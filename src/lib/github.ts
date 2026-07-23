@@ -14,6 +14,10 @@ export function pullRequestPayload(title: string, head: string, base: string, bo
   return { title, head, base, body };
 }
 
+export function selectCurrentPull<T extends { state: string }>(pulls: T[]) {
+  return pulls.find(pull => pull.state === 'open') || pulls[0];
+}
+
 export async function githubFetch<T>(token: string, path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
     ...init,

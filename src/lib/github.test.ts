@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { githubApiUrl, parseRepository, pullRequestPayload } from './github';
+import { githubApiUrl, parseRepository, pullRequestPayload, selectCurrentPull } from './github';
 
 describe('GitHub repository helpers', () => {
   it('parses the repository selected from GitHub', () => {
@@ -13,5 +13,9 @@ describe('GitHub repository helpers', () => {
 
   it('builds the explicit payload used to create a PR', () => {
     expect(pullRequestPayload('Fix login', 'feature/login', 'dev', 'Summary')).toEqual({ title: 'Fix login', head: 'feature/login', base: 'dev', body: 'Summary' });
+  });
+
+  it('prioritizes an open PR over older merged PRs for monitoring', () => {
+    expect(selectCurrentPull([{ state: 'closed', merged_at: '2026-07-01' }, { state: 'open', merged_at: null }])?.state).toBe('open');
   });
 });
