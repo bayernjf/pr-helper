@@ -4,6 +4,7 @@ import { buildPrPrompt, generatePrMessage, testAiConnection, type AiConfig } fro
 import { canCreateStage, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks } from './lib/domain';
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
+import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
 import { addStage, createWorkflow, deleteWorkflow, removeStage, saveWorkflow, workflowSummary, type Workflow } from './lib/workflow';
 
 type Repo = { full_name: string; private: boolean };
@@ -12,6 +13,7 @@ type CheckRun = { status: string; conclusion: string | null };
 type Review = { state: string };
 type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeChecks>; approvals?: number; aheadBy?: number; message?: string };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
+const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
 let token = sessionStorage.getItem('github-token') || '';
 let repos: Repo[] = [];
 let workflows = loadWorkflows();
@@ -23,6 +25,7 @@ let refreshOnNextDetail = false;
 let pollTimer: number | undefined;
 let aiConfig: AiConfig | null = loadAiConfig();
 let generationRules = loadGenerationRules(() => localStorage.getItem(GENERATION_RULES_KEY));
+let pullRequestDrafts = loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), Date.now());
 
 const app = () => document.querySelector<HTMLDivElement>('#app')!;
 const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
@@ -30,6 +33,8 @@ function loadWorkflows(): Workflow[] { try { return JSON.parse(localStorage.getI
 function persistGenerationRules(next: GenerationRule[]) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(next)); generationRules = next; }
 function save(next: Workflow) { active = next; workflows = saveWorkflow(workflows, next); localStorage.setItem('pr-helper-workflows', JSON.stringify(workflows)); }
 function showToast(message: string) { const previous = document.querySelector('.toast'); previous?.remove(); const toast = document.createElement('div'); toast.className = 'toast'; toast.setAttribute('role', 'status'); toast.textContent = message; document.body.append(toast); window.setTimeout(() => toast.remove(), 3200); }
+function persistPullRequestDrafts() { try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(pullRequestDrafts)); } catch { showToast('草稿保存失败'); } }
+persistPullRequestDrafts();
 function loadAiConfig(): AiConfig | null { try { return JSON.parse(sessionStorage.getItem('pr-helper-ai') || 'null') as AiConfig | null; } catch { return null; } }
 function showAiSettings() { const dialog = document.createElement('dialog'); dialog.className = 'create-dialog'; dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">AI MODEL SETTINGS</p><h2>配置 AI 模型</h2><label>API Base URL<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="https://api.openai.com/v1" /></label><label>模型<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="gpt-4.1-mini" /></label><label>API Key<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><p id="ai-test-result" class="ai-connection-result">可在保存前测试当前连接。</p><div class="dialog-actions"><button id="test-ai" type="button" class="ghost">测试连接</button><button value="cancel" class="ghost">取消</button><button id="save-ai" class="primary">保存设置</button></div></form>`; document.body.append(dialog); dialog.showModal(); const read = () => ({ baseUrl: dialog.querySelector<HTMLInputElement>('#ai-url')!.value.trim(), model: dialog.querySelector<HTMLInputElement>('#ai-model')!.value.trim(), apiKey: dialog.querySelector<HTMLInputElement>('#ai-key')!.value.trim() }); dialog.querySelector('#test-ai')!.addEventListener('click', async () => { const button = dialog.querySelector<HTMLButtonElement>('#test-ai')!, result = dialog.querySelector('#ai-test-result')!; const config = read(); if (!config.baseUrl || !config.apiKey) { result.textContent = '请先填写 API Base URL 和 API Key。'; result.className = 'ai-connection-result is-error'; return; } button.disabled = true; result.textContent = '正在测试连接…'; result.className = 'ai-connection-result is-loading'; try { await testAiConnection(config); result.textContent = '连接成功，可以保存设置。'; result.className = 'ai-connection-result is-success'; } catch (err) { const raw = err instanceof Error ? err.message : ''; result.textContent = raw.includes('non ISO-8859-1') ? 'API Key 格式无效，请检查是否包含空格、引号或非英文字符。' : raw || '无法连接模型服务，请检查地址、Key 与网络。'; result.className = 'ai-connection-result is-error'; } finally { button.disabled = false; } }); dialog.querySelector('#save-ai')!.addEventListener('click', event => { event.preventDefault(); aiConfig = read(); sessionStorage.setItem('pr-helper-ai', JSON.stringify(aiConfig)); dialog.close(); showToast('AI 模型设置已保存到当前会话。'); }); dialog.addEventListener('close', () => dialog.remove()); }
 
@@ -295,12 +300,35 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
 function showCreateDialog(index: number) {
   if (!active) return;
   const stage = active.stages[index];
+  const identity: PullRequestDraftIdentity = { repository: active.repository, source: stage.source, target: stage.target };
+  pullRequestDrafts = loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), Date.now());
+  persistPullRequestDrafts();
+  const restoredDraft = findPullRequestDraft(pullRequestDrafts, identity);
+  const defaultTitle = `${stage.source} → ${stage.target}`;
   let selectedGenerationRuleId = defaultGenerationRule(generationRules)?.id || null;
   const selectedGenerationRule = () => generationRuleById(generationRules, selectedGenerationRuleId);
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
-  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">CREATE PULL REQUEST</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><label>PR 标题<input id="create-title" value="${escape(stage.source)} → ${escape(stage.target)}" /></label><label>PR 描述（可选）<textarea id="create-body" placeholder="可使用 AI 生成"></textarea></label><p class="meta">确认后才会在 GitHub 创建 PR；不会自动合并。</p><div class="dialog-actions"><button id="generation-rules" type="button" class="ghost">${escape(generationRuleButtonLabel(selectedGenerationRule()))}</button><button id="ai-settings" type="button" class="ghost">AI 设置</button><button id="generate-ai" type="button" class="ghost">AI 生成</button><button value="cancel" class="ghost">取消</button><button id="confirm-create" class="primary">确认创建 PR</button></div></form>`;
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">CREATE PULL REQUEST</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><label>PR 标题<input id="create-title" value="${escape(restoredDraft ? restoredDraft.title : defaultTitle)}" /></label><label>PR 描述（可选）<textarea id="create-body" placeholder="可使用 AI 生成">${escape(restoredDraft?.body || '')}</textarea></label><p class="meta">确认后才会在 GitHub 创建 PR；不会自动合并。</p><div class="dialog-actions"><button id="generation-rules" type="button" class="ghost">${escape(generationRuleButtonLabel(selectedGenerationRule()))}</button><button id="ai-settings" type="button" class="ghost">AI 设置</button><button id="generate-ai" type="button" class="ghost">AI 生成</button><button value="cancel" class="ghost">取消</button><button id="confirm-create" class="primary">确认创建 PR</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
+  const titleInput = dialog.querySelector<HTMLInputElement>('#create-title')!;
+  const bodyInput = dialog.querySelector<HTMLTextAreaElement>('#create-body')!;
+  let draftDirty = false;
+  let draftSaveTimer: number | undefined;
+  const flushDraft = () => {
+    if (draftSaveTimer !== undefined) { window.clearTimeout(draftSaveTimer); draftSaveTimer = undefined; }
+    if (!draftDirty) return;
+    draftDirty = false;
+    pullRequestDrafts = upsertPullRequestDraft(pullRequestDrafts, identity, { title: titleInput.value, body: bodyInput.value }, Date.now());
+    persistPullRequestDrafts();
+  };
+  const scheduleDraftSave = () => {
+    draftDirty = true;
+    if (draftSaveTimer !== undefined) window.clearTimeout(draftSaveTimer);
+    draftSaveTimer = window.setTimeout(flushDraft, 300);
+  };
+  titleInput.addEventListener('input', scheduleDraftSave);
+  bodyInput.addEventListener('input', scheduleDraftSave);
   const ruleButton = dialog.querySelector<HTMLButtonElement>('#generation-rules')!;
   const syncRuleButton = () => {
     selectedGenerationRuleId ||= defaultGenerationRule(generationRules)?.id || null;
@@ -311,9 +339,9 @@ function showCreateDialog(index: number) {
     syncRuleButton();
   }, syncRuleButton));
   dialog.querySelector('#ai-settings')!.addEventListener('click', showAiSettings);
-  dialog.querySelector('#generate-ai')!.addEventListener('click', async () => { if (!aiConfig?.baseUrl || !aiConfig.apiKey || !aiConfig.model) { showAiSettings(); return; } const button = dialog.querySelector<HTMLButtonElement>('#generate-ai')!; button.disabled = true; button.textContent = '生成中…'; try { const { owner, name } = parseRepository(active!.repository); const comparison = await githubFetch<{ commits: { commit: { message: string } }[] }>(token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`); const generated = await generatePrMessage(aiConfig, buildPrPrompt(stage.source, stage.target, comparison.commits.map(item => item.commit.message), selectedGenerationRule()?.content)); dialog.querySelector<HTMLInputElement>('#create-title')!.value = generated.title; dialog.querySelector<HTMLTextAreaElement>('#create-body')!.value = generated.body; } catch (err) { showToast(err instanceof Error ? err.message : 'AI 生成失败'); } finally { button.disabled = false; button.textContent = 'AI 生成'; } });
-  dialog.querySelector('#confirm-create')!.addEventListener('click', async event => { event.preventDefault(); const title = dialog.querySelector<HTMLInputElement>('#create-title')!.value.trim(); const body = dialog.querySelector<HTMLTextAreaElement>('#create-body')!.value.trim(); if (!title) return; const button = dialog.querySelector<HTMLButtonElement>('#confirm-create')!; button.disabled = true; button.textContent = '正在创建…'; try { const { owner, name } = parseRepository(active!.repository); await githubFetch(token, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify(pullRequestPayload(title, stage.source, stage.target, body)) }); dialog.close(); await refreshStatuses(); } catch (err) { button.disabled = false; button.textContent = err instanceof Error ? err.message : '创建失败'; } });
-  dialog.addEventListener('close', () => dialog.remove());
+  dialog.querySelector('#generate-ai')!.addEventListener('click', async () => { if (!aiConfig?.baseUrl || !aiConfig.apiKey || !aiConfig.model) { showAiSettings(); return; } const button = dialog.querySelector<HTMLButtonElement>('#generate-ai')!; button.disabled = true; button.textContent = '生成中…'; try { const { owner, name } = parseRepository(active!.repository); const comparison = await githubFetch<{ commits: { commit: { message: string } }[] }>(token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`); const generated = await generatePrMessage(aiConfig, buildPrPrompt(stage.source, stage.target, comparison.commits.map(item => item.commit.message), selectedGenerationRule()?.content)); titleInput.value = generated.title; bodyInput.value = generated.body; } catch (err) { showToast(err instanceof Error ? err.message : 'AI 生成失败'); } finally { button.disabled = false; button.textContent = 'AI 生成'; } });
+  dialog.querySelector('#confirm-create')!.addEventListener('click', async event => { event.preventDefault(); const title = titleInput.value.trim(); const body = bodyInput.value.trim(); if (!title) return; const button = dialog.querySelector<HTMLButtonElement>('#confirm-create')!; button.disabled = true; button.textContent = '正在创建…'; try { const { owner, name } = parseRepository(active!.repository); await githubFetch(token, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify(pullRequestPayload(title, stage.source, stage.target, body)) }); if (draftSaveTimer !== undefined) { window.clearTimeout(draftSaveTimer); draftSaveTimer = undefined; } draftDirty = false; pullRequestDrafts = deletePullRequestDraft(pullRequestDrafts, identity); persistPullRequestDrafts(); dialog.close(); await refreshStatuses(); } catch (err) { button.disabled = false; button.textContent = err instanceof Error ? err.message : '创建失败'; } });
+  dialog.addEventListener('close', () => { flushDraft(); dialog.remove(); });
 }
 
 const apiKeyFieldObserver = new MutationObserver(() => {
