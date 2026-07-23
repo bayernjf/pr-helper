@@ -9,6 +9,7 @@ import {
   pullRequestDraftKey,
   upsertPullRequestDraft,
 } from './pr-drafts';
+import type { PullRequestDraft } from './pr-drafts';
 
 const identity = { repository: 'acme/widget', source: 'feature/a', target: 'dev' };
 const nowMs = Date.parse('2026-07-23T12:00:00.000Z');
@@ -60,7 +61,7 @@ describe('PR drafts', () => {
 
   it('finds a draft without mutating it or refreshing its timestamp', () => {
     const existing = draft();
-    const drafts = [existing];
+    const drafts: readonly PullRequestDraft[] = [existing];
 
     expect(findPullRequestDraft(drafts, identity)).toBe(existing);
     expect(drafts).toEqual([existing]);
@@ -69,7 +70,7 @@ describe('PR drafts', () => {
 
   it('upserts immutably and refreshes the matching draft timestamp', () => {
     const existing = draft();
-    const drafts = [existing];
+    const drafts: readonly PullRequestDraft[] = [existing];
     const result = upsertPullRequestDraft(drafts, identity, { title: 'Updated', body: 'New body' }, nowMs);
 
     expect(result).toEqual([draft({ title: 'Updated', body: 'New body', updatedAt: new Date(nowMs).toISOString() })]);
@@ -91,9 +92,25 @@ describe('PR drafts', () => {
     );
   });
 
+  it('prunes persisted drafts to the newest 50 during parsing and loading', () => {
+    const persisted = Array.from({ length: PULL_REQUEST_DRAFT_LIMIT + 1 }, (_, index) => {
+      const persistedIdentity = { ...identity, source: `persisted/${index}` };
+      return draft({
+        ...persistedIdentity,
+        key: pullRequestDraftKey(persistedIdentity),
+        updatedAt: new Date(nowMs - index).toISOString(),
+      });
+    });
+    const raw = JSON.stringify(persisted);
+    const expectedSources = Array.from({ length: PULL_REQUEST_DRAFT_LIMIT }, (_, index) => `persisted/${index}`);
+
+    expect(parsePullRequestDrafts(raw, nowMs).map(item => item.source)).toEqual(expectedSources);
+    expect(loadPullRequestDrafts(() => raw, nowMs).map(item => item.source)).toEqual(expectedSources);
+  });
+
   it('deletes only the targeted draft immutably', () => {
     const otherIdentity = { ...identity, source: 'feature/other' };
-    const drafts = [draft(), draft({ ...otherIdentity, key: pullRequestDraftKey(otherIdentity) })];
+    const drafts: readonly PullRequestDraft[] = [draft(), draft({ ...otherIdentity, key: pullRequestDraftKey(otherIdentity) })];
 
     expect(deletePullRequestDraft(drafts, identity)).toEqual([draft({ ...otherIdentity, key: pullRequestDraftKey(otherIdentity) })]);
     expect(drafts).toHaveLength(2);
@@ -101,5 +118,9 @@ describe('PR drafts', () => {
 
   it('returns an empty list when the storage reader throws', () => {
     expect(loadPullRequestDrafts(() => { throw new Error('storage unavailable'); }, nowMs)).toEqual([]);
+  });
+
+  it('returns an empty list when storage has no saved draft value', () => {
+    expect(loadPullRequestDrafts(() => null, nowMs)).toEqual([]);
   });
 });

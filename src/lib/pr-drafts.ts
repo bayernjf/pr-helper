@@ -18,7 +18,9 @@ export function pullRequestDraftKey({ repository, source, target }: PullRequestD
   return JSON.stringify([repository, source, target]);
 }
 
-export function parsePullRequestDrafts(raw: string, nowMs: number): PullRequestDraft[] {
+export function parsePullRequestDrafts(raw: string | null, nowMs: number): PullRequestDraft[] {
+  if (!raw) return [];
+
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -29,7 +31,7 @@ export function parsePullRequestDrafts(raw: string, nowMs: number): PullRequestD
   }
 }
 
-export function loadPullRequestDrafts(read: () => string, nowMs: number): PullRequestDraft[] {
+export function loadPullRequestDrafts(read: () => string | null, nowMs: number): PullRequestDraft[] {
   try {
     return parsePullRequestDrafts(read(), nowMs);
   } catch {
@@ -37,12 +39,12 @@ export function loadPullRequestDrafts(read: () => string, nowMs: number): PullRe
   }
 }
 
-export function findPullRequestDraft(drafts: PullRequestDraft[], identity: PullRequestDraftIdentity) {
+export function findPullRequestDraft(drafts: readonly PullRequestDraft[], identity: PullRequestDraftIdentity) {
   return drafts.find(draft => draft.key === pullRequestDraftKey(identity));
 }
 
 export function upsertPullRequestDraft(
-  drafts: PullRequestDraft[],
+  drafts: readonly PullRequestDraft[],
   identity: PullRequestDraftIdentity,
   content: Pick<PullRequestDraft, 'title' | 'body'>,
   nowMs: number,
@@ -53,7 +55,7 @@ export function upsertPullRequestDraft(
   return pruneDrafts([...drafts.filter(draft => draft.key !== key), updatedDraft], nowMs);
 }
 
-export function deletePullRequestDraft(drafts: PullRequestDraft[], identity: PullRequestDraftIdentity): PullRequestDraft[] {
+export function deletePullRequestDraft(drafts: readonly PullRequestDraft[], identity: PullRequestDraftIdentity): PullRequestDraft[] {
   const key = pullRequestDraftKey(identity);
   return drafts.filter(draft => draft.key !== key);
 }
@@ -70,7 +72,7 @@ function isPullRequestDraft(value: unknown): value is PullRequestDraft {
     && !Number.isNaN(Date.parse(draft.updatedAt));
 }
 
-function pruneDrafts(drafts: PullRequestDraft[], nowMs: number): PullRequestDraft[] {
+function pruneDrafts(drafts: readonly PullRequestDraft[], nowMs: number): PullRequestDraft[] {
   return drafts
     .filter(draft => nowMs - Date.parse(draft.updatedAt) < PULL_REQUEST_DRAFT_TTL_MS)
     .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
