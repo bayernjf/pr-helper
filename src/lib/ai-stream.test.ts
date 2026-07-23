@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { parseFinalPrMessage, parsePartialPrMessage } from './ai-stream';
+import { describe, expect, it, vi } from 'vitest';
+import { parseFinalPrMessage, parsePartialPrMessage, streamPrMessage } from './ai-stream';
+import type { AiConfig } from './ai';
 
 describe('parsePartialPrMessage', () => {
   it('returns growing title and body prefixes from incomplete JSON', () => {
@@ -78,5 +79,150 @@ describe('parseFinalPrMessage', () => {
     expect(() => parseFinalPrMessage('{"body":"Details"}')).toThrow('AI 未返回标题');
     expect(() => parseFinalPrMessage('{"title":" \\n\\t "}')).toThrow('AI 未返回标题');
     expect(() => parseFinalPrMessage('{"title":42}')).toThrow('AI 未返回标题');
+  });
+});
+
+const config: AiConfig = { baseUrl: 'https://api.example.com/v1/', apiKey: 'secret', model: 'model-1' };
+const encoder = new TextEncoder();
+
+function sseResponse(chunks: Uint8Array[], contentType = 'text/event-stream; charset=utf-8') {
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      chunks.forEach(chunk => controller.enqueue(chunk));
+      controller.close();
+    },
+  }), { headers: { 'Content-Type': contentType } });
+}
+
+describe('streamPrMessage', () => {
+  it('posts an OpenAI-compatible streaming request and reports changed partial messages', async () => {
+    const source = [
+      'data: {"choices":[{"delta":{"content":"{\\"title\\":\\"登"}}]}\r\n\r\n',
+      'data:{"choices":[{"delta":{"content":"录\\",\\"body\\":\\"描"}}]}\n\n',
+      ': keepalive\n\n\n\ndata: {"choices":[{"delta":{}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"述\\"}"}}]}\n\ndata: [DONE]\n\n',
+    ].join('');
+    const bytes = encoder.encode(source);
+    const fetcher = vi.fn(async () => sseResponse([bytes.slice(0, 13), bytes.slice(13, 71), bytes.slice(71)]));
+    const updates: { title: string; body: string }[] = [];
+
+    await expect(streamPrMessage(config, 'write this PR', { fetcher, onUpdate: update => updates.push(update) }))
+      .resolves.toEqual({ title: '登录', body: '描述' });
+
+    expect(fetcher).toHaveBeenCalledWith('https://api.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer secret' },
+      body: JSON.stringify({
+        model: 'model-1',
+        messages: [{ role: 'user', content: 'write this PR' }],
+        temperature: 0.2,
+        stream: true,
+      }),
+      signal: undefined,
+    });
+    expect(updates).toEqual([
+      { title: '登', body: '' },
+      { title: '登录', body: '描' },
+      { title: '登录', body: '描述' },
+    ]);
+  });
+
+  it('decodes a Chinese character split between binary chunks', async () => {
+    const source = 'data: {"choices":[{"delta":{"content":"{\\"title\\":\\"中文\\"}"}}]}\n\ndata: [DONE]\n\n';
+    const bytes = encoder.encode(source);
+    const split = bytes.indexOf(0xe4) + 1;
+
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => sseResponse([bytes.slice(0, split), bytes.slice(split)]),
+      onUpdate: vi.fn(),
+    })).resolves.toEqual({ title: '中文', body: '' });
+  });
+
+  it('joins multiple data lines in one SSE event', async () => {
+    const source = 'data: {"choices":[{"delta":\n'
+      + 'data: {"content":"{\\"title\\":\\"完整\\"}"}}]}\n\n'
+      + 'data: [DONE]\n\n';
+
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => sseResponse([encoder.encode(source)]),
+      onUpdate: vi.fn(),
+    })).resolves.toEqual({ title: '完整', body: '' });
+  });
+
+  it('rejects HTTP failures, non-streaming content types, and missing stream bodies', async () => {
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => new Response('', { status: 429 }), onUpdate: vi.fn(),
+    })).rejects.toThrow('AI 请求失败 (429)');
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => new Response('{}', { headers: { 'content-type': 'Application/JSON; charset=utf-8' } }), onUpdate: vi.fn(),
+    })).rejects.toThrow('当前模型服务不支持流式生成');
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => new Response(null, { headers: { 'Content-Type': 'TEXT/EVENT-STREAM' } }), onUpdate: vi.fn(),
+    })).rejects.toThrow('AI 流式响应没有内容');
+  });
+
+  it('rejects malformed event JSON and ignores no-content deltas before the final parse', async () => {
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => sseResponse([encoder.encode('data: nope\n\n')]), onUpdate: vi.fn(),
+    })).rejects.toThrow('AI 流式响应格式错误');
+
+    const updates = vi.fn();
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => sseResponse([encoder.encode([
+        'event: message\n',
+        'id: 10\n',
+        'data: null\n\n',
+        'data: {"choices":[]}\n\n',
+        'data: {"choices":[{"delta":{"content":""}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":42}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":null}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"{\\"title\\":\\"OK\\"}"}}]}\n\n',
+        'data: [DONE]\n\n',
+      ].join(''))]),
+      onUpdate: updates,
+    })).resolves.toEqual({ title: 'OK', body: '' });
+    expect(updates).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves final PR message parser errors', async () => {
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => sseResponse([encoder.encode(
+        'data: {"choices":[{"delta":{"content":"{}"}}]}\n\ndata: [DONE]\n\n',
+      )]),
+      onUpdate: vi.fn(),
+    })).rejects.toThrow('AI 未返回标题');
+  });
+
+  it('cancels an unread reader after the DONE event', async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(
+          'data: {"choices":[{"delta":{"content":"{\\"title\\":\\"Done\\"}"}}]}\n\ndata: [DONE]\n\n',
+        ));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => new Response(body, { headers: { 'Content-Type': 'text/event-stream' } }),
+      onUpdate: vi.fn(),
+    })).resolves.toEqual({ title: 'Done', body: '' });
+    expect(cancelled).toBe(true);
+  });
+
+  it('passes the abort signal to fetch and preserves AbortError', async () => {
+    const controller = new AbortController();
+    const abortError = new DOMException('Aborted', 'AbortError');
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.signal).toBe(controller.signal);
+      throw abortError;
+    });
+    controller.abort();
+
+    await expect(streamPrMessage(config, 'prompt', { fetcher, signal: controller.signal, onUpdate: vi.fn() }))
+      .rejects.toBe(abortError);
   });
 });

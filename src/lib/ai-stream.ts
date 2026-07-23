@@ -1,3 +1,5 @@
+import { aiChatCompletionsUrl, type AiConfig } from './ai';
+
 export type PrMessage = { title: string; body: string };
 
 const invalidJsonMessage = 'AI 响应不是有效的 PR JSON';
@@ -203,4 +205,110 @@ export function parseFinalPrMessage(source: string): PrMessage {
   }
 
   return { title: message.title, body: (message.body as string | undefined) ?? '' };
+}
+
+type StreamOptions = {
+  onUpdate: (message: PrMessage) => void;
+  signal?: AbortSignal;
+  fetcher?: typeof fetch;
+};
+
+function sseEventData(frame: string) {
+  const dataLines = frame
+    .split(/\r?\n/)
+    .filter(line => line.startsWith('data:'))
+    .map(line => line.slice(5).replace(/^ /, ''));
+
+  return dataLines.length > 0 ? dataLines.join('\n') : null;
+}
+
+async function* readSseData(body: ReadableStream<Uint8Array>) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let complete = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (value) buffer += decoder.decode(value, { stream: true });
+      if (done) {
+        buffer += decoder.decode();
+        complete = true;
+      }
+
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = frames.pop() ?? '';
+      for (const frame of frames) {
+        const data = sseEventData(frame);
+        if (data !== null) yield data;
+      }
+      if (done) break;
+    }
+
+    const data = sseEventData(buffer);
+    if (data !== null) yield data;
+  } finally {
+    if (!complete) {
+      try {
+        await reader.cancel();
+      } catch {
+        // The consumer's original error is more useful than a cleanup failure.
+      }
+    }
+    reader.releaseLock();
+  }
+}
+
+export async function streamPrMessage(
+  config: AiConfig,
+  prompt: string,
+  options: StreamOptions,
+): Promise<PrMessage> {
+  const fetcher = options.fetcher ?? fetch;
+  const response = await fetcher(aiChatCompletionsUrl(config.baseUrl), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
+    body: JSON.stringify({
+      model: config.model,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.2,
+      stream: true,
+    }),
+    signal: options.signal,
+  });
+
+  if (!response.ok) throw new Error(`AI 请求失败 (${response.status})`);
+  if (!response.headers.get('Content-Type')?.toLowerCase().includes('text/event-stream')) {
+    throw new Error('当前模型服务不支持流式生成');
+  }
+  if (!response.body) throw new Error('AI 流式响应没有内容');
+
+  let content = '';
+  let latest: PrMessage = { title: '', body: '' };
+  for await (const data of readSseData(response.body)) {
+    if (data === '[DONE]') break;
+
+    let event: unknown;
+    try {
+      event = JSON.parse(data) as unknown;
+    } catch {
+      throw new Error('AI 流式响应格式错误');
+    }
+
+    if (event === null || typeof event !== 'object') continue;
+    const delta = (event as { choices?: { delta?: { content?: unknown } }[] }).choices?.[0]?.delta?.content;
+    if (typeof delta !== 'string' || delta === '') continue;
+
+    content += delta;
+    const next = parsePartialPrMessage(content);
+    if (next.title !== latest.title || next.body !== latest.body) {
+      latest = next;
+      options.onUpdate({ ...next });
+    }
+  }
+
+  const final = parseFinalPrMessage(content);
+  if (final.title !== latest.title || final.body !== latest.body) options.onUpdate({ ...final });
+  return final;
 }
