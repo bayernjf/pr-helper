@@ -279,7 +279,8 @@ export async function streamPrMessage(
   });
 
   if (!response.ok) throw new Error(`AI 请求失败 (${response.status})`);
-  if (!response.headers.get('Content-Type')?.toLowerCase().includes('text/event-stream')) {
+  const mediaType = response.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase();
+  if (mediaType !== 'text/event-stream') {
     throw new Error('当前模型服务不支持流式生成');
   }
   if (!response.body) throw new Error('AI 流式响应没有内容');

@@ -149,12 +149,30 @@ describe('streamPrMessage', () => {
     })).resolves.toEqual({ title: '完整', body: '' });
   });
 
+  it('recognizes LF and CRLF delimiters split between chunks with multiple events', async () => {
+    const first = 'data: {"choices":[{"delta":{"content":"{\\"title\\":\\"分"}}]}\n\n';
+    const second = 'data: {"choices":[{"delta":{"content":"隔\\"}"}}]}\r\n\r\n';
+    const done = 'data: [DONE]\r\n\r\n';
+
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => sseResponse([
+        encoder.encode(first.slice(0, -1)),
+        encoder.encode(first.slice(-1) + second.slice(0, -1)),
+        encoder.encode(second.slice(-1) + done),
+      ]),
+      onUpdate: vi.fn(),
+    })).resolves.toEqual({ title: '分隔', body: '' });
+  });
+
   it('rejects HTTP failures, non-streaming content types, and missing stream bodies', async () => {
     await expect(streamPrMessage(config, 'prompt', {
       fetcher: async () => new Response('', { status: 429 }), onUpdate: vi.fn(),
     })).rejects.toThrow('AI 请求失败 (429)');
     await expect(streamPrMessage(config, 'prompt', {
       fetcher: async () => new Response('{}', { headers: { 'content-type': 'Application/JSON; charset=utf-8' } }), onUpdate: vi.fn(),
+    })).rejects.toThrow('当前模型服务不支持流式生成');
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => new Response('{}', { headers: { 'Content-Type': 'text/event-streaming; charset=utf-8' } }), onUpdate: vi.fn(),
     })).rejects.toThrow('当前模型服务不支持流式生成');
     await expect(streamPrMessage(config, 'prompt', {
       fetcher: async () => new Response(null, { headers: { 'Content-Type': 'TEXT/EVENT-STREAM' } }), onUpdate: vi.fn(),
