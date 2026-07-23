@@ -31,3 +31,7 @@ export function canCreateStage(index: number, states: string[]) {
 export function statusChanged(previous: { kind: string; checks?: string }, next: { kind: string; checks?: string }) {
   return previous.kind !== next.kind || previous.checks !== next.checks;
 }
+
+export function needsNewPullRequest(aheadBy: number, latestPullState: string) {
+  return aheadBy > 0 && latestPullState === 'merged';
+}

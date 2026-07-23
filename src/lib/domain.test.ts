@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canCreateStage, getStageAction, githubCompareUrl, githubPullUrl, statusChanged, summarizeChecks } from './domain';
+import { canCreateStage, getStageAction, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks } from './domain';
 
 describe('workflow stages', () => {
   it('keeps the release stage locked until the previous PR and its checks succeed', () => {
@@ -27,5 +27,10 @@ describe('workflow stages', () => {
   it('only signals a meaningful status transition', () => {
     expect(statusChanged({ kind: 'open', checks: 'pending' }, { kind: 'open', checks: 'success' })).toBe(true);
     expect(statusChanged({ kind: 'open', checks: 'pending' }, { kind: 'open', checks: 'pending' })).toBe(false);
+  });
+
+  it('requires a new PR when the source branch is ahead after an earlier PR merged', () => {
+    expect(needsNewPullRequest(3, 'merged')).toBe(true);
+    expect(needsNewPullRequest(0, 'merged')).toBe(false);
   });
 });
