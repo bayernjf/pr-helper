@@ -165,8 +165,8 @@ export function parsePartialPrMessage(source: string): PrMessage {
 
 export function parseFinalPrMessage(source: string): PrMessage {
   let jsonSource = source.trim();
-  if (/^```json\b/.test(jsonSource)) {
-    jsonSource = jsonSource.replace(/^```json[ \t]*(?:\r?\n)?/, '').replace(/(?:\r?\n)?```$/, '');
+  if (/^```json\b/i.test(jsonSource)) {
+    jsonSource = jsonSource.replace(/^```json[ \t]*(?:\r?\n)?/i, '').replace(/(?:\r?\n)?```$/, '');
   }
 
   let parsed: unknown;

@@ -43,6 +43,13 @@ describe('parseFinalPrMessage', () => {
     });
   });
 
+  it('accepts an uppercase JSON fence', () => {
+    expect(parseFinalPrMessage('```JSON\n{"title":"Fix login"}\n```')).toEqual({
+      title: 'Fix login',
+      body: '',
+    });
+  });
+
   it('rejects malformed JSON', () => {
     expect(() => parseFinalPrMessage('{"title":')).toThrow('AI 响应不是有效的 PR JSON');
   });
