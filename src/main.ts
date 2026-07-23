@@ -321,6 +321,7 @@ function showCreateDialog(index: number) {
   const generateButton = dialog.querySelector<HTMLButtonElement>('#generate-ai')!;
   let generationController: AbortController | null = null;
   let dialogClosed = false;
+  const isDialogOpen = () => !dialogClosed && dialog.open;
   let draftDirty = false;
   let draftSaveTimer: number | undefined;
   const flushDraft = () => {
@@ -350,7 +351,7 @@ function showCreateDialog(index: number) {
   generateButton.addEventListener('click', async () => {
     const config = aiConfig;
     if (!config?.baseUrl || !config.apiKey || !config.model) { showAiSettings(); return; }
-    if (generationController || dialogClosed) return;
+    if (generationController || !isDialogOpen()) return;
     if ((titleInput.value || bodyInput.value) && !window.confirm('AI 生成会覆盖当前标题和描述，是否继续？')) return;
 
     titleInput.value = '';
@@ -369,23 +370,26 @@ function showCreateDialog(index: number) {
     try {
       const { owner, name } = parseRepository(identity.repository);
       const comparison = await githubFetch<{ commits: { commit: { message: string } }[] }>(token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`, { signal: controller.signal });
+      if (!isDialogOpen()) return;
       await streamPrMessage(config, buildPrPrompt(stage.source, stage.target, comparison.commits.map(item => item.commit.message), generationRuleContent), {
         signal: controller.signal,
         onUpdate: message => {
-          if (dialogClosed) return;
+          if (!isDialogOpen()) return;
           titleInput.value = message.title;
           bodyInput.value = message.body;
           scheduleDraftSave(100, true);
         },
       });
-      flushDraft();
+      if (isDialogOpen()) flushDraft();
     } catch (err) {
-      flushDraft();
       const isAbortError = err instanceof Error && err.name === 'AbortError';
-      if (!dialogClosed && !isAbortError) showToast(err instanceof Error ? err.message : 'AI 生成失败');
+      if (isDialogOpen()) {
+        flushDraft();
+        if (!isAbortError) showToast(err instanceof Error ? err.message : 'AI 生成失败');
+      }
     } finally {
       if (generationController === controller) generationController = null;
-      if (!dialogClosed) {
+      if (isDialogOpen()) {
         titleInput.disabled = false;
         bodyInput.disabled = false;
         generateButton.disabled = false;
