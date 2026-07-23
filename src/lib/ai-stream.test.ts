@@ -7,6 +7,11 @@ describe('parsePartialPrMessage', () => {
     expect(parsePartialPrMessage('{"title":"起草 PR","body":"第一段')).toEqual({ title: '起草 PR', body: '第一段' });
   });
 
+  it('streams incomplete JSON after lowercase and mixed-case JSON fences', () => {
+    expect(parsePartialPrMessage('```json\n{"title":"起草')).toEqual({ title: '起草', body: '' });
+    expect(parsePartialPrMessage(' ```JsOn\n{"title":"起草","body":"第一段')).toEqual({ title: '起草', body: '第一段' });
+  });
+
   it('decodes complete string escapes while waiting for an incomplete trailing escape', () => {
     const source = String.raw`{"title":"A\nB\tC\bD\fE\rF\/G\\H\"I","body":"等待` + '\\';
 
@@ -25,6 +30,10 @@ describe('parsePartialPrMessage', () => {
     expect(parsePartialPrMessage(String.raw`{"title":"\uD83D\uDE80`)).toEqual({ title: '🚀', body: '' });
   });
 
+  it('replaces a conclusively unmatched high surrogate and continues decoding', () => {
+    expect(parsePartialPrMessage(String.raw`{"title":"A\uD83D\u0041B`)).toEqual({ title: 'A�AB', body: '' });
+  });
+
   it('does not treat escaped key-like content inside a value as a top-level field', () => {
     const source = String.raw`{"title":"text: \"body\": \"not a field","body":"actual body`;
 
@@ -32,6 +41,12 @@ describe('parsePartialPrMessage', () => {
       title: 'text: "body": "not a field',
       body: 'actual body',
     });
+  });
+
+  it('uses the latest top-level fields after nested unknown values', () => {
+    const source = '{"body":"first","unknown":{"items":["ignored",{"title":"also ignored"}]},"title":"first title","body":"latest body","title":"latest title"}';
+
+    expect(parsePartialPrMessage(source)).toEqual({ title: 'latest title', body: 'latest body' });
   });
 });
 

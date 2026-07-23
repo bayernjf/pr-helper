@@ -61,17 +61,30 @@ function decodePartialJsonString(source: string) {
 
     const codeUnit = Number.parseInt(hex, 16);
     if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      if (index + 12 > source.length || source.slice(index + 6, index + 8) !== '\\u') break;
-      const lowHex = source.slice(index + 8, index + 12);
-      if (!/^[\da-fA-F]{4}$/.test(lowHex)) break;
-      const lowSurrogate = Number.parseInt(lowHex, 16);
-      if (lowSurrogate < 0xdc00 || lowSurrogate > 0xdfff) break;
-      value += String.fromCodePoint(0x10000 + (codeUnit - 0xd800) * 0x400 + lowSurrogate - 0xdc00);
-      index += 12;
+      const nextEscape = index + 6;
+      if (nextEscape >= source.length || (source[nextEscape] === '\\' && nextEscape + 1 >= source.length)) break;
+      if (source.slice(nextEscape, nextEscape + 2) === '\\u') {
+        if (nextEscape + 6 > source.length) break;
+        const lowHex = source.slice(nextEscape + 2, nextEscape + 6);
+        if (/^[\da-fA-F]{4}$/.test(lowHex)) {
+          const lowSurrogate = Number.parseInt(lowHex, 16);
+          if (lowSurrogate >= 0xdc00 && lowSurrogate <= 0xdfff) {
+            value += String.fromCodePoint(0x10000 + (codeUnit - 0xd800) * 0x400 + lowSurrogate - 0xdc00);
+            index += 12;
+            continue;
+          }
+        }
+      }
+      value += '\ufffd';
+      index += 6;
       continue;
     }
 
-    if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) break;
+    if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      value += '\ufffd';
+      index += 6;
+      continue;
+    }
     value += String.fromCharCode(codeUnit);
     index += 6;
   }
@@ -122,6 +135,7 @@ function skipJsonValue(source: string, start: number) {
 
 export function parsePartialPrMessage(source: string): PrMessage {
   const message: PrMessage = { title: '', body: '' };
+  source = source.replace(/^\s*```json\b[ \t]*(?:\r?\n)?/i, '');
   let index = skipWhitespace(source, 0);
   if (source[index] !== '{') return message;
   index += 1;
