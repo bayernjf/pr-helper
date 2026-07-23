@@ -314,7 +314,7 @@ function showCreateDialog(index: number) {
   const selectedGenerationRule = () => generationRuleById(generationRules, selectedGenerationRuleId);
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
-  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">CREATE PULL REQUEST</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><label>PR 标题<input id="create-title" value="${escape(restoredDraft ? restoredDraft.title : defaultTitle)}" /></label><label>PR 描述（可选）<textarea id="create-body" placeholder="可使用 AI 生成">${escape(restoredDraft?.body || '')}</textarea></label><p class="meta">确认后才会在 GitHub 创建 PR；不会自动合并。</p><div class="dialog-actions"><button id="generation-rules" type="button" class="ghost">${escape(generationRuleButtonLabel(selectedGenerationRule()))}</button><button id="ai-settings" type="button" class="ghost">AI 设置</button><button id="generate-ai" type="button" class="ghost">AI 生成</button><button value="cancel" class="ghost">取消</button><button id="confirm-create" class="primary">确认创建 PR</button></div></form>`;
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">CREATE PULL REQUEST</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><label>PR 标题<input id="create-title" value="${escape(restoredDraft ? restoredDraft.title : defaultTitle)}" /></label><label>PR 描述（可选）<textarea id="create-body" placeholder="可使用 AI 生成">${escape(restoredDraft?.body || '')}</textarea></label><p class="meta">确认后才会在 GitHub 创建 PR；不会自动合并。</p><p id="create-operation-status" class="meta" role="status" aria-live="polite" aria-atomic="true"></p><div class="dialog-actions"><button id="generation-rules" type="button" class="ghost">${escape(generationRuleButtonLabel(selectedGenerationRule()))}</button><button id="ai-settings" type="button" class="ghost">AI 设置</button><button id="generate-ai" type="button" class="ghost">AI 生成</button><button value="cancel" class="ghost">取消</button><button id="confirm-create" class="primary">确认创建 PR</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
   const form = dialog.querySelector<HTMLFormElement>('form')!;
   const titleInput = dialog.querySelector<HTMLInputElement>('#create-title')!;
@@ -323,9 +323,9 @@ function showCreateDialog(index: number) {
   const confirmButton = dialog.querySelector<HTMLButtonElement>('#confirm-create')!;
   const ruleButton = dialog.querySelector<HTMLButtonElement>('#generation-rules')!;
   const aiSettingsButton = dialog.querySelector<HTMLButtonElement>('#ai-settings')!;
-  const cancelButton = dialog.querySelector<HTMLButtonElement>('button[value="cancel"]')!;
+  const operationStatus = dialog.querySelector<HTMLElement>('#create-operation-status')!;
   let generationController: AbortController | null = null;
-  let creationPending = false;
+  let creationController: AbortController | null = null;
   let dialogClosed = false;
   const isDialogOpen = () => !dialogClosed && dialog.open;
   const setDialogOperation = (operation: 'idle' | 'generation' | 'creation') => {
@@ -336,8 +336,10 @@ function showCreateDialog(index: number) {
     confirmButton.disabled = busy;
     ruleButton.disabled = busy;
     aiSettingsButton.disabled = busy;
-    cancelButton.disabled = operation === 'creation';
     form.setAttribute('aria-busy', String(busy));
+    operationStatus.textContent = operation === 'generation'
+      ? 'AI 正在生成标题和描述…'
+      : operation === 'creation' ? '正在创建 Pull Request…' : '';
   };
   let draftDirty = false;
   let draftSaveTimer: number | undefined;
@@ -360,18 +362,18 @@ function showCreateDialog(index: number) {
     ruleButton.textContent = generationRuleButtonLabel(selectedGenerationRule());
   };
   ruleButton.addEventListener('click', () => {
-    if (generationController || creationPending || !isDialogOpen()) return;
+    if (generationController || creationController || !isDialogOpen()) return;
     showGenerationRules(selectedGenerationRuleId, id => {
       selectedGenerationRuleId = id;
       syncRuleButton();
     }, syncRuleButton);
   });
   aiSettingsButton.addEventListener('click', () => {
-    if (generationController || creationPending || !isDialogOpen()) return;
+    if (generationController || creationController || !isDialogOpen()) return;
     showAiSettings();
   });
   generateButton.addEventListener('click', async () => {
-    if (generationController || creationPending || !isDialogOpen()) return;
+    if (generationController || creationController || !isDialogOpen()) return;
     const config = aiConfig;
     if (!config?.baseUrl || !config.apiKey || !config.model) { showAiSettings(); return; }
     if ((titleInput.value || bodyInput.value) && !window.confirm('AI 生成会覆盖当前标题和描述，是否继续？')) return;
@@ -409,7 +411,7 @@ function showCreateDialog(index: number) {
       }
     } finally {
       if (generationController === controller) generationController = null;
-      if (isDialogOpen() && !creationPending) {
+      if (isDialogOpen() && !creationController) {
         setDialogOperation('idle');
         generateButton.textContent = 'AI 生成';
       }
@@ -417,37 +419,39 @@ function showCreateDialog(index: number) {
   });
   confirmButton.addEventListener('click', async event => {
     event.preventDefault();
-    if (generationController || creationPending || !isDialogOpen()) return;
+    if (generationController || creationController || !isDialogOpen()) return;
     const title = titleInput.value.trim();
     const body = bodyInput.value.trim();
     if (!title) return;
 
-    creationPending = true;
+    const controller = new AbortController();
+    creationController = controller;
     setDialogOperation('creation');
     confirmButton.textContent = '正在创建…';
     try {
       const { owner, name } = parseRepository(identity.repository);
-      await githubFetch(token, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify(pullRequestPayload(title, stage.source, stage.target, body)) });
+      await githubFetch(token, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify(pullRequestPayload(title, stage.source, stage.target, body)), signal: controller.signal });
+      if (!isDialogOpen() || controller.signal.aborted) return;
       if (draftSaveTimer !== undefined) { window.clearTimeout(draftSaveTimer); draftSaveTimer = undefined; }
       draftDirty = false;
       persistPullRequestDrafts(deletePullRequestDraft(pullRequestDrafts, identity));
-      creationPending = false;
       dialog.close();
       await refreshStatuses();
     } catch (err) {
-      creationPending = false;
-      if (isDialogOpen()) {
+      const isAbortError = err instanceof Error && err.name === 'AbortError';
+      if (isDialogOpen() && !isAbortError) showToast(err instanceof Error ? err.message : '创建失败');
+    } finally {
+      if (creationController === controller) creationController = null;
+      if (isDialogOpen() && !generationController) {
         setDialogOperation('idle');
-        confirmButton.textContent = err instanceof Error ? err.message : '创建失败';
+        confirmButton.textContent = '确认创建 PR';
       }
     }
-  });
-  dialog.addEventListener('cancel', event => {
-    if (creationPending) event.preventDefault();
   });
   dialog.addEventListener('close', () => {
     dialogClosed = true;
     generationController?.abort();
+    creationController?.abort();
     flushDraft();
     dialog.remove();
   });
