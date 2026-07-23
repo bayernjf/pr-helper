@@ -213,41 +213,59 @@ type StreamOptions = {
   fetcher?: typeof fetch;
 };
 
-function sseEventData(frame: string) {
-  const dataLines = frame
-    .split(/\r?\n/)
-    .filter(line => line.startsWith('data:'))
-    .map(line => line.slice(5).replace(/^ /, ''));
-
-  return dataLines.length > 0 ? dataLines.join('\n') : null;
-}
-
 async function* readSseData(body: ReadableStream<Uint8Array>) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  let buffer = '';
   let complete = false;
+  let line = '';
+  let pendingCarriageReturn = false;
+  let dataLines: string[] = [];
+  const events: string[] = [];
+
+  const finishLine = () => {
+    if (line === '') {
+      if (dataLines.length > 0) events.push(dataLines.join('\n'));
+      dataLines = [];
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).replace(/^ /, ''));
+    }
+    line = '';
+  };
+
+  const consumeText = (source: string) => {
+    for (const character of source) {
+      if (pendingCarriageReturn) {
+        pendingCarriageReturn = false;
+        finishLine();
+        if (character === '\n') continue;
+      }
+
+      if (character === '\r') {
+        pendingCarriageReturn = true;
+      } else if (character === '\n') {
+        finishLine();
+      } else {
+        line += character;
+      }
+    }
+  };
 
   try {
     while (true) {
       const { done, value } = await reader.read();
-      if (value) buffer += decoder.decode(value, { stream: true });
+      if (value) consumeText(decoder.decode(value, { stream: true }));
       if (done) {
-        buffer += decoder.decode();
+        consumeText(decoder.decode());
+        if (pendingCarriageReturn) {
+          pendingCarriageReturn = false;
+          finishLine();
+        }
         complete = true;
       }
 
-      const frames = buffer.split(/\r?\n\r?\n/);
-      buffer = frames.pop() ?? '';
-      for (const frame of frames) {
-        const data = sseEventData(frame);
-        if (data !== null) yield data;
-      }
+      while (events.length > 0) yield events.shift()!;
       if (done) break;
     }
-
-    const data = sseEventData(buffer);
-    if (data !== null) yield data;
   } finally {
     if (!complete) {
       try {
@@ -257,6 +275,15 @@ async function* readSseData(body: ReadableStream<Uint8Array>) {
       }
     }
     reader.releaseLock();
+  }
+}
+
+async function cancelResponseBody(body: ReadableStream<Uint8Array> | null) {
+  if (!body) return;
+  try {
+    await body.cancel();
+  } catch {
+    // The response error is more useful than a best-effort cleanup failure.
   }
 }
 
@@ -278,17 +305,25 @@ export async function streamPrMessage(
     signal: options.signal,
   });
 
-  if (!response.ok) throw new Error(`AI 请求失败 (${response.status})`);
+  if (!response.ok) {
+    await cancelResponseBody(response.body);
+    throw new Error(`AI 请求失败 (${response.status})`);
+  }
   const mediaType = response.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase();
   if (mediaType !== 'text/event-stream') {
+    await cancelResponseBody(response.body);
     throw new Error('当前模型服务不支持流式生成');
   }
   if (!response.body) throw new Error('AI 流式响应没有内容');
 
   let content = '';
   let latest: PrMessage = { title: '', body: '' };
+  let sawDone = false;
   for await (const data of readSseData(response.body)) {
-    if (data === '[DONE]') break;
+    if (data === '[DONE]') {
+      sawDone = true;
+      break;
+    }
 
     let event: unknown;
     try {
@@ -309,6 +344,7 @@ export async function streamPrMessage(
     }
   }
 
+  if (!sawDone) throw new Error('AI 流式响应意外中断');
   const final = parseFinalPrMessage(content);
   if (final.title !== latest.title || final.body !== latest.body) options.onUpdate({ ...final });
   return final;

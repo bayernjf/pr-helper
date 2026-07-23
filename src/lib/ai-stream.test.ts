@@ -164,6 +164,21 @@ describe('streamPrMessage', () => {
     })).resolves.toEqual({ title: '分隔', body: '' });
   });
 
+  it('recognizes lone CR and mixed line endings across chunk boundaries', async () => {
+    const first = 'data: {"choices":[{"delta":{"content":"{\\"title\\":\\"混"}}]}\r\r';
+    const second = 'data: {"choices":[{"delta":{"content":"合\\"}"}}]}\r\n\n';
+    const done = 'data: [DONE]\r\r';
+
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => sseResponse([
+        encoder.encode(first.slice(0, -1)),
+        encoder.encode(first.slice(-1) + second.slice(0, -2)),
+        encoder.encode(second.slice(-2) + done),
+      ]),
+      onUpdate: vi.fn(),
+    })).resolves.toEqual({ title: '混合', body: '' });
+  });
+
   it('rejects HTTP failures, non-streaming content types, and missing stream bodies', async () => {
     await expect(streamPrMessage(config, 'prompt', {
       fetcher: async () => new Response('', { status: 429 }), onUpdate: vi.fn(),
@@ -209,6 +224,69 @@ describe('streamPrMessage', () => {
       )]),
       onUpdate: vi.fn(),
     })).rejects.toThrow('AI 未返回标题');
+  });
+
+  it('rejects a completed message when the stream ends without DONE', async () => {
+    const updates = vi.fn();
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => sseResponse([encoder.encode(
+        'data: {"choices":[{"delta":{"content":"{\\"title\\":\\"未完成\\"}"}}]}\n\n',
+      )]),
+      onUpdate: updates,
+    })).rejects.toThrow('AI 流式响应意外中断');
+    expect(updates).toHaveBeenCalledWith({ title: '未完成', body: '' });
+  });
+
+  it('does not dispatch an unterminated data tail before rejecting a missing DONE', async () => {
+    const updates = vi.fn();
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => sseResponse([encoder.encode(
+        'data: {"choices":[{"delta":{"content":"{\\"title\\":\\"保留\\",\\"body\\":\\""}}]}\n\n'
+        + 'data: {"choices":[{"delta":{"content":"不应派发\\"}"}}]}',
+      )]),
+      onUpdate: updates,
+    })).rejects.toThrow('AI 流式响应意外中断');
+    expect(updates).toHaveBeenCalledTimes(1);
+    expect(updates).toHaveBeenLastCalledWith({ title: '保留', body: '' });
+  });
+
+  it('propagates a mid-body AbortError without clearing partial updates', async () => {
+    const abortError = new DOMException('Aborted', 'AbortError');
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulls++ === 0) {
+          controller.enqueue(encoder.encode(
+            'data: {"choices":[{"delta":{"content":"{\\"title\\":\\"部分\\""}}]}\n\n',
+          ));
+          return;
+        }
+        controller.error(abortError);
+      },
+    });
+    const updates = vi.fn();
+
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => new Response(body, { headers: { 'Content-Type': 'text/event-stream' } }),
+      onUpdate: updates,
+    })).rejects.toBe(abortError);
+    expect(updates).toHaveBeenLastCalledWith({ title: '部分', body: '' });
+  });
+
+  it('cancels bodies before reporting HTTP and content-type errors', async () => {
+    let httpCancelled = false;
+    const httpBody = new ReadableStream<Uint8Array>({ cancel: () => { httpCancelled = true; } });
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => new Response(httpBody, { status: 429 }), onUpdate: vi.fn(),
+    })).rejects.toThrow('AI 请求失败 (429)');
+    expect(httpCancelled).toBe(true);
+
+    let typeCancelled = false;
+    const typeBody = new ReadableStream<Uint8Array>({ cancel: () => { typeCancelled = true; } });
+    await expect(streamPrMessage(config, 'prompt', {
+      fetcher: async () => new Response(typeBody, { headers: { 'Content-Type': 'application/json' } }), onUpdate: vi.fn(),
+    })).rejects.toThrow('当前模型服务不支持流式生成');
+    expect(typeCancelled).toBe(true);
   });
 
   it('cancels an unread reader after the DONE event', async () => {
