@@ -28,6 +28,7 @@ describe('generation rules', () => {
       { id: 'rule-1', isDefault: true },
       { id: 'rule-2', isDefault: false },
     ]);
+    expect(() => createGenerationRule(rules, standardDraft, 'rule-1', now)).toThrow('规则 ID 已存在');
   });
 
   it('moves the unique default to an existing rule', () => {
@@ -80,6 +81,8 @@ describe('generation rules', () => {
 
     expect(defaultGenerationRule(rules)).toMatchObject({ id: 'rule-1' });
     expect(generationRuleById(rules, 'rule-2')).toMatchObject({ id: 'rule-2' });
+    expect(generationRuleById(rules, null)).toBeUndefined();
+    expect(generationRuleById(rules, 'missing')).toBeUndefined();
     expect(defaultGenerationRule(rules)).toMatchObject({ id: 'rule-1' });
     expect(generationRuleButtonLabel(defaultGenerationRule(rules))).toBe('生成规则 · 标准 PR');
     expect(generationRuleButtonLabel()).toBe('生成规则');
@@ -90,6 +93,13 @@ describe('generation rules', () => {
     expect(parseGenerationRules('{')).toEqual([]);
     expect(parseGenerationRules(JSON.stringify([{ id: 'rule-1' }]))).toEqual([]);
     expect(parseGenerationRules(JSON.stringify([{ id: 'rule-1', ...standardDraft, isDefault: true, createdAt: now, updatedAt: 1 }]))).toEqual([]);
+    expect(parseGenerationRules(JSON.stringify([{ id: ' ', ...standardDraft, isDefault: true, createdAt: now, updatedAt: now }]))).toEqual([]);
+    expect(parseGenerationRules(JSON.stringify([{ id: 'rule-1', name: ' ', content: '# 规则', isDefault: true, createdAt: now, updatedAt: now }]))).toEqual([]);
+    expect(parseGenerationRules(JSON.stringify([{ id: 'rule-1', name: '标准 PR', content: ' ', isDefault: true, createdAt: now, updatedAt: now }]))).toEqual([]);
+    expect(parseGenerationRules(JSON.stringify([
+      { id: 'rule-1', ...standardDraft, isDefault: true, createdAt: now, updatedAt: now },
+      { id: 'rule-1', name: '发布 PR', content: '规则内容', isDefault: false, createdAt: now, updatedAt: now },
+    ]))).toEqual([]);
   });
 
   it('normalizes one persisted rule to default and keeps only the first declared default', () => {

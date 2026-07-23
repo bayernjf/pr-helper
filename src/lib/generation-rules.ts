@@ -9,15 +9,19 @@ export interface GenerationRule {
 
 export type GenerationRuleDraft = Pick<GenerationRule, 'name' | 'content'>;
 
+function isNonBlankText(value: string): boolean {
+  return Boolean(value.trim());
+}
+
 function normalizedDraft(draft: GenerationRuleDraft): GenerationRuleDraft {
   const name = draft.name.trim();
   const content = draft.content.trim();
 
-  if (!name) {
+  if (!isNonBlankText(name)) {
     throw new Error('规则名称不能为空');
   }
 
-  if (!content) {
+  if (!isNonBlankText(content)) {
     throw new Error('规则内容不能为空');
   }
 
@@ -36,7 +40,10 @@ function isGenerationRule(value: unknown): value is GenerationRule {
     typeof rule.content === 'string' &&
     typeof rule.isDefault === 'boolean' &&
     typeof rule.createdAt === 'string' &&
-    typeof rule.updatedAt === 'string'
+    typeof rule.updatedAt === 'string' &&
+    isNonBlankText(rule.id) &&
+    isNonBlankText(rule.name) &&
+    isNonBlankText(rule.content)
   );
 }
 
@@ -47,7 +54,7 @@ export function parseGenerationRules(raw: string | null): GenerationRule[] {
 
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed) || !parsed.every(isGenerationRule)) {
+    if (!Array.isArray(parsed) || !parsed.every(isGenerationRule) || new Set(parsed.map((rule) => rule.id)).size !== parsed.length) {
       return [];
     }
 
@@ -67,12 +74,16 @@ export function parseGenerationRules(raw: string | null): GenerationRule[] {
 }
 
 export function createGenerationRule(
-  rules: GenerationRule[],
+  rules: readonly GenerationRule[],
   draft: GenerationRuleDraft,
   id: string,
   now: string,
 ): GenerationRule[] {
   const normalized = normalizedDraft(draft);
+  if (rules.some((rule) => rule.id === id)) {
+    throw new Error('规则 ID 已存在');
+  }
+
   return [
     ...rules,
     {
@@ -86,7 +97,7 @@ export function createGenerationRule(
 }
 
 export function updateGenerationRule(
-  rules: GenerationRule[],
+  rules: readonly GenerationRule[],
   id: string,
   draft: GenerationRuleDraft,
   now: string,
@@ -99,7 +110,7 @@ export function updateGenerationRule(
   return rules.map((rule) => (rule.id === id ? { ...rule, ...normalized, updatedAt: now } : rule));
 }
 
-export function setDefaultGenerationRule(rules: GenerationRule[], id: string): GenerationRule[] {
+export function setDefaultGenerationRule(rules: readonly GenerationRule[], id: string): GenerationRule[] {
   if (!rules.some((rule) => rule.id === id)) {
     throw new Error('找不到要设为默认的规则');
   }
@@ -107,11 +118,11 @@ export function setDefaultGenerationRule(rules: GenerationRule[], id: string): G
   return rules.map((rule) => ({ ...rule, isDefault: rule.id === id }));
 }
 
-export function defaultGenerationRule(rules: GenerationRule[]): GenerationRule | undefined {
+export function defaultGenerationRule(rules: readonly GenerationRule[]): GenerationRule | undefined {
   return rules.find((rule) => rule.isDefault) || (rules.length === 1 ? rules[0] : undefined);
 }
 
-export function generationRuleById(rules: GenerationRule[], id: string | null): GenerationRule | undefined {
+export function generationRuleById(rules: readonly GenerationRule[], id: string | null): GenerationRule | undefined {
   return id ? rules.find((rule) => rule.id === id) : undefined;
 }
 
