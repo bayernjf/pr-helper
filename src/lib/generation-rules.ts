@@ -73,6 +73,14 @@ export function parseGenerationRules(raw: string | null): GenerationRule[] {
   }
 }
 
+export function loadGenerationRules(read: () => string | null): GenerationRule[] {
+  try {
+    return parseGenerationRules(read());
+  } catch {
+    return [];
+  }
+}
+
 export function createGenerationRule(
   rules: readonly GenerationRule[],
   draft: GenerationRuleDraft,

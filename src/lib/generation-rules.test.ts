@@ -5,6 +5,7 @@ import {
   defaultGenerationRule,
   generationRuleButtonLabel,
   generationRuleById,
+  loadGenerationRules,
   markdownRuleName,
   parseGenerationRules,
   setDefaultGenerationRule,
@@ -100,6 +101,18 @@ describe('generation rules', () => {
       { id: 'rule-1', ...standardDraft, isDefault: true, createdAt: now, updatedAt: now },
       { id: 'rule-1', name: '发布 PR', content: '规则内容', isDefault: false, createdAt: now, updatedAt: now },
     ]))).toEqual([]);
+  });
+
+  it('loads persisted rules from a successful storage reader', () => {
+    const rules = [{ id: 'rule-1', ...standardDraft, isDefault: true, createdAt: now, updatedAt: now }];
+
+    expect(loadGenerationRules(() => JSON.stringify(rules))).toEqual(rules);
+  });
+
+  it('returns no rules when the storage reader throws', () => {
+    expect(loadGenerationRules(() => {
+      throw new DOMException('Storage access denied', 'SecurityError');
+    })).toEqual([]);
   });
 
   it('normalizes one persisted rule to default and keeps only the first declared default', () => {
