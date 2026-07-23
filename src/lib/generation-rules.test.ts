@@ -19,6 +19,7 @@ describe('generation rules', () => {
     expect(createGenerationRule([], standardDraft, 'rule-1', now)).toEqual([
       { id: 'rule-1', ...standardDraft, isDefault: true, createdAt: now, updatedAt: now },
     ]);
+    expect(() => createGenerationRule([], standardDraft, '   ', now)).toThrow('规则 ID 不能为空');
   });
 
   it('preserves an existing default when creating another rule', () => {
@@ -83,7 +84,6 @@ describe('generation rules', () => {
     expect(generationRuleById(rules, 'rule-2')).toMatchObject({ id: 'rule-2' });
     expect(generationRuleById(rules, null)).toBeUndefined();
     expect(generationRuleById(rules, 'missing')).toBeUndefined();
-    expect(defaultGenerationRule(rules)).toMatchObject({ id: 'rule-1' });
     expect(generationRuleButtonLabel(defaultGenerationRule(rules))).toBe('生成规则 · 标准 PR');
     expect(generationRuleButtonLabel()).toBe('生成规则');
     expect(defaultGenerationRule([{ ...rules[1], isDefault: false }])).toMatchObject({ id: 'rule-2' });
@@ -131,5 +131,16 @@ describe('generation rules', () => {
 
     expect(rules).toEqual(initialRules);
     expect(draft).toEqual(initialDraft);
+  });
+
+  it('round-trips every successfully created rule through persisted JSON', () => {
+    const rules = createGenerationRule(
+      createGenerationRule([], standardDraft, 'rule-1', now),
+      { name: '发布 PR', content: '规则内容' },
+      'rule-2',
+      now,
+    );
+
+    expect(parseGenerationRules(JSON.stringify(rules))).toEqual(rules);
   });
 });

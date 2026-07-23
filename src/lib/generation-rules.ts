@@ -79,6 +79,10 @@ export function createGenerationRule(
   id: string,
   now: string,
 ): GenerationRule[] {
+  if (!isNonBlankText(id)) {
+    throw new Error('规则 ID 不能为空');
+  }
+
   const normalized = normalizedDraft(draft);
   if (rules.some((rule) => rule.id === id)) {
     throw new Error('规则 ID 已存在');
