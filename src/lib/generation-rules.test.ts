@@ -40,6 +40,7 @@ describe('generation rules', () => {
       { id: 'rule-1', isDefault: false },
       { id: 'rule-2', isDefault: true },
     ]);
+    expect(() => setDefaultGenerationRule(rules, 'missing')).toThrow('找不到要设为默认的规则');
   });
 
   it('updates trimmed content and timestamp while preserving immutable fields', () => {
@@ -56,6 +57,7 @@ describe('generation rules', () => {
         updatedAt,
       },
     ]);
+    expect(() => updateGenerationRule(rules, 'missing', standardDraft, updatedAt)).toThrow('找不到要编辑的规则');
   });
 
   it('rejects blank rule names and content', () => {
@@ -64,8 +66,10 @@ describe('generation rules', () => {
   });
 
   it('derives a name from case-insensitive Markdown file extensions', () => {
-    expect(markdownRuleName('标准 PR.MD')).toBe('标准 PR');
+    expect(markdownRuleName('  标准 PR.MD')).toBe('标准 PR');
     expect(() => markdownRuleName('标准 PR.txt')).toThrow('只能导入 Markdown (.md) 文件');
+    expect(() => markdownRuleName('.md')).toThrow('规则名称不能为空');
+    expect(() => markdownRuleName('   .md')).toThrow('规则名称不能为空');
   });
 
   it('selects rules and derives the generation button label', () => {
@@ -79,6 +83,7 @@ describe('generation rules', () => {
     expect(defaultGenerationRule(rules)).toMatchObject({ id: 'rule-1' });
     expect(generationRuleButtonLabel(defaultGenerationRule(rules))).toBe('生成规则 · 标准 PR');
     expect(generationRuleButtonLabel()).toBe('生成规则');
+    expect(defaultGenerationRule([{ ...rules[1], isDefault: false }])).toMatchObject({ id: 'rule-2' });
   });
 
   it('returns no rules for malformed JSON or structurally invalid arrays', () => {
@@ -99,5 +104,22 @@ describe('generation rules', () => {
       { id: 'rule-1', isDefault: true },
       { id: 'rule-2', isDefault: false },
     ]);
+  });
+
+  it('does not mutate inputs while creating, updating, or setting a default', () => {
+    const rules = [
+      { id: 'rule-1', ...standardDraft, isDefault: true, createdAt: now, updatedAt: now },
+      { id: 'rule-2', name: '发布 PR', content: '规则内容', isDefault: false, createdAt: now, updatedAt: now },
+    ];
+    const draft = { name: '  新规则  ', content: '  新内容  ' };
+    const initialRules = structuredClone(rules);
+    const initialDraft = structuredClone(draft);
+
+    createGenerationRule(rules, draft, 'rule-3', now);
+    updateGenerationRule(rules, 'rule-1', draft, now);
+    setDefaultGenerationRule(rules, 'rule-2');
+
+    expect(rules).toEqual(initialRules);
+    expect(draft).toEqual(initialDraft);
   });
 });

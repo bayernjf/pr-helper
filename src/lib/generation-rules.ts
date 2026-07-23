@@ -108,7 +108,7 @@ export function setDefaultGenerationRule(rules: GenerationRule[], id: string): G
 }
 
 export function defaultGenerationRule(rules: GenerationRule[]): GenerationRule | undefined {
-  return rules.find((rule) => rule.isDefault);
+  return rules.find((rule) => rule.isDefault) || (rules.length === 1 ? rules[0] : undefined);
 }
 
 export function generationRuleById(rules: GenerationRule[], id: string | null): GenerationRule | undefined {
@@ -124,5 +124,10 @@ export function markdownRuleName(fileName: string): string {
     throw new Error('只能导入 Markdown (.md) 文件');
   }
 
-  return fileName.slice(0, -3);
+  const name = fileName.slice(0, -3).trim();
+  if (!name) {
+    throw new Error('规则名称不能为空');
+  }
+
+  return name;
 }
