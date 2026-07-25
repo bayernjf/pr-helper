@@ -313,9 +313,15 @@ function showCreateDialog(index: number) {
   let selectedGenerationRuleId = defaultGenerationRule(generationRules)?.id || null;
   const selectedGenerationRule = () => generationRuleById(generationRules, selectedGenerationRuleId);
   const dialog = document.createElement('dialog');
-  dialog.className = 'create-dialog';
+  dialog.className = 'create-dialog pr-create-dialog';
   dialog.innerHTML = `<form method="dialog"><p class="eyebrow">CREATE PULL REQUEST</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><label>PR 标题<input id="create-title" value="${escape(restoredDraft ? restoredDraft.title : defaultTitle)}" /></label><label>PR 描述（可选）<textarea id="create-body" placeholder="可使用 AI 生成">${escape(restoredDraft?.body || '')}</textarea></label><p class="meta">确认后才会在 GitHub 创建 PR；不会自动合并。</p><p id="create-operation-status" class="meta" role="status" aria-live="polite" aria-atomic="true"></p><div class="dialog-actions"><button id="generation-rules" type="button" class="ghost">${escape(generationRuleButtonLabel(selectedGenerationRule()))}</button><button id="ai-settings" type="button" class="ghost">AI 设置</button><button id="generate-ai" type="button" class="ghost">AI 生成</button><button value="cancel" class="ghost">取消</button><button id="confirm-create" class="primary">确认创建 PR</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
+  const dialogRect = dialog.getBoundingClientRect();
+  dialog.style.position = 'fixed';
+  dialog.style.inset = 'auto';
+  dialog.style.left = `${dialogRect.left}px`;
+  dialog.style.top = `${dialogRect.top}px`;
+  dialog.style.margin = '0';
   const form = dialog.querySelector<HTMLFormElement>('form')!;
   const titleInput = dialog.querySelector<HTMLInputElement>('#create-title')!;
   const bodyInput = dialog.querySelector<HTMLTextAreaElement>('#create-body')!;
