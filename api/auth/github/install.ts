@@ -3,7 +3,7 @@ import { parseGithubAppConfig, readSignedSession } from '../../_lib/github-app.j
 import { githubAppRequest } from '../../_lib/github-api.js';
 import { installationForLogin, type GitHubAppInstallation } from '../../_lib/installations.js';
 
-export default function handler(request: ApiRequest, response: ApiResponse) {
+export default async function handler(request: ApiRequest, response: ApiResponse) {
   if (!requestMustBeGet(request, response)) return;
   try {
     const config = parseGithubAppConfig(process.env);
