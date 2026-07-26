@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aiChatCompletionsUrl, buildPrPrompt } from './ai';
+import { aiChatCompletionsUrl, buildPrPrompt, shouldAutoGeneratePrMessage } from './ai';
 
 describe('PR AI prompt', () => {
   it('includes the branch direction and GitHub changes', () => {
@@ -20,5 +20,12 @@ describe('PR AI prompt', () => {
 
   it('treats a whitespace-only generation rule as no rule', () => {
     expect(buildPrPrompt('feature/login', 'dev', ['feat: login'], ' \n\t ')).toBe('为 GitHub Pull Request 生成简洁的中文标题和描述。分支：feature/login → dev。提交：\n- feat: login\n仅返回 JSON：{"title":"...","body":"..."}。');
+  });
+
+  it('only auto-generates when enabled and the PR description is empty', () => {
+    expect(shouldAutoGeneratePrMessage(true, '')).toBe(true);
+    expect(shouldAutoGeneratePrMessage(true, '  \n ')).toBe(true);
+    expect(shouldAutoGeneratePrMessage(true, '已生成的描述')).toBe(false);
+    expect(shouldAutoGeneratePrMessage(false, '')).toBe(false);
   });
 });
