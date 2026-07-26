@@ -2,7 +2,7 @@ import './style.css';
 import { githubAppApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './lib/github';
 import { buildPrPrompt, testAiConnection, type AiConfig } from './lib/ai';
 import { streamPrMessage } from './lib/ai-stream';
-import { canCreateStage, canMergeOpenPull, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks } from './lib/domain';
+import { canCreateStage, canMergeOpenPull, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeGitHubChecks } from './lib/domain';
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
@@ -11,6 +11,7 @@ import { addStage, createWorkflow, deleteWorkflow, removeStage, saveWorkflow, wo
 type Repo = { full_name: string; private: boolean };
 type Pull = { number: number; state: string; merged_at: string | null; merge_commit_sha?: string | null; mergeable?: boolean | null; mergeable_state?: string; html_url: string; head: { sha: string } };
 type CheckRun = { status: string; conclusion: string | null };
+type CommitStatus = { state: string };
 type Review = { state: string };
 type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
 type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string };
@@ -29,6 +30,7 @@ let pollTimer: number | undefined;
 let refreshOnFocusBound = false;
 const mergingStages = new Set<number>();
 const recentlyCreatedPullNumbers = new Map<number, number>();
+const recentlyMergedPullNumbers = new Map<number, number>();
 let aiConfig: AiConfig | null = loadAiConfig();
 let generationRules = loadGenerationRules(() => localStorage.getItem(GENERATION_RULES_KEY));
 let pullRequestDrafts = loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), Date.now());
@@ -179,8 +181,11 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const mergedVerification = status.checks?.state;
   const state = status.kind === 'merged' ? mergedVerification === 'success' ? '合并后验证通过' : mergedVerification === 'failure' ? '合并后验证失败' : status.checks ? '合并后验证中' : '已合并' : status.kind === 'closed' ? '已关闭' : status.checks?.total && status.checks.state === 'failure' ? 'Actions 失败' : status.checks?.total && status.checks.state === 'pending' ? '等待 Actions' : status.requiredApprovals && (status.approvals || 0) < status.requiredApprovals ? '等待审批' : mergeability ? '合并被阻塞' : '等待合并';
   const gates = status.kind === 'merged' ? [actions] : [actions, approvals, mergeability];
-  const newCommits = status.kind === 'merged' && status.aheadBy ? `<p><b class="status neutral">有 ${status.aheadBy} 个新提交</b> · 可创建新的 PR。</p>` : '';
-  const newPullAction = status.kind === 'merged' && status.aheadBy ? `<button class="timeline-action" data-create-pr="${index}">创建新 PR</button>` : '';
+  const canCreateNewPull = status.kind === 'merged' && Boolean(status.aheadBy) && canCreateStage(index, statuses!);
+  const newCommits = status.kind === 'merged' && status.aheadBy
+    ? `<p><b class="status neutral">有 ${status.aheadBy} 个新提交</b> · ${canCreateNewPull ? '可创建新的 PR。' : '等待前序步骤合并后 Actions 成功。'}</p>`
+    : '';
+  const newPullAction = canCreateNewPull ? `<button class="timeline-action" data-create-pr="${index}">创建新 PR</button>` : '';
   const stateClass = status.kind === 'merged' ? mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
   const mergeAction = status.kind === 'open' && canMergePull(status) ? mergingStages.has(index) ? `<button class="create-pr" disabled>正在合并…</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">发起合并</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="选择合并方式" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>✓　合并提交（merge）</b><small>保留此分支的全部提交，并创建一个合并提交。</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>压缩合并（squash）</b><small>需到 GitHub 页面操作</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>变基合并（rebase）</b><small>需到 GitHub 页面操作</small></button></span></span>` : '';
   return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b>${gates.filter(Boolean).map(gate => ` · ${gate}`).join('')}</p>${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">打开 GitHub PR #${status.pr!.number} ↗</a>${mergeAction}${newPullAction}</div></div></article>`;
@@ -228,6 +233,7 @@ function showMergeDialog(index: number) {
       if (!result.merged) throw new Error(result.message || 'GitHub 未完成合并。');
       const pendingChecks = { state: 'pending' as const, passed: 0, total: 0 };
       statuses = statuses?.map((item, statusIndex) => statusIndex === index ? { ...item, kind: 'merged', pr: { ...status.pr!, state: 'closed', merged_at: new Date().toISOString(), merge_commit_sha: result.sha }, checks: pendingChecks } : item) || null;
+      recentlyMergedPullNumbers.set(index, status.pr.number);
       mergingStages.delete(index);
       dialog.close();
       detail();
@@ -254,35 +260,48 @@ async function refreshStatuses() {
   statuses = await Promise.all(active.stages.map(async (stage, index) => {
     try {
       const recentlyCreatedNumber = recentlyCreatedPullNumbers.get(index);
-      const [openPulls, closedPulls, comparison, recentlyCreatedPull] = await Promise.all([
+      const recentlyMergedNumber = recentlyMergedPullNumbers.get(index);
+      const recentlyChangedNumber = recentlyCreatedNumber || recentlyMergedNumber;
+      const [openPulls, closedPulls, comparison, recentlyChangedPull] = await Promise.all([
         githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + stage.source)}&base=${encodeURIComponent(stage.target)}&per_page=1`),
         githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&head=${encodeURIComponent(owner + ':' + stage.source)}&base=${encodeURIComponent(stage.target)}&per_page=1`),
         githubFetch<{ ahead_by: number }>(token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`),
-        recentlyCreatedNumber ? githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls/${recentlyCreatedNumber}`).catch(() => null) : Promise.resolve(null),
+        recentlyChangedNumber ? githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls/${recentlyChangedNumber}`).catch(() => null) : Promise.resolve(null),
       ]);
       if (recentlyCreatedNumber && openPulls.some(pull => pull.number === recentlyCreatedNumber)) recentlyCreatedPullNumbers.delete(index);
-      if (recentlyCreatedNumber && recentlyCreatedPull?.state !== 'open') recentlyCreatedPullNumbers.delete(index);
-      const pr = recentlyCreatedPull?.state === 'open' ? recentlyCreatedPull : selectCurrentPull([...openPulls, ...closedPulls]);
+      if (recentlyCreatedNumber && recentlyChangedPull?.state !== 'open') recentlyCreatedPullNumbers.delete(index);
+      if (recentlyMergedNumber && !openPulls.some(pull => pull.number === recentlyMergedNumber) && closedPulls.some(pull => pull.number === recentlyMergedNumber)) recentlyMergedPullNumbers.delete(index);
+      if (recentlyMergedNumber && !recentlyChangedPull?.merged_at && previous?.[index]?.kind === 'merged') return previous[index];
+      const pr = recentlyMergedNumber && recentlyChangedPull?.merged_at
+        ? recentlyChangedPull
+        : recentlyCreatedNumber && recentlyChangedPull?.state === 'open'
+          ? recentlyChangedPull
+          : selectCurrentPull([...openPulls, ...closedPulls]);
       if (!pr) return { kind: 'not-created' } as StepStatus;
       if (pr.merged_at) {
         let checks: StepStatus['checks'];
         if (pr.merge_commit_sha) {
           try {
-            const runs = await githubFetch<{ check_runs: CheckRun[] }>(token, `/repos/${owner}/${name}/commits/${pr.merge_commit_sha}/check-runs?per_page=100`);
-            checks = runs.check_runs.length ? summarizeChecks(runs.check_runs) : undefined;
+            const [runs, statuses] = await Promise.all([
+              githubFetch<{ check_runs: CheckRun[] }>(token, `/repos/${owner}/${name}/commits/${pr.merge_commit_sha}/check-runs?per_page=100`),
+              githubFetch<{ statuses: CommitStatus[] }>(token, `/repos/${owner}/${name}/commits/${pr.merge_commit_sha}/status`),
+            ]);
+            checks = runs.check_runs.length || statuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, statuses.statuses) : undefined;
           } catch { /* Keep the merged PR visible while its post-merge checks cannot be read yet. */ }
         }
         return { kind: 'merged', pr, checks, approvals: 0, aheadBy: comparison.ahead_by } as StepStatus;
       }
       if (pr.state === 'closed') return { kind: 'closed', pr, approvals: 0 } as StepStatus;
-      const [details, runs, reviews, protection] = await Promise.all([
+      const [details, runs, commitStatuses, reviews, protection] = await Promise.all([
         githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls/${pr.number}`),
         githubFetch<{ check_runs: CheckRun[] }>(token, `/repos/${owner}/${name}/commits/${pr.head.sha}/check-runs?per_page=100`),
+        githubFetch<{ statuses: CommitStatus[] }>(token, `/repos/${owner}/${name}/commits/${pr.head.sha}/status`),
         githubFetch<Review[]>(token, `/repos/${owner}/${name}/pulls/${pr.number}/reviews?per_page=100`),
         readBranchProtection(owner, name, stage.target),
       ]);
       const requiredApprovals = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
-      return { kind: 'open', pr: details, checks: runs.check_runs.length ? summarizeChecks(runs.check_runs) : undefined, approvals: reviews.filter(review => review.state === 'APPROVED').length, requiredApprovals: requiredApprovals || undefined, mergeable: details.mergeable, mergeableState: details.mergeable_state } as StepStatus;
+      const checks = runs.check_runs.length || commitStatuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, commitStatuses.statuses) : undefined;
+      return { kind: 'open', pr: details, checks, approvals: reviews.filter(review => review.state === 'APPROVED').length, requiredApprovals: requiredApprovals || undefined, mergeable: details.mergeable, mergeableState: details.mergeable_state } as StepStatus;
     } catch (err) { return { kind: 'error', message: err instanceof Error ? err.message : '未知错误' } as StepStatus; }
   }));
   if (previous) statuses.forEach((status, index) => { const before = previous[index]; const oldCheck = before?.checks?.state; const newCheck = status.checks?.state; if (before && statusChanged({ kind: before.kind, checks: oldCheck }, { kind: status.kind, checks: newCheck })) { const message = `第 ${index + 1} 步状态更新：${status.kind === 'merged' ? 'PR 已合并' : newCheck === 'failure' ? 'Actions 失败' : newCheck === 'success' ? 'Actions 全绿' : status.kind}`; showToast(message); if (Notification.permission === 'granted') new Notification('PR Flow', { body: message }); } });

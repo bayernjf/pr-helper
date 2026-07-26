@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { githubApiUrl, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './github';
+import { githubApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './github';
 
 describe('GitHub repository helpers', () => {
   it('parses the repository selected from GitHub', () => {
@@ -21,5 +21,13 @@ describe('GitHub repository helpers', () => {
 
   it('prioritizes an open PR over older merged PRs for monitoring', () => {
     expect(selectCurrentPull([{ state: 'closed', merged_at: '2026-07-01' }, { state: 'open', merged_at: null }])?.state).toBe('open');
+  });
+
+  it('bypasses browser caches when refreshing live GitHub state', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ login: 'octocat' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    await githubFetch('token', '/user');
+    expect(fetchMock).toHaveBeenCalledWith('https://api.github.com/user', expect.objectContaining({ cache: 'no-store' }));
+    vi.unstubAllGlobals();
   });
 });

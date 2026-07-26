@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canCreateStage, canMergeOpenPull, getStageAction, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks } from './domain';
+import { canCreateStage, canMergeOpenPull, getStageAction, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks, summarizeGitHubChecks } from './domain';
 
 describe('workflow stages', () => {
   it('keeps the release stage locked until the previous PR and its checks succeed', () => {
@@ -16,6 +16,13 @@ describe('workflow stages', () => {
   it('summarizes GitHub check runs for the execution view', () => {
     expect(summarizeChecks([{ status: 'completed', conclusion: 'success' }, { status: 'in_progress', conclusion: null }])).toEqual({ state: 'pending', passed: 1, total: 2 });
     expect(summarizeChecks([{ status: 'completed', conclusion: 'failure' }])).toEqual({ state: 'failure', passed: 0, total: 1 });
+  });
+
+  it('combines Check Runs and legacy Commit Statuses shown by GitHub', () => {
+    expect(summarizeGitHubChecks(
+      [{ status: 'completed', conclusion: 'success' }, { status: 'completed', conclusion: 'success' }],
+      [{ state: 'success' }],
+    )).toEqual({ state: 'success', passed: 3, total: 3 });
   });
 
   it('only unlocks a later PR after every earlier step is merged and its post-merge checks succeed', () => {
