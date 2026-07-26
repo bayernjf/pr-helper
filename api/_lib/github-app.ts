@@ -18,6 +18,8 @@ type OAuthState = {
 
 export type GitHubSession = {
   login: string;
+  githubUserId?: number;
+  avatarUrl?: string;
   installationId?: string;
   returnTo?: string;
   expiresAt: number;
