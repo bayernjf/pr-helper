@@ -714,7 +714,9 @@ function showCreateDialog(index: number) {
       draftDirty = false;
       persistPullRequestDrafts(deletePullRequestDraft(pullRequestDrafts, identity));
       recentlyCreatedPullNumbers.set(index, createdPull.number);
-      statuses = statuses?.map((status, statusIndex) => statusIndex === index ? { kind: 'open', pr: createdPull, checks: { state: 'pending', passed: 0, total: 0 }, approvals: 0, mergeable: false } : status) || null;
+      // GitHub has accepted the PR, but its mergeability calculation is not available yet.
+      // `false` means a confirmed conflict, so keep the optimistic value unknown until refreshStatuses reads GitHub's detail response.
+      statuses = statuses?.map((status, statusIndex) => statusIndex === index ? { kind: 'open', pr: createdPull, checks: { state: 'pending', passed: 0, total: 0 }, approvals: 0, mergeable: null } : status) || null;
       dialog.close();
       detail();
       window.setTimeout(() => { void refreshStatuses(); }, 1_000);
