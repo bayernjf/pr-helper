@@ -10,8 +10,6 @@ export type StoredWorkflow = {
 type DatabaseUser = { id: string };
 type WorkflowRow = { payload: StoredWorkflow };
 
-let schemaPromise: Promise<void> | undefined;
-
 function databaseUrl(environment: Record<string, string | undefined>) {
   const value = environment.DATABASE_URL?.trim();
   if (!value) throw new Error('未配置 DATABASE_URL，流程仍仅保存在当前浏览器。');
@@ -22,17 +20,7 @@ function query(environment: Record<string, string | undefined>) {
   return neon(databaseUrl(environment));
 }
 
-async function ensureSchema(environment: Record<string, string | undefined>) {
-  if (!schemaPromise) schemaPromise = (async () => {
-    const sql = query(environment);
-    await sql.query('CREATE TABLE IF NOT EXISTS pr_helper_users (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), github_login text NOT NULL UNIQUE, github_user_id bigint, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now())');
-    await sql.query('CREATE TABLE IF NOT EXISTS pr_helper_workflows (id text NOT NULL, user_id uuid NOT NULL REFERENCES pr_helper_users(id) ON DELETE CASCADE, payload jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (user_id, id))');
-  })();
-  return schemaPromise;
-}
-
 async function userForLogin(environment: Record<string, string | undefined>, login: string, githubUserId?: number) {
-  await ensureSchema(environment);
   const sql = query(environment);
   const rows = await sql.query('INSERT INTO pr_helper_users (github_login, github_user_id) VALUES ($1, $2) ON CONFLICT (github_login) DO UPDATE SET github_user_id = COALESCE(EXCLUDED.github_user_id, pr_helper_users.github_user_id), updated_at = now() RETURNING id', [login, githubUserId || null]) as DatabaseUser[];
   return rows[0];
