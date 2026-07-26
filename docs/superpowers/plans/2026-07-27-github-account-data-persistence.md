@@ -39,7 +39,7 @@ Keep GitHub as PR Helper's only account identity. Store workflow configurations 
 
 - [ ] Create or choose a PostgreSQL database (Neon, Vercel Postgres, or an existing managed Postgres).
 - [ ] Add `DATABASE_URL` to Vercel Production and Preview environments.
-- [ ] Run `db/migrations/001_users_and_workflows.sql` once (the API also creates the same two tables on first use).
+- [ ] Run `db/migrations/001_users_and_workflows.sql` once through the Supabase SQL Editor or a dedicated migration job.
 - [ ] Deploy and verify: create a workflow in one browser, sign in with the same GitHub account in another browser, and confirm it appears.
 
 ## Data boundaries
@@ -56,3 +56,4 @@ Keep GitHub as PR Helper's only account identity. Store workflow configurations 
 | Date | Status | Note |
 | --- | --- | --- |
 | 2026-07-27 | In progress | Implemented code-level Postgres persistence boundary and local fallback; production database connection still needs a user-selected database and `DATABASE_URL`. |
+| 2026-07-27 | Updated | Removed runtime DDL. The migration SQL is now the only schema source and must be applied explicitly before workflows can use the database. |
