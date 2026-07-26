@@ -2,7 +2,7 @@ import { type ApiRequest, type ApiResponse, queryValue, readCookie, requestMustB
 import { createSignedSession, parseGithubAppConfig, readSignedState } from '../../_lib/github-app.js';
 
 type OAuthToken = { access_token?: string; error?: string; error_description?: string };
-type GitHubUser = { login: string };
+type GitHubUser = { id: number; login: string; avatar_url?: string };
 
 export default async function handler(request: ApiRequest, response: ApiResponse) {
   if (!requestMustBeGet(request, response)) return;
@@ -24,7 +24,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     const userResponse = await fetch('https://api.github.com/user', { headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${oauth.access_token}` } });
     if (!userResponse.ok) throw new Error('无法读取 GitHub 用户信息');
     const user = await userResponse.json() as GitHubUser;
-    setSecureCookie(response, 'pr-helper-session', createSignedSession({ login: user.login, returnTo: verifiedState.returnTo }, config.sessionSecret), 7 * 24 * 60 * 60);
+    setSecureCookie(response, 'pr-helper-session', createSignedSession({ login: user.login, githubUserId: user.id, avatarUrl: user.avatar_url, returnTo: verifiedState.returnTo }, config.sessionSecret), 7 * 24 * 60 * 60);
     response.redirect(302, '/api/auth/github/install');
   } catch (error) {
     response.status(400).json({ message: error instanceof Error ? error.message : 'GitHub 授权失败' });

@@ -10,6 +10,7 @@ export default function handler(request: ApiRequest, response: ApiResponse) {
     response.status(200).json({
       connected: Boolean(session.installationId),
       login: session.login,
+      avatarUrl: session.avatarUrl,
       installationSettingsUrl: session.installationId ? githubInstallationSettingsUrl(session.installationId) : undefined,
     });
   } catch {
