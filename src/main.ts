@@ -45,7 +45,29 @@ function showToast(message: string) { const previous = document.querySelector('.
 function persistPullRequestDrafts(next: typeof pullRequestDrafts) { pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); draftStorageSynchronized = true; } catch { draftStorageSynchronized = false; showToast('草稿保存失败'); } }
 persistPullRequestDrafts(pullRequestDrafts);
 function loadAiConfig(): AiConfig | null { try { return JSON.parse(sessionStorage.getItem('pr-helper-ai') || 'null') as AiConfig | null; } catch { return null; } }
-function showAiSettings() { const dialog = document.createElement('dialog'); dialog.className = 'create-dialog'; dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">AI MODEL SETTINGS</p><h2>配置 AI 模型</h2><label>API Base URL<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="https://api.openai.com/v1" /></label><label>模型<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="gpt-4.1-mini" /></label><label>API Key<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><p id="ai-test-result" class="ai-connection-result">可在保存前测试当前连接。</p><div class="dialog-actions"><button id="test-ai" type="button" class="ghost">测试连接</button><button value="cancel" class="ghost">取消</button><button id="save-ai" class="primary">保存设置</button></div></form>`; document.body.append(dialog); dialog.showModal(); const read = () => ({ baseUrl: dialog.querySelector<HTMLInputElement>('#ai-url')!.value.trim(), model: dialog.querySelector<HTMLInputElement>('#ai-model')!.value.trim(), apiKey: dialog.querySelector<HTMLInputElement>('#ai-key')!.value.trim() }); dialog.querySelector('#test-ai')!.addEventListener('click', async () => { const button = dialog.querySelector<HTMLButtonElement>('#test-ai')!, result = dialog.querySelector('#ai-test-result')!; const config = read(); if (!config.baseUrl || !config.apiKey) { result.textContent = '请先填写 API Base URL 和 API Key。'; result.className = 'ai-connection-result is-error'; return; } button.disabled = true; result.textContent = '正在测试连接…'; result.className = 'ai-connection-result is-loading'; try { await testAiConnection(config); result.textContent = '连接成功，可以保存设置。'; result.className = 'ai-connection-result is-success'; } catch (err) { const raw = err instanceof Error ? err.message : ''; result.textContent = raw.includes('non ISO-8859-1') ? 'API Key 格式无效，请检查是否包含空格、引号或非英文字符。' : raw || '无法连接模型服务，请检查地址、Key 与网络。'; result.className = 'ai-connection-result is-error'; } finally { button.disabled = false; } }); dialog.querySelector('#save-ai')!.addEventListener('click', event => { event.preventDefault(); aiConfig = read(); sessionStorage.setItem('pr-helper-ai', JSON.stringify(aiConfig)); dialog.close(); showToast('AI 模型设置已保存到当前会话。'); }); dialog.addEventListener('close', () => dialog.remove()); }
+function showAiSettings() {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog';
+  dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">AI MODEL SETTINGS</p><h2>配置 AI 模型</h2><label>API Base URL<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="https://api.openai.com/v1" /></label><label>模型<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="gpt-4.1-mini" /></label><label>API Key<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><label class="setting-toggle"><input id="ai-auto-generate" type="checkbox" ${aiConfig?.autoGeneratePrMessage ? 'checked' : ''} />创建 PR 时自动生成标题和描述<span>仅在模型配置完整时执行；仍可在弹窗内手动修改。</span></label><p id="ai-test-result" class="ai-connection-result">可在保存前测试当前连接。</p><div class="dialog-actions"><button id="test-ai" type="button" class="ghost">测试连接</button><button value="cancel" class="ghost">取消</button><button id="save-ai" class="primary">保存设置</button></div></form>`;
+  document.body.append(dialog); dialog.showModal();
+  const read = (): AiConfig => ({
+    baseUrl: dialog.querySelector<HTMLInputElement>('#ai-url')!.value.trim(),
+    model: dialog.querySelector<HTMLInputElement>('#ai-model')!.value.trim(),
+    apiKey: dialog.querySelector<HTMLInputElement>('#ai-key')!.value.trim(),
+    autoGeneratePrMessage: dialog.querySelector<HTMLInputElement>('#ai-auto-generate')!.checked,
+  });
+  dialog.querySelector('#test-ai')!.addEventListener('click', async () => {
+    const button = dialog.querySelector<HTMLButtonElement>('#test-ai')!, result = dialog.querySelector('#ai-test-result')!;
+    const config = read();
+    if (!config.baseUrl || !config.apiKey) { result.textContent = '请先填写 API Base URL 和 API Key。'; result.className = 'ai-connection-result is-error'; return; }
+    button.disabled = true; result.textContent = '正在测试连接…'; result.className = 'ai-connection-result is-loading';
+    try { await testAiConnection(config); result.textContent = '连接成功，可以保存设置。'; result.className = 'ai-connection-result is-success'; }
+    catch (err) { const raw = err instanceof Error ? err.message : ''; result.textContent = raw.includes('non ISO-8859-1') ? 'API Key 格式无效，请检查是否包含空格、引号或非英文字符。' : raw || '无法连接模型服务，请检查地址、Key 与网络。'; result.className = 'ai-connection-result is-error'; }
+    finally { button.disabled = false; }
+  });
+  dialog.querySelector('#save-ai')!.addEventListener('click', event => { event.preventDefault(); aiConfig = read(); sessionStorage.setItem('pr-helper-ai', JSON.stringify(aiConfig)); dialog.close(); showToast('AI 模型设置已保存到当前会话。'); });
+  dialog.addEventListener('close', () => dialog.remove());
+}
 
 function connect(error = '') {
   const requiresRemoteAuthOrigin = import.meta.env.DEV && !import.meta.env.VITE_AUTH_ORIGIN;
@@ -540,11 +562,14 @@ function showCreateDialog(index: number) {
     if (generationController || creationController || !isDialogOpen()) return;
     showAiSettings();
   });
-  generateButton.addEventListener('click', async () => {
+  const generatePrMessage = async (confirmOverwrite: boolean) => {
     if (generationController || creationController || !isDialogOpen()) return;
     const config = aiConfig;
-    if (!config?.baseUrl || !config.apiKey || !config.model) { showAiSettings(); return; }
-    if ((titleInput.value || bodyInput.value) && !await confirmAiGenerationOverwrite()) return;
+    if (!config?.baseUrl || !config.apiKey || !config.model) {
+      if (confirmOverwrite) showAiSettings();
+      return;
+    }
+    if (confirmOverwrite && (titleInput.value || bodyInput.value) && !await confirmAiGenerationOverwrite()) return;
 
     titleInput.value = '';
     bodyInput.value = '';
@@ -585,7 +610,11 @@ function showCreateDialog(index: number) {
         generateButton.textContent = 'AI 生成';
       }
     }
-  });
+  };
+  generateButton.addEventListener('click', () => { void generatePrMessage(true); });
+  if (aiConfig?.autoGeneratePrMessage && aiConfig.baseUrl && aiConfig.apiKey && aiConfig.model) {
+    void generatePrMessage(false);
+  }
   confirmButton.addEventListener('click', async event => {
     event.preventDefault();
     if (generationController || creationController || !isDialogOpen()) return;
