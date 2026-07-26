@@ -1,5 +1,5 @@
-import { parseGithubAppConfig, readSignedSession } from '../_lib/github-app';
-import { type ApiRequest, type ApiResponse, readCookie, requestMustBeGet } from '../_lib/http';
+import { parseGithubAppConfig, readSignedSession } from '../_lib/github-app.js';
+import { type ApiRequest, type ApiResponse, readCookie, requestMustBeGet } from '../_lib/http.js';
 
 export default function handler(request: ApiRequest, response: ApiResponse) {
   if (!requestMustBeGet(request, response)) return;

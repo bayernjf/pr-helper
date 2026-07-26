@@ -1,4 +1,4 @@
-import { createGithubAppJwt, type GitHubAppConfig } from './github-app';
+import { createGithubAppJwt, type GitHubAppConfig } from './github-app.js';
 
 const githubApi = 'https://api.github.com';
 
