@@ -1,6 +1,6 @@
 import './style.css';
 import { githubAppApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './lib/github';
-import { buildPrPrompt, testAiConnection, type AiConfig } from './lib/ai';
+import { buildPrPrompt, shouldAutoGeneratePrMessage, testAiConnection, type AiConfig } from './lib/ai';
 import { streamPrMessage } from './lib/ai-stream';
 import { canCreateStage, canMergeOpenPull, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeGitHubChecks } from './lib/domain';
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
@@ -612,7 +612,7 @@ function showCreateDialog(index: number) {
     }
   };
   generateButton.addEventListener('click', () => { void generatePrMessage(true); });
-  if (aiConfig?.autoGeneratePrMessage && aiConfig.baseUrl && aiConfig.apiKey && aiConfig.model) {
+  if (aiConfig?.baseUrl && aiConfig.apiKey && aiConfig.model && shouldAutoGeneratePrMessage(aiConfig.autoGeneratePrMessage, bodyInput.value)) {
     void generatePrMessage(false);
   }
   confirmButton.addEventListener('click', async event => {
