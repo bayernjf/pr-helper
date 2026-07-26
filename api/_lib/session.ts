@@ -1,5 +1,5 @@
-import { parseGithubAppConfig, readSignedSession } from './github-app';
-import { type ApiRequest, readCookie } from './http';
+import { parseGithubAppConfig, readSignedSession } from './github-app.js';
+import { type ApiRequest, readCookie } from './http.js';
 
 export function currentGitHubSession(request: ApiRequest) {
   const config = parseGithubAppConfig(process.env);

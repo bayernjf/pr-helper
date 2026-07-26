@@ -1,5 +1,5 @@
-import { type ApiRequest, type ApiResponse, queryValue, readCookie, requestMustBeGet, setSecureCookie } from '../../_lib/http';
-import { createSignedSession, parseGithubAppConfig, readSignedState } from '../../_lib/github-app';
+import { type ApiRequest, type ApiResponse, queryValue, readCookie, requestMustBeGet, setSecureCookie } from '../../_lib/http.js';
+import { createSignedSession, parseGithubAppConfig, readSignedState } from '../../_lib/github-app.js';
 
 type OAuthToken = { access_token?: string; error?: string; error_description?: string };
 type GitHubUser = { login: string };
