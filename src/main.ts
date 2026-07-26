@@ -1,5 +1,5 @@
 import './style.css';
-import { githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './lib/github';
+import { githubAppApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './lib/github';
 import { buildPrPrompt, testAiConnection, type AiConfig } from './lib/ai';
 import { streamPrMessage } from './lib/ai-stream';
 import { canCreateStage, canMergeOpenPull, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks } from './lib/domain';
@@ -46,8 +46,20 @@ function loadAiConfig(): AiConfig | null { try { return JSON.parse(sessionStorag
 function showAiSettings() { const dialog = document.createElement('dialog'); dialog.className = 'create-dialog'; dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">AI MODEL SETTINGS</p><h2>配置 AI 模型</h2><label>API Base URL<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="https://api.openai.com/v1" /></label><label>模型<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="gpt-4.1-mini" /></label><label>API Key<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><p id="ai-test-result" class="ai-connection-result">可在保存前测试当前连接。</p><div class="dialog-actions"><button id="test-ai" type="button" class="ghost">测试连接</button><button value="cancel" class="ghost">取消</button><button id="save-ai" class="primary">保存设置</button></div></form>`; document.body.append(dialog); dialog.showModal(); const read = () => ({ baseUrl: dialog.querySelector<HTMLInputElement>('#ai-url')!.value.trim(), model: dialog.querySelector<HTMLInputElement>('#ai-model')!.value.trim(), apiKey: dialog.querySelector<HTMLInputElement>('#ai-key')!.value.trim() }); dialog.querySelector('#test-ai')!.addEventListener('click', async () => { const button = dialog.querySelector<HTMLButtonElement>('#test-ai')!, result = dialog.querySelector('#ai-test-result')!; const config = read(); if (!config.baseUrl || !config.apiKey) { result.textContent = '请先填写 API Base URL 和 API Key。'; result.className = 'ai-connection-result is-error'; return; } button.disabled = true; result.textContent = '正在测试连接…'; result.className = 'ai-connection-result is-loading'; try { await testAiConnection(config); result.textContent = '连接成功，可以保存设置。'; result.className = 'ai-connection-result is-success'; } catch (err) { const raw = err instanceof Error ? err.message : ''; result.textContent = raw.includes('non ISO-8859-1') ? 'API Key 格式无效，请检查是否包含空格、引号或非英文字符。' : raw || '无法连接模型服务，请检查地址、Key 与网络。'; result.className = 'ai-connection-result is-error'; } finally { button.disabled = false; } }); dialog.querySelector('#save-ai')!.addEventListener('click', event => { event.preventDefault(); aiConfig = read(); sessionStorage.setItem('pr-helper-ai', JSON.stringify(aiConfig)); dialog.close(); showToast('AI 模型设置已保存到当前会话。'); }); dialog.addEventListener('close', () => dialog.remove()); }
 
 function connect(error = '') {
-  app().innerHTML = `<main class="connect"><p class="eyebrow">PR FLOW</p><h1>让发布流程，回到可控。</h1><p class="sub">连接 GitHub 后，配置真实仓库和真实分支组成的 PR 流程。</p><section class="panel"><h2>连接 GitHub</h2>${error ? `<p class="error">${escape(error)}</p>` : ''}<label>GitHub Personal Access Token<input id="token" type="password" placeholder="github_pat_…" /></label><button id="connect" class="primary">连接 GitHub</button><small>仅用于本地开发，Token 保存在当前浏览器会话。</small></section></main>`;
+  const requiresRemoteAuthOrigin = import.meta.env.DEV && !import.meta.env.VITE_AUTH_ORIGIN;
+  app().innerHTML = `<main class="connect connect-onboarding"><section class="connect-hero"><p class="eyebrow">PR FLOW</p><h1>把 PR 流程和发布门禁，放到一个地方。</h1><p class="sub">从 feature → dev → main，统一管理创建、门禁、合并与后续 Actions。</p></section><section class="panel connection-card"><p class="eyebrow">SECURE CONNECTION</p><h2>连接 GitHub</h2><p class="connection-intro">使用 GitHub App 授权后，选择 PR Helper 可以访问的仓库。</p>${error ? `<p class="error">${escape(error)}</p>` : ''}<a id="github-app-connect" class="primary github-connect" href="${githubAppApiUrl('/api/auth/github/start')}">使用 GitHub 连接 <span aria-hidden="true">→</span></a><p id="github-app-hint" class="connection-hint" hidden></p><ul class="connection-benefits"><li>支持 public、private 与 organization 仓库</li><li>可授权全部或指定仓库，并随时在 GitHub 撤销</li><li>不会在浏览器中保存 GitHub 访问令牌</li></ul><details class="developer-connect"><summary>使用 Personal Access Token（仅本地开发）</summary><label>GitHub Personal Access Token<input id="token" type="password" placeholder="github_pat_…" autocomplete="off" /></label><p class="meta">Token 仅保存在当前浏览器会话，用于本地开发调试。</p><button id="connect" class="ghost">使用 PAT 连接</button></details></section></main>`;
+  if (requiresRemoteAuthOrigin) document.querySelector('#github-app-connect')!.addEventListener('click', event => { event.preventDefault(); const hint = document.querySelector<HTMLElement>('#github-app-hint')!; hint.hidden = false; hint.textContent = '本地 Vite 预览不会运行 GitHub App 授权 API。请先配置 VITE_AUTH_ORIGIN 指向 Vercel，或使用下方 PAT 进行本地开发。'; });
   document.querySelector('#connect')!.addEventListener('click', async () => { const value = document.querySelector<HTMLInputElement>('#token')!.value.trim(); try { await githubFetch(value, '/user'); token = value; sessionStorage.setItem('github-token', value); await init(); } catch (err) { connect(err instanceof Error ? err.message : '连接失败'); } });
+}
+
+async function restoreConnection() {
+  if (token) return init();
+  try {
+    const response = await fetch(githubAppApiUrl('/api/github/session'));
+    const session = await response.json() as { connected?: boolean };
+    if (session.connected) return init();
+  } catch { /* Local Vite development has no serverless API; show the development fallback. */ }
+  connect();
 }
 
 async function init() {
@@ -59,7 +71,7 @@ function render() {
   app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">PR<span>FLOW</span></a><nav aria-label="主导航"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">流程总览</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">＋ 新建流程</button></nav><div class="topbar-actions"><button id="ai-settings-top" class="ghost">AI 设置</button><button id="disconnect" class="ghost">断开 GitHub</button></div></header><section id="content"></section></main>`;
   document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) active = null; goTo(target); }));
   document.querySelector('#ai-settings-top')!.addEventListener('click', showAiSettings);
-  document.querySelector('#disconnect')!.addEventListener('click', () => { sessionStorage.removeItem('github-token'); token = ''; connect(); });
+  document.querySelector('#disconnect')!.addEventListener('click', async () => { sessionStorage.removeItem('github-token'); token = ''; await fetch(githubAppApiUrl('/api/auth/github/logout'), { method: 'POST' }).catch(() => undefined); connect(); });
   renderContent();
 }
 
@@ -128,6 +140,7 @@ function detail() {
     const menu = document.querySelector<HTMLElement>(`[data-merge-menu="${button.dataset.mergeMenuToggle}"]`)!;
     menu.hidden = !menu.hidden;
     button.setAttribute('aria-expanded', String(!menu.hidden));
+    if (!menu.hidden) positionMergeMenu(menu, button.closest<HTMLElement>('.merge-control')!);
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-merge-method="merge"]').forEach(button => button.addEventListener('click', () => {
     const control = button.closest<HTMLElement>('.merge-control')!;
@@ -142,10 +155,23 @@ function detail() {
   if (refreshOnNextDetail) { refreshOnNextDetail = false; void refreshStatuses(); }
 }
 
+function positionMergeMenu(menu: HTMLElement, control: HTMLElement) {
+  menu.classList.remove('opens-upward');
+  menu.style.maxHeight = '';
+  const controlRect = control.getBoundingClientRect();
+  const menuHeight = menu.getBoundingClientRect().height;
+  const spaceBelow = window.innerHeight - controlRect.bottom - 8;
+  const spaceAbove = controlRect.top - 8;
+  const opensUpward = menuHeight > spaceBelow && spaceAbove > spaceBelow;
+  menu.classList.toggle('opens-upward', opensUpward);
+  const availableSpace = opensUpward ? spaceAbove : spaceBelow;
+  if (menuHeight > availableSpace) menu.style.maxHeight = `${Math.max(96, Math.floor(availableSpace))}px`;
+}
+
 function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const status = statuses?.[index];
   if (!status) return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p>尚未读取 GitHub 状态。</p></div></article>`;
-  if (status.kind === 'not-created') { const unlocked = canCreateStage(index, statuses!); return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">等待创建 PR</b> · GitHub 中尚无对应 PR。</p>${unlocked ? `<button class="create-pr" data-create-pr="${index}">创建 PR</button><a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">在 GitHub 创建 PR ↗</a>` : '<p class="meta">等待前序步骤合并且合并后 Actions 成功。</p>'}</div></article>`; }
+  if (status.kind === 'not-created') { const unlocked = canCreateStage(index, statuses!); return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">等待创建 PR</b> · GitHub 中尚无对应 PR。</p>${unlocked ? `<div class="timeline-actions"><button class="timeline-action" data-create-pr="${index}">创建 PR</button><a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">在 GitHub 创建 PR ↗</a></div>` : '<p class="meta">等待前序步骤合并且合并后 Actions 成功。</p>'}</div></article>`; }
   if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status failure">读取失败</b> · ${escape(status.message || '')}</p></div></article>`;
   const actions = status.checks?.total ? `${status.checks.passed}/${status.checks.total} Actions ${status.checks.state}` : '';
   const approvals = status.requiredApprovals ? `${status.approvals || 0}/${status.requiredApprovals} Approval` : '';
@@ -153,10 +179,11 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const mergedVerification = status.checks?.state;
   const state = status.kind === 'merged' ? mergedVerification === 'success' ? '合并后验证通过' : mergedVerification === 'failure' ? '合并后验证失败' : status.checks ? '合并后验证中' : '已合并' : status.kind === 'closed' ? '已关闭' : status.checks?.total && status.checks.state === 'failure' ? 'Actions 失败' : status.checks?.total && status.checks.state === 'pending' ? '等待 Actions' : status.requiredApprovals && (status.approvals || 0) < status.requiredApprovals ? '等待审批' : mergeability ? '合并被阻塞' : '等待合并';
   const gates = status.kind === 'merged' ? [actions] : [actions, approvals, mergeability];
-  const newCommits = status.kind === 'merged' && status.aheadBy ? `<p><b class="status neutral">有 ${status.aheadBy} 个新提交</b> · 可创建新的 PR。</p><button class="create-pr" data-create-pr="${index}">创建新 PR</button>` : '';
+  const newCommits = status.kind === 'merged' && status.aheadBy ? `<p><b class="status neutral">有 ${status.aheadBy} 个新提交</b> · 可创建新的 PR。</p>` : '';
+  const newPullAction = status.kind === 'merged' && status.aheadBy ? `<button class="timeline-action" data-create-pr="${index}">创建新 PR</button>` : '';
   const stateClass = status.kind === 'merged' ? mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
   const mergeAction = status.kind === 'open' && canMergePull(status) ? mergingStages.has(index) ? `<button class="create-pr" disabled>正在合并…</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">发起合并</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="选择合并方式" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>✓　合并提交（merge）</b><small>保留此分支的全部提交，并创建一个合并提交。</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>压缩合并（squash）</b><small>需到 GitHub 页面操作</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>变基合并（rebase）</b><small>需到 GitHub 页面操作</small></button></span></span>` : '';
-  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b>${gates.filter(Boolean).map(gate => ` · ${gate}`).join('')}</p><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">打开 GitHub PR #${status.pr!.number} ↗</a>${mergeAction}${newCommits}</div></article>`;
+  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b>${gates.filter(Boolean).map(gate => ` · ${gate}`).join('')}</p>${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">打开 GitHub PR #${status.pr!.number} ↗</a>${mergeAction}${newPullAction}</div></div></article>`;
 }
 function canMergePull(status: StepStatus) {
   return status.kind === 'open' && canMergeOpenPull({
@@ -610,4 +637,4 @@ const apiKeyFieldObserver = new MutationObserver(() => {
 apiKeyFieldObserver.observe(document.body, { childList: true, subtree: true });
 
 document.addEventListener('click', event => { const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-remove]'); if (!button || !active) return; const next = removeStage(active, Number(button.dataset.remove)); if (!next.stages.length) { workflows = deleteWorkflow(workflows, active.id); localStorage.setItem('pr-helper-workflows', JSON.stringify(workflows)); active = null; } else save(next); editor(); });
-token ? init() : connect();
+void restoreConnection();

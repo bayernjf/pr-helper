@@ -1,4 +1,9 @@
 const apiBase = 'https://api.github.com';
+const appApiBase = (import.meta.env.VITE_AUTH_ORIGIN || '').replace(/\/$/, '');
+
+export function githubAppApiUrl(path: string) {
+  return `${appApiBase}${path}`;
+}
 
 export function parseRepository(repository: string) {
   const [owner, name] = repository.split('/');
@@ -23,9 +28,12 @@ export function selectCurrentPull<T extends { state: string }>(pulls: T[]) {
 }
 
 export async function githubFetch<T>(token: string, path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBase}${path}`, {
+  const useGitHubApp = !token;
+  const response = await fetch(useGitHubApp ? githubAppApiUrl(`/api/github/request?path=${encodeURIComponent(path)}`) : `${apiBase}${path}`, {
     ...init,
-    headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', ...init?.headers },
+    headers: useGitHubApp
+      ? { ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers }
+      : { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', ...init?.headers },
   });
   if (!response.ok) {
     const detail = await response.json().catch(() => ({ message: response.statusText }));
