@@ -28,6 +28,7 @@ let statuses: StepStatus[] | null = null;
 let refreshOnNextDetail = false;
 let pollTimer: number | undefined;
 let refreshOnFocusBound = false;
+let githubInstallationSettingsUrl = '';
 const mergingStages = new Set<number>();
 const recentlyCreatedPullNumbers = new Map<number, number>();
 const recentlyMergedPullNumbers = new Map<number, number>();
@@ -80,8 +81,11 @@ async function restoreConnection() {
   if (token) return init();
   try {
     const response = await fetch(githubAppApiUrl('/api/github/session'));
-    const session = await response.json() as { connected?: boolean };
-    if (session.connected) return init();
+    const session = await response.json() as { connected?: boolean; installationSettingsUrl?: string };
+    if (session.connected) {
+      githubInstallationSettingsUrl = session.installationSettingsUrl || '';
+      return init();
+    }
   } catch { /* Local Vite development has no serverless API; show the development fallback. */ }
   connect();
 }
@@ -92,10 +96,11 @@ async function init() {
 }
 
 function render() {
-  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">PR<span>FLOW</span></a><nav aria-label="主导航"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">流程总览</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">＋ 新建流程</button></nav><div class="topbar-actions"><button id="ai-settings-top" class="ghost">AI 设置</button><button id="disconnect" class="ghost">断开 GitHub</button></div></header><section id="content"></section></main>`;
+  const manageRepositories = githubInstallationSettingsUrl ? `<a class="ghost manage-repositories" target="_blank" href="${escape(githubInstallationSettingsUrl)}">管理授权仓库 ↗</a>` : '';
+  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">PR<span>FLOW</span></a><nav aria-label="主导航"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">流程总览</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">＋ 新建流程</button></nav><div class="topbar-actions">${manageRepositories}<button id="ai-settings-top" class="ghost">AI 设置</button><button id="disconnect" class="ghost">断开 GitHub</button></div></header><section id="content"></section></main>`;
   document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) active = null; goTo(target); }));
   document.querySelector('#ai-settings-top')!.addEventListener('click', showAiSettings);
-  document.querySelector('#disconnect')!.addEventListener('click', async () => { sessionStorage.removeItem('github-token'); token = ''; await fetch(githubAppApiUrl('/api/auth/github/logout'), { method: 'POST' }).catch(() => undefined); connect(); });
+  document.querySelector('#disconnect')!.addEventListener('click', async () => { sessionStorage.removeItem('github-token'); token = ''; githubInstallationSettingsUrl = ''; await fetch(githubAppApiUrl('/api/auth/github/logout'), { method: 'POST' }).catch(() => undefined); connect(); });
   renderContent();
 }
 
