@@ -26,6 +26,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+        env:
+          VITE_AUTH_ORIGIN: ${{ vars.VITE_AUTH_ORIGIN }}
       - name: Deploy Cloudflare Pages
         id: deploy
         uses: cloudflare/wrangler-action@v3
