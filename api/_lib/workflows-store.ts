@@ -8,7 +8,7 @@ export type StoredWorkflow = {
 };
 
 type DatabaseUser = { id: string };
-type WorkflowRow = { payload: StoredWorkflow };
+type WorkflowRow = { payload: unknown };
 
 function databaseUrl(environment: Record<string, string | undefined>) {
   const value = environment.DATABASE_URL?.trim();
@@ -42,18 +42,23 @@ export function isStoredWorkflow(value: unknown): value is StoredWorkflow {
     && workflow.stages.every(stage => Boolean(stage) && typeof stage.source === 'string' && typeof stage.target === 'string' && stage.source.length > 0 && stage.target.length > 0);
 }
 
+export function storedWorkflowFromPayload(payload: unknown): StoredWorkflow | undefined {
+  const value = typeof payload === 'string' ? (() => { try { return JSON.parse(payload) as unknown; } catch { return undefined; } })() : payload;
+  return isStoredWorkflow(value) ? value : undefined;
+}
+
 export async function listWorkflows(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number }) {
   const user = await userForLogin(environment, identity.login, identity.githubUserId);
   const sql = query(environment);
   const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} ORDER BY updated_at DESC`;
-  return rows.map(row => row.payload).filter(isStoredWorkflow);
+  return rows.map(row => storedWorkflowFromPayload(row.payload)).filter((workflow): workflow is StoredWorkflow => Boolean(workflow));
 }
 
 export async function upsertWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number }, workflow: StoredWorkflow) {
   if (!isStoredWorkflow(workflow)) throw new Error('流程数据无效');
   const user = await userForLogin(environment, identity.login, identity.githubUserId);
   const sql = query(environment);
-  await sql`INSERT INTO pr_helper_workflows (id, user_id, payload) VALUES (${workflow.id}, ${user.id}, ${JSON.stringify(workflow)}::jsonb) ON CONFLICT (user_id, id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`;
+  await sql`INSERT INTO pr_helper_workflows (id, user_id, payload) VALUES (${workflow.id}, ${user.id}, ${sql.json(workflow)}) ON CONFLICT (user_id, id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`;
 }
 
 export async function removeWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number }, workflowId: string) {

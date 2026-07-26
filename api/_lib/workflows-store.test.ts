@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { isStoredWorkflow } from './workflows-store';
+import { isStoredWorkflow, storedWorkflowFromPayload } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('accepts a workflow with real branch stages', () => {
@@ -9,5 +9,10 @@ describe('stored workflow validation', () => {
 
   it('rejects incomplete data before it can reach the database', () => {
     expect(isStoredWorkflow({ id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev' }] })).toBe(false);
+  });
+
+  it('recovers a legacy JSON-string payload so an existing cloud workflow remains visible during migration', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature/payments', target: 'dev' }] };
+    expect(storedWorkflowFromPayload(JSON.stringify(workflow))).toEqual(workflow);
   });
 });
