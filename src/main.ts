@@ -2,7 +2,7 @@ import './style.css';
 import { githubAppApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './lib/github';
 import { buildPrPrompt, testAiConnection, type AiConfig } from './lib/ai';
 import { streamPrMessage } from './lib/ai-stream';
-import { canCreateStage, canMergeOpenPull, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks } from './lib/domain';
+import { canCreateStage, canMergeOpenPull, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeGitHubChecks } from './lib/domain';
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
@@ -11,6 +11,7 @@ import { addStage, createWorkflow, deleteWorkflow, removeStage, saveWorkflow, wo
 type Repo = { full_name: string; private: boolean };
 type Pull = { number: number; state: string; merged_at: string | null; merge_commit_sha?: string | null; mergeable?: boolean | null; mergeable_state?: string; html_url: string; head: { sha: string } };
 type CheckRun = { status: string; conclusion: string | null };
+type CommitStatus = { state: string };
 type Review = { state: string };
 type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
 type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string };
@@ -278,21 +279,26 @@ async function refreshStatuses() {
         let checks: StepStatus['checks'];
         if (pr.merge_commit_sha) {
           try {
-            const runs = await githubFetch<{ check_runs: CheckRun[] }>(token, `/repos/${owner}/${name}/commits/${pr.merge_commit_sha}/check-runs?per_page=100`);
-            checks = runs.check_runs.length ? summarizeChecks(runs.check_runs) : undefined;
+            const [runs, statuses] = await Promise.all([
+              githubFetch<{ check_runs: CheckRun[] }>(token, `/repos/${owner}/${name}/commits/${pr.merge_commit_sha}/check-runs?per_page=100`),
+              githubFetch<{ statuses: CommitStatus[] }>(token, `/repos/${owner}/${name}/commits/${pr.merge_commit_sha}/status`),
+            ]);
+            checks = runs.check_runs.length || statuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, statuses.statuses) : undefined;
           } catch { /* Keep the merged PR visible while its post-merge checks cannot be read yet. */ }
         }
         return { kind: 'merged', pr, checks, approvals: 0, aheadBy: comparison.ahead_by } as StepStatus;
       }
       if (pr.state === 'closed') return { kind: 'closed', pr, approvals: 0 } as StepStatus;
-      const [details, runs, reviews, protection] = await Promise.all([
+      const [details, runs, commitStatuses, reviews, protection] = await Promise.all([
         githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls/${pr.number}`),
         githubFetch<{ check_runs: CheckRun[] }>(token, `/repos/${owner}/${name}/commits/${pr.head.sha}/check-runs?per_page=100`),
+        githubFetch<{ statuses: CommitStatus[] }>(token, `/repos/${owner}/${name}/commits/${pr.head.sha}/status`),
         githubFetch<Review[]>(token, `/repos/${owner}/${name}/pulls/${pr.number}/reviews?per_page=100`),
         readBranchProtection(owner, name, stage.target),
       ]);
       const requiredApprovals = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
-      return { kind: 'open', pr: details, checks: runs.check_runs.length ? summarizeChecks(runs.check_runs) : undefined, approvals: reviews.filter(review => review.state === 'APPROVED').length, requiredApprovals: requiredApprovals || undefined, mergeable: details.mergeable, mergeableState: details.mergeable_state } as StepStatus;
+      const checks = runs.check_runs.length || commitStatuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, commitStatuses.statuses) : undefined;
+      return { kind: 'open', pr: details, checks, approvals: reviews.filter(review => review.state === 'APPROVED').length, requiredApprovals: requiredApprovals || undefined, mergeable: details.mergeable, mergeableState: details.mergeable_state } as StepStatus;
     } catch (err) { return { kind: 'error', message: err instanceof Error ? err.message : '未知错误' } as StepStatus; }
   }));
   if (previous) statuses.forEach((status, index) => { const before = previous[index]; const oldCheck = before?.checks?.state; const newCheck = status.checks?.state; if (before && statusChanged({ kind: before.kind, checks: oldCheck }, { kind: status.kind, checks: newCheck })) { const message = `第 ${index + 1} 步状态更新：${status.kind === 'merged' ? 'PR 已合并' : newCheck === 'failure' ? 'Actions 失败' : newCheck === 'success' ? 'Actions 全绿' : status.kind}`; showToast(message); if (Notification.permission === 'granted') new Notification('PR Flow', { body: message }); } });

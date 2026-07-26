@@ -31,9 +31,10 @@ export async function githubFetch<T>(token: string, path: string, init?: Request
   const useGitHubApp = !token;
   const response = await fetch(useGitHubApp ? githubAppApiUrl(`/api/github/request?path=${encodeURIComponent(path)}`) : `${apiBase}${path}`, {
     ...init,
+    cache: 'no-store',
     headers: useGitHubApp
-      ? { ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers }
-      : { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', ...init?.headers },
+      ? { 'Cache-Control': 'no-cache', ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers }
+      : { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', 'Cache-Control': 'no-cache', ...init?.headers },
   });
   if (!response.ok) {
     const detail = await response.json().catch(() => ({ message: response.statusText }));

@@ -24,6 +24,17 @@ export function summarizeChecks(checks: { status: string; conclusion: string | n
   return { state: hasFailure ? 'failure' : passed === checks.length && checks.length > 0 ? 'success' : 'pending', passed, total: checks.length };
 }
 
+export function summarizeGitHubChecks(
+  checkRuns: { status: string; conclusion: string | null }[],
+  commitStatuses: { state: string }[],
+) {
+  const legacyChecks = commitStatuses.map(status => ({
+    status: status.state === 'pending' ? 'in_progress' : 'completed',
+    conclusion: status.state === 'success' ? 'success' : ['failure', 'error'].includes(status.state) ? 'failure' : null,
+  }));
+  return summarizeChecks([...checkRuns, ...legacyChecks]);
+}
+
 export function canCreateStage(index: number, statuses: { kind: string; checks?: { state: string } }[]) {
   return statuses.slice(0, index).every(status => status.kind === 'merged' && (!status.checks || status.checks.state === 'success'));
 }
