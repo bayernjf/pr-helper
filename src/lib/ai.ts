@@ -1,7 +1,11 @@
-export type AiConfig = { baseUrl: string; apiKey: string; model: string };
+export type AiConfig = { baseUrl: string; apiKey: string; model: string; autoGeneratePrMessage?: boolean };
 
 export function aiChatCompletionsUrl(baseUrl: string) {
   return `${baseUrl.replace(/\/$/, '')}/chat/completions`;
+}
+
+export function shouldAutoGeneratePrMessage(enabled: boolean | undefined, description: string) {
+  return Boolean(enabled) && !description.trim();
 }
 
 export async function testAiConnection(config: AiConfig) {
