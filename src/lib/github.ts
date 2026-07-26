@@ -14,6 +14,10 @@ export function pullRequestPayload(title: string, head: string, base: string, bo
   return { title, head, base, body };
 }
 
+export function mergePullRequestPayload(method: 'merge' | 'squash' | 'rebase', sha: string) {
+  return { merge_method: method, sha };
+}
+
 export function selectCurrentPull<T extends { state: string }>(pulls: T[]) {
   return pulls.find(pull => pull.state === 'open') || pulls[0];
 }

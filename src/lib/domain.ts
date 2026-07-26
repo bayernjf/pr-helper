@@ -24,8 +24,8 @@ export function summarizeChecks(checks: { status: string; conclusion: string | n
   return { state: hasFailure ? 'failure' : passed === checks.length && checks.length > 0 ? 'success' : 'pending', passed, total: checks.length };
 }
 
-export function canCreateStage(index: number, states: string[]) {
-  return states.slice(0, index).every(state => state === 'merged');
+export function canCreateStage(index: number, statuses: { kind: string; checks?: { state: string } }[]) {
+  return statuses.slice(0, index).every(status => status.kind === 'merged' && (!status.checks || status.checks.state === 'success'));
 }
 
 export function statusChanged(previous: { kind: string; checks?: string }, next: { kind: string; checks?: string }) {
@@ -34,4 +34,11 @@ export function statusChanged(previous: { kind: string; checks?: string }, next:
 
 export function needsNewPullRequest(aheadBy: number, latestPullState: string) {
   return aheadBy > 0 && latestPullState === 'merged';
+}
+
+export function canMergeOpenPull(input: { checks?: string; approvalsMet: boolean; mergeable?: boolean | null; mergeableState?: string }) {
+  return input.checks === 'success'
+    && input.approvalsMet
+    && input.mergeable !== false
+    && !['dirty', 'behind', 'blocked'].includes(input.mergeableState || '');
 }
