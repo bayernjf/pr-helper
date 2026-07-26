@@ -32,6 +32,7 @@ let githubInstallationSettingsUrl = '';
 let githubLogin = '';
 let cloudWorkflowStorage = false;
 let pendingLocalWorkflowSync = false;
+let cloudWorkflowSyncError = '';
 let repositoryManagementWindow: Window | null = null;
 let repositoryManagementTimer: number | undefined;
 const mergingStages = new Set<number>();
@@ -51,27 +52,36 @@ async function persistWorkflowRemotely(workflow: Workflow) {
   if (!cloudWorkflowStorage) return;
   try {
     const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflow }) });
-    if (!response.ok) throw new Error('同步失败');
-  } catch { showToast('已保存在当前浏览器；云端同步将在下次连接时重试。'); }
+    if (!response.ok) throw new Error(await workflowApiError(response));
+    cloudWorkflowSyncError = '';
+  } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : '云端同步失败'; showToast(`已保存在当前浏览器；${cloudWorkflowSyncError}`); render(); }
 }
 function save(next: Workflow) { active = next; workflows = saveWorkflow(workflows, next); persistWorkflowsLocally(); void persistWorkflowRemotely(next); }
 async function removeWorkflowFromStorage(workflowId: string) {
   workflows = deleteWorkflow(workflows, workflowId); persistWorkflowsLocally();
   if (!cloudWorkflowStorage) return;
-  try { await fetch(githubAppApiUrl('/api/workflows'), { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: workflowId }) }); }
-  catch { showToast('已从当前浏览器移除；云端删除将在下次连接时重试。'); }
+  try {
+    const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: workflowId }) });
+    if (!response.ok) throw new Error(await workflowApiError(response));
+    cloudWorkflowSyncError = '';
+  } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : '云端删除失败'; showToast(`已从当前浏览器移除；${cloudWorkflowSyncError}`); render(); }
+}
+async function workflowApiError(response: Response) {
+  const payload = await response.json().catch(() => ({})) as { message?: string };
+  return payload.message || `云端同步失败（${response.status}）`;
 }
 async function loadCloudWorkflows() {
   try {
     const response = await fetch(githubAppApiUrl('/api/workflows'));
-    if (response.status === 401 || response.status === 503) return;
-    if (!response.ok) throw new Error('读取失败');
+    if (response.status === 401) return;
+    if (!response.ok) throw new Error(await workflowApiError(response));
     const payload = await response.json() as { workflows?: Workflow[] };
     if (!Array.isArray(payload.workflows)) return;
     cloudWorkflowStorage = true;
+    cloudWorkflowSyncError = '';
     if (payload.workflows.length) { workflows = payload.workflows; active = workflows[0] || null; persistWorkflowsLocally(); }
     else pendingLocalWorkflowSync = workflows.length > 0;
-  } catch { /* The local cache remains the safe fallback if the API is unreachable. */ }
+  } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : '无法连接云端流程存储'; }
 }
 async function syncLocalWorkflows() {
   if (!cloudWorkflowStorage || !workflows.length) return;
@@ -81,7 +91,7 @@ async function syncLocalWorkflows() {
       if (!response.ok) throw new Error('同步失败');
     }
     pendingLocalWorkflowSync = false; render(); showToast('本机流程已同步到你的 GitHub 账号。');
-  } catch { showToast('流程同步失败，本机数据仍然保留。'); }
+  } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : '流程同步失败'; render(); showToast(`流程同步失败，本机数据仍然保留：${cloudWorkflowSyncError}`); }
 }
 function showToast(message: string) { const previous = document.querySelector('.toast'); previous?.remove(); const toast = document.createElement('div'); toast.className = 'toast'; toast.setAttribute('role', 'status'); toast.textContent = message; document.body.append(toast); window.setTimeout(() => toast.remove(), 3200); }
 function persistPullRequestDrafts(next: typeof pullRequestDrafts) { pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); draftStorageSynchronized = true; } catch { draftStorageSynchronized = false; showToast('草稿保存失败'); } }
@@ -188,8 +198,9 @@ function renderContent() { if (screen === 'overview') overview(); else if (scree
 
 function overview() {
   const content = document.querySelector('#content')!;
+  const storageWarning = cloudWorkflowSyncError ? `<section class="local-sync-notice is-error"><div><b>云端流程同步失败</b><p>${escape(cloudWorkflowSyncError)}。当前流程只保存在这台设备的浏览器中。</p></div></section>` : '';
   const syncPrompt = pendingLocalWorkflowSync ? `<section class="local-sync-notice"><div><b>发现 ${workflows.length} 个仅保存在这台设备上的流程</b><p>确认后会同步到 GitHub 账号 ${githubLogin ? `@${escape(githubLogin)}` : ''}，以后可在其他设备继续使用。</p></div><button id="sync-local-workflows" class="ghost">同步到账号</button></section>` : '';
-  content.innerHTML = `<section class="hero"><p class="eyebrow">WORKSPACE</p><h1>只在需要你决策时，打断你。</h1><p>所有仓库的 PR 编排将聚合在这里。当前先管理配置，下一步接入 PR、Actions 和 Approval 监控。</p><button id="new-flow" class="primary">创建流程</button></section>${syncPrompt}<section class="section-head"><div><p class="eyebrow">SAVED FLOWS</p><h2>${workflows.length ? `${workflows.length} 个已保存流程` : '还没有流程'}</h2></div></section><section class="flow-grid">${workflows.length ? workflows.map(card).join('') : `<article class="empty"><h3>从一个仓库开始</h3><p>选择真实分支，配置 feature → dev → main 等发布链路。</p><button id="empty-new" class="ghost">创建第一个流程</button></article>`}</section>`;
+  content.innerHTML = `<section class="hero"><p class="eyebrow">WORKSPACE</p><h1>只在需要你决策时，打断你。</h1><p>所有仓库的 PR 编排将聚合在这里。当前先管理配置，下一步接入 PR、Actions 和 Approval 监控。</p><button id="new-flow" class="primary">创建流程</button></section>${storageWarning}${syncPrompt}<section class="section-head"><div><p class="eyebrow">SAVED FLOWS</p><h2>${workflows.length ? `${workflows.length} 个已保存流程` : '还没有流程'}</h2></div></section><section class="flow-grid">${workflows.length ? workflows.map(card).join('') : `<article class="empty"><h3>从一个仓库开始</h3><p>选择真实分支，配置 feature → dev → main 等发布链路。</p><button id="empty-new" class="ghost">创建第一个流程</button></article>`}</section>`;
   document.querySelector('#new-flow')!.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
