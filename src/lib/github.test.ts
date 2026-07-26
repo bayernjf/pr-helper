@@ -27,7 +27,7 @@ describe('GitHub repository helpers', () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ login: 'octocat' }) });
     vi.stubGlobal('fetch', fetchMock);
     await githubFetch('token', '/user');
-    expect(fetchMock).toHaveBeenCalledWith('https://api.github.com/user', expect.objectContaining({ cache: 'no-store', headers: expect.objectContaining({ 'Cache-Control': 'no-cache' }) }));
+    expect(fetchMock).toHaveBeenCalledWith('https://api.github.com/user', expect.objectContaining({ cache: 'no-store' }));
     vi.unstubAllGlobals();
   });
 });

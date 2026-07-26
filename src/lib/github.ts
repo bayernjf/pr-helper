@@ -33,8 +33,8 @@ export async function githubFetch<T>(token: string, path: string, init?: Request
     ...init,
     cache: 'no-store',
     headers: useGitHubApp
-      ? { 'Cache-Control': 'no-cache', ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers }
-      : { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', 'Cache-Control': 'no-cache', ...init?.headers },
+      ? { ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers }
+      : { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', ...init?.headers },
   });
   if (!response.ok) {
     const detail = await response.json().catch(() => ({ message: response.statusText }));
