@@ -128,6 +128,7 @@ function detail() {
     const menu = document.querySelector<HTMLElement>(`[data-merge-menu="${button.dataset.mergeMenuToggle}"]`)!;
     menu.hidden = !menu.hidden;
     button.setAttribute('aria-expanded', String(!menu.hidden));
+    if (!menu.hidden) positionMergeMenu(menu, button.closest<HTMLElement>('.merge-control')!);
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-merge-method="merge"]').forEach(button => button.addEventListener('click', () => {
     const control = button.closest<HTMLElement>('.merge-control')!;
@@ -142,10 +143,23 @@ function detail() {
   if (refreshOnNextDetail) { refreshOnNextDetail = false; void refreshStatuses(); }
 }
 
+function positionMergeMenu(menu: HTMLElement, control: HTMLElement) {
+  menu.classList.remove('opens-upward');
+  menu.style.maxHeight = '';
+  const controlRect = control.getBoundingClientRect();
+  const menuHeight = menu.getBoundingClientRect().height;
+  const spaceBelow = window.innerHeight - controlRect.bottom - 8;
+  const spaceAbove = controlRect.top - 8;
+  const opensUpward = menuHeight > spaceBelow && spaceAbove > spaceBelow;
+  menu.classList.toggle('opens-upward', opensUpward);
+  const availableSpace = opensUpward ? spaceAbove : spaceBelow;
+  if (menuHeight > availableSpace) menu.style.maxHeight = `${Math.max(96, Math.floor(availableSpace))}px`;
+}
+
 function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const status = statuses?.[index];
   if (!status) return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p>尚未读取 GitHub 状态。</p></div></article>`;
-  if (status.kind === 'not-created') { const unlocked = canCreateStage(index, statuses!); return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">等待创建 PR</b> · GitHub 中尚无对应 PR。</p>${unlocked ? `<button class="create-pr" data-create-pr="${index}">创建 PR</button><a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">在 GitHub 创建 PR ↗</a>` : '<p class="meta">等待前序步骤合并且合并后 Actions 成功。</p>'}</div></article>`; }
+  if (status.kind === 'not-created') { const unlocked = canCreateStage(index, statuses!); return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">等待创建 PR</b> · GitHub 中尚无对应 PR。</p>${unlocked ? `<div class="timeline-actions"><button class="timeline-action" data-create-pr="${index}">创建 PR</button><a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">在 GitHub 创建 PR ↗</a></div>` : '<p class="meta">等待前序步骤合并且合并后 Actions 成功。</p>'}</div></article>`; }
   if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status failure">读取失败</b> · ${escape(status.message || '')}</p></div></article>`;
   const actions = status.checks?.total ? `${status.checks.passed}/${status.checks.total} Actions ${status.checks.state}` : '';
   const approvals = status.requiredApprovals ? `${status.approvals || 0}/${status.requiredApprovals} Approval` : '';
@@ -153,10 +167,11 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const mergedVerification = status.checks?.state;
   const state = status.kind === 'merged' ? mergedVerification === 'success' ? '合并后验证通过' : mergedVerification === 'failure' ? '合并后验证失败' : status.checks ? '合并后验证中' : '已合并' : status.kind === 'closed' ? '已关闭' : status.checks?.total && status.checks.state === 'failure' ? 'Actions 失败' : status.checks?.total && status.checks.state === 'pending' ? '等待 Actions' : status.requiredApprovals && (status.approvals || 0) < status.requiredApprovals ? '等待审批' : mergeability ? '合并被阻塞' : '等待合并';
   const gates = status.kind === 'merged' ? [actions] : [actions, approvals, mergeability];
-  const newCommits = status.kind === 'merged' && status.aheadBy ? `<p><b class="status neutral">有 ${status.aheadBy} 个新提交</b> · 可创建新的 PR。</p><button class="create-pr" data-create-pr="${index}">创建新 PR</button>` : '';
+  const newCommits = status.kind === 'merged' && status.aheadBy ? `<p><b class="status neutral">有 ${status.aheadBy} 个新提交</b> · 可创建新的 PR。</p>` : '';
+  const newPullAction = status.kind === 'merged' && status.aheadBy ? `<button class="timeline-action" data-create-pr="${index}">创建新 PR</button>` : '';
   const stateClass = status.kind === 'merged' ? mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
   const mergeAction = status.kind === 'open' && canMergePull(status) ? mergingStages.has(index) ? `<button class="create-pr" disabled>正在合并…</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">发起合并</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="选择合并方式" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>✓　合并提交（merge）</b><small>保留此分支的全部提交，并创建一个合并提交。</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>压缩合并（squash）</b><small>需到 GitHub 页面操作</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>变基合并（rebase）</b><small>需到 GitHub 页面操作</small></button></span></span>` : '';
-  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b>${gates.filter(Boolean).map(gate => ` · ${gate}`).join('')}</p><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">打开 GitHub PR #${status.pr!.number} ↗</a>${mergeAction}${newCommits}</div></article>`;
+  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b>${gates.filter(Boolean).map(gate => ` · ${gate}`).join('')}</p>${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">打开 GitHub PR #${status.pr!.number} ↗</a>${mergeAction}${newPullAction}</div></div></article>`;
 }
 function canMergePull(status: StepStatus) {
   return status.kind === 'open' && canMergeOpenPull({
