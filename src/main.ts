@@ -14,7 +14,7 @@ type CheckRun = { status: string; conclusion: string | null };
 type CommitStatus = { state: string };
 type Review = { state: string };
 type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
-type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string };
+type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string };
 type MergeResult = { merged: boolean; message?: string; sha?: string };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
@@ -32,6 +32,8 @@ let githubInstallationSettingsUrl = '';
 let githubLogin = '';
 let cloudWorkflowStorage = false;
 let pendingLocalWorkflowSync = false;
+let repositoryManagementWindow: Window | null = null;
+let repositoryManagementTimer: number | undefined;
 const mergingStages = new Set<number>();
 const recentlyCreatedPullNumbers = new Map<number, number>();
 const recentlyMergedPullNumbers = new Map<number, number>();
@@ -135,12 +137,41 @@ async function init() {
   try { repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated'); await loadCloudWorkflows(); render(); } catch (err) { connect(err instanceof Error ? err.message : '无法读取仓库'); }
 }
 
+async function refreshAuthorizedRepositories() {
+  try {
+    repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated');
+    render();
+    if (screen === 'detail') void refreshStatuses();
+    showToast('授权仓库已同步，已回到原页面。');
+  } catch (err) { showToast(err instanceof Error ? err.message : '无法同步授权仓库'); }
+}
+
+function openRepositoryManagement() {
+  if (!githubInstallationSettingsUrl) return;
+  repositoryManagementWindow?.close();
+  repositoryManagementWindow = window.open(githubInstallationSettingsUrl, 'pr-helper-github-installation', 'popup,width=960,height=780');
+  if (!repositoryManagementWindow) {
+    window.location.assign(githubInstallationSettingsUrl);
+    return;
+  }
+  showToast('在 GitHub 保存后关闭授权页，将自动回到这里并同步仓库。');
+  if (repositoryManagementTimer !== undefined) window.clearInterval(repositoryManagementTimer);
+  repositoryManagementTimer = window.setInterval(() => {
+    if (!repositoryManagementWindow || repositoryManagementWindow.closed) {
+      repositoryManagementWindow = null;
+      if (repositoryManagementTimer !== undefined) { window.clearInterval(repositoryManagementTimer); repositoryManagementTimer = undefined; }
+      void refreshAuthorizedRepositories();
+    }
+  }, 500);
+}
+
 function render() {
-  const manageRepositories = githubInstallationSettingsUrl ? `<a class="ghost manage-repositories" target="_blank" href="${escape(githubInstallationSettingsUrl)}">管理授权仓库 ↗</a>` : '';
+  const manageRepositories = githubInstallationSettingsUrl ? '<button id="manage-repositories" class="ghost manage-repositories">管理授权仓库 ↗</button>' : '';
   const account = githubLogin ? `<span class="github-account" title="已通过 GitHub 登录">GitHub · @${escape(githubLogin)}</span>` : '';
   app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">PR<span>FLOW</span></a><nav aria-label="主导航"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">流程总览</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">＋ 新建流程</button></nav><div class="topbar-actions">${account}${manageRepositories}<button id="ai-settings-top" class="ghost">AI 设置</button><button id="disconnect" class="ghost">断开 GitHub</button></div></header><section id="content"></section></main>`;
   document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) active = null; goTo(target); }));
   document.querySelector('#ai-settings-top')!.addEventListener('click', showAiSettings);
+  document.querySelector('#manage-repositories')?.addEventListener('click', openRepositoryManagement);
   document.querySelector('#disconnect')!.addEventListener('click', async () => { sessionStorage.removeItem('github-token'); token = ''; githubInstallationSettingsUrl = ''; githubLogin = ''; cloudWorkflowStorage = false; await fetch(githubAppApiUrl('/api/auth/github/logout'), { method: 'POST' }).catch(() => undefined); connect(); });
   renderContent();
 }
@@ -287,9 +318,10 @@ function hideNativeOnlyTooltip() { if (nativeOnlyTooltip) nativeOnlyTooltip.hidd
 function showMergeDialog(index: number) {
   const status = statuses?.[index];
   if (!active || !status?.pr || !canMergePull(status)) return;
+  const pull = status.pr;
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
-  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">MERGE PULL REQUEST</p><h2>合并 PR #${status.pr.number}</h2><p class="meta">将创建一个合并提交。GitHub 会再次校验权限、分支保护和最新提交。</p><div class="dialog-actions"><button value="cancel" class="ghost">取消</button><button id="confirm-merge" class="primary">确认合并</button></div></form>`;
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">MERGE PULL REQUEST</p><h2>合并 PR #${pull.number}</h2><p class="meta">将创建一个合并提交。GitHub 会再次校验权限、分支保护和最新提交。</p><div class="dialog-actions"><button value="cancel" class="ghost">取消</button><button id="confirm-merge" class="primary">确认合并</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
   dialog.querySelector<HTMLButtonElement>('#confirm-merge')!.addEventListener('click', async event => {
     event.preventDefault();
@@ -299,11 +331,11 @@ function showMergeDialog(index: number) {
     detail();
     try {
       const { owner, name } = parseRepository(active!.repository);
-      const result = await githubFetch<MergeResult>(token, `/repos/${owner}/${name}/pulls/${status.pr!.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', status.pr!.head.sha)) });
+      const result = await githubFetch<MergeResult>(token, `/repos/${owner}/${name}/pulls/${pull.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) });
       if (!result.merged) throw new Error(result.message || 'GitHub 未完成合并。');
       const pendingChecks = { state: 'pending' as const, passed: 0, total: 0 };
-      statuses = statuses?.map((item, statusIndex) => statusIndex === index ? { ...item, kind: 'merged', pr: { ...status.pr!, state: 'closed', merged_at: new Date().toISOString(), merge_commit_sha: result.sha }, checks: pendingChecks } : item) || null;
-      recentlyMergedPullNumbers.set(index, status.pr.number);
+      statuses = statuses?.map((item, statusIndex) => statusIndex === index ? { ...item, kind: 'merged', pr: { ...pull, state: 'closed', merged_at: new Date().toISOString(), merge_commit_sha: result.sha }, checks: pendingChecks } : item) || null;
+      recentlyMergedPullNumbers.set(index, pull.number);
       mergingStages.delete(index);
       dialog.close();
       detail();
