@@ -1,6 +1,6 @@
-import { installationRequest } from '../_lib/github-api';
-import { type ApiRequest, type ApiResponse, queryValue } from '../_lib/http';
-import { currentGitHubSession } from '../_lib/session';
+import { installationRequest } from '../_lib/github-api.js';
+import { type ApiRequest, type ApiResponse, queryValue } from '../_lib/http.js';
+import { currentGitHubSession } from '../_lib/session.js';
 
 function requestedPath(request: ApiRequest) {
   const path = queryValue(request, 'path');

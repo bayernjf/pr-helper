@@ -1,6 +1,6 @@
-import { type ApiRequest, type ApiResponse, queryValue, readCookie, requestMustBeGet, setSecureCookie } from '../../_lib/http';
-import { githubAppRequest } from '../../_lib/github-api';
-import { createSignedSession, parseGithubAppConfig, readSignedSession } from '../../_lib/github-app';
+import { type ApiRequest, type ApiResponse, queryValue, readCookie, requestMustBeGet, setSecureCookie } from '../../_lib/http.js';
+import { githubAppRequest } from '../../_lib/github-api.js';
+import { createSignedSession, parseGithubAppConfig, readSignedSession } from '../../_lib/github-app.js';
 
 export default async function handler(request: ApiRequest, response: ApiResponse) {
   if (!requestMustBeGet(request, response)) return;

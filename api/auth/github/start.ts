@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 
-import { type ApiRequest, type ApiResponse, requestMustBeGet, setSecureCookie } from '../../_lib/http';
-import { createSignedState, parseGithubAppConfig } from '../../_lib/github-app';
+import { type ApiRequest, type ApiResponse, requestMustBeGet, setSecureCookie } from '../../_lib/http.js';
+import { createSignedState, parseGithubAppConfig } from '../../_lib/github-app.js';
 
 export default function handler(request: ApiRequest, response: ApiResponse) {
   if (!requestMustBeGet(request, response)) return;
