@@ -1,0 +1,29 @@
+# PR Helper
+
+GitHub-first web application for managing ordered pull-request workflows, such as `feature/xxx → dev → main`.
+
+## Local development
+
+```bash
+npm ci
+npm run dev
+```
+
+## CI and deployments
+
+GitHub Actions checks every pull request and deploys commits pushed to `dev` and `main`:
+
+| Branch | Cloudflare Pages | Vercel |
+| --- | --- | --- |
+| `dev` | Preview | Preview |
+| `main` | Production | Production |
+
+Configure these repository secrets before the first deployment:
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+- `VERCEL_TOKEN`
+- `VERCEL_ORG_ID`
+- `VERCEL_PROJECT_ID`
+
+Optionally set the repository variable `CLOUDFLARE_PAGES_PROJECT`. It defaults to `pr-helper`; create a Cloudflare Pages project with that name first if you do not set a different value.

@@ -17,3 +17,28 @@ export function githubCompareUrl(repository: string, source: string, target: str
 export function githubPullUrl(repository: string, number: number) {
   return `https://github.com/${repository}/pull/${number}`;
 }
+
+export function summarizeChecks(checks: { status: string; conclusion: string | null }[]) {
+  const passed = checks.filter(check => check.conclusion === 'success').length;
+  const hasFailure = checks.some(check => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(check.conclusion || ''));
+  return { state: hasFailure ? 'failure' : passed === checks.length && checks.length > 0 ? 'success' : 'pending', passed, total: checks.length };
+}
+
+export function canCreateStage(index: number, statuses: { kind: string; checks?: { state: string } }[]) {
+  return statuses.slice(0, index).every(status => status.kind === 'merged' && (!status.checks || status.checks.state === 'success'));
+}
+
+export function statusChanged(previous: { kind: string; checks?: string }, next: { kind: string; checks?: string }) {
+  return previous.kind !== next.kind || previous.checks !== next.checks;
+}
+
+export function needsNewPullRequest(aheadBy: number, latestPullState: string) {
+  return aheadBy > 0 && latestPullState === 'merged';
+}
+
+export function canMergeOpenPull(input: { checks?: string; approvalsMet: boolean; mergeable?: boolean | null; mergeableState?: string }) {
+  return input.checks === 'success'
+    && input.approvalsMet
+    && input.mergeable !== false
+    && !['dirty', 'behind', 'blocked'].includes(input.mergeableState || '');
+}
