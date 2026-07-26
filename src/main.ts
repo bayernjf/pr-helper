@@ -14,7 +14,7 @@ type CheckRun = { status: string; conclusion: string | null };
 type CommitStatus = { state: string };
 type Review = { state: string };
 type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
-type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string };
+type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string };
 type MergeResult = { merged: boolean; message?: string; sha?: string };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
@@ -29,6 +29,11 @@ let refreshOnNextDetail = false;
 let pollTimer: number | undefined;
 let refreshOnFocusBound = false;
 let githubInstallationSettingsUrl = '';
+let githubLogin = '';
+let cloudWorkflowStorage = false;
+let pendingLocalWorkflowSync = false;
+let repositoryManagementWindow: Window | null = null;
+let repositoryManagementTimer: number | undefined;
 const mergingStages = new Set<number>();
 const recentlyCreatedPullNumbers = new Map<number, number>();
 const recentlyMergedPullNumbers = new Map<number, number>();
@@ -41,7 +46,43 @@ const app = () => document.querySelector<HTMLDivElement>('#app')!;
 const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 function loadWorkflows(): Workflow[] { try { return JSON.parse(localStorage.getItem('pr-helper-workflows') || '[]') as Workflow[]; } catch { return []; } }
 function persistGenerationRules(next: GenerationRule[]) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(next)); generationRules = next; }
-function save(next: Workflow) { active = next; workflows = saveWorkflow(workflows, next); localStorage.setItem('pr-helper-workflows', JSON.stringify(workflows)); }
+function persistWorkflowsLocally() { localStorage.setItem('pr-helper-workflows', JSON.stringify(workflows)); }
+async function persistWorkflowRemotely(workflow: Workflow) {
+  if (!cloudWorkflowStorage) return;
+  try {
+    const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflow }) });
+    if (!response.ok) throw new Error('同步失败');
+  } catch { showToast('已保存在当前浏览器；云端同步将在下次连接时重试。'); }
+}
+function save(next: Workflow) { active = next; workflows = saveWorkflow(workflows, next); persistWorkflowsLocally(); void persistWorkflowRemotely(next); }
+async function removeWorkflowFromStorage(workflowId: string) {
+  workflows = deleteWorkflow(workflows, workflowId); persistWorkflowsLocally();
+  if (!cloudWorkflowStorage) return;
+  try { await fetch(githubAppApiUrl('/api/workflows'), { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: workflowId }) }); }
+  catch { showToast('已从当前浏览器移除；云端删除将在下次连接时重试。'); }
+}
+async function loadCloudWorkflows() {
+  try {
+    const response = await fetch(githubAppApiUrl('/api/workflows'));
+    if (response.status === 401 || response.status === 503) return;
+    if (!response.ok) throw new Error('读取失败');
+    const payload = await response.json() as { workflows?: Workflow[] };
+    if (!Array.isArray(payload.workflows)) return;
+    cloudWorkflowStorage = true;
+    if (payload.workflows.length) { workflows = payload.workflows; active = workflows[0] || null; persistWorkflowsLocally(); }
+    else pendingLocalWorkflowSync = workflows.length > 0;
+  } catch { /* The local cache remains the safe fallback if the API is unreachable. */ }
+}
+async function syncLocalWorkflows() {
+  if (!cloudWorkflowStorage || !workflows.length) return;
+  try {
+    for (const workflow of workflows) {
+      const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflow }) });
+      if (!response.ok) throw new Error('同步失败');
+    }
+    pendingLocalWorkflowSync = false; render(); showToast('本机流程已同步到你的 GitHub 账号。');
+  } catch { showToast('流程同步失败，本机数据仍然保留。'); }
+}
 function showToast(message: string) { const previous = document.querySelector('.toast'); previous?.remove(); const toast = document.createElement('div'); toast.className = 'toast'; toast.setAttribute('role', 'status'); toast.textContent = message; document.body.append(toast); window.setTimeout(() => toast.remove(), 3200); }
 function persistPullRequestDrafts(next: typeof pullRequestDrafts) { pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); draftStorageSynchronized = true; } catch { draftStorageSynchronized = false; showToast('草稿保存失败'); } }
 persistPullRequestDrafts(pullRequestDrafts);
@@ -81,9 +122,10 @@ async function restoreConnection() {
   if (token) return init();
   try {
     const response = await fetch(githubAppApiUrl('/api/github/session'));
-    const session = await response.json() as { connected?: boolean; installationSettingsUrl?: string };
+    const session = await response.json() as { connected?: boolean; login?: string; installationSettingsUrl?: string };
     if (session.connected) {
       githubInstallationSettingsUrl = session.installationSettingsUrl || '';
+      githubLogin = session.login || '';
       return init();
     }
   } catch { /* Local Vite development has no serverless API; show the development fallback. */ }
@@ -92,15 +134,45 @@ async function restoreConnection() {
 
 async function init() {
   app().innerHTML = '<main class="connect"><p class="eyebrow">GITHUB</p><h1>正在载入你的工作台…</h1></main>';
-  try { repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated'); render(); } catch (err) { connect(err instanceof Error ? err.message : '无法读取仓库'); }
+  try { repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated'); await loadCloudWorkflows(); render(); } catch (err) { connect(err instanceof Error ? err.message : '无法读取仓库'); }
+}
+
+async function refreshAuthorizedRepositories() {
+  try {
+    repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated');
+    render();
+    if (screen === 'detail') void refreshStatuses();
+    showToast('授权仓库已同步，已回到原页面。');
+  } catch (err) { showToast(err instanceof Error ? err.message : '无法同步授权仓库'); }
+}
+
+function openRepositoryManagement() {
+  if (!githubInstallationSettingsUrl) return;
+  repositoryManagementWindow?.close();
+  repositoryManagementWindow = window.open(githubInstallationSettingsUrl, 'pr-helper-github-installation', 'popup,width=960,height=780');
+  if (!repositoryManagementWindow) {
+    window.location.assign(githubInstallationSettingsUrl);
+    return;
+  }
+  showToast('在 GitHub 保存后关闭授权页，将自动回到这里并同步仓库。');
+  if (repositoryManagementTimer !== undefined) window.clearInterval(repositoryManagementTimer);
+  repositoryManagementTimer = window.setInterval(() => {
+    if (!repositoryManagementWindow || repositoryManagementWindow.closed) {
+      repositoryManagementWindow = null;
+      if (repositoryManagementTimer !== undefined) { window.clearInterval(repositoryManagementTimer); repositoryManagementTimer = undefined; }
+      void refreshAuthorizedRepositories();
+    }
+  }, 500);
 }
 
 function render() {
-  const manageRepositories = githubInstallationSettingsUrl ? `<a class="ghost manage-repositories" target="_blank" href="${escape(githubInstallationSettingsUrl)}">管理授权仓库 ↗</a>` : '';
-  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">PR<span>FLOW</span></a><nav aria-label="主导航"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">流程总览</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">＋ 新建流程</button></nav><div class="topbar-actions">${manageRepositories}<button id="ai-settings-top" class="ghost">AI 设置</button><button id="disconnect" class="ghost">断开 GitHub</button></div></header><section id="content"></section></main>`;
+  const manageRepositories = githubInstallationSettingsUrl ? '<button id="manage-repositories" class="ghost manage-repositories">管理授权仓库 ↗</button>' : '';
+  const account = githubLogin ? `<span class="github-account" title="已通过 GitHub 登录">GitHub · @${escape(githubLogin)}</span>` : '';
+  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">PR<span>FLOW</span></a><nav aria-label="主导航"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">流程总览</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">＋ 新建流程</button></nav><div class="topbar-actions">${account}${manageRepositories}<button id="ai-settings-top" class="ghost">AI 设置</button><button id="disconnect" class="ghost">断开 GitHub</button></div></header><section id="content"></section></main>`;
   document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) active = null; goTo(target); }));
   document.querySelector('#ai-settings-top')!.addEventListener('click', showAiSettings);
-  document.querySelector('#disconnect')!.addEventListener('click', async () => { sessionStorage.removeItem('github-token'); token = ''; githubInstallationSettingsUrl = ''; await fetch(githubAppApiUrl('/api/auth/github/logout'), { method: 'POST' }).catch(() => undefined); connect(); });
+  document.querySelector('#manage-repositories')?.addEventListener('click', openRepositoryManagement);
+  document.querySelector('#disconnect')!.addEventListener('click', async () => { sessionStorage.removeItem('github-token'); token = ''; githubInstallationSettingsUrl = ''; githubLogin = ''; cloudWorkflowStorage = false; await fetch(githubAppApiUrl('/api/auth/github/logout'), { method: 'POST' }).catch(() => undefined); connect(); });
   renderContent();
 }
 
@@ -116,9 +188,11 @@ function renderContent() { if (screen === 'overview') overview(); else if (scree
 
 function overview() {
   const content = document.querySelector('#content')!;
-  content.innerHTML = `<section class="hero"><p class="eyebrow">WORKSPACE</p><h1>只在需要你决策时，打断你。</h1><p>所有仓库的 PR 编排将聚合在这里。当前先管理配置，下一步接入 PR、Actions 和 Approval 监控。</p><button id="new-flow" class="primary">创建流程</button></section><section class="section-head"><div><p class="eyebrow">SAVED FLOWS</p><h2>${workflows.length ? `${workflows.length} 个已保存流程` : '还没有流程'}</h2></div></section><section class="flow-grid">${workflows.length ? workflows.map(card).join('') : `<article class="empty"><h3>从一个仓库开始</h3><p>选择真实分支，配置 feature → dev → main 等发布链路。</p><button id="empty-new" class="ghost">创建第一个流程</button></article>`}</section>`;
+  const syncPrompt = pendingLocalWorkflowSync ? `<section class="local-sync-notice"><div><b>发现 ${workflows.length} 个仅保存在这台设备上的流程</b><p>确认后会同步到 GitHub 账号 ${githubLogin ? `@${escape(githubLogin)}` : ''}，以后可在其他设备继续使用。</p></div><button id="sync-local-workflows" class="ghost">同步到账号</button></section>` : '';
+  content.innerHTML = `<section class="hero"><p class="eyebrow">WORKSPACE</p><h1>只在需要你决策时，打断你。</h1><p>所有仓库的 PR 编排将聚合在这里。当前先管理配置，下一步接入 PR、Actions 和 Approval 监控。</p><button id="new-flow" class="primary">创建流程</button></section>${syncPrompt}<section class="section-head"><div><p class="eyebrow">SAVED FLOWS</p><h2>${workflows.length ? `${workflows.length} 个已保存流程` : '还没有流程'}</h2></div></section><section class="flow-grid">${workflows.length ? workflows.map(card).join('') : `<article class="empty"><h3>从一个仓库开始</h3><p>选择真实分支，配置 feature → dev → main 等发布链路。</p><button id="empty-new" class="ghost">创建第一个流程</button></article>`}</section>`;
   document.querySelector('#new-flow')!.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
+  document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
   bindFlowCards();
 }
 function card(flow: Workflow) { const summary = workflowSummary(flow); return `<article class="flow-card"><p class="eyebrow">${escape(flow.repository)}</p><h3>${escape(flow.name)}</h3><p class="route">${escape(summary.route)}</p><footer><span>${summary.stepCount} 个步骤 · 尚未执行</span><button data-open="${flow.id}" class="link-button">查看流程 →</button></footer></article>`; }
@@ -244,9 +318,10 @@ function hideNativeOnlyTooltip() { if (nativeOnlyTooltip) nativeOnlyTooltip.hidd
 function showMergeDialog(index: number) {
   const status = statuses?.[index];
   if (!active || !status?.pr || !canMergePull(status)) return;
+  const pull = status.pr;
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
-  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">MERGE PULL REQUEST</p><h2>合并 PR #${status.pr.number}</h2><p class="meta">将创建一个合并提交。GitHub 会再次校验权限、分支保护和最新提交。</p><div class="dialog-actions"><button value="cancel" class="ghost">取消</button><button id="confirm-merge" class="primary">确认合并</button></div></form>`;
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">MERGE PULL REQUEST</p><h2>合并 PR #${pull.number}</h2><p class="meta">将创建一个合并提交。GitHub 会再次校验权限、分支保护和最新提交。</p><div class="dialog-actions"><button value="cancel" class="ghost">取消</button><button id="confirm-merge" class="primary">确认合并</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
   dialog.querySelector<HTMLButtonElement>('#confirm-merge')!.addEventListener('click', async event => {
     event.preventDefault();
@@ -256,11 +331,11 @@ function showMergeDialog(index: number) {
     detail();
     try {
       const { owner, name } = parseRepository(active!.repository);
-      const result = await githubFetch<MergeResult>(token, `/repos/${owner}/${name}/pulls/${status.pr!.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', status.pr!.head.sha)) });
+      const result = await githubFetch<MergeResult>(token, `/repos/${owner}/${name}/pulls/${pull.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) });
       if (!result.merged) throw new Error(result.message || 'GitHub 未完成合并。');
       const pendingChecks = { state: 'pending' as const, passed: 0, total: 0 };
-      statuses = statuses?.map((item, statusIndex) => statusIndex === index ? { ...item, kind: 'merged', pr: { ...status.pr!, state: 'closed', merged_at: new Date().toISOString(), merge_commit_sha: result.sha }, checks: pendingChecks } : item) || null;
-      recentlyMergedPullNumbers.set(index, status.pr.number);
+      statuses = statuses?.map((item, statusIndex) => statusIndex === index ? { ...item, kind: 'merged', pr: { ...pull, state: 'closed', merged_at: new Date().toISOString(), merge_commit_sha: result.sha }, checks: pendingChecks } : item) || null;
+      recentlyMergedPullNumbers.set(index, pull.number);
       mergingStages.delete(index);
       dialog.close();
       detail();
@@ -689,5 +764,5 @@ const apiKeyFieldObserver = new MutationObserver(() => {
 });
 apiKeyFieldObserver.observe(document.body, { childList: true, subtree: true });
 
-document.addEventListener('click', event => { const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-remove]'); if (!button || !active) return; const next = removeStage(active, Number(button.dataset.remove)); if (!next.stages.length) { workflows = deleteWorkflow(workflows, active.id); localStorage.setItem('pr-helper-workflows', JSON.stringify(workflows)); active = null; } else save(next); editor(); });
+document.addEventListener('click', event => { const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-remove]'); if (!button || !active) return; const next = removeStage(active, Number(button.dataset.remove)); if (!next.stages.length) { const workflowId = active.id; active = null; void removeWorkflowFromStorage(workflowId); } else save(next); editor(); });
 void restoreConnection();
