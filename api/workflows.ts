@@ -9,6 +9,12 @@ function body(request: ApiRequest) {
   return request.body;
 }
 
+function responseMessage(error: unknown) {
+  const databaseCode = typeof error === 'object' && error ? (error as { code?: unknown }).code : undefined;
+  if (databaseCode === '42P01') return '数据库尚未迁移。请先执行 db/migrations/001_users_and_workflows.sql。';
+  return error instanceof Error ? error.message : '流程同步失败';
+}
+
 export default async function handler(request: ApiRequest, response: ApiResponse) {
   try {
     const { session } = currentGitHubIdentity(request);
@@ -30,7 +36,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     }
     response.status(400).json({ message: '无效的流程请求' });
   } catch (error) {
-    const message = error instanceof Error ? error.message : '流程同步失败';
+    const message = responseMessage(error);
     const code = message.includes('DATABASE_URL') ? 503 : message.includes('GitHub 会话') ? 401 : 500;
     response.status(code).json({ message });
   }
