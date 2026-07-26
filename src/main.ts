@@ -29,6 +29,7 @@ let pollTimer: number | undefined;
 let refreshOnFocusBound = false;
 const mergingStages = new Set<number>();
 const recentlyCreatedPullNumbers = new Map<number, number>();
+const recentlyMergedPullNumbers = new Map<number, number>();
 let aiConfig: AiConfig | null = loadAiConfig();
 let generationRules = loadGenerationRules(() => localStorage.getItem(GENERATION_RULES_KEY));
 let pullRequestDrafts = loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), Date.now());
@@ -228,6 +229,7 @@ function showMergeDialog(index: number) {
       if (!result.merged) throw new Error(result.message || 'GitHub 未完成合并。');
       const pendingChecks = { state: 'pending' as const, passed: 0, total: 0 };
       statuses = statuses?.map((item, statusIndex) => statusIndex === index ? { ...item, kind: 'merged', pr: { ...status.pr!, state: 'closed', merged_at: new Date().toISOString(), merge_commit_sha: result.sha }, checks: pendingChecks } : item) || null;
+      recentlyMergedPullNumbers.set(index, status.pr.number);
       mergingStages.delete(index);
       dialog.close();
       detail();
@@ -254,15 +256,23 @@ async function refreshStatuses() {
   statuses = await Promise.all(active.stages.map(async (stage, index) => {
     try {
       const recentlyCreatedNumber = recentlyCreatedPullNumbers.get(index);
-      const [openPulls, closedPulls, comparison, recentlyCreatedPull] = await Promise.all([
+      const recentlyMergedNumber = recentlyMergedPullNumbers.get(index);
+      const recentlyChangedNumber = recentlyCreatedNumber || recentlyMergedNumber;
+      const [openPulls, closedPulls, comparison, recentlyChangedPull] = await Promise.all([
         githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + stage.source)}&base=${encodeURIComponent(stage.target)}&per_page=1`),
         githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&head=${encodeURIComponent(owner + ':' + stage.source)}&base=${encodeURIComponent(stage.target)}&per_page=1`),
         githubFetch<{ ahead_by: number }>(token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`),
-        recentlyCreatedNumber ? githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls/${recentlyCreatedNumber}`).catch(() => null) : Promise.resolve(null),
+        recentlyChangedNumber ? githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls/${recentlyChangedNumber}`).catch(() => null) : Promise.resolve(null),
       ]);
       if (recentlyCreatedNumber && openPulls.some(pull => pull.number === recentlyCreatedNumber)) recentlyCreatedPullNumbers.delete(index);
-      if (recentlyCreatedNumber && recentlyCreatedPull?.state !== 'open') recentlyCreatedPullNumbers.delete(index);
-      const pr = recentlyCreatedPull?.state === 'open' ? recentlyCreatedPull : selectCurrentPull([...openPulls, ...closedPulls]);
+      if (recentlyCreatedNumber && recentlyChangedPull?.state !== 'open') recentlyCreatedPullNumbers.delete(index);
+      if (recentlyMergedNumber && !openPulls.some(pull => pull.number === recentlyMergedNumber) && closedPulls.some(pull => pull.number === recentlyMergedNumber)) recentlyMergedPullNumbers.delete(index);
+      if (recentlyMergedNumber && !recentlyChangedPull?.merged_at && previous?.[index]?.kind === 'merged') return previous[index];
+      const pr = recentlyMergedNumber && recentlyChangedPull?.merged_at
+        ? recentlyChangedPull
+        : recentlyCreatedNumber && recentlyChangedPull?.state === 'open'
+          ? recentlyChangedPull
+          : selectCurrentPull([...openPulls, ...closedPulls]);
       if (!pr) return { kind: 'not-created' } as StepStatus;
       if (pr.merged_at) {
         let checks: StepStatus['checks'];
