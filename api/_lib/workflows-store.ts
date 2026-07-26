@@ -10,6 +10,8 @@ export type StoredWorkflow = {
 type DatabaseUser = { id: string };
 type WorkflowRow = { payload: unknown };
 
+type WebhookDelivery = { deliveryId: string; eventName: string; action?: string; repository?: string };
+
 function databaseUrl(environment: Record<string, string | undefined>) {
   const value = environment.DATABASE_URL?.trim();
   if (!value) throw new Error('未配置 DATABASE_URL，流程仍仅保存在当前浏览器。');
@@ -65,4 +67,10 @@ export async function removeWorkflow(environment: Record<string, string | undefi
   const user = await userForLogin(environment, identity.login, identity.githubUserId);
   const sql = query(environment);
   await sql`DELETE FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId}`;
+}
+
+export async function recordWebhookDelivery(environment: Record<string, string | undefined>, delivery: WebhookDelivery) {
+  const sql = query(environment);
+  const rows = await sql`INSERT INTO github_webhook_deliveries (delivery_id, event_name, action, repository) VALUES (${delivery.deliveryId}, ${delivery.eventName}, ${delivery.action || null}, ${delivery.repository || null}) ON CONFLICT (delivery_id) DO NOTHING RETURNING delivery_id`;
+  return rows.length > 0;
 }
