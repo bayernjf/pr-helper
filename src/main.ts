@@ -261,10 +261,21 @@ function openRepositoryManagement() {
 }
 
 function render() {
-  const manageRepositories = githubInstallationSettingsUrl ? '<button id="manage-repositories" class="ghost manage-repositories">管理授权仓库 ↗</button>' : '';
-  const account = githubLogin ? `<span class="github-account" title="已通过 GitHub 登录">GitHub · @${escape(githubLogin)}</span>` : '';
+  const manageRepositories = githubInstallationSettingsUrl ? '<button id="manage-repositories" class="account-menu-item">管理授权仓库 ↗</button>' : '';
+  const account = githubLogin ? `GitHub · @${escape(githubLogin)}` : '账户与设置';
   const push = pushConfigured ? `<button id="push-settings" class="ghost" ${pushSubscribed ? 'disabled title="浏览器通知已开启"' : ''}>${pushSubscribed ? '通知已开启' : '开启通知'}</button>` : '';
-  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">PR<span>FLOW</span></a><nav aria-label="主导航"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">流程总览</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">＋ 新建流程</button></nav><div class="topbar-actions">${account}${manageRepositories}${push}<button id="ai-settings-top" class="ghost">AI 设置</button><button id="disconnect" class="ghost">断开 GitHub</button></div></header><section id="content"></section></main>`;
+  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">PR<span>FLOW</span></a><nav aria-label="主导航"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">流程总览</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">＋ 新建流程</button></nav><div class="topbar-actions"><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}<button id="ai-settings-top" class="account-menu-item">AI 设置</button><button id="disconnect" class="account-menu-item danger">断开 GitHub</button></div></div></div></header><section id="content"></section></main>`;
+  const accountMenuToggle = document.querySelector<HTMLButtonElement>('#account-menu-toggle')!, accountMenuPanel = document.querySelector<HTMLElement>('#account-menu-panel')!;
+  const accountMenu = accountMenuToggle.closest<HTMLElement>('.account-menu')!;
+  const closeAccountMenu = () => { accountMenuPanel.hidden = true; accountMenuToggle.setAttribute('aria-expanded', 'false'); };
+  accountMenuToggle.addEventListener('click', () => {
+    accountMenuPanel.hidden = !accountMenuPanel.hidden; accountMenuToggle.setAttribute('aria-expanded', String(!accountMenuPanel.hidden));
+    if (!accountMenuPanel.hidden) {
+      document.addEventListener('pointerdown', event => { if (!accountMenu.contains(event.target as Node)) closeAccountMenu(); }, { once: true });
+      document.addEventListener('keydown', event => { if (event.key === 'Escape') closeAccountMenu(); }, { once: true });
+    }
+  });
+  accountMenuPanel.addEventListener('click', closeAccountMenu);
   document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) active = null; goTo(target); }));
   document.querySelector('#ai-settings-top')!.addEventListener('click', showAiSettings);
   document.querySelector('#manage-repositories')?.addEventListener('click', openRepositoryManagement);
