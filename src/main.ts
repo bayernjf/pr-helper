@@ -35,6 +35,8 @@ let cloudWorkflowStorage = false;
 let pendingLocalWorkflowSync = false;
 let cloudWorkflowSyncError = '';
 let actionQueue: ActionQueueItem[] = [];
+let pushSubscribed = false;
+let pushConfigured = false;
 let repositoryManagementWindow: Window | null = null;
 let repositoryManagementTimer: number | undefined;
 const mergingStages = new Set<number>();
@@ -93,6 +95,36 @@ async function loadActionQueue() {
     const payload = await response.json() as { items?: ActionQueueItem[] };
     actionQueue = Array.isArray(payload.items) ? payload.items : [];
   } catch { /* The workflow dashboard remains available when the optional queue cannot load. */ }
+}
+async function loadPushState() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !cloudWorkflowStorage) return;
+  try {
+    const response = await fetch(githubAppApiUrl('/api/notifications/subscription'));
+    if (!response.ok) return;
+    const payload = await response.json() as { subscribed?: boolean };
+    pushConfigured = true;
+    pushSubscribed = Boolean(payload.subscribed);
+  } catch { /* Push setup is optional and should not block the PR workspace. */ }
+}
+function vapidKey(value: string) {
+  const padded = `${value}${'='.repeat((4 - value.length % 4) % 4)}`.replaceAll('-', '+').replaceAll('_', '/');
+  const bytes = atob(padded);
+  return Uint8Array.from(bytes, character => character.charCodeAt(0));
+}
+async function enablePushNotifications() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) { showToast('当前浏览器不支持后台推送通知。'); return; }
+  try {
+    const keyResponse = await fetch(githubAppApiUrl('/api/notifications/public-key'));
+    if (!keyResponse.ok) throw new Error((await keyResponse.json().catch(() => ({})) as { message?: string }).message || '浏览器推送尚未配置');
+    const { publicKey } = await keyResponse.json() as { publicKey: string };
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') throw new Error('你尚未允许浏览器通知。');
+    const registration = await navigator.serviceWorker.register('/push-sw.js');
+    const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidKey(publicKey) });
+    const response = await fetch(githubAppApiUrl('/api/notifications/subscription'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(subscription.toJSON()) });
+    if (!response.ok) throw new Error((await response.json().catch(() => ({})) as { message?: string }).message || '保存浏览器通知设置失败');
+    pushConfigured = true; pushSubscribed = true; render(); showToast('浏览器通知已开启；页面关闭后也会收到重要流程提醒。');
+  } catch (error) { showToast(error instanceof Error ? error.message : '无法开启浏览器通知'); }
 }
 async function syncLocalWorkflows() {
   if (!cloudWorkflowStorage || !workflows.length) return;
@@ -176,7 +208,7 @@ function showAiSettings() {
 
 function connect(error = '') {
   const requiresRemoteAuthOrigin = import.meta.env.DEV && !import.meta.env.VITE_AUTH_ORIGIN;
-  app().innerHTML = `<main class="connect connect-onboarding"><section class="connect-hero"><p class="eyebrow">PR FLOW</p><h1>把 PR 流程和发布门禁，放到一个地方。</h1><p class="sub">从 feature → dev → main，统一管理创建、门禁、合并与后续 Actions。</p></section><section class="panel connection-card"><p class="eyebrow">SECURE CONNECTION</p><h2>连接 GitHub</h2><p class="connection-intro">使用 GitHub App 授权后，选择 PR Helper 可以访问的仓库。</p>${error ? `<p class="error">${escape(error)}</p>` : ''}<a id="github-app-connect" class="primary github-connect" href="${githubAppApiUrl('/api/auth/github/start')}">使用 GitHub 连接 <span aria-hidden="true">→</span></a><p id="github-app-hint" class="connection-hint" hidden></p><ul class="connection-benefits"><li>支持 public、private 与 organization 仓库</li><li>可授权全部或指定仓库，并随时在 GitHub 撤销</li><li>不会在浏览器中保存 GitHub 访问令牌</li></ul><details class="developer-connect"><summary>使用 Personal Access Token（仅本地开发）</summary><label>GitHub Personal Access Token<input id="token" type="password" placeholder="github_pat_…" autocomplete="off" /></label><p class="meta">Token 仅保存在当前浏览器会话，用于本地开发调试。</p><button id="connect" class="ghost">使用 PAT 连接</button></details></section></main>`;
+  app().innerHTML = `<main class="connect connect-onboarding"><section class="connect-hero"><p class="eyebrow">PR FLOW</p><h1>把 PR 流程和发布门禁，放到一个地方。</h1><p class="sub">连接 GitHub → 选择仓库 → 创建流程。</p></section><section class="panel connection-card"><p class="eyebrow">SECURE CONNECTION</p><h2>连接 GitHub</h2><p class="connection-intro">授权后选择 PR Helper 可以访问的仓库，之后可随时调整。</p>${error ? `<p class="error">${escape(error)}</p>` : ''}<a id="github-app-connect" class="primary github-connect" href="${githubAppApiUrl('/api/auth/github/start')}">连接 GitHub <span aria-hidden="true">→</span></a><p id="github-app-hint" class="connection-hint" hidden></p><ul class="connection-benefits"><li>支持 public、private 与 organization 仓库</li><li>可授权全部或指定仓库，并随时在 GitHub 撤销</li><li>不会在浏览器中保存 GitHub 访问令牌</li></ul><details class="developer-connect"><summary>使用 Personal Access Token（仅本地开发）</summary><label>GitHub Personal Access Token<input id="token" type="password" placeholder="github_pat_…" autocomplete="off" /></label><p class="meta">Token 仅保存在当前浏览器会话，用于本地开发调试。</p><button id="connect" class="ghost">使用 PAT 连接</button></details></section></main>`;
   if (requiresRemoteAuthOrigin) document.querySelector('#github-app-connect')!.addEventListener('click', event => { event.preventDefault(); const hint = document.querySelector<HTMLElement>('#github-app-hint')!; hint.hidden = false; hint.textContent = '本地 Vite 预览不会运行 GitHub App 授权 API。请先配置 VITE_AUTH_ORIGIN 指向 Vercel，或使用下方 PAT 进行本地开发。'; });
   document.querySelector('#connect')!.addEventListener('click', async () => { const value = document.querySelector<HTMLInputElement>('#token')!.value.trim(); try { await githubFetch(value, '/user'); token = value; sessionStorage.setItem('github-token', value); await init(); } catch (err) { connect(err instanceof Error ? err.message : '连接失败'); } });
 }
@@ -197,15 +229,16 @@ async function restoreConnection() {
 
 async function init() {
   app().innerHTML = '<main class="connect"><p class="eyebrow">GITHUB</p><h1>正在载入你的工作台…</h1></main>';
-  try { repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated'); await loadCloudWorkflows(); await loadActionQueue(); render(); } catch (err) { connect(err instanceof Error ? err.message : '无法读取仓库'); }
+  try { repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated'); await loadCloudWorkflows(); await Promise.all([loadActionQueue(), loadPushState()]); render(); } catch (err) { connect(err instanceof Error ? err.message : '无法读取仓库'); }
 }
 
 async function refreshAuthorizedRepositories() {
   try {
     repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated');
+    const activeRepositoryRevoked = Boolean(active && !repos.some(repo => repo.full_name === active!.repository));
     render();
     if (screen === 'detail') void refreshStatuses();
-    showToast('授权仓库已同步，已回到原页面。');
+    showToast(activeRepositoryRevoked ? '授权仓库已同步；当前流程仓库已不再授权。' : `已同步 ${repos.length} 个授权仓库，已回到原页面。`);
   } catch (err) { showToast(err instanceof Error ? err.message : '无法同步授权仓库'); }
 }
 
@@ -229,12 +262,25 @@ function openRepositoryManagement() {
 }
 
 function render() {
-  const manageRepositories = githubInstallationSettingsUrl ? '<button id="manage-repositories" class="ghost manage-repositories">管理授权仓库 ↗</button>' : '';
-  const account = githubLogin ? `<span class="github-account" title="已通过 GitHub 登录">GitHub · @${escape(githubLogin)}</span>` : '';
-  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">PR<span>FLOW</span></a><nav aria-label="主导航"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">流程总览</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">＋ 新建流程</button></nav><div class="topbar-actions">${account}${manageRepositories}<button id="ai-settings-top" class="ghost">AI 设置</button><button id="disconnect" class="ghost">断开 GitHub</button></div></header><section id="content"></section></main>`;
+  const manageRepositories = githubInstallationSettingsUrl ? '<button id="manage-repositories" class="account-menu-item">管理授权仓库 ↗</button>' : '';
+  const account = githubLogin ? `GitHub · @${escape(githubLogin)}` : '账户与设置';
+  const push = pushConfigured ? `<button id="push-settings" class="ghost" ${pushSubscribed ? 'disabled title="浏览器通知已开启"' : ''}>${pushSubscribed ? '通知已开启' : '开启通知'}</button>` : '';
+  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">PR<span>FLOW</span></a><nav aria-label="主导航"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">流程总览</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">＋ 新建流程</button></nav><div class="topbar-actions"><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}<button id="ai-settings-top" class="account-menu-item">AI 设置</button><button id="disconnect" class="account-menu-item danger">断开 GitHub</button></div></div></div></header><section id="content"></section></main>`;
+  const accountMenuToggle = document.querySelector<HTMLButtonElement>('#account-menu-toggle')!, accountMenuPanel = document.querySelector<HTMLElement>('#account-menu-panel')!;
+  const accountMenu = accountMenuToggle.closest<HTMLElement>('.account-menu')!;
+  const closeAccountMenu = () => { accountMenuPanel.hidden = true; accountMenuToggle.setAttribute('aria-expanded', 'false'); };
+  accountMenuToggle.addEventListener('click', () => {
+    accountMenuPanel.hidden = !accountMenuPanel.hidden; accountMenuToggle.setAttribute('aria-expanded', String(!accountMenuPanel.hidden));
+    if (!accountMenuPanel.hidden) {
+      document.addEventListener('pointerdown', event => { if (!accountMenu.contains(event.target as Node)) closeAccountMenu(); }, { once: true });
+      document.addEventListener('keydown', event => { if (event.key === 'Escape') closeAccountMenu(); }, { once: true });
+    }
+  });
+  accountMenuPanel.addEventListener('click', closeAccountMenu);
   document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) active = null; goTo(target); }));
   document.querySelector('#ai-settings-top')!.addEventListener('click', showAiSettings);
   document.querySelector('#manage-repositories')?.addEventListener('click', openRepositoryManagement);
+  document.querySelector('#push-settings')?.addEventListener('click', () => void enablePushNotifications());
   document.querySelector('#disconnect')!.addEventListener('click', async () => { sessionStorage.removeItem('github-token'); token = ''; githubInstallationSettingsUrl = ''; githubLogin = ''; cloudWorkflowStorage = false; await fetch(githubAppApiUrl('/api/auth/github/logout'), { method: 'POST' }).catch(() => undefined); connect(); });
   renderContent();
 }
@@ -298,6 +344,7 @@ function detail() {
   content.innerHTML = `<section class="page-head"><p class="eyebrow">FLOW DETAIL</p><h1>${escape(active.name)}</h1><p>${escape(active.repository)} · ${escape(summary.route)}</p><button id="refresh-status" class="ghost">刷新 GitHub 状态</button></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">EXECUTION TIMELINE</p>${active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><aside class="panel next-action"><p class="eyebrow">NEXT ACTION</p><h2>${nextActionTitle()}</h2><p>${statuses ? '状态直接来自 GitHub；门禁满足时可在此创建或合并 PR。' : '点击“刷新 GitHub 状态”，读取每一步的 PR、Actions 和 Approval。'}</p><button id="edit-flow" class="primary">编辑流程</button></aside></section>`;
   document.querySelector('#edit-flow')!.addEventListener('click', () => { screen = 'editor'; render(); });
   document.querySelector('#refresh-status')!.addEventListener('click', refreshStatuses);
+  document.querySelectorAll<HTMLButtonElement>('[data-codex-repair]').forEach(button => button.addEventListener('click', () => void showCodexRepairDialog(Number(button.dataset.codexRepair))));
   if (!pollTimer) pollTimer = window.setInterval(() => refreshStatuses(), 30000);
   if (!refreshOnFocusBound) {
     refreshOnFocusBound = true;
@@ -343,8 +390,8 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   if (!status) return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p>尚未读取 GitHub 状态。</p></div></article>`;
   if (status.kind === 'not-created') { const unlocked = canCreateStage(index, statuses!); return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">等待创建 PR</b> · GitHub 中尚无对应 PR。</p>${unlocked ? `<div class="timeline-actions"><button class="timeline-action" data-create-pr="${index}">创建 PR</button><a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">在 GitHub 创建 PR ↗</a></div>` : '<p class="meta">等待前序步骤合并且合并后 Actions 成功。</p>'}</div></article>`; }
   if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status failure">读取失败</b> · ${escape(status.message || '')}</p></div></article>`;
-  const actions = status.checks?.total ? `${status.checks.passed}/${status.checks.total} Actions ${status.checks.state}` : '';
-  const approvals = status.requiredApprovals ? `${status.approvals || 0}/${status.requiredApprovals} Approval` : '';
+  const actions = status.checks?.total ? `${status.checks.passed}/${status.checks.total} Actions ${status.checks.state === 'success' ? '通过' : status.checks.state === 'failure' ? '失败' : '进行中'}` : '';
+  const approvals = status.requiredApprovals ? `${status.approvals || 0}/${status.requiredApprovals} 个审批` : '';
   const mergeability = status.mergeable === false || status.mergeableState === 'dirty' ? '存在合并冲突' : status.mergeableState === 'behind' ? '需要更新分支' : status.mergeableState === 'blocked' ? 'GitHub 门禁未满足' : '';
   const mergedVerification = status.checks?.state;
   const state = status.kind === 'merged' ? mergedVerification === 'success' ? '合并后验证通过' : mergedVerification === 'failure' ? '合并后验证失败' : status.checks ? '合并后验证中' : '已合并' : status.kind === 'closed' ? '已关闭' : status.checks?.total && status.checks.state === 'failure' ? 'Actions 失败' : status.checks?.total && status.checks.state === 'pending' ? '等待 Actions' : status.requiredApprovals && (status.approvals || 0) < status.requiredApprovals ? '等待审批' : mergeability ? '合并被阻塞' : '等待合并';
@@ -355,8 +402,31 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
     : '';
   const newPullAction = canCreateNewPull ? `<button class="timeline-action" data-create-pr="${index}">创建新 PR</button>` : '';
   const stateClass = status.kind === 'merged' ? mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
-  const mergeAction = status.kind === 'open' && canMergePull(status) ? mergingStages.has(index) ? `<button class="create-pr" disabled>正在合并…</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">发起合并</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="选择合并方式" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>✓　合并提交（merge）</b><small>保留此分支的全部提交，并创建一个合并提交。</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>压缩合并（squash）</b><small>需到 GitHub 页面操作</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>变基合并（rebase）</b><small>需到 GitHub 页面操作</small></button></span></span>` : '';
-  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b>${gates.filter(Boolean).map(gate => ` · ${gate}`).join('')}</p>${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">打开 GitHub PR #${status.pr!.number} ↗</a>${mergeAction}${newPullAction}</div></div></article>`;
+  const mergeAction = status.kind === 'open' && canMergePull(status) ? mergingStages.has(index) ? `<button class="create-pr" disabled>正在合并…</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">合并 PR</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="选择合并方式" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>✓　合并提交（merge）</b><small>保留此分支的全部提交，并创建一个合并提交。</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>压缩合并（squash）</b><small>需到 GitHub 页面操作</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>变基合并（rebase）</b><small>需到 GitHub 页面操作</small></button></span></span>` : '';
+  const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">交给 Codex 修复</button>` : '';
+  const gateList = gates.filter(Boolean);
+  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b></p>${gateList.length ? `<div class="gate-list">${gateList.map(gate => `<span>${gate}</span>`).join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">打开 GitHub PR #${status.pr!.number} ↗</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
+}
+async function showCodexRepairDialog(index: number) {
+  if (!active) return;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog repair-dialog';
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">CODEX REPAIR PACKAGE</p><h2>正在收集修复上下文…</h2><p class="meta">将包含 PR、失败检查、Actions Job 链接和改动摘要；不会发送代码或创建提交。</p></form>`;
+  document.body.append(dialog); dialog.showModal();
+  try {
+    const response = await fetch(githubAppApiUrl('/api/repair-context'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: active.id, stageIndex: index }) });
+    const payload = await response.json().catch(() => ({})) as { markdown?: string; pullUrl?: string; message?: string };
+    if (!response.ok || !payload.markdown) throw new Error(payload.message || '无法生成 Codex 修复任务');
+    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">CODEX REPAIR PACKAGE</p><h2>修复任务已准备好</h2><p class="meta">复制后粘贴到该仓库的 Codex 任务中即可开始修复。</p><textarea id="repair-context" readonly></textarea><div class="dialog-actions"><a class="ghost" target="_blank" href="${escape(payload.pullUrl || '#')}">打开 GitHub Actions ↗</a><button id="copy-repair-context" type="button" class="primary">复制给 Codex</button><button value="cancel" class="ghost">关闭</button></div></form>`;
+    dialog.querySelector<HTMLTextAreaElement>('#repair-context')!.value = payload.markdown;
+    dialog.querySelector('#copy-repair-context')!.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(payload.markdown!); showToast('Codex 修复任务已复制。'); }
+      catch { showToast('复制失败，请手动复制修复任务内容。'); }
+    });
+  } catch (error) {
+    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">CODEX REPAIR PACKAGE</p><h2>无法生成修复任务</h2><p class="error">${escape(error instanceof Error ? error.message : '未知错误')}</p><div class="dialog-actions"><button value="cancel" class="ghost">关闭</button></div></form>`;
+  }
+  dialog.addEventListener('close', () => dialog.remove());
 }
 function canMergePull(status: StepStatus) {
   return status.kind === 'open' && canMergeOpenPull({
