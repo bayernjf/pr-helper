@@ -235,9 +235,10 @@ async function init() {
 async function refreshAuthorizedRepositories() {
   try {
     repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated');
+    const activeRepositoryRevoked = Boolean(active && !repos.some(repo => repo.full_name === active!.repository));
     render();
     if (screen === 'detail') void refreshStatuses();
-    showToast('授权仓库已同步，已回到原页面。');
+    showToast(activeRepositoryRevoked ? '授权仓库已同步；当前流程仓库已不再授权。' : `已同步 ${repos.length} 个授权仓库，已回到原页面。`);
   } catch (err) { showToast(err instanceof Error ? err.message : '无法同步授权仓库'); }
 }
 
