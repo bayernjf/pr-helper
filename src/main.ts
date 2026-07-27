@@ -326,6 +326,12 @@ function showNativeOnlyTooltip(event: MouseEvent) {
 }
 function moveNativeOnlyTooltip(event: MouseEvent) { positionNativeOnlyTooltip(event); }
 function hideNativeOnlyTooltip() { if (nativeOnlyTooltip) nativeOnlyTooltip.hidden = true; }
+function mergeErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : '合并失败';
+  return message.includes('Resource not accessible by integration')
+    ? 'GitHub App 缺少 Contents: Read & write 权限，更新权限后请重新批准该 App 安装。'
+    : message;
+}
 function showMergeDialog(index: number) {
   const status = statuses?.[index];
   if (!active || !status?.pr || !canMergePull(status)) return;
@@ -354,7 +360,7 @@ function showMergeDialog(index: number) {
     } catch (err) {
       mergingStages.delete(index);
       detail();
-      showToast(err instanceof Error ? err.message : '合并失败');
+      showToast(mergeErrorMessage(err));
       button.disabled = false; button.textContent = '确认合并';
     }
   });
