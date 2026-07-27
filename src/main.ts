@@ -112,10 +112,40 @@ function showToast(message: string) {
   toast.className = 'toast';
   toast.setAttribute('role', 'status');
   toast.setAttribute('popover', 'manual');
-  toast.textContent = message;
+  const content = document.createElement('span');
+  content.className = 'toast-message';
+  content.textContent = message;
+  const copy = document.createElement('button');
+  copy.className = 'toast-action';
+  copy.type = 'button';
+  copy.textContent = '复制';
+  copy.setAttribute('aria-label', '复制反馈信息');
+  const close = document.createElement('button');
+  close.className = 'toast-close';
+  close.type = 'button';
+  close.textContent = '关闭';
+  close.setAttribute('aria-label', '关闭反馈信息');
+  toast.append(content, copy, close);
   document.body.append(toast);
   toast.showPopover?.();
-  window.setTimeout(() => { toast.hidePopover?.(); toast.remove(); }, 3200);
+  let remaining = 3_200;
+  let deadline = Date.now() + remaining;
+  let timer: number | undefined;
+  let hovering = false;
+  let focused = false;
+  const dismiss = () => { if (timer !== undefined) window.clearTimeout(timer); toast.hidePopover?.(); toast.remove(); };
+  const resume = () => { if (!toast.isConnected || hovering || focused || timer !== undefined) return; deadline = Date.now() + remaining; timer = window.setTimeout(dismiss, remaining); };
+  const pause = () => { if (timer === undefined) return; window.clearTimeout(timer); timer = undefined; remaining = Math.max(0, deadline - Date.now()); };
+  toast.addEventListener('pointerenter', () => { hovering = true; pause(); });
+  toast.addEventListener('pointerleave', () => { hovering = false; resume(); });
+  toast.addEventListener('focusin', () => { focused = true; pause(); });
+  toast.addEventListener('focusout', event => { if (!toast.contains(event.relatedTarget as Node | null)) { focused = false; resume(); } });
+  copy.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(message); copy.textContent = '已复制'; }
+    catch { copy.textContent = '复制失败'; }
+  });
+  close.addEventListener('click', dismiss);
+  resume();
 }
 function persistPullRequestDrafts(next: typeof pullRequestDrafts) { pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); draftStorageSynchronized = true; } catch { draftStorageSynchronized = false; showToast('草稿保存失败'); } }
 persistPullRequestDrafts(pullRequestDrafts);
@@ -355,7 +385,7 @@ function hideNativeOnlyTooltip() { if (nativeOnlyTooltip) nativeOnlyTooltip.hidd
 function mergeErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : '合并失败';
   return message.includes('Resource not accessible by integration')
-    ? 'GitHub App 缺少 Contents: Read & write 权限，更新权限后请重新批准该 App 安装。'
+    ? 'GitHub App 当前无权合并 PR。请确认 Contents 与 Pull requests 均为 Read & write；权限更新后，到 GitHub 已安装应用中重新批准或重新安装 PR Helper，再重试。'
     : message;
 }
 function showMergeDialog(index: number) {
