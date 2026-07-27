@@ -112,19 +112,41 @@ function vapidKey(value: string) {
   return Uint8Array.from(bytes, character => character.charCodeAt(0));
 }
 async function enablePushNotifications() {
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) { showToast('当前浏览器不支持后台推送通知。'); return; }
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) { showToast('当前浏览器不支持后台推送通知。'); return; }
+  if (Notification.permission === 'denied') { showNotificationPermissionHelp(); return; }
   try {
     const keyResponse = await fetch(githubAppApiUrl('/api/notifications/public-key'));
     if (!keyResponse.ok) throw new Error((await keyResponse.json().catch(() => ({})) as { message?: string }).message || '浏览器推送尚未配置');
     const { publicKey } = await keyResponse.json() as { publicKey: string };
     const permission = await Notification.requestPermission();
-    if (permission !== 'granted') throw new Error('你尚未允许浏览器通知。');
+    if (permission !== 'granted') { showNotificationPermissionHelp(); return; }
     const registration = await navigator.serviceWorker.register('/push-sw.js');
     const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidKey(publicKey) });
     const response = await fetch(githubAppApiUrl('/api/notifications/subscription'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(subscription.toJSON()) });
     if (!response.ok) throw new Error((await response.json().catch(() => ({})) as { message?: string }).message || '保存浏览器通知设置失败');
     pushConfigured = true; pushSubscribed = true; render(); showToast('浏览器通知已开启；页面关闭后也会收到重要流程提醒。');
   } catch (error) { showToast(error instanceof Error ? error.message : '无法开启浏览器通知'); }
+}
+function showNotificationPermissionHelp() {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog confirm-dialog';
+  dialog.innerHTML = `<form method="dialog"><div class="confirm-icon" aria-hidden="true">🔔</div><h2>允许浏览器通知</h2><p>请在地址栏左侧点击网站信息图标，进入“网站设置”，将“通知”改为“允许”。返回本页后，再点击“开启通知”。</p><div class="dialog-actions"><button value="confirm" class="primary">知道了</button></div></form>`;
+  document.body.append(dialog); dialog.showModal();
+  dialog.addEventListener('close', () => dialog.remove(), { once: true });
+}
+function showDisconnectDialog() {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog confirm-dialog';
+  dialog.innerHTML = `<form method="dialog"><div class="confirm-icon" aria-hidden="true">GH</div><h2>断开 GitHub？</h2><p>这会清除当前浏览器中的 GitHub 登录会话。已保存的本机流程不会被删除。</p><div class="dialog-actions"><button value="cancel" class="ghost">取消</button><button value="confirm" class="primary">确认断开</button></div></form>`;
+  document.body.append(dialog); dialog.showModal();
+  dialog.addEventListener('close', async () => {
+    const confirmed = dialog.returnValue === 'confirm';
+    dialog.remove();
+    if (!confirmed) return;
+    sessionStorage.removeItem('github-token'); token = ''; githubInstallationSettingsUrl = ''; githubLogin = ''; cloudWorkflowStorage = false;
+    await fetch(githubAppApiUrl('/api/auth/github/logout'), { method: 'POST' }).catch(() => undefined);
+    connect();
+  }, { once: true });
 }
 async function syncLocalWorkflows() {
   if (!cloudWorkflowStorage || !workflows.length) return;
@@ -264,7 +286,7 @@ function openRepositoryManagement() {
 function render() {
   const manageRepositories = githubInstallationSettingsUrl ? '<button id="manage-repositories" class="account-menu-item">管理授权仓库 ↗</button>' : '';
   const account = githubLogin ? `GitHub · @${escape(githubLogin)}` : '账户与设置';
-  const push = pushConfigured ? `<button id="push-settings" class="ghost" ${pushSubscribed ? 'disabled title="浏览器通知已开启"' : ''}>${pushSubscribed ? '通知已开启' : '开启通知'}</button>` : '';
+  const push = pushConfigured ? `<button id="push-settings" class="account-menu-item" ${pushSubscribed ? 'disabled title="浏览器通知已开启"' : ''}>${pushSubscribed ? '通知已开启' : '开启通知'}</button>` : '';
   app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">PR<span>FLOW</span></a><nav aria-label="主导航"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">流程总览</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">＋ 新建流程</button></nav><div class="topbar-actions"><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}<button id="ai-settings-top" class="account-menu-item">AI 设置</button><button id="disconnect" class="account-menu-item danger">断开 GitHub</button></div></div></div></header><section id="content"></section></main>`;
   const accountMenuToggle = document.querySelector<HTMLButtonElement>('#account-menu-toggle')!, accountMenuPanel = document.querySelector<HTMLElement>('#account-menu-panel')!;
   const accountMenu = accountMenuToggle.closest<HTMLElement>('.account-menu')!;
@@ -281,7 +303,7 @@ function render() {
   document.querySelector('#ai-settings-top')!.addEventListener('click', showAiSettings);
   document.querySelector('#manage-repositories')?.addEventListener('click', openRepositoryManagement);
   document.querySelector('#push-settings')?.addEventListener('click', () => void enablePushNotifications());
-  document.querySelector('#disconnect')!.addEventListener('click', async () => { sessionStorage.removeItem('github-token'); token = ''; githubInstallationSettingsUrl = ''; githubLogin = ''; cloudWorkflowStorage = false; await fetch(githubAppApiUrl('/api/auth/github/logout'), { method: 'POST' }).catch(() => undefined); connect(); });
+  document.querySelector('#disconnect')!.addEventListener('click', showDisconnectDialog);
   renderContent();
 }
 
