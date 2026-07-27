@@ -6,7 +6,7 @@
 
 1. Open the target Supabase project and choose **SQL Editor**.
 2. Create a new query.
-3. Copy and run the migration files in numerical order. For a new database, run `001_users_and_workflows.sql` and then `002_normalize_workflow_payloads.sql`.
+3. Copy and run the migration files in numerical order. For a new database, run `001_users_and_workflows.sql` through `004_workflow_stage_states.sql`.
 4. Confirm that `pr_helper_users` and `pr_helper_workflows` appear in Table Editor.
 
 After that, configure the same project's pooled Postgres connection string as `DATABASE_URL` in Vercel. The application will return a clear migration-required error instead of attempting to change schema when the tables are missing.
