@@ -385,7 +385,7 @@ function hideNativeOnlyTooltip() { if (nativeOnlyTooltip) nativeOnlyTooltip.hidd
 function mergeErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : '合并失败';
   return message.includes('Resource not accessible by integration')
-    ? 'GitHub App 缺少 Contents: Read & write 权限，更新权限后请重新批准该 App 安装。'
+    ? 'GitHub App 当前无权合并 PR。请确认 Contents 与 Pull requests 均为 Read & write；权限更新后，到 GitHub 已安装应用中重新批准或重新安装 PR Helper，再重试。'
     : message;
 }
 function showMergeDialog(index: number) {
