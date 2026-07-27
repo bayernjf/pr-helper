@@ -16,6 +16,7 @@ type Review = { state: string };
 type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
 type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string };
 type MergeResult = { merged: boolean; message?: string; sha?: string };
+type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
 let token = sessionStorage.getItem('github-token') || '';
@@ -33,6 +34,7 @@ let githubLogin = '';
 let cloudWorkflowStorage = false;
 let pendingLocalWorkflowSync = false;
 let cloudWorkflowSyncError = '';
+let actionQueue: ActionQueueItem[] = [];
 let repositoryManagementWindow: Window | null = null;
 let repositoryManagementTimer: number | undefined;
 const mergingStages = new Set<number>();
@@ -83,6 +85,15 @@ async function loadCloudWorkflows() {
     else pendingLocalWorkflowSync = workflows.length > 0;
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : '无法连接云端流程存储'; }
 }
+async function loadActionQueue() {
+  if (!cloudWorkflowStorage) { actionQueue = []; return; }
+  try {
+    const response = await fetch(githubAppApiUrl('/api/inbox'));
+    if (!response.ok) return;
+    const payload = await response.json() as { items?: ActionQueueItem[] };
+    actionQueue = Array.isArray(payload.items) ? payload.items : [];
+  } catch { /* The workflow dashboard remains available when the optional queue cannot load. */ }
+}
 async function syncLocalWorkflows() {
   if (!cloudWorkflowStorage || !workflows.length) return;
   try {
@@ -93,7 +104,19 @@ async function syncLocalWorkflows() {
     pendingLocalWorkflowSync = false; render(); showToast('本机流程已同步到你的 GitHub 账号。');
   } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : '流程同步失败'; render(); showToast(`流程同步失败，本机数据仍然保留：${cloudWorkflowSyncError}`); }
 }
-function showToast(message: string) { const previous = document.querySelector('.toast'); previous?.remove(); const toast = document.createElement('div'); toast.className = 'toast'; toast.setAttribute('role', 'status'); toast.textContent = message; document.body.append(toast); window.setTimeout(() => toast.remove(), 3200); }
+function showToast(message: string) {
+  const previous = document.querySelector<HTMLElement>('.toast');
+  previous?.hidePopover?.();
+  previous?.remove();
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.setAttribute('role', 'status');
+  toast.setAttribute('popover', 'manual');
+  toast.textContent = message;
+  document.body.append(toast);
+  toast.showPopover?.();
+  window.setTimeout(() => { toast.hidePopover?.(); toast.remove(); }, 3200);
+}
 function persistPullRequestDrafts(next: typeof pullRequestDrafts) { pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); draftStorageSynchronized = true; } catch { draftStorageSynchronized = false; showToast('草稿保存失败'); } }
 persistPullRequestDrafts(pullRequestDrafts);
 function loadAiConfig(): AiConfig | null { try { return JSON.parse(sessionStorage.getItem('pr-helper-ai') || 'null') as AiConfig | null; } catch { return null; } }
@@ -144,7 +167,7 @@ async function restoreConnection() {
 
 async function init() {
   app().innerHTML = '<main class="connect"><p class="eyebrow">GITHUB</p><h1>正在载入你的工作台…</h1></main>';
-  try { repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated'); await loadCloudWorkflows(); render(); } catch (err) { connect(err instanceof Error ? err.message : '无法读取仓库'); }
+  try { repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated'); await loadCloudWorkflows(); await loadActionQueue(); render(); } catch (err) { connect(err instanceof Error ? err.message : '无法读取仓库'); }
 }
 
 async function refreshAuthorizedRepositories() {
@@ -200,10 +223,13 @@ function overview() {
   const content = document.querySelector('#content')!;
   const storageWarning = cloudWorkflowSyncError ? `<section class="local-sync-notice is-error"><div><b>云端流程同步失败</b><p>${escape(cloudWorkflowSyncError)}。当前流程只保存在这台设备的浏览器中。</p></div></section>` : '';
   const syncPrompt = pendingLocalWorkflowSync ? `<section class="local-sync-notice"><div><b>发现 ${workflows.length} 个仅保存在这台设备上的流程</b><p>确认后会同步到 GitHub 账号 ${githubLogin ? `@${escape(githubLogin)}` : ''}，以后可在其他设备继续使用。</p></div><button id="sync-local-workflows" class="ghost">同步到账号</button></section>` : '';
-  content.innerHTML = `<section class="hero"><p class="eyebrow">WORKSPACE</p><h1>只在需要你决策时，打断你。</h1><p>所有仓库的 PR 编排将聚合在这里。当前先管理配置，下一步接入 PR、Actions 和 Approval 监控。</p><button id="new-flow" class="primary">创建流程</button></section>${storageWarning}${syncPrompt}<section class="section-head"><div><p class="eyebrow">SAVED FLOWS</p><h2>${workflows.length ? `${workflows.length} 个已保存流程` : '还没有流程'}</h2></div></section><section class="flow-grid">${workflows.length ? workflows.map(card).join('') : `<article class="empty"><h3>从一个仓库开始</h3><p>选择真实分支，配置 feature → dev → main 等发布链路。</p><button id="empty-new" class="ghost">创建第一个流程</button></article>`}</section>`;
+  const queue = actionQueue.length ? `<section class="action-queue"><div class="section-head"><div><p class="eyebrow">NEEDS YOUR ATTENTION</p><h2>需要你处理 · ${actionQueue.length}</h2></div><button id="refresh-action-queue" class="ghost">刷新队列</button></div><div class="action-queue-list">${actionQueue.map(item => `<button class="action-queue-item ${escape(item.kind)}" data-open-queue="${escape(item.workflowId)}"><span>${item.kind === 'checks-failed' ? '!' : item.kind === 'needs-approval' ? '✓' : '→'}</span><div><b>${escape(item.workflowName)} · 第 ${item.stageIndex + 1} 步</b><p>${escape(item.repository)} · ${escape(item.source)} → ${escape(item.target)}${item.pullNumber ? ` · PR #${item.pullNumber}` : ''}</p></div><em>${escape(item.message)}</em></button>`).join('')}</div></section>` : '';
+  content.innerHTML = `<section class="hero"><p class="eyebrow">WORKSPACE</p><h1>只在需要你决策时，打断你。</h1><p>跨仓库的 PR 编排、门禁与待办，统一在这里处理。</p><button id="new-flow" class="primary">创建流程</button></section>${storageWarning}${syncPrompt}${queue}<section class="section-head"><div><p class="eyebrow">SAVED FLOWS</p><h2>${workflows.length ? `${workflows.length} 个已保存流程` : '还没有流程'}</h2></div></section><section class="flow-grid">${workflows.length ? workflows.map(card).join('') : `<article class="empty"><h3>从一个仓库开始</h3><p>选择真实分支，配置 feature → dev → main 等发布链路。</p><button id="empty-new" class="ghost">创建第一个流程</button></article>`}</section>`;
   document.querySelector('#new-flow')!.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
+  document.querySelector('#refresh-action-queue')?.addEventListener('click', async () => { await loadActionQueue(); render(); showToast('待办队列已刷新。'); });
+  document.querySelectorAll<HTMLButtonElement>('[data-open-queue]').forEach(button => button.addEventListener('click', () => { active = workflows.find(item => item.id === button.dataset.openQueue) || null; goTo('detail'); }));
   bindFlowCards();
 }
 function card(flow: Workflow) { const summary = workflowSummary(flow); return `<article class="flow-card"><p class="eyebrow">${escape(flow.repository)}</p><h3>${escape(flow.name)}</h3><p class="route">${escape(summary.route)}</p><footer><span>${summary.stepCount} 个步骤 · 尚未执行</span><button data-open="${flow.id}" class="link-button">查看流程 →</button></footer></article>`; }

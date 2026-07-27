@@ -18,7 +18,7 @@ function responseMessage(error: unknown) {
 export default async function handler(request: ApiRequest, response: ApiResponse) {
   try {
     const { session } = currentGitHubIdentity(request);
-    const identity = { login: session.login, githubUserId: session.githubUserId };
+    const identity = { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId };
     if (!request.method || request.method === 'GET') {
       response.status(200).json({ workflows: await listWorkflows(process.env, identity) });
       return;
