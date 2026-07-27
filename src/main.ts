@@ -104,7 +104,19 @@ async function syncLocalWorkflows() {
     pendingLocalWorkflowSync = false; render(); showToast('本机流程已同步到你的 GitHub 账号。');
   } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : '流程同步失败'; render(); showToast(`流程同步失败，本机数据仍然保留：${cloudWorkflowSyncError}`); }
 }
-function showToast(message: string) { const previous = document.querySelector('.toast'); previous?.remove(); const toast = document.createElement('div'); toast.className = 'toast'; toast.setAttribute('role', 'status'); toast.textContent = message; document.body.append(toast); window.setTimeout(() => toast.remove(), 3200); }
+function showToast(message: string) {
+  const previous = document.querySelector<HTMLElement>('.toast');
+  previous?.hidePopover?.();
+  previous?.remove();
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.setAttribute('role', 'status');
+  toast.setAttribute('popover', 'manual');
+  toast.textContent = message;
+  document.body.append(toast);
+  toast.showPopover?.();
+  window.setTimeout(() => { toast.hidePopover?.(); toast.remove(); }, 3200);
+}
 function persistPullRequestDrafts(next: typeof pullRequestDrafts) { pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); draftStorageSynchronized = true; } catch { draftStorageSynchronized = false; showToast('草稿保存失败'); } }
 persistPullRequestDrafts(pullRequestDrafts);
 function loadAiConfig(): AiConfig | null { try { return JSON.parse(sessionStorage.getItem('pr-helper-ai') || 'null') as AiConfig | null; } catch { return null; } }
