@@ -22,6 +22,14 @@ type CommitStatus = { state: string };
 type Review = { state: string };
 type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
 
+export function repairCommitSha(pull: Pick<Pull, 'merged_at' | 'merge_commit_sha' | 'head'>) {
+  return pull.merged_at ? pull.merge_commit_sha || pull.head.sha : pull.head.sha;
+}
+
+export function compactFailureDetails(parts: Array<string | undefined | null>) {
+  return parts.filter((part): part is string => Boolean(part)).join(' ').replace(/\s+/g, ' ').trim().slice(0, 800);
+}
+
 export type ActionableStage = {
   workflowId: string;
   workflowName: string;
@@ -95,22 +103,32 @@ export async function codexRepairContext(environment: Record<string, string | un
   type RepairPull = Pull & { title: string; body?: string | null; html_url: string; head: { sha: string; ref: string }; base: { ref: string } };
   type RepairFile = { filename: string; status: string; additions: number; deletions: number; patch?: string };
   type WorkflowRun = { id: number; name: string; html_url: string; conclusion: string | null; head_sha: string };
-  type WorkflowJob = { name: string; html_url: string; conclusion: string | null; status: string };
+  type RepairCheckRun = CheckRun & { name?: string; details_url?: string; output?: { title?: string; summary?: string; text?: string } };
+  type WorkflowStep = { name: string; conclusion: string | null; status: string; number?: number };
+  type WorkflowJob = { name: string; html_url: string; conclusion: string | null; status: string; steps?: WorkflowStep[] };
   const pull = await installationRequest<RepairPull>(config, identity.installationId, `/repos/${owner}/${name}/pulls/${pullNumber}`);
+  const checkedSha = repairCommitSha(pull);
   const [checks, commitStatuses, files, actionRuns] = await Promise.all([
-    installationRequest<{ check_runs: (CheckRun & { name?: string; details_url?: string })[] }>(config, identity.installationId, `/repos/${owner}/${name}/commits/${pull.head.sha}/check-runs?per_page=100`),
-    installationRequest<{ statuses: (CommitStatus & { context?: string; target_url?: string })[] }>(config, identity.installationId, `/repos/${owner}/${name}/commits/${pull.head.sha}/status`),
+    installationRequest<{ check_runs: RepairCheckRun[] }>(config, identity.installationId, `/repos/${owner}/${name}/commits/${checkedSha}/check-runs?per_page=100`),
+    installationRequest<{ statuses: (CommitStatus & { context?: string; target_url?: string })[] }>(config, identity.installationId, `/repos/${owner}/${name}/commits/${checkedSha}/status`),
     installationRequest<RepairFile[]>(config, identity.installationId, `/repos/${owner}/${name}/pulls/${pullNumber}/files?per_page=100`),
-    installationRequest<{ workflow_runs: WorkflowRun[] }>(config, identity.installationId, `/repos/${owner}/${name}/actions/runs?head_sha=${pull.head.sha}&per_page=20`).catch(() => ({ workflow_runs: [] })),
+    installationRequest<{ workflow_runs: WorkflowRun[] }>(config, identity.installationId, `/repos/${owner}/${name}/actions/runs?head_sha=${checkedSha}&per_page=20`).catch(() => ({ workflow_runs: [] })),
   ]);
   const failedRuns = actionRuns.workflow_runs.filter(run => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(run.conclusion || ''));
   const failedJobs = (await Promise.all(failedRuns.map(async run => ({ run, jobs: await installationRequest<{ jobs: WorkflowJob[] }>(config, identity.installationId!, `/repos/${owner}/${name}/actions/runs/${run.id}/jobs?per_page=100`).catch(() => ({ jobs: [] })) })))).flatMap(({ run, jobs }) => jobs.jobs.filter(job => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(job.conclusion || '')).map(job => ({ ...job, run })));
   const failedChecks = [
-    ...checks.check_runs.filter(check => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(check.conclusion || '')).map(check => `- ${check.name || 'Check'}${check.details_url ? `: ${check.details_url}` : ''}`),
+    ...checks.check_runs.filter(check => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(check.conclusion || '')).map(check => {
+      const details = compactFailureDetails([check.output?.title, check.output?.summary, check.output?.text]);
+      return `- ${check.name || 'Check'}${check.details_url ? `: ${check.details_url}` : ''}${details ? `\n  - 错误摘要：${details}` : ''}`;
+    }),
     ...commitStatuses.statuses.filter(status => ['failure', 'error'].includes(status.state)).map(status => `- ${status.context || 'Commit status'}${status.target_url ? `: ${status.target_url}` : ''}`),
   ];
   const fileSummary = files.map(file => `- \`${file.filename}\` (${file.status}, +${file.additions}/-${file.deletions})${file.patch ? `\n  - diff: \`${file.patch.replaceAll('`', "'").replace(/\s+/g, ' ').slice(0, 360)}\`` : ''}`).join('\n');
-  const markdown = `# 修复 CI 失败\n\n## 目标\n修复当前 PR 的失败门禁；运行相关测试后汇报结果。不要执行 git push、创建 PR 或合并。\n\n## PR\n- 仓库：\`${workflow.repository}\`\n- PR：[#${pullNumber} ${pull.title}](${pull.html_url})\n- 分支：\`${pull.head.ref}\` → \`${pull.base.ref}\`\n- Head SHA：\`${pull.head.sha}\`\n- 流程步骤：${stageIndex + 1}（\`${stage.source}\` → \`${stage.target}\`）\n\n## 失败检查\n${failedChecks.length ? failedChecks.join('\n') : '- GitHub 未返回具体失败 check；请打开 PR 的 Actions 页面确认。'}\n\n## 失败 Actions Job\n${failedJobs.length ? failedJobs.map(job => `- [${job.run.name} / ${job.name}](${job.html_url || job.run.html_url})`).join('\n') : failedRuns.length ? failedRuns.map(run => `- [${run.name}](${run.html_url})`).join('\n') : '- 未读取到 Actions job；请从 PR 链接进入 Actions 日志。'}\n\n## PR 改动摘要\n${fileSummary || '- 未读取到改动文件。'}\n\n## 执行要求\n1. 在本地复现失败，优先阅读上方失败 job 日志。\n2. 只修改解决本次 CI 失败所需的代码。\n3. 运行最小相关测试；若可行再运行完整检查。\n4. 输出根因、修改内容、执行过的命令和结果。`;
+  const failedJobSummary = failedJobs.length ? failedJobs.map(job => {
+    const failedSteps = job.steps?.filter(step => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(step.conclusion || '')).map(step => step.name) || [];
+    return `- [${job.run.name} / ${job.name}](${job.html_url || job.run.html_url})${failedSteps.length ? `\n  - 失败步骤：${failedSteps.join('、')}` : ''}`;
+  }).join('\n') : failedRuns.length ? failedRuns.map(run => `- [${run.name}](${run.html_url})\n  - 未读取到失败 Job；请打开该运行日志确认。`).join('\n') : '- 未读取到 Actions Job；请从 PR 链接进入 Actions 日志。';
+  const markdown = `# 修复 CI 失败\n\n## 目标\n修复当前 PR 的失败门禁；运行相关测试后汇报结果。不要执行 git push、创建 PR 或合并。\n\n## PR\n- 仓库：\`${workflow.repository}\`\n- PR：[#${pullNumber} ${pull.title}](${pull.html_url})\n- 分支：\`${pull.head.ref}\` → \`${pull.base.ref}\`\n- 检查 SHA：\`${checkedSha}\`${pull.merged_at ? '（合并提交）' : ''}\n- 流程步骤：${stageIndex + 1}（\`${stage.source}\` → \`${stage.target}\`）\n\n## 失败检查\n${failedChecks.length ? failedChecks.join('\n') : '- GitHub 未返回具体失败 check；请打开 PR 的 Actions 页面确认。'}\n\n## 失败 Actions Job\n${failedJobSummary}\n\n## PR 改动摘要\n${fileSummary || '- 未读取到改动文件。'}\n\n## 执行要求\n1. 在本地复现失败，优先阅读上方失败 Job 日志与错误摘要。\n2. 只修改解决本次 CI 失败所需的代码。\n3. 运行最小相关测试；若可行再运行完整检查。\n4. 输出根因、修改内容、执行过的命令和结果。`;
   return { markdown, pullNumber, pullUrl: pull.html_url };
 }
 
@@ -129,6 +147,10 @@ export function storedWorkflowFromPayload(payload: unknown): StoredWorkflow | un
 
 export function matchingWorkflowStages(workflows: readonly StoredWorkflow[], pull: Pick<PullRequestWebhook, 'repository' | 'source' | 'target'>) {
   return workflows.flatMap(workflow => workflow.repository !== pull.repository ? [] : workflow.stages.flatMap((stage, stageIndex) => stage.source === pull.source && stage.target === pull.target ? [{ workflow, stageIndex }] : []));
+}
+
+export function initialWebhookChecksState(mergedAt?: string | null) {
+  return mergedAt ? 'pending' : 'unknown';
 }
 
 export async function listWorkflows(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }) {
@@ -165,7 +187,8 @@ export async function projectPullRequestWebhook(environment: Record<string, stri
     return workflow ? [{ userId: row.user_id, workflowId: row.id, workflow }] : [];
   });
   const matches = tracked.flatMap(item => matchingWorkflowStages([item.workflow], pull).map(match => ({ ...item, stageIndex: match.stageIndex })));
-  await Promise.all(matches.map(match => sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, repository, source, target, pull_number, pull_state, merged_at) VALUES (${match.userId}, ${match.workflowId}, ${match.stageIndex}, ${pull.repository}, ${pull.source}, ${pull.target}, ${pull.number}, ${pull.mergedAt ? 'merged' : pull.state}, ${pull.mergedAt || null}) ON CONFLICT (user_id, workflow_id, stage_index) DO UPDATE SET pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, updated_at = now()`));
+  const checksState = initialWebhookChecksState(pull.mergedAt);
+  await Promise.all(matches.map(match => sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, repository, source, target, pull_number, pull_state, merged_at, checks_state, checks_passed, checks_total) VALUES (${match.userId}, ${match.workflowId}, ${match.stageIndex}, ${pull.repository}, ${pull.source}, ${pull.target}, ${pull.number}, ${pull.mergedAt ? 'merged' : pull.state}, ${pull.mergedAt || null}, ${checksState}, ${0}, ${0}) ON CONFLICT (user_id, workflow_id, stage_index) DO UPDATE SET pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, checks_state = CASE WHEN EXCLUDED.merged_at IS NOT NULL THEN EXCLUDED.checks_state ELSE workflow_stage_states.checks_state END, checks_passed = CASE WHEN EXCLUDED.merged_at IS NOT NULL THEN 0 ELSE workflow_stage_states.checks_passed END, checks_total = CASE WHEN EXCLUDED.merged_at IS NOT NULL THEN 0 ELSE workflow_stage_states.checks_total END, updated_at = now()`));
   return matches.length;
 }
 
