@@ -1,6 +1,5 @@
 {
   "framework": "vite",
   "buildCommand": "npm run build",
-  "outputDirectory": "dist",
-  "crons": [{ "path": "/api/cron/reconcile", "schedule": "*/10 * * * *" }]
+  "outputDirectory": "dist"
 }
