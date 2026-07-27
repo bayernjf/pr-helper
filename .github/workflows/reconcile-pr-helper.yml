@@ -1,0 +1,21 @@
+name: Reconcile PR Helper monitoring
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Calibrate active workflows
+        env:
+          CRON_SECRET: ${{ secrets.PR_HELPER_CRON_SECRET }}
+        run: |
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${CRON_SECRET}" \
+            https://pr-helper-ten.vercel.app/api/cron/reconcile
