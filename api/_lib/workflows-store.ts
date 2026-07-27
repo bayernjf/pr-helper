@@ -1,4 +1,6 @@
 import postgres from 'postgres';
+import { installationRequest } from './github-api.js';
+import { parseGithubAppConfig } from './github-app.js';
 
 export type StoredWorkflow = {
   id: string;
@@ -9,10 +11,27 @@ export type StoredWorkflow = {
 
 type DatabaseUser = { id: string };
 type WorkflowRow = { payload: unknown };
-type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string };
+type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string; github_installation_id?: string | null };
 
 type WebhookDelivery = { deliveryId: string; eventName: string; action?: string; repository?: string };
 export type PullRequestWebhook = { repository: string; source: string; target: string; number: number; state: string; mergedAt?: string | null };
+type Pull = { number: number; state: string; merged_at: string | null; merge_commit_sha?: string | null; mergeable?: boolean | null; mergeable_state?: string | null; head: { sha: string } };
+type CheckRun = { status: string; conclusion: string | null };
+type CommitStatus = { state: string };
+type Review = { state: string };
+type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
+
+export type ActionableStage = {
+  workflowId: string;
+  workflowName: string;
+  repository: string;
+  stageIndex: number;
+  source: string;
+  target: string;
+  pullNumber: number | null;
+  kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create';
+  message: string;
+};
 
 function databaseUrl(environment: Record<string, string | undefined>) {
   const value = environment.DATABASE_URL?.trim();
@@ -32,9 +51,9 @@ function query(environment: Record<string, string | undefined>) {
   return client;
 }
 
-async function userForLogin(environment: Record<string, string | undefined>, login: string, githubUserId?: number) {
+async function userForLogin(environment: Record<string, string | undefined>, login: string, githubUserId?: number, installationId?: string) {
   const sql = query(environment);
-  const rows = await sql<DatabaseUser[]>`INSERT INTO pr_helper_users (github_login, github_user_id) VALUES (${login}, ${githubUserId || null}) ON CONFLICT (github_login) DO UPDATE SET github_user_id = COALESCE(EXCLUDED.github_user_id, pr_helper_users.github_user_id), updated_at = now() RETURNING id`;
+  const rows = await sql<DatabaseUser[]>`INSERT INTO pr_helper_users (github_login, github_user_id, github_installation_id) VALUES (${login}, ${githubUserId || null}, ${installationId || null}) ON CONFLICT (github_login) DO UPDATE SET github_user_id = COALESCE(EXCLUDED.github_user_id, pr_helper_users.github_user_id), github_installation_id = COALESCE(EXCLUDED.github_installation_id, pr_helper_users.github_installation_id), updated_at = now() RETURNING id`;
   return rows[0];
 }
 
@@ -55,22 +74,22 @@ export function matchingWorkflowStages(workflows: readonly StoredWorkflow[], pul
   return workflows.flatMap(workflow => workflow.repository !== pull.repository ? [] : workflow.stages.flatMap((stage, stageIndex) => stage.source === pull.source && stage.target === pull.target ? [{ workflow, stageIndex }] : []));
 }
 
-export async function listWorkflows(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number }) {
-  const user = await userForLogin(environment, identity.login, identity.githubUserId);
+export async function listWorkflows(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
   const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} ORDER BY updated_at DESC`;
   return rows.map(row => storedWorkflowFromPayload(row.payload)).filter((workflow): workflow is StoredWorkflow => Boolean(workflow));
 }
 
-export async function upsertWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number }, workflow: StoredWorkflow) {
+export async function upsertWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflow: StoredWorkflow) {
   if (!isStoredWorkflow(workflow)) throw new Error('流程数据无效');
-  const user = await userForLogin(environment, identity.login, identity.githubUserId);
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
   await sql`INSERT INTO pr_helper_workflows (id, user_id, payload) VALUES (${workflow.id}, ${user.id}, ${sql.json(workflow)}) ON CONFLICT (user_id, id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`;
 }
 
-export async function removeWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number }, workflowId: string) {
-  const user = await userForLogin(environment, identity.login, identity.githubUserId);
+export async function removeWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
   await sql`DELETE FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId}`;
 }
@@ -83,7 +102,7 @@ export async function recordWebhookDelivery(environment: Record<string, string |
 
 export async function projectPullRequestWebhook(environment: Record<string, string | undefined>, pull: PullRequestWebhook) {
   const sql = query(environment);
-  const rows = await sql<TrackedWorkflowRow[]>`SELECT user_id, id, payload FROM pr_helper_workflows`;
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
   const tracked = rows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
     return workflow ? [{ userId: row.user_id, workflowId: row.id, workflow }] : [];
@@ -91,4 +110,88 @@ export async function projectPullRequestWebhook(environment: Record<string, stri
   const matches = tracked.flatMap(item => matchingWorkflowStages([item.workflow], pull).map(match => ({ ...item, stageIndex: match.stageIndex })));
   await Promise.all(matches.map(match => sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, repository, source, target, pull_number, pull_state, merged_at) VALUES (${match.userId}, ${match.workflowId}, ${match.stageIndex}, ${pull.repository}, ${pull.source}, ${pull.target}, ${pull.number}, ${pull.mergedAt ? 'merged' : pull.state}, ${pull.mergedAt || null}) ON CONFLICT (user_id, workflow_id, stage_index) DO UPDATE SET pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, updated_at = now()`));
   return matches.length;
+}
+
+function checkSummary(checkRuns: CheckRun[], statuses: CommitStatus[]) {
+  const checks = [...checkRuns.map(check => check.conclusion), ...statuses.map(status => status.state === 'success' ? 'success' : ['failure', 'error'].includes(status.state) ? 'failure' : null)];
+  const passed = checks.filter(check => check === 'success').length;
+  const failed = checks.some(check => ['failure', 'cancelled', 'timed_out', 'action_required', 'error'].includes(check || ''));
+  return { state: failed ? 'failure' : checks.length > 0 && passed === checks.length ? 'success' : 'pending', passed, total: checks.length };
+}
+
+function ownerAndName(repository: string) {
+  const [owner, name] = repository.split('/');
+  if (!owner || !name) throw new Error(`无效仓库：${repository}`);
+  return { owner, name };
+}
+
+async function pullForStage(environment: Record<string, string | undefined>, installationId: string, workflow: StoredWorkflow, stage: StoredWorkflow['stages'][number]) {
+  const config = parseGithubAppConfig(environment);
+  const { owner, name } = ownerAndName(workflow.repository);
+  const path = `/repos/${owner}/${name}/pulls?state=all&head=${encodeURIComponent(`${owner}:${stage.source}`)}&base=${encodeURIComponent(stage.target)}&per_page=10`;
+  const pulls = await installationRequest<Pull[]>(config, installationId, path);
+  return pulls[0];
+}
+
+async function reconcileOneStage(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, eventName?: string) {
+  if (!row.github_installation_id) return false;
+  const stage = workflow.stages[stageIndex];
+  const pull = await pullForStage(environment, row.github_installation_id, workflow, stage);
+  const sql = query(environment);
+  if (!pull) {
+    await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, repository, source, target, pull_state, checks_state, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${workflow.repository}, ${stage.source}, ${stage.target}, 'none', 'unknown', ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_index) DO UPDATE SET pull_number = NULL, pull_state = 'none', merged_at = NULL, head_sha = NULL, checks_state = 'unknown', checks_passed = 0, checks_total = 0, approvals = 0, required_approvals = 0, mergeable = NULL, mergeable_state = NULL, last_event = EXCLUDED.last_event, updated_at = now()`;
+    return true;
+  }
+  const { owner, name } = ownerAndName(workflow.repository);
+  const config = parseGithubAppConfig(environment);
+  const sha = pull.merged_at ? pull.merge_commit_sha : pull.head.sha;
+  const [runs, statuses, reviews, protection] = await Promise.all([
+    sha ? installationRequest<{ check_runs: CheckRun[] }>(config, row.github_installation_id, `/repos/${owner}/${name}/commits/${sha}/check-runs?per_page=100`).catch(() => ({ check_runs: [] })) : Promise.resolve({ check_runs: [] }),
+    sha ? installationRequest<{ statuses: CommitStatus[] }>(config, row.github_installation_id, `/repos/${owner}/${name}/commits/${sha}/status`).catch(() => ({ statuses: [] })) : Promise.resolve({ statuses: [] }),
+    pull.merged_at ? Promise.resolve([] as Review[]) : installationRequest<Review[]>(config, row.github_installation_id, `/repos/${owner}/${name}/pulls/${pull.number}/reviews?per_page=100`).catch(() => []),
+    pull.merged_at ? Promise.resolve(null as BranchProtection | null) : installationRequest<BranchProtection>(config, row.github_installation_id, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}/protection`).catch(() => null),
+  ]);
+  const checks = checkSummary(runs.check_runs, statuses.statuses);
+  const requiredApprovals = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
+  const approvals = reviews.filter(review => review.state === 'APPROVED').length;
+  await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${workflow.repository}, ${stage.source}, ${stage.target}, ${pull.number}, ${pull.merged_at ? 'merged' : pull.state}, ${pull.merged_at || null}, ${sha || null}, ${checks.state}, ${checks.passed}, ${checks.total}, ${approvals}, ${requiredApprovals}, ${pull.mergeable ?? null}, ${pull.mergeable_state || null}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_index) DO UPDATE SET pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, head_sha = EXCLUDED.head_sha, checks_state = EXCLUDED.checks_state, checks_passed = EXCLUDED.checks_passed, checks_total = EXCLUDED.checks_total, approvals = EXCLUDED.approvals, required_approvals = EXCLUDED.required_approvals, mergeable = EXCLUDED.mergeable, mergeable_state = EXCLUDED.mergeable_state, last_event = EXCLUDED.last_event, updated_at = now()`;
+  return true;
+}
+
+export async function reconcileWorkflowStages(environment: Record<string, string | undefined>, filter: { repository?: string; installationId?: string; eventName?: string } = {}) {
+  const sql = query(environment);
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
+  const tracked = rows.flatMap(row => {
+    const workflow = storedWorkflowFromPayload(row.payload);
+    if (!workflow || (filter.repository && workflow.repository !== filter.repository) || (filter.installationId && row.github_installation_id !== filter.installationId)) return [];
+    return workflow.stages.map((_, stageIndex) => ({ row, workflow, stageIndex }));
+  });
+  const results = await Promise.allSettled(tracked.map(item => reconcileOneStage(environment, item.row, item.workflow, item.stageIndex, filter.eventName)));
+  const failed = results.find(result => result.status === 'rejected');
+  if (failed?.status === 'rejected') throw failed.reason;
+  return results.filter(result => result.status === 'fulfilled' && result.value).length;
+}
+
+type StageStateRow = { workflow_id: string; stage_index: number; repository: string; source: string; target: string; pull_number: number | null; pull_state: string; checks_state: string; approvals: number; required_approvals: number; mergeable: boolean | null; mergeable_state: string | null };
+
+export async function listActionableStages(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<ActionableStage[]> {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  const workflows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id}`;
+  const states = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, repository, source, target, pull_number, pull_state, checks_state, approvals, required_approvals, mergeable, mergeable_state FROM workflow_stage_states WHERE user_id = ${user.id}`;
+  const stateByStep = new Map(states.map(state => [`${state.workflow_id}:${state.stage_index}`, state]));
+  return workflows.flatMap(row => {
+    const workflow = storedWorkflowFromPayload(row.payload);
+    if (!workflow) return [];
+    return workflow.stages.reduce<ActionableStage[]>((items, stage, stageIndex) => {
+      const state = stateByStep.get(`${workflow.id}:${stageIndex}`);
+      const previous = stageIndex ? stateByStep.get(`${workflow.id}:${stageIndex - 1}`) : undefined;
+      const base = { workflowId: workflow.id, workflowName: workflow.name, repository: workflow.repository, stageIndex, source: stage.source, target: stage.target, pullNumber: state?.pull_number || null };
+      if (state?.checks_state === 'failure') items.push({ ...base, kind: 'checks-failed', message: `第 ${stageIndex + 1} 步 Actions 失败` });
+      else if (state?.pull_state === 'open' && state.approvals < state.required_approvals) items.push({ ...base, kind: 'needs-approval', message: `PR 还需要 ${state.required_approvals - state.approvals} 个 Approval` });
+      else if (state?.pull_state === 'open' && state.checks_state === 'success' && state.approvals >= state.required_approvals && state.mergeable !== false && !['dirty', 'behind', 'blocked'].includes(state.mergeable_state || '')) items.push({ ...base, kind: 'ready-to-merge', message: 'PR 已满足合并条件' });
+      else if (!state?.pull_number && (stageIndex === 0 || previous?.pull_state === 'merged' && previous.checks_state === 'success')) items.push({ ...base, kind: 'ready-to-create', message: '可以创建下一步 PR' });
+      return items;
+    }, []);
+  });
 }

@@ -14,3 +14,4 @@ After that, configure the same project's pooled Postgres connection string as `D
 ## Future schema changes
 
 Add a new, ordered SQL file such as `003_add_workflow_metadata.sql`. Apply it in Supabase SQL Editor (or a separately configured migration CI job) before deploying code that relies on it. Do not edit an already-applied migration.
+Run migrations in numeric order in the Supabase SQL Editor. `005_workflow_monitoring.sql` enables server-side monitoring, Vercel Cron reconciliation, and the action queue. Set `CRON_SECRET` in Vercel before deploying; Vercel sends it as the cron Authorization bearer token.

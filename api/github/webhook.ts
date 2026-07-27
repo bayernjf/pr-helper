@@ -1,7 +1,7 @@
 import { type ApiRequest, type ApiResponse } from '../_lib/http.js';
 import { verifyGithubWebhookSignature } from '../_lib/github-webhook.js';
 import { recordWebhookDelivery } from '../_lib/workflows-store.js';
-import { projectPullRequestWebhook } from '../_lib/workflows-store.js';
+import { projectPullRequestWebhook, reconcileWorkflowStages } from '../_lib/workflows-store.js';
 
 export const config = { api: { bodyParser: false } };
 
@@ -25,13 +25,16 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     const deliveryId = Array.isArray(request.headers?.['x-github-delivery']) ? request.headers?.['x-github-delivery'][0] : request.headers?.['x-github-delivery'];
     const eventName = Array.isArray(request.headers?.['x-github-event']) ? request.headers?.['x-github-event'][0] : request.headers?.['x-github-event'];
     if (!deliveryId || !eventName) throw new Error('GitHub Webhook 缺少事件标识');
-    const payload = JSON.parse(body) as { action?: string; repository?: { full_name?: string }; pull_request?: { number: number; state: string; merged_at?: string | null; head: { ref: string }; base: { ref: string } } };
+    const payload = JSON.parse(body) as { action?: string; repository?: { full_name?: string }; installation?: { id?: number }; pull_request?: { number: number; state: string; merged_at?: string | null; head: { ref: string }; base: { ref: string } } };
     const accepted = await recordWebhookDelivery(process.env, { deliveryId, eventName, action: payload.action, repository: payload.repository?.full_name });
     const pull = payload.pull_request;
     const projectedStages = accepted && eventName === 'pull_request' && pull && payload.repository?.full_name
       ? await projectPullRequestWebhook(process.env, { repository: payload.repository.full_name, source: pull.head.ref, target: pull.base.ref, number: pull.number, state: pull.state, mergedAt: pull.merged_at })
       : 0;
-    response.status(202).json({ accepted, duplicate: !accepted, projectedStages });
+    const reconciledStages = accepted && payload.repository?.full_name && payload.installation?.id
+      ? await reconcileWorkflowStages(process.env, { repository: payload.repository.full_name, installationId: String(payload.installation.id), eventName })
+      : 0;
+    response.status(202).json({ accepted, duplicate: !accepted, projectedStages, reconciledStages });
   } catch (error) {
     response.status(401).json({ message: error instanceof Error ? error.message : 'GitHub Webhook 处理失败' });
   }
