@@ -9,8 +9,10 @@ export type StoredWorkflow = {
 
 type DatabaseUser = { id: string };
 type WorkflowRow = { payload: unknown };
+type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string };
 
 type WebhookDelivery = { deliveryId: string; eventName: string; action?: string; repository?: string };
+export type PullRequestWebhook = { repository: string; source: string; target: string; number: number; state: string; mergedAt?: string | null };
 
 function databaseUrl(environment: Record<string, string | undefined>) {
   const value = environment.DATABASE_URL?.trim();
@@ -49,6 +51,10 @@ export function storedWorkflowFromPayload(payload: unknown): StoredWorkflow | un
   return isStoredWorkflow(value) ? value : undefined;
 }
 
+export function matchingWorkflowStages(workflows: readonly StoredWorkflow[], pull: Pick<PullRequestWebhook, 'repository' | 'source' | 'target'>) {
+  return workflows.flatMap(workflow => workflow.repository !== pull.repository ? [] : workflow.stages.flatMap((stage, stageIndex) => stage.source === pull.source && stage.target === pull.target ? [{ workflow, stageIndex }] : []));
+}
+
 export async function listWorkflows(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number }) {
   const user = await userForLogin(environment, identity.login, identity.githubUserId);
   const sql = query(environment);
@@ -73,4 +79,16 @@ export async function recordWebhookDelivery(environment: Record<string, string |
   const sql = query(environment);
   const rows = await sql`INSERT INTO github_webhook_deliveries (delivery_id, event_name, action, repository) VALUES (${delivery.deliveryId}, ${delivery.eventName}, ${delivery.action || null}, ${delivery.repository || null}) ON CONFLICT (delivery_id) DO NOTHING RETURNING delivery_id`;
   return rows.length > 0;
+}
+
+export async function projectPullRequestWebhook(environment: Record<string, string | undefined>, pull: PullRequestWebhook) {
+  const sql = query(environment);
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT user_id, id, payload FROM pr_helper_workflows`;
+  const tracked = rows.flatMap(row => {
+    const workflow = storedWorkflowFromPayload(row.payload);
+    return workflow ? [{ userId: row.user_id, workflowId: row.id, workflow }] : [];
+  });
+  const matches = tracked.flatMap(item => matchingWorkflowStages([item.workflow], pull).map(match => ({ ...item, stageIndex: match.stageIndex })));
+  await Promise.all(matches.map(match => sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, repository, source, target, pull_number, pull_state, merged_at) VALUES (${match.userId}, ${match.workflowId}, ${match.stageIndex}, ${pull.repository}, ${pull.source}, ${pull.target}, ${pull.number}, ${pull.mergedAt ? 'merged' : pull.state}, ${pull.mergedAt || null}) ON CONFLICT (user_id, workflow_id, stage_index) DO UPDATE SET pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, updated_at = now()`));
+  return matches.length;
 }

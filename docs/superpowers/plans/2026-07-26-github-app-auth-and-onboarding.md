@@ -24,7 +24,7 @@ Create a GitHub App and configure its callback/setup URLs to the canonical Verce
 Repository permissions:
 
 - Metadata: Read-only (required)
-- Contents: Read-only
+- Contents: Read & write (required for in-app PR merge)
 - Pull requests: Read & write
 - Checks: Read-only
 - Actions: Read-only
