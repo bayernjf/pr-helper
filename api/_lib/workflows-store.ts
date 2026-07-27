@@ -1,6 +1,7 @@
 import postgres from 'postgres';
 import { installationRequest } from './github-api.js';
 import { parseGithubAppConfig } from './github-app.js';
+import { sendPushNotifications, type BrowserPushSubscription } from './push.js';
 
 export type StoredWorkflow = {
   id: string;
@@ -32,6 +33,7 @@ export type ActionableStage = {
   kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create';
   message: string;
 };
+export type CodexRepairContext = { markdown: string; pullNumber: number; pullUrl: string };
 
 function databaseUrl(environment: Record<string, string | undefined>) {
   const value = environment.DATABASE_URL?.trim();
@@ -55,6 +57,61 @@ async function userForLogin(environment: Record<string, string | undefined>, log
   const sql = query(environment);
   const rows = await sql<DatabaseUser[]>`INSERT INTO pr_helper_users (github_login, github_user_id, github_installation_id) VALUES (${login}, ${githubUserId || null}, ${installationId || null}) ON CONFLICT (github_login) DO UPDATE SET github_user_id = COALESCE(EXCLUDED.github_user_id, pr_helper_users.github_user_id), github_installation_id = COALESCE(EXCLUDED.github_installation_id, pr_helper_users.github_installation_id), updated_at = now() RETURNING id`;
   return rows[0];
+}
+
+export async function hasPushSubscription(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  const rows = await sql`SELECT id FROM pr_helper_push_subscriptions WHERE user_id = ${user.id} LIMIT 1`;
+  return rows.length > 0;
+}
+
+export async function savePushSubscription(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, subscription: BrowserPushSubscription) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  await sql`INSERT INTO pr_helper_push_subscriptions (user_id, endpoint, subscription) VALUES (${user.id}, ${subscription.endpoint}, ${sql.json(subscription)}) ON CONFLICT (endpoint) DO UPDATE SET user_id = EXCLUDED.user_id, subscription = EXCLUDED.subscription, updated_at = now()`;
+}
+
+export async function removePushSubscription(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, endpoint: string) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  await sql`DELETE FROM pr_helper_push_subscriptions WHERE user_id = ${user.id} AND endpoint = ${endpoint}`;
+}
+
+export async function codexRepairContext(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string, stageIndex: number): Promise<CodexRepairContext> {
+  if (!Number.isInteger(stageIndex) || stageIndex < 0) throw new Error('无效的流程步骤');
+  if (!identity.installationId) throw new Error('尚未选择 GitHub App 可访问的仓库');
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId}`;
+  const workflow = storedWorkflowFromPayload(rows[0]?.payload);
+  const stage = workflow?.stages[stageIndex];
+  if (!workflow || !stage) throw new Error('未找到对应流程步骤');
+  const states = await sql<{ pull_number: number | null }[]>`SELECT pull_number FROM workflow_stage_states WHERE user_id = ${user.id} AND workflow_id = ${workflowId} AND stage_index = ${stageIndex}`;
+  const pullNumber = states[0]?.pull_number;
+  if (!pullNumber) throw new Error('该步骤没有可用于修复的 PR');
+  const { owner, name } = ownerAndName(workflow.repository);
+  const config = parseGithubAppConfig(environment);
+  type RepairPull = Pull & { title: string; body?: string | null; html_url: string; head: { sha: string; ref: string }; base: { ref: string } };
+  type RepairFile = { filename: string; status: string; additions: number; deletions: number; patch?: string };
+  type WorkflowRun = { id: number; name: string; html_url: string; conclusion: string | null; head_sha: string };
+  type WorkflowJob = { name: string; html_url: string; conclusion: string | null; status: string };
+  const pull = await installationRequest<RepairPull>(config, identity.installationId, `/repos/${owner}/${name}/pulls/${pullNumber}`);
+  const [checks, commitStatuses, files, actionRuns] = await Promise.all([
+    installationRequest<{ check_runs: (CheckRun & { name?: string; details_url?: string })[] }>(config, identity.installationId, `/repos/${owner}/${name}/commits/${pull.head.sha}/check-runs?per_page=100`),
+    installationRequest<{ statuses: (CommitStatus & { context?: string; target_url?: string })[] }>(config, identity.installationId, `/repos/${owner}/${name}/commits/${pull.head.sha}/status`),
+    installationRequest<RepairFile[]>(config, identity.installationId, `/repos/${owner}/${name}/pulls/${pullNumber}/files?per_page=100`),
+    installationRequest<{ workflow_runs: WorkflowRun[] }>(config, identity.installationId, `/repos/${owner}/${name}/actions/runs?head_sha=${pull.head.sha}&per_page=20`).catch(() => ({ workflow_runs: [] })),
+  ]);
+  const failedRuns = actionRuns.workflow_runs.filter(run => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(run.conclusion || ''));
+  const failedJobs = (await Promise.all(failedRuns.map(async run => ({ run, jobs: await installationRequest<{ jobs: WorkflowJob[] }>(config, identity.installationId!, `/repos/${owner}/${name}/actions/runs/${run.id}/jobs?per_page=100`).catch(() => ({ jobs: [] })) })))).flatMap(({ run, jobs }) => jobs.jobs.filter(job => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(job.conclusion || '')).map(job => ({ ...job, run })));
+  const failedChecks = [
+    ...checks.check_runs.filter(check => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(check.conclusion || '')).map(check => `- ${check.name || 'Check'}${check.details_url ? `: ${check.details_url}` : ''}`),
+    ...commitStatuses.statuses.filter(status => ['failure', 'error'].includes(status.state)).map(status => `- ${status.context || 'Commit status'}${status.target_url ? `: ${status.target_url}` : ''}`),
+  ];
+  const fileSummary = files.map(file => `- \`${file.filename}\` (${file.status}, +${file.additions}/-${file.deletions})${file.patch ? `\n  - diff: \`${file.patch.replaceAll('`', "'").replace(/\s+/g, ' ').slice(0, 360)}\`` : ''}`).join('\n');
+  const markdown = `# 修复 CI 失败\n\n## 目标\n修复当前 PR 的失败门禁；运行相关测试后汇报结果。不要执行 git push、创建 PR 或合并。\n\n## PR\n- 仓库：\`${workflow.repository}\`\n- PR：[#${pullNumber} ${pull.title}](${pull.html_url})\n- 分支：\`${pull.head.ref}\` → \`${pull.base.ref}\`\n- Head SHA：\`${pull.head.sha}\`\n- 流程步骤：${stageIndex + 1}（\`${stage.source}\` → \`${stage.target}\`）\n\n## 失败检查\n${failedChecks.length ? failedChecks.join('\n') : '- GitHub 未返回具体失败 check；请打开 PR 的 Actions 页面确认。'}\n\n## 失败 Actions Job\n${failedJobs.length ? failedJobs.map(job => `- [${job.run.name} / ${job.name}](${job.html_url || job.run.html_url})`).join('\n') : failedRuns.length ? failedRuns.map(run => `- [${run.name}](${run.html_url})`).join('\n') : '- 未读取到 Actions job；请从 PR 链接进入 Actions 日志。'}\n\n## PR 改动摘要\n${fileSummary || '- 未读取到改动文件。'}\n\n## 执行要求\n1. 在本地复现失败，优先阅读上方失败 job 日志。\n2. 只修改解决本次 CI 失败所需的代码。\n3. 运行最小相关测试；若可行再运行完整检查。\n4. 输出根因、修改内容、执行过的命令和结果。`;
+  return { markdown, pullNumber, pullUrl: pull.html_url };
 }
 
 export function isStoredWorkflow(value: unknown): value is StoredWorkflow {
@@ -138,6 +195,7 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   const stage = workflow.stages[stageIndex];
   const pull = await pullForStage(environment, row.github_installation_id, workflow, stage);
   const sql = query(environment);
+  const previous = await sql<{ pull_state: string; checks_state: string; approvals: number; required_approvals: number }[]>`SELECT pull_state, checks_state, approvals, required_approvals FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_index = ${stageIndex}`;
   if (!pull) {
     await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, repository, source, target, pull_state, checks_state, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${workflow.repository}, ${stage.source}, ${stage.target}, 'none', 'unknown', ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_index) DO UPDATE SET pull_number = NULL, pull_state = 'none', merged_at = NULL, head_sha = NULL, checks_state = 'unknown', checks_passed = 0, checks_total = 0, approvals = 0, required_approvals = 0, mergeable = NULL, mergeable_state = NULL, last_event = EXCLUDED.last_event, updated_at = now()`;
     return true;
@@ -155,6 +213,14 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   const requiredApprovals = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
   const approvals = reviews.filter(review => review.state === 'APPROVED').length;
   await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${workflow.repository}, ${stage.source}, ${stage.target}, ${pull.number}, ${pull.merged_at ? 'merged' : pull.state}, ${pull.merged_at || null}, ${sha || null}, ${checks.state}, ${checks.passed}, ${checks.total}, ${approvals}, ${requiredApprovals}, ${pull.mergeable ?? null}, ${pull.mergeable_state || null}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_index) DO UPDATE SET pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, head_sha = EXCLUDED.head_sha, checks_state = EXCLUDED.checks_state, checks_passed = EXCLUDED.checks_passed, checks_total = EXCLUDED.checks_total, approvals = EXCLUDED.approvals, required_approvals = EXCLUDED.required_approvals, mergeable = EXCLUDED.mergeable, mergeable_state = EXCLUDED.mergeable_state, last_event = EXCLUDED.last_event, updated_at = now()`;
+  const before = previous[0];
+  const route = `${stage.source} → ${stage.target}`;
+  if (before?.checks_state !== checks.state && ['success', 'failure'].includes(checks.state)) {
+    await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:checks:${sha}:${checks.state}`, kind: `checks-${checks.state}`, title: checks.state === 'failure' ? 'Actions 失败，需要处理' : 'Actions 已全绿', body: `${workflow.repository} · ${route}`, url: `/` });
+  }
+  if (!pull.merged_at && requiredApprovals > 0 && approvals >= requiredApprovals && (!before || before.approvals < before.required_approvals)) {
+    await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:merge-ready:${pull.number}:${pull.head.sha}`, kind: 'merge-ready', title: 'PR 已满足合并条件', body: `${workflow.repository} · ${route} · PR #${pull.number}`, url: `/` });
+  }
   return true;
 }
 
