@@ -7,6 +7,7 @@ import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel,
 import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
 import { addStage, createWorkflow, deleteWorkflow, removeStage, reorderWorkflows, saveWorkflow, sortWorkflows, workflowSummary, type Workflow } from './lib/workflow';
+import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
 import { t, getLocale, setLocale, detectLocale, registerTranslations, type Locale } from './lib/i18n';
 import en from './lib/translations/en';
 import zh from './lib/translations/zh';
@@ -23,6 +24,7 @@ type BranchProtection = { required_pull_request_reviews?: { required_approving_r
 type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string };
 type MergeResult = { merged: boolean; message?: string; sha?: string };
 type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
+type WorkflowStageState = WorkflowStageRunState & { workflowId: string; stageIndex: number; repository: string; source: string; target: string; mergedAt: string | null; checksPassed: number; checksTotal: number; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string | null; aheadBy: number; lastEvent: string | null; updatedAt: string };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
 const THEME_KEY = 'pr-helper-theme';
@@ -43,6 +45,7 @@ let cloudWorkflowStorage = false;
 let pendingLocalWorkflowSync = false;
 let cloudWorkflowSyncError = '';
 let actionQueue: ActionQueueItem[] = [];
+let workflowStageStates: WorkflowStageState[] = [];
 let actionQueueError = '';
 let overviewFilter: 'all' | 'attention' | 'failed' = 'all';
 let pushSubscribed = false;
@@ -134,21 +137,22 @@ async function loadCloudWorkflows() {
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
 }
 async function loadActionQueue() {
-  if (!cloudWorkflowStorage) { actionQueue = []; actionQueueError = ''; return false; }
+  if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; actionQueueError = ''; return false; }
   try {
     const response = await fetch(githubAppApiUrl('/api/inbox'));
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { message?: string };
-      actionQueue = [];
+      actionQueue = []; workflowStageStates = [];
       actionQueueError = payload.message || t('toast.queue.failed');
       return false;
     }
-    const payload = await response.json() as { items?: ActionQueueItem[] };
+    const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[] };
     actionQueue = Array.isArray(payload.items) ? payload.items : [];
+    workflowStageStates = Array.isArray(payload.states) ? payload.states : [];
     actionQueueError = '';
     return true;
   } catch (error) {
-    actionQueue = [];
+    actionQueue = []; workflowStageStates = [];
     actionQueueError = error instanceof Error ? error.message : t('toast.queue.failed');
     return false;
   }
@@ -383,6 +387,24 @@ function goTo(target: Screen | 'back') {
 
 function renderContent() { if (screen === 'overview') overview(); else if (screen === 'editor') editor(); else detail(); }
 
+function stageState(workflowId: string, stageIndex: number) {
+  return workflowStageStates.find(state => state.workflowId === workflowId && state.stageIndex === stageIndex);
+}
+function stageRunPresentationText(run: ReturnType<typeof stageRunPresentation>) {
+  const status = t(`overview.run.${run.status}`);
+  return run.pullNumber ? t('overview.run.prStatus', { number: run.pullNumber, status }) : status;
+}
+function stageRunText(state?: WorkflowStageRunState) { return stageRunPresentationText(stageRunPresentation(state)); }
+function stageUpdatedAt(state?: WorkflowStageState) {
+  if (!state?.updatedAt) return '';
+  const date = new Date(state.updatedAt);
+  if (Number.isNaN(date.getTime())) return '';
+  return t('overview.run.updated', { time: new Intl.DateTimeFormat(getLocale() === 'zh' ? 'zh-CN' : 'en-US', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date) });
+}
+function laneRunSummary(flow: Workflow) {
+  const summary = workflowRunSummary(flow.stages.map((_, index) => stageState(flow.id, index)));
+  return { ...summary, text: t('overview.run.current', { step: summary.stageIndex + 1, status: stageRunPresentationText(summary) }) };
+}
 function overview() {
   const content = document.querySelector('#content')!;
   const storageWarning = cloudWorkflowSyncError ? `<details class="compact-notice is-error"><summary><span><b>${t('sync.warning.title')}</b><span>${t('sync.warning.desc')}</span></span><small>${t('sync.warning.detail')}</small></summary><p>${escape(cloudWorkflowSyncError)}</p></details>` : '';
@@ -406,14 +428,18 @@ function projectLane(flow: Workflow) {
   const items = actionQueue.filter(item => item.workflowId === flow.id);
   const steps = flow.stages.map((stage, index) => {
     const item = items.find(candidate => candidate.stageIndex === index);
-    const tone = item?.kind === 'checks-failed' ? 'failed' : item ? 'attention' : 'idle';
-    const label = item?.message || t('overview.board.waitingSync');
-    return `<button class="lane-step ${tone}" data-lane-step="${index}" data-workflow-id="${escape(flow.id)}"><span class="lane-step-index">${index + 1}</span><b>${escape(stage.source)} → ${escape(stage.target)}</b><small>${escape(label)}</small></button>`;
+    const state = stageState(flow.id, index);
+    const run = stageRunPresentation(state);
+    const tone = item?.kind === 'checks-failed' ? 'failed' : item ? 'attention' : run.tone;
+    const label = item?.message || stageRunText(state);
+    const updatedAt = stageUpdatedAt(state);
+    return `<button class="lane-step ${tone}" data-lane-step="${index}" data-workflow-id="${escape(flow.id)}"><span class="lane-step-index">${index + 1}</span><b>${escape(stage.source)} → ${escape(stage.target)}</b><small>${escape(label)}${updatedAt ? ` · ${escape(updatedAt)}` : ''}</small></button>`;
   }).join('<span class="lane-connector" aria-hidden="true">→</span>');
   const orderIndex = workflows.findIndex(workflow => workflow.id === flow.id);
   const sortingDisabled = overviewFilter !== 'all';
   const dragLabel = t('overview.board.dragProject', { name: flow.name });
-  return `<article class="project-lane" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 22" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div></div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${escape(flow.name)}</h2></div></div><div class="lane-actions"><button data-edit-project="${escape(flow.id)}" class="link-button">${t('overview.board.edit')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button></div></header><div class="lane-track">${steps}</div></article>`;
+  const runSummary = laneRunSummary(flow);
+  return `<article class="project-lane" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 22" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div></div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${escape(flow.name)}</h2><p class="lane-run-summary ${runSummary.tone}">${escape(runSummary.text)}</p></div></div><div class="lane-actions"><button data-edit-project="${escape(flow.id)}" class="link-button">${t('overview.board.edit')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button></div></header><div class="lane-track">${steps}</div></article>`;
 }
 function bindLaneSorting() {
   const lanes = [...document.querySelectorAll<HTMLElement>('[data-project-lane]')];
@@ -468,9 +494,15 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number) {
   const flow = workflows.find(item => item.id === workflowId), stage = flow?.stages[stageIndex];
   if (!flow || !stage) return;
   const queueItem = actionQueue.find(item => item.workflowId === workflowId && item.stageIndex === stageIndex);
+  const state = stageState(workflowId, stageIndex);
+  const run = stageRunPresentation(state);
+  const tone = queueItem?.kind === 'checks-failed' ? 'failed' : queueItem ? 'attention' : run.tone;
+  const pullNumber = queueItem?.pullNumber || state?.pullNumber || null;
+  const checks = state?.checksTotal ? `<p>${t('overview.run.checkCount', { passed: state.checksPassed, total: state.checksTotal })}</p>` : '';
+  const pull = pullNumber ? `<a class="drawer-pr-link" href="${githubPullUrl(flow.repository, pullNumber)}" target="_blank" rel="noreferrer">PR #${pullNumber} ↗</a>` : `<p>${t('overview.board.noPull')}</p>`;
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
-  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${queueItem?.kind === 'checks-failed' ? 'failed' : queueItem ? 'attention' : 'idle'}"><b>${escape(queueItem?.message || t('overview.board.waitingSync'))}</b><p>${queueItem?.pullNumber ? `PR #${queueItem.pullNumber}` : t('overview.board.noPull')}</p></div><div class="dialog-actions"><button class="ghost drawer-close-action">${t('overview.board.close')}</button><button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
+  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div><div class="dialog-actions"><button class="ghost drawer-close-action">${t('overview.board.close')}</button><button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);

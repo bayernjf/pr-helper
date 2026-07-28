@@ -42,6 +42,26 @@ export type ActionableStage = {
   kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create';
   message: string;
 };
+export type WorkflowStageState = {
+  workflowId: string;
+  stageIndex: number;
+  repository: string;
+  source: string;
+  target: string;
+  pullNumber: number | null;
+  pullState: string;
+  mergedAt: string | null;
+  checksState: string;
+  checksPassed: number;
+  checksTotal: number;
+  approvals: number;
+  requiredApprovals: number;
+  mergeable: boolean | null;
+  mergeableState: string | null;
+  aheadBy: number;
+  lastEvent: string | null;
+  updatedAt: string;
+};
 export type CodexRepairContext = { markdown: string; pullNumber: number; pullUrl: string };
 
 function databaseUrl(environment: Record<string, string | undefined>) {
@@ -289,13 +309,39 @@ export async function reconcileWorkflowStages(environment: Record<string, string
   return results.filter(result => result.status === 'fulfilled' && result.value).length;
 }
 
-type StageStateRow = { workflow_id: string; stage_index: number; repository: string; source: string; target: string; pull_number: number | null; pull_state: string; checks_state: string; approvals: number; required_approvals: number; mergeable: boolean | null; mergeable_state: string | null; ahead_by: number };
+type StageStateRow = { workflow_id: string; stage_index: number; repository: string; source: string; target: string; pull_number: number | null; pull_state: string; merged_at: string | null; checks_state: string; checks_passed: number; checks_total: number; approvals: number; required_approvals: number; mergeable: boolean | null; mergeable_state: string | null; ahead_by: number; last_event: string | null; updated_at: string };
+
+export async function listWorkflowStageStates(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageState[]> {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  const rows = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, repository, source, target, pull_number, pull_state, merged_at, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${user.id} ORDER BY workflow_id, stage_index`;
+  return rows.map(row => ({
+    workflowId: row.workflow_id,
+    stageIndex: row.stage_index,
+    repository: row.repository,
+    source: row.source,
+    target: row.target,
+    pullNumber: row.pull_number,
+    pullState: row.pull_state,
+    mergedAt: row.merged_at,
+    checksState: row.checks_state,
+    checksPassed: row.checks_passed,
+    checksTotal: row.checks_total,
+    approvals: row.approvals,
+    requiredApprovals: row.required_approvals,
+    mergeable: row.mergeable,
+    mergeableState: row.mergeable_state,
+    aheadBy: row.ahead_by,
+    lastEvent: row.last_event,
+    updatedAt: row.updated_at,
+  }));
+}
 
 export async function listActionableStages(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<ActionableStage[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
   const workflows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id}`;
-  const states = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, repository, source, target, pull_number, pull_state, checks_state, approvals, required_approvals, mergeable, mergeable_state, ahead_by FROM workflow_stage_states WHERE user_id = ${user.id}`;
+  const states = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, repository, source, target, pull_number, pull_state, merged_at, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${user.id}`;
   const stateByStep = new Map(states.map(state => [`${state.workflow_id}:${state.stage_index}`, state]));
   return workflows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
