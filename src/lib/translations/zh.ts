@@ -98,6 +98,7 @@ const zh: TranslationDict = {
   // Storage sync
   'sync.warning.title': '云端流程同步失败',
   'sync.warning.desc': '当前流程只保存在这台设备的浏览器中。',
+  'sync.warning.detail': '查看详情',
   'sync.prompt.title': '发现 {count} 个仅保存在这台设备上的流程',
   'sync.prompt.desc': '确认后会同步到 GitHub 账号 @{login}，以后可在其他设备继续使用。',
   'sync.prompt.button': '同步到账号',
