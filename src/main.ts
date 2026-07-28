@@ -43,6 +43,7 @@ let cloudWorkflowStorage = false;
 let pendingLocalWorkflowSync = false;
 let cloudWorkflowSyncError = '';
 let actionQueue: ActionQueueItem[] = [];
+let actionQueueError = '';
 let pushSubscribed = false;
 let pushConfigured = false;
 let repositoryManagementWindow: Window | null = null;
@@ -115,13 +116,24 @@ async function loadCloudWorkflows() {
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
 }
 async function loadActionQueue() {
-  if (!cloudWorkflowStorage) { actionQueue = []; return; }
+  if (!cloudWorkflowStorage) { actionQueue = []; actionQueueError = ''; return false; }
   try {
     const response = await fetch(githubAppApiUrl('/api/inbox'));
-    if (!response.ok) return;
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({})) as { message?: string };
+      actionQueue = [];
+      actionQueueError = payload.message || t('toast.queue.failed');
+      return false;
+    }
     const payload = await response.json() as { items?: ActionQueueItem[] };
     actionQueue = Array.isArray(payload.items) ? payload.items : [];
-  } catch { /* The workflow dashboard remains available when the optional queue cannot load. */ }
+    actionQueueError = '';
+    return true;
+  } catch (error) {
+    actionQueue = [];
+    actionQueueError = error instanceof Error ? error.message : t('toast.queue.failed');
+    return false;
+  }
 }
 async function loadPushState() {
   if (!('serviceWorker' in navigator) || !('PushManager' in window) || !cloudWorkflowStorage) return;
@@ -356,13 +368,14 @@ function renderContent() { if (screen === 'overview') overview(); else if (scree
 function overview() {
   const content = document.querySelector('#content')!;
   const storageWarning = cloudWorkflowSyncError ? `<section class="local-sync-notice is-error"><div><b>${t('sync.warning.title')}</b><p>${escape(cloudWorkflowSyncError)}。${t('sync.warning.desc')}</p></div></section>` : '';
+  const queueWarning = actionQueueError ? `<section class="local-sync-notice is-error"><div><b>${t('overview.queue.error.title')}</b><p>${escape(actionQueueError)}</p></div></section>` : '';
   const syncPrompt = pendingLocalWorkflowSync ? `<section class="local-sync-notice"><div><b>${t('sync.prompt.title', { count: workflows.length })}</b><p>${t('sync.prompt.desc', { login: githubLogin || '' })}</p></div><button id="sync-local-workflows" class="ghost">${t('sync.prompt.button')}</button></section>` : '';
   const queue = actionQueue.length ? `<section class="action-queue"><div class="section-head"><div><p class="eyebrow">${t('overview.eyebrow.queue')}</p><h2>${t('overview.queue.title', { count: actionQueue.length })}</h2></div><button id="refresh-action-queue" class="ghost">${t('overview.queue.refresh')}</button></div><div class="action-queue-list">${actionQueue.map(item => `<button class="action-queue-item ${escape(item.kind)}" data-open-queue="${escape(item.workflowId)}"><span>${item.kind === 'checks-failed' ? '!' : item.kind === 'needs-approval' ? '✓' : '→'}</span><div><b>${escape(item.workflowName)} · ${t('overview.queue.step', { index: item.stageIndex + 1 })}</b><p>${escape(item.repository)} · ${escape(item.source)} → ${escape(item.target)}${item.pullNumber ? ` · PR #${item.pullNumber}` : ''}</p></div><em>${escape(item.message)}</em></button>`).join('')}</div></section>` : '';
-  content.innerHTML = `<section class="hero"><p class="eyebrow">${t('overview.eyebrow.workspace')}</p><h1>${t('overview.hero.title')}</h1><p>${t('overview.hero.sub')}</p><button id="new-flow" class="primary">${t('overview.hero.createFlow')}</button></section>${storageWarning}${syncPrompt}${queue}<section class="section-head"><div><p class="eyebrow">${t('overview.savedFlows')}</p><h2>${workflows.length ? t('overview.flowsCount', { count: workflows.length }) : t('overview.noFlows')}</h2></div></section><section class="flow-grid">${workflows.length ? workflows.map(card).join('') : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
+  content.innerHTML = `<section class="hero"><p class="eyebrow">${t('overview.eyebrow.workspace')}</p><h1>${t('overview.hero.title')}</h1><p>${t('overview.hero.sub')}</p><button id="new-flow" class="primary">${t('overview.hero.createFlow')}</button></section>${storageWarning}${queueWarning}${syncPrompt}${queue}<section class="section-head"><div><p class="eyebrow">${t('overview.savedFlows')}</p><h2>${workflows.length ? t('overview.flowsCount', { count: workflows.length }) : t('overview.noFlows')}</h2></div></section><section class="flow-grid">${workflows.length ? workflows.map(card).join('') : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
   document.querySelector('#new-flow')!.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
-  document.querySelector('#refresh-action-queue')?.addEventListener('click', async () => { await loadActionQueue(); render(); showToast(t('toast.queue.refreshed')); });
+  document.querySelector('#refresh-action-queue')?.addEventListener('click', async () => { const loaded = await loadActionQueue(); render(); showToast(loaded ? t('toast.queue.refreshed') : t('toast.queue.failed')); });
   document.querySelectorAll<HTMLButtonElement>('[data-open-queue]').forEach(button => button.addEventListener('click', () => { active = workflows.find(item => item.id === button.dataset.openQueue) || null; goTo('detail'); }));
   bindFlowCards();
 }

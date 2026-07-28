@@ -71,6 +71,7 @@ const en: TranslationDict = {
   'overview.flowCard.view': 'View flow →',
   'overview.flowCard.steps': '{count} steps · Not started',
   'overview.queue.step': 'Step {index}',
+  'overview.queue.error.title': 'To-do queue is temporarily unavailable',
 
   // Storage sync
   'sync.warning.title': 'Cloud flow sync failed',
@@ -296,6 +297,7 @@ const en: TranslationDict = {
   'notif.actionsFailed': 'Actions failed',
   'notif.actionsPassed': 'All Actions passed',
   'notif.newPullReady': 'New commits are ready for a new PR',
+  'toast.queue.failed': 'Failed to refresh the to-do queue',
 
   // Next action titles
   'nextAction.notStarted': 'Not started yet',

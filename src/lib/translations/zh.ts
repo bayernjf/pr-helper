@@ -71,6 +71,7 @@ const zh: TranslationDict = {
   'overview.flowCard.view': '查看流程 →',
   'overview.flowCard.steps': '{count} 个步骤 · 尚未执行',
   'overview.queue.step': '第 {index} 步',
+  'overview.queue.error.title': '待办队列暂不可用',
 
   // Storage sync
   'sync.warning.title': '云端流程同步失败',
@@ -296,6 +297,7 @@ const zh: TranslationDict = {
   'notif.actionsFailed': 'Actions 失败',
   'notif.actionsPassed': 'Actions 全绿',
   'notif.newPullReady': '有新提交，可以创建新 PR',
+  'toast.queue.failed': '待办队列刷新失败',
 
   // Next action titles
   'nextAction.notStarted': '尚未开始监控',
