@@ -295,6 +295,7 @@ const zh: TranslationDict = {
   'notif.merged': 'PR 已合并',
   'notif.actionsFailed': 'Actions 失败',
   'notif.actionsPassed': 'Actions 全绿',
+  'notif.newPullReady': '有新提交，可以创建新 PR',
 
   // Next action titles
   'nextAction.notStarted': '尚未开始监控',

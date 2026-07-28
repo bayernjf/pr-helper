@@ -295,6 +295,7 @@ const en: TranslationDict = {
   'notif.merged': 'PR merged',
   'notif.actionsFailed': 'Actions failed',
   'notif.actionsPassed': 'All Actions passed',
+  'notif.newPullReady': 'New commits are ready for a new PR',
 
   // Next action titles
   'nextAction.notStarted': 'Not started yet',

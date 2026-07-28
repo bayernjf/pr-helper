@@ -607,7 +607,18 @@ async function refreshStatuses() {
       return { kind: 'open', pr: details, checks, approvals: reviews.filter(review => review.state === 'APPROVED').length, requiredApprovals: requiredApprovals || undefined, mergeable: details.mergeable, mergeableState: details.mergeable_state } as StepStatus;
     } catch (err) { return { kind: 'error', message: err instanceof Error ? err.message : t('toast.unknownError') } as StepStatus; }
   }));
-  if (previous) statuses.forEach((status, index) => { const before = previous[index]; const oldCheck = before?.checks?.state; const newCheck = status.checks?.state; if (before && statusChanged({ kind: before.kind, checks: oldCheck }, { kind: status.kind, checks: newCheck })) { const detail = status.kind === 'merged' ? t('notif.merged') : newCheck === 'failure' ? t('notif.actionsFailed') : newCheck === 'success' ? t('notif.actionsPassed') : status.kind; const message = t('notif.stepUpdate', { index: index + 1, detail }); showToast(message); if (Notification.permission === 'granted') new Notification(t('notif.title'), { body: message }); } });
+  statuses.forEach((status, index) => {
+    const before = previous?.[index];
+    const oldCheck = before?.checks?.state;
+    const newCheck = status.checks?.state;
+    const newPullReady = status.kind === 'merged' && Boolean(status.aheadBy) && canCreateStage(index, statuses!) && !(before?.kind === 'merged' && before.aheadBy);
+    const changed = Boolean(before && statusChanged({ kind: before.kind, checks: oldCheck }, { kind: status.kind, checks: newCheck }));
+    if (!changed && !newPullReady) return;
+    const detail = newPullReady ? t('notif.newPullReady') : status.kind === 'merged' ? t('notif.merged') : newCheck === 'failure' ? t('notif.actionsFailed') : newCheck === 'success' ? t('notif.actionsPassed') : status.kind;
+    const message = t('notif.stepUpdate', { index: index + 1, detail });
+    showToast(message);
+    if (Notification.permission === 'granted') new Notification(t('notif.title'), { body: message });
+  });
   detail();
 }
 
