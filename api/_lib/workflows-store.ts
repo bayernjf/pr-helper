@@ -218,12 +218,19 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   const stage = workflow.stages[stageIndex];
   const pull = await pullForStage(environment, row.github_installation_id, workflow, stage);
   const sql = query(environment);
-  const previous = await sql<{ pull_state: string; checks_state: string; approvals: number; required_approvals: number }[]>`SELECT pull_state, checks_state, approvals, required_approvals FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_index = ${stageIndex}`;
+  const previous = await sql<{ pull_state: string; checks_state: string; approvals: number; required_approvals: number; ahead_by: number }[]>`SELECT pull_state, checks_state, approvals, required_approvals, ahead_by FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_index = ${stageIndex}`;
+  const preceding = stageIndex
+    ? await sql<{ pull_state: string; checks_state: string }[]>`SELECT pull_state, checks_state FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_index = ${stageIndex - 1}`
+    : [];
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
   const comparison = await installationRequest<{ ahead_by: number }>(config, row.github_installation_id, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`).catch(() => ({ ahead_by: 0 }));
   if (!pull) {
     await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, repository, source, target, pull_state, checks_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${workflow.repository}, ${stage.source}, ${stage.target}, 'none', 'unknown', ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_index) DO UPDATE SET pull_number = NULL, pull_state = 'none', merged_at = NULL, head_sha = NULL, checks_state = 'unknown', checks_passed = 0, checks_total = 0, approvals = 0, required_approvals = 0, mergeable = NULL, mergeable_state = NULL, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`;
+    const unlocked = stageIndex === 0 || preceding[0]?.pull_state === 'merged' && preceding[0]?.checks_state === 'success';
+    if (unlocked && comparison.ahead_by > 0 && (previous[0]?.ahead_by || 0) === 0) {
+      await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:new-pr:none`, kind: 'new-pr-ready', title: '可以创建下一步 PR', body: `${workflow.repository} · ${stage.source} → ${stage.target}`, url: '/' });
+    }
     return true;
   }
   const sha = pull.merged_at ? pull.merge_commit_sha : pull.head.sha;
@@ -244,6 +251,10 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   }
   if (!pull.merged_at && requiredApprovals > 0 && approvals >= requiredApprovals && (!before || before.approvals < before.required_approvals)) {
     await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:merge-ready:${pull.number}:${pull.head.sha}`, kind: 'merge-ready', title: 'PR 已满足合并条件', body: `${workflow.repository} · ${route} · PR #${pull.number}`, url: `/` });
+  }
+  const unlocked = stageIndex === 0 || preceding[0]?.pull_state === 'merged' && preceding[0]?.checks_state === 'success';
+  if (pull.merged_at && unlocked && comparison.ahead_by > 0 && (before?.ahead_by || 0) === 0) {
+    await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:new-pr:${pull.number}`, kind: 'new-pr-ready', title: '有新提交，可以创建新 PR', body: `${workflow.repository} · ${route}`, url: '/' });
   }
   return true;
 }
