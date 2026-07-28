@@ -476,6 +476,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number) {
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);
   dialog.querySelector('.drawer-close-action')!.addEventListener('click', close);
   dialog.querySelector('.drawer-view-flow')!.addEventListener('click', () => { active = flow; dialog.close(); goTo('detail'); });
+  dialog.addEventListener('click', event => { if (event.target === dialog) close(); });
   dialog.addEventListener('close', () => dialog.remove());
 }
 function bindFlowCards() { document.querySelectorAll<HTMLButtonElement>('[data-open]').forEach(button => button.addEventListener('click', () => { active = workflows.find(item => item.id === button.dataset.open) || null; goTo('detail'); })); }
