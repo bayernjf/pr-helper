@@ -150,7 +150,6 @@ const en: TranslationDict = {
   'state.waitingApprovals': 'Waiting for approvals',
   'state.mergeBlocked': 'Merge blocked',
   'state.waitingMerge': 'Waiting for merge',
-  'state.readyToMerge': 'Ready to merge',
   'status.newCommits': '{count} new commits',
   'status.newCommits.canCreate': 'A new PR can be created.',
   'status.newCommits.waiting': 'Waiting for the previous step to merge and Actions to pass.',
