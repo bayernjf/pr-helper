@@ -7,6 +7,12 @@ import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel,
 import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
 import { addStage, createWorkflow, deleteWorkflow, removeStage, saveWorkflow, workflowSummary, type Workflow } from './lib/workflow';
+import { t, getLocale, setLocale, detectLocale, registerTranslations, type Locale } from './lib/i18n';
+import en from './lib/translations/en';
+import zh from './lib/translations/zh';
+
+registerTranslations('en', en);
+registerTranslations('zh', zh);
 
 type Repo = { full_name: string; private: boolean };
 type Pull = { number: number; state: string; merged_at: string | null; merge_commit_sha?: string | null; mergeable?: boolean | null; mergeable_state?: string; html_url: string; head: { sha: string } };
@@ -19,6 +25,8 @@ type MergeResult = { merged: boolean; message?: string; sha?: string };
 type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
+const THEME_KEY = 'pr-helper-theme';
+type Theme = 'light' | 'dark';
 let token = sessionStorage.getItem('github-token') || '';
 let repos: Repo[] = [];
 let workflows = loadWorkflows();
@@ -46,10 +54,29 @@ let aiConfig: AiConfig | null = loadAiConfig();
 let generationRules = loadGenerationRules(() => localStorage.getItem(GENERATION_RULES_KEY));
 let pullRequestDrafts = loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), Date.now());
 let draftStorageSynchronized = true;
+let currentTheme: Theme = (localStorage.getItem(THEME_KEY) as Theme) || 'light';
 
 const app = () => document.querySelector<HTMLDivElement>('#app')!;
 const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 function loadWorkflows(): Workflow[] { try { return JSON.parse(localStorage.getItem('pr-helper-workflows') || '[]') as Workflow[]; } catch { return []; } }
+function applyTheme(theme: Theme) {
+  currentTheme = theme;
+  localStorage.setItem(THEME_KEY, theme);
+  document.documentElement.setAttribute('data-theme', theme);
+  updateThemeToggleButton();
+}
+function toggleTheme() {
+  applyTheme(currentTheme === 'light' ? 'dark' : 'light');
+}
+function updateThemeToggleButton() {
+  const button = document.querySelector<HTMLButtonElement>('#theme-toggle');
+  if (!button) return;
+  const sunIcon = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
+  const moonIcon = '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3a6 6 0 0 0 12 0V9a6 6 0 0 0-6-6z"/></svg>';
+  const isDark = currentTheme === 'dark';
+  button.innerHTML = `${isDark ? sunIcon : moonIcon}<span>${isDark ? t('theme.light') : t('theme.dark')}</span>`;
+  button.setAttribute('aria-label', isDark ? t('theme.toLight') : t('theme.toDark'));
+}
 function persistGenerationRules(next: GenerationRule[]) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(next)); generationRules = next; }
 function persistWorkflowsLocally() { localStorage.setItem('pr-helper-workflows', JSON.stringify(workflows)); }
 async function persistWorkflowRemotely(workflow: Workflow) {
@@ -58,7 +85,7 @@ async function persistWorkflowRemotely(workflow: Workflow) {
     const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflow }) });
     if (!response.ok) throw new Error(await workflowApiError(response));
     cloudWorkflowSyncError = '';
-  } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : '云端同步失败'; showToast(`已保存在当前浏览器；${cloudWorkflowSyncError}`); render(); }
+  } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail'); showToast(t('toast.saved.local', { error: cloudWorkflowSyncError })); render(); }
 }
 function save(next: Workflow) { active = next; workflows = saveWorkflow(workflows, next); persistWorkflowsLocally(); void persistWorkflowRemotely(next); }
 async function removeWorkflowFromStorage(workflowId: string) {
@@ -68,11 +95,11 @@ async function removeWorkflowFromStorage(workflowId: string) {
     const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: workflowId }) });
     if (!response.ok) throw new Error(await workflowApiError(response));
     cloudWorkflowSyncError = '';
-  } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : '云端删除失败'; showToast(`已从当前浏览器移除；${cloudWorkflowSyncError}`); render(); }
+  } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.removed.cloudFail'); showToast(t('toast.removed.local', { error: cloudWorkflowSyncError })); render(); }
 }
 async function workflowApiError(response: Response) {
   const payload = await response.json().catch(() => ({})) as { message?: string };
-  return payload.message || `云端同步失败（${response.status}）`;
+  return payload.message || t('toast.cloudFail.status', { status: response.status });
 }
 async function loadCloudWorkflows() {
   try {
@@ -85,7 +112,7 @@ async function loadCloudWorkflows() {
     cloudWorkflowSyncError = '';
     if (payload.workflows.length) { workflows = payload.workflows; active = workflows[0] || null; persistWorkflowsLocally(); }
     else pendingLocalWorkflowSync = workflows.length > 0;
-  } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : '无法连接云端流程存储'; }
+  } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
 }
 async function loadActionQueue() {
   if (!cloudWorkflowStorage) { actionQueue = []; return; }
@@ -112,32 +139,32 @@ function vapidKey(value: string) {
   return Uint8Array.from(bytes, character => character.charCodeAt(0));
 }
 async function enablePushNotifications() {
-  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) { showToast('当前浏览器不支持后台推送通知。'); return; }
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) { showToast(t('toast.push.unsupported')); return; }
   if (Notification.permission === 'denied') { showNotificationPermissionHelp(); return; }
   try {
     const keyResponse = await fetch(githubAppApiUrl('/api/notifications/public-key'));
-    if (!keyResponse.ok) throw new Error((await keyResponse.json().catch(() => ({})) as { message?: string }).message || '浏览器推送尚未配置');
+    if (!keyResponse.ok) throw new Error((await keyResponse.json().catch(() => ({})) as { message?: string }).message || t('toast.push.unconfigured'));
     const { publicKey } = await keyResponse.json() as { publicKey: string };
     const permission = await Notification.requestPermission();
     if (permission !== 'granted') { showNotificationPermissionHelp(); return; }
     const registration = await navigator.serviceWorker.register('/push-sw.js');
     const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidKey(publicKey) });
     const response = await fetch(githubAppApiUrl('/api/notifications/subscription'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(subscription.toJSON()) });
-    if (!response.ok) throw new Error((await response.json().catch(() => ({})) as { message?: string }).message || '保存浏览器通知设置失败');
-    pushConfigured = true; pushSubscribed = true; render(); showToast('浏览器通知已开启；页面关闭后也会收到重要流程提醒。');
-  } catch (error) { showToast(error instanceof Error ? error.message : '无法开启浏览器通知'); }
+    if (!response.ok) throw new Error((await response.json().catch(() => ({})) as { message?: string }).message || t('toast.push.saveError'));
+    pushConfigured = true; pushSubscribed = true; render(); showToast(t('toast.push.enabled'));
+  } catch (error) { showToast(error instanceof Error ? error.message : t('toast.push.enableError')); }
 }
 function showNotificationPermissionHelp() {
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog confirm-dialog';
-  dialog.innerHTML = `<form method="dialog"><div class="confirm-icon" aria-hidden="true">🔔</div><h2>允许浏览器通知</h2><p>请在地址栏左侧点击网站信息图标，进入“网站设置”，将“通知”改为“允许”。返回本页后，再点击“开启通知”。</p><div class="dialog-actions"><button value="confirm" class="primary">知道了</button></div></form>`;
+  dialog.innerHTML = `<form method="dialog"><div class="confirm-icon" aria-hidden="true">🔔</div><h2>${t('notify.title')}</h2><p>${t('notify.desc')}</p><div class="dialog-actions"><button value="confirm" class="primary">${t('notify.confirm')}</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
   dialog.addEventListener('close', () => dialog.remove(), { once: true });
 }
 function showDisconnectDialog() {
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog confirm-dialog';
-  dialog.innerHTML = `<form method="dialog"><div class="confirm-icon" aria-hidden="true">GH</div><h2>断开 GitHub？</h2><p>这会清除当前浏览器中的 GitHub 登录会话。已保存的本机流程不会被删除。</p><div class="dialog-actions"><button value="cancel" class="ghost">取消</button><button value="confirm" class="primary">确认断开</button></div></form>`;
+  dialog.innerHTML = `<form method="dialog"><div class="confirm-icon" aria-hidden="true">GH</div><h2>${t('disconnect.title')}</h2><p>${t('disconnect.desc')}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('disconnect.cancel')}</button><button value="confirm" class="primary">${t('disconnect.confirm')}</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
   dialog.addEventListener('close', async () => {
     const confirmed = dialog.returnValue === 'confirm';
@@ -153,10 +180,10 @@ async function syncLocalWorkflows() {
   try {
     for (const workflow of workflows) {
       const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflow }) });
-      if (!response.ok) throw new Error('同步失败');
+      if (!response.ok) throw new Error(t('sync.fail.short'));
     }
-    pendingLocalWorkflowSync = false; render(); showToast('本机流程已同步到你的 GitHub 账号。');
-  } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : '流程同步失败'; render(); showToast(`流程同步失败，本机数据仍然保留：${cloudWorkflowSyncError}`); }
+    pendingLocalWorkflowSync = false; render(); showToast(t('sync.success'));
+  } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : t('sync.fail.short'); render(); showToast(t('sync.fail', { error: cloudWorkflowSyncError })); }
 }
 function showToast(message: string) {
   const previous = document.querySelector<HTMLElement>('.toast');
@@ -172,13 +199,13 @@ function showToast(message: string) {
   const copy = document.createElement('button');
   copy.className = 'toast-action';
   copy.type = 'button';
-  copy.textContent = '复制';
-  copy.setAttribute('aria-label', '复制反馈信息');
+  copy.textContent = t('toastAction.copy');
+  copy.setAttribute('aria-label', t('toastAction.copyLabel'));
   const close = document.createElement('button');
   close.className = 'toast-close';
   close.type = 'button';
-  close.textContent = '关闭';
-  close.setAttribute('aria-label', '关闭反馈信息');
+  close.textContent = t('toastAction.close');
+  close.setAttribute('aria-label', t('toastAction.closeLabel'));
   toast.append(content, copy, close);
   document.body.append(toast);
   toast.showPopover?.();
@@ -195,19 +222,19 @@ function showToast(message: string) {
   toast.addEventListener('focusin', () => { focused = true; pause(); });
   toast.addEventListener('focusout', event => { if (!toast.contains(event.relatedTarget as Node | null)) { focused = false; resume(); } });
   copy.addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(message); copy.textContent = '已复制'; }
-    catch { copy.textContent = '复制失败'; }
+    try { await navigator.clipboard.writeText(message); copy.textContent = t('toastAction.copied'); }
+    catch { copy.textContent = t('toastAction.copyFailed'); }
   });
   close.addEventListener('click', dismiss);
   resume();
 }
-function persistPullRequestDrafts(next: typeof pullRequestDrafts) { pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); draftStorageSynchronized = true; } catch { draftStorageSynchronized = false; showToast('草稿保存失败'); } }
+function persistPullRequestDrafts(next: typeof pullRequestDrafts) { pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); draftStorageSynchronized = true; } catch { draftStorageSynchronized = false; showToast(t('connect.draft.saveError')); } }
 persistPullRequestDrafts(pullRequestDrafts);
 function loadAiConfig(): AiConfig | null { try { return JSON.parse(sessionStorage.getItem('pr-helper-ai') || 'null') as AiConfig | null; } catch { return null; } }
 function showAiSettings() {
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
-  dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">AI MODEL SETTINGS</p><h2>配置 AI 模型</h2><label>API Base URL<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="https://api.openai.com/v1" /></label><label>模型<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="gpt-4.1-mini" /></label><label>API Key<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><label class="setting-toggle"><input id="ai-auto-generate" type="checkbox" ${aiConfig?.autoGeneratePrMessage ? 'checked' : ''} />创建 PR 时自动生成标题和描述<span>仅在模型配置完整时执行；仍可在弹窗内手动修改。</span></label><p id="ai-test-result" class="ai-connection-result">可在保存前测试当前连接。</p><div class="dialog-actions"><button id="test-ai" type="button" class="ghost">测试连接</button><button value="cancel" class="ghost">取消</button><button id="save-ai" class="primary">保存设置</button></div></form>`;
+  dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('ai.eyebrow')}</p><h2>${t('ai.title')}</h2><label>${t('ai.label.baseUrl')}<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="${t('ai.placeholder.baseUrl')}" /></label><label>${t('ai.label.model')}<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="${t('ai.placeholder.model')}" /></label><label>${t('ai.label.apiKey')}<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><label class="setting-toggle"><input id="ai-auto-generate" type="checkbox" ${aiConfig?.autoGeneratePrMessage ? 'checked' : ''} />${t('ai.toggle.label')}<span>${t('ai.toggle.desc')}</span></label><p id="ai-test-result" class="ai-connection-result">${t('ai.test.placeholder')}</p><div class="dialog-actions"><button id="test-ai" type="button" class="ghost">${t('ai.test')}</button><button value="cancel" class="ghost">${t('ai.cancel')}</button><button id="save-ai" class="primary">${t('ai.save')}</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
   const read = (): AiConfig => ({
     baseUrl: dialog.querySelector<HTMLInputElement>('#ai-url')!.value.trim(),
@@ -218,21 +245,27 @@ function showAiSettings() {
   dialog.querySelector('#test-ai')!.addEventListener('click', async () => {
     const button = dialog.querySelector<HTMLButtonElement>('#test-ai')!, result = dialog.querySelector('#ai-test-result')!;
     const config = read();
-    if (!config.baseUrl || !config.apiKey) { result.textContent = '请先填写 API Base URL 和 API Key。'; result.className = 'ai-connection-result is-error'; return; }
-    button.disabled = true; result.textContent = '正在测试连接…'; result.className = 'ai-connection-result is-loading';
-    try { await testAiConnection(config); result.textContent = '连接成功，可以保存设置。'; result.className = 'ai-connection-result is-success'; }
-    catch (err) { const raw = err instanceof Error ? err.message : ''; result.textContent = raw.includes('non ISO-8859-1') ? 'API Key 格式无效，请检查是否包含空格、引号或非英文字符。' : raw || '无法连接模型服务，请检查地址、Key 与网络。'; result.className = 'ai-connection-result is-error'; }
+    if (!config.baseUrl || !config.apiKey) { result.textContent = t('ai.test.error.empty'); result.className = 'ai-connection-result is-error'; return; }
+    button.disabled = true; result.textContent = t('ai.test.loading'); result.className = 'ai-connection-result is-loading';
+    try { await testAiConnection(config); result.textContent = t('ai.test.success'); result.className = 'ai-connection-result is-success'; }
+    catch (err) { const raw = err instanceof Error ? err.message : ''; result.textContent = raw.includes('non ISO-8859-1') ? t('ai.test.error.chars') : raw || t('ai.test.error.generic'); result.className = 'ai-connection-result is-error'; }
     finally { button.disabled = false; }
   });
-  dialog.querySelector('#save-ai')!.addEventListener('click', event => { event.preventDefault(); aiConfig = read(); sessionStorage.setItem('pr-helper-ai', JSON.stringify(aiConfig)); dialog.close(); showToast('AI 模型设置已保存到当前会话。'); });
+  dialog.querySelector('#save-ai')!.addEventListener('click', event => { event.preventDefault(); aiConfig = read(); sessionStorage.setItem('pr-helper-ai', JSON.stringify(aiConfig)); dialog.close(); showToast(t('ai.toast.saved')); });
   dialog.addEventListener('close', () => dialog.remove());
 }
 
 function connect(error = '') {
   const requiresRemoteAuthOrigin = import.meta.env.DEV && !import.meta.env.VITE_AUTH_ORIGIN;
-  app().innerHTML = `<main class="connect connect-onboarding"><section class="connect-hero"><p class="eyebrow">PR FLOW</p><h1>在一个地方跟踪 PR 流程与合并门禁。</h1><p class="sub">连接 GitHub → 选择仓库 → 创建流程。</p></section><section class="panel connection-card"><p class="eyebrow">SECURE CONNECTION</p><h2>连接 GitHub</h2><p class="connection-intro">授权后选择 PR Helper 可以访问的仓库，之后可随时调整。</p>${error ? `<p class="error">${escape(error)}</p>` : ''}<a id="github-app-connect" class="primary github-connect" href="${githubAppApiUrl('/api/auth/github/start')}">连接 GitHub <span aria-hidden="true">→</span></a><p id="github-app-hint" class="connection-hint" hidden></p><ul class="connection-benefits"><li>支持 public、private 与 organization 仓库</li><li>可授权全部或指定仓库，并随时在 GitHub 撤销</li><li>不会在浏览器中保存 GitHub 访问令牌</li></ul><details class="developer-connect"><summary>使用 Personal Access Token（仅本地开发）</summary><label>GitHub Personal Access Token<input id="token" type="password" placeholder="github_pat_…" autocomplete="off" /></label><p class="meta">Token 仅保存在当前浏览器会话，用于本地开发调试。</p><button id="connect" class="ghost">使用 PAT 连接</button></details></section></main>`;
-  if (requiresRemoteAuthOrigin) document.querySelector('#github-app-connect')!.addEventListener('click', event => { event.preventDefault(); const hint = document.querySelector<HTMLElement>('#github-app-hint')!; hint.hidden = false; hint.textContent = '本地 Vite 预览不会运行 GitHub App 授权 API。请先配置 VITE_AUTH_ORIGIN 指向 Vercel，或使用下方 PAT 进行本地开发。'; });
-  document.querySelector('#connect')!.addEventListener('click', async () => { const value = document.querySelector<HTMLInputElement>('#token')!.value.trim(); try { await githubFetch(value, '/user'); token = value; sessionStorage.setItem('github-token', value); await init(); } catch (err) { connect(err instanceof Error ? err.message : '连接失败'); } });
+  const sunIcon = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
+  const moonIcon = '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3a6 6 0 0 0 12 0V9a6 6 0 0 0-6-6z"/></svg>';
+  const isDark = currentTheme === 'dark';
+  app().innerHTML = `<main class="connect connect-onboarding"><div class="connect-topbar"><button id="connect-theme-toggle" class="theme-toggle" aria-label="${isDark ? t('theme.toLight') : t('theme.toDark')}">${isDark ? sunIcon : moonIcon}<span>${isDark ? t('theme.light') : t('theme.dark')}</span></button><button id="connect-lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button></div><section class="connect-hero"><p class="eyebrow">${t('connect.eyebrow')}</p><h1>${t('connect.hero.title')}</h1><p class="sub">${t('connect.hero.sub')}</p></section><section class="panel connection-card"><p class="eyebrow">${t('connect.card.eyebrow')}</p><h2>${t('connect.card.title')}</h2><p class="connection-intro">${t('connect.card.intro')}</p>${error ? `<p class="error">${escape(error)}</p>` : ''}<a id="github-app-connect" class="primary github-connect" href="${githubAppApiUrl('/api/auth/github/start')}">${t('connect.card.button')} <span aria-hidden="true">${t('connect.card.arrow')}</span></a><p id="github-app-hint" class="connection-hint" hidden></p><ul class="connection-benefits"><li>${t('connect.benefit1')}</li><li>${t('connect.benefit2')}</li><li>${t('connect.benefit3')}</li></ul><details class="developer-connect"><summary>${t('connect.pat.summary')}</summary><label>${t('connect.pat.label')}<input id="token" type="password" placeholder="${t('connect.pat.placeholder')}" autocomplete="off" /></label><p class="meta">${t('connect.pat.meta')}</p><button id="connect" class="ghost">${t('connect.pat.button')}</button></details></section></main>`;
+  const themeToggle = document.querySelector('#connect-theme-toggle');
+  themeToggle?.addEventListener('click', toggleTheme);
+  document.querySelector('#connect-lang-toggle')?.addEventListener('click', () => { setLocale(getLocale() === 'zh' ? 'en' : 'zh'); connect(error); });
+  if (requiresRemoteAuthOrigin) document.querySelector('#github-app-connect')!.addEventListener('click', event => { event.preventDefault(); const hint = document.querySelector<HTMLElement>('#github-app-hint')!; hint.hidden = false; hint.textContent = t('connect.hint.local'); });
+  document.querySelector('#connect')!.addEventListener('click', async () => { const value = document.querySelector<HTMLInputElement>('#token')!.value.trim(); try { await githubFetch(value, '/user'); token = value; sessionStorage.setItem('github-token', value); await init(); } catch (err) { connect(err instanceof Error ? err.message : t('connect.error.generic')); } });
 }
 
 async function restoreConnection() {
@@ -250,8 +283,8 @@ async function restoreConnection() {
 }
 
 async function init() {
-  app().innerHTML = '<main class="connect"><p class="eyebrow">GITHUB</p><h1>正在载入你的工作台…</h1></main>';
-  try { repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated'); await loadCloudWorkflows(); await Promise.all([loadActionQueue(), loadPushState()]); render(); } catch (err) { connect(err instanceof Error ? err.message : '无法读取仓库'); }
+  app().innerHTML = `<main class="connect"><p class="eyebrow">${t('connect.eyebrow.github')}</p><h1>${t('connect.loading')}</h1></main>`;
+  try { repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated'); await loadCloudWorkflows(); await Promise.all([loadActionQueue(), loadPushState()]); render(); } catch (err) { connect(err instanceof Error ? err.message : t('connect.error.repos')); }
 }
 
 async function refreshAuthorizedRepositories() {
@@ -260,8 +293,8 @@ async function refreshAuthorizedRepositories() {
     const activeRepositoryRevoked = Boolean(active && !repos.some(repo => repo.full_name === active!.repository));
     render();
     if (screen === 'detail') void refreshStatuses();
-    showToast(activeRepositoryRevoked ? '授权仓库已同步；当前流程仓库已不再授权。' : `已同步 ${repos.length} 个授权仓库，已回到原页面。`);
-  } catch (err) { showToast(err instanceof Error ? err.message : '无法同步授权仓库'); }
+    showToast(activeRepositoryRevoked ? t('toast.repos.synced') : t('toast.repos.syncedCount', { count: repos.length }));
+  } catch (err) { showToast(err instanceof Error ? err.message : t('toast.repos.error')); }
 }
 
 function openRepositoryManagement() {
@@ -272,7 +305,7 @@ function openRepositoryManagement() {
     window.location.assign(githubInstallationSettingsUrl);
     return;
   }
-  showToast('在 GitHub 保存后关闭授权页，将自动回到这里并同步仓库。');
+  showToast(t('toast.repos.hint'));
   if (repositoryManagementTimer !== undefined) window.clearInterval(repositoryManagementTimer);
   repositoryManagementTimer = window.setInterval(() => {
     if (!repositoryManagementWindow || repositoryManagementWindow.closed) {
@@ -284,10 +317,11 @@ function openRepositoryManagement() {
 }
 
 function render() {
-  const manageRepositories = githubInstallationSettingsUrl ? '<button id="manage-repositories" class="account-menu-item">管理授权仓库 ↗</button>' : '';
-  const account = githubLogin ? `GitHub · @${escape(githubLogin)}` : '账户与设置';
-  const push = pushConfigured ? `<button id="push-settings" class="account-menu-item" ${pushSubscribed ? 'disabled title="浏览器通知已开启"' : ''}>${pushSubscribed ? '通知已开启' : '开启通知'}</button>` : '';
-  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">PR<span>FLOW</span></a><nav aria-label="主导航"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">流程总览</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">＋ 新建流程</button></nav><div class="topbar-actions"><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}<button id="ai-settings-top" class="account-menu-item">AI 设置</button><button id="disconnect" class="account-menu-item danger">断开 GitHub</button></div></div></div></header><section id="content"></section></main>`;
+  const manageRepositories = githubInstallationSettingsUrl ? `<button id="manage-repositories" class="account-menu-item">${t('account.manageRepos')}</button>` : '';
+  const account = githubLogin ? `GitHub · @${escape(githubLogin)}` : t('account.label');
+  const push = pushConfigured ? `<button id="push-settings" class="account-menu-item" ${pushSubscribed ? `disabled title="${t('account.push.title')}"` : ''}>${pushSubscribed ? t('account.push.on') : t('account.push.off')}</button>` : '';
+  const themeIcon = currentTheme === 'dark' ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3a6 6 0 0 0 12 0V9a6 6 0 0 0-6-6z"/></svg>';
+  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">${t('brand.name')}<span>${t('brand.suffix')}</span></a><nav aria-label="${t('nav.label')}"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">${t('nav.overview')}</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">${t('nav.newFlow')}</button></nav><div class="topbar-actions"><button id="theme-toggle" class="theme-toggle" aria-label="${currentTheme === 'dark' ? t('theme.toLight') : t('theme.toDark')}">${themeIcon}<span>${currentTheme === 'dark' ? t('theme.light') : t('theme.dark')}</span></button><button id="lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}<button id="ai-settings-top" class="account-menu-item">${t('account.aiSettings')}</button><button id="disconnect" class="account-menu-item danger">${t('account.disconnect')}</button></div></div></div></header><section id="content"></section></main>`;
   const accountMenuToggle = document.querySelector<HTMLButtonElement>('#account-menu-toggle')!, accountMenuPanel = document.querySelector<HTMLElement>('#account-menu-panel')!;
   const accountMenu = accountMenuToggle.closest<HTMLElement>('.account-menu')!;
   const closeAccountMenu = () => { accountMenuPanel.hidden = true; accountMenuToggle.setAttribute('aria-expanded', 'false'); };
@@ -300,6 +334,8 @@ function render() {
   });
   accountMenuPanel.addEventListener('click', closeAccountMenu);
   document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) active = null; goTo(target); }));
+  document.querySelector('#theme-toggle')!.addEventListener('click', toggleTheme);
+  document.querySelector('#lang-toggle')!.addEventListener('click', () => { setLocale(getLocale() === 'zh' ? 'en' : 'zh'); render(); });
   document.querySelector('#ai-settings-top')!.addEventListener('click', showAiSettings);
   document.querySelector('#manage-repositories')?.addEventListener('click', openRepositoryManagement);
   document.querySelector('#push-settings')?.addEventListener('click', () => void enablePushNotifications());
@@ -319,24 +355,24 @@ function renderContent() { if (screen === 'overview') overview(); else if (scree
 
 function overview() {
   const content = document.querySelector('#content')!;
-  const storageWarning = cloudWorkflowSyncError ? `<section class="local-sync-notice is-error"><div><b>云端流程同步失败</b><p>${escape(cloudWorkflowSyncError)}。当前流程只保存在这台设备的浏览器中。</p></div></section>` : '';
-  const syncPrompt = pendingLocalWorkflowSync ? `<section class="local-sync-notice"><div><b>发现 ${workflows.length} 个仅保存在这台设备上的流程</b><p>确认后会同步到 GitHub 账号 ${githubLogin ? `@${escape(githubLogin)}` : ''}，以后可在其他设备继续使用。</p></div><button id="sync-local-workflows" class="ghost">同步到账号</button></section>` : '';
-  const queue = actionQueue.length ? `<section class="action-queue"><div class="section-head"><div><p class="eyebrow">NEEDS YOUR ATTENTION</p><h2>需要你处理 · ${actionQueue.length}</h2></div><button id="refresh-action-queue" class="ghost">刷新队列</button></div><div class="action-queue-list">${actionQueue.map(item => `<button class="action-queue-item ${escape(item.kind)}" data-open-queue="${escape(item.workflowId)}"><span>${item.kind === 'checks-failed' ? '!' : item.kind === 'needs-approval' ? '✓' : '→'}</span><div><b>${escape(item.workflowName)} · 第 ${item.stageIndex + 1} 步</b><p>${escape(item.repository)} · ${escape(item.source)} → ${escape(item.target)}${item.pullNumber ? ` · PR #${item.pullNumber}` : ''}</p></div><em>${escape(item.message)}</em></button>`).join('')}</div></section>` : '';
-  content.innerHTML = `<section class="hero"><p class="eyebrow">WORKSPACE</p><h1>只在需要你决策时，打断你。</h1><p>跨仓库的 PR 编排、门禁与待办，统一在这里处理。</p><button id="new-flow" class="primary">创建流程</button></section>${storageWarning}${syncPrompt}${queue}<section class="section-head"><div><p class="eyebrow">SAVED FLOWS</p><h2>${workflows.length ? `${workflows.length} 个已保存流程` : '还没有流程'}</h2></div></section><section class="flow-grid">${workflows.length ? workflows.map(card).join('') : `<article class="empty"><h3>从一个仓库开始</h3><p>选择真实分支，配置 feature → dev → main 等发布链路。</p><button id="empty-new" class="ghost">创建第一个流程</button></article>`}</section>`;
+  const storageWarning = cloudWorkflowSyncError ? `<section class="local-sync-notice is-error"><div><b>${t('sync.warning.title')}</b><p>${escape(cloudWorkflowSyncError)}。${t('sync.warning.desc')}</p></div></section>` : '';
+  const syncPrompt = pendingLocalWorkflowSync ? `<section class="local-sync-notice"><div><b>${t('sync.prompt.title', { count: workflows.length })}</b><p>${t('sync.prompt.desc', { login: githubLogin || '' })}</p></div><button id="sync-local-workflows" class="ghost">${t('sync.prompt.button')}</button></section>` : '';
+  const queue = actionQueue.length ? `<section class="action-queue"><div class="section-head"><div><p class="eyebrow">${t('overview.eyebrow.queue')}</p><h2>${t('overview.queue.title', { count: actionQueue.length })}</h2></div><button id="refresh-action-queue" class="ghost">${t('overview.queue.refresh')}</button></div><div class="action-queue-list">${actionQueue.map(item => `<button class="action-queue-item ${escape(item.kind)}" data-open-queue="${escape(item.workflowId)}"><span>${item.kind === 'checks-failed' ? '!' : item.kind === 'needs-approval' ? '✓' : '→'}</span><div><b>${escape(item.workflowName)} · ${t('overview.queue.step', { index: item.stageIndex + 1 })}</b><p>${escape(item.repository)} · ${escape(item.source)} → ${escape(item.target)}${item.pullNumber ? ` · PR #${item.pullNumber}` : ''}</p></div><em>${escape(item.message)}</em></button>`).join('')}</div></section>` : '';
+  content.innerHTML = `<section class="hero"><p class="eyebrow">${t('overview.eyebrow.workspace')}</p><h1>${t('overview.hero.title')}</h1><p>${t('overview.hero.sub')}</p><button id="new-flow" class="primary">${t('overview.hero.createFlow')}</button></section>${storageWarning}${syncPrompt}${queue}<section class="section-head"><div><p class="eyebrow">${t('overview.savedFlows')}</p><h2>${workflows.length ? t('overview.flowsCount', { count: workflows.length }) : t('overview.noFlows')}</h2></div></section><section class="flow-grid">${workflows.length ? workflows.map(card).join('') : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
   document.querySelector('#new-flow')!.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
-  document.querySelector('#refresh-action-queue')?.addEventListener('click', async () => { await loadActionQueue(); render(); showToast('待办队列已刷新。'); });
+  document.querySelector('#refresh-action-queue')?.addEventListener('click', async () => { await loadActionQueue(); render(); showToast(t('toast.queue.refreshed')); });
   document.querySelectorAll<HTMLButtonElement>('[data-open-queue]').forEach(button => button.addEventListener('click', () => { active = workflows.find(item => item.id === button.dataset.openQueue) || null; goTo('detail'); }));
   bindFlowCards();
 }
-function card(flow: Workflow) { const summary = workflowSummary(flow); return `<article class="flow-card"><p class="eyebrow">${escape(flow.repository)}</p><h3>${escape(flow.name)}</h3><p class="route">${escape(summary.route)}</p><footer><span>${summary.stepCount} 个步骤 · 尚未执行</span><button data-open="${flow.id}" class="link-button">查看流程 →</button></footer></article>`; }
+function card(flow: Workflow) { const summary = workflowSummary(flow); return `<article class="flow-card"><p class="eyebrow">${escape(flow.repository)}</p><h3>${escape(flow.name)}</h3><p class="route">${escape(summary.route)}</p><footer><span>${t('overview.flowCard.steps', { count: summary.stepCount })}</span><button data-open="${flow.id}" class="link-button">${t('overview.flowCard.view')}</button></footer></article>`; }
 function bindFlowCards() { document.querySelectorAll<HTMLButtonElement>('[data-open]').forEach(button => button.addEventListener('click', () => { active = workflows.find(item => item.id === button.dataset.open) || null; goTo('detail'); })); }
 
 function editor() {
   const content = document.querySelector('#content')!;
   const selected = active?.repository || '';
-  content.innerHTML = `<section class="page-head"><button id="back-from-editor" class="ghost">← 返回${active ? '流程详情' : '流程总览'}</button><p class="eyebrow">FLOW EDITOR</p><h1>${active ? '编辑流程' : '新建流程'}</h1><p>流程配置不会创建任何 GitHub PR。</p></section><section class="editor-layout"><section class="panel editor-panel"><label>流程名称<input id="flow-name" value="${escape(active?.name || '')}" placeholder="例如：支付功能上线" /></label><label>仓库<select id="repo"><option value="">选择 GitHub 仓库</option>${repos.map(repo => `<option value="${repo.full_name}" ${repo.full_name === selected ? 'selected' : ''}>${repo.full_name}${repo.private ? ' · private' : ''}</option>`).join('')}</select></label><div id="step-form">${selected ? '<p class="meta">正在读取分支…</p>' : '<p class="meta">选择仓库后显示实际分支。</p>'}</div></section><aside id="draft" class="panel draft">${renderDraft()}</aside></section>`;
+  content.innerHTML = `<section class="page-head"><button id="back-from-editor" class="ghost">${active ? t('editor.back.detail') : t('editor.back.overview')}</button><p class="eyebrow">${t('editor.eyebrow')}</p><h1>${active ? t('editor.title.edit') : t('editor.title.new')}</h1><p>${t('editor.subtitle')}</p></section><section class="editor-layout"><section class="panel editor-panel"><label>${t('editor.label.name')}<input id="flow-name" value="${escape(active?.name || '')}" placeholder="${t('editor.placeholder.name')}" /></label><label>${t('editor.label.repo')}<select id="repo"><option value="">${t('editor.repo.placeholder')}</option>${repos.map(repo => `<option value="${repo.full_name}" ${repo.full_name === selected ? 'selected' : ''}>${repo.full_name}${repo.private ? t('editor.repo.private') : ''}</option>`).join('')}</select></label><div id="step-form">${selected ? `<p class="meta">${t('editor.branch.loading')}</p>` : `<p class="meta">${t('editor.branch.hint')}</p>`}</div></section><aside id="draft" class="panel draft">${renderDraft()}</aside></section>`;
   document.querySelector('#back-from-editor')!.addEventListener('click', () => goTo('back'));
   document.querySelector<HTMLSelectElement>('#repo')!.addEventListener('change', async event => { active = active?.repository === (event.target as HTMLSelectElement).value ? active : null; await loadBranches((event.target as HTMLSelectElement).value); });
   if (selected) loadBranches(selected);
@@ -344,26 +380,26 @@ function editor() {
 
 async function loadBranches(repository: string) {
   const form = document.querySelector('#step-form')!;
-  try { const { owner, name } = parseRepository(repository); branches = (await githubFetch<{ name: string }[]>(token, `/repos/${owner}/${name}/branches?per_page=100`)).map(item => item.name); renderStepForm(repository); } catch (err) { form.innerHTML = `<p class="error">${escape(err instanceof Error ? err.message : '无法读取分支')}</p>`; }
+  try { const { owner, name } = parseRepository(repository); branches = (await githubFetch<{ name: string }[]>(token, `/repos/${owner}/${name}/branches?per_page=100`)).map(item => item.name); renderStepForm(repository); } catch (err) { form.innerHTML = `<p class="error">${escape(err instanceof Error ? err.message : t('editor.error.branches'))}</p>`; }
 }
 function renderStepForm(repository: string) {
   const last = active?.repository === repository ? active.stages.at(-1) : undefined;
   const source = last?.target || branches.find(branch => branch.startsWith('feature/')) || branches[0] || '';
   const target = branches.find(branch => branch === 'dev') || branches.find(branch => branch === 'main') || branches.find(branch => branch !== source) || '';
-  document.querySelector('#step-form')!.innerHTML = `<div class="two"><label>Source<select id="source">${options(source)}</select></label><label>Target<select id="target">${options(target)}</select></label></div><div class="actions"><a id="compare" target="_blank" class="text-link">在 GitHub 查看 Compare ↗</a><button id="add-step" class="primary">${active?.repository === repository ? '添加下一步' : '保存流程'}</button></div>`;
+  document.querySelector('#step-form')!.innerHTML = `<div class="two"><label>${t('editor.label.source')}<select id="source">${options(source)}</select></label><label>${t('editor.label.target')}<select id="target">${options(target)}</select></label></div><div class="actions"><a id="compare" target="_blank" class="text-link">${t('editor.compare')}</a><button id="add-step" class="primary">${active?.repository === repository ? t('editor.addStep') : t('editor.saveFlow')}</button></div>`;
   const sync = () => document.querySelector<HTMLAnchorElement>('#compare')!.href = githubCompareUrl(repository, value('source'), value('target'));
   document.querySelector('#source')!.addEventListener('change', sync); document.querySelector('#target')!.addEventListener('change', sync); sync();
-  document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast('Source 和 Target 不能是同一分支。'); return; } const name = value('flow-name') || repository; const isNew = active?.repository !== repository; const next = active?.repository === repository ? { ...addStage(active, source, target), name } : createWorkflow(repository, source, target, name); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); showToast(isNew ? `流程“${next.name}”已保存。` : `已保存第 ${next.stages.length} 步：${source} → ${target}`); renderStepForm(repository); });
+  document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } const name = value('flow-name') || repository; const isNew = active?.repository !== repository; const next = active?.repository === repository ? { ...addStage(active, source, target), name } : createWorkflow(repository, source, target, name); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.stepSaved', { step: next.stages.length, source, target })); renderStepForm(repository); });
 }
 function options(selected: string) { return branches.map(branch => `<option ${branch === selected ? 'selected' : ''}>${escape(branch)}</option>`).join(''); }
 function value(id: string) { return document.querySelector<HTMLSelectElement | HTMLInputElement>(`#${id}`)!.value; }
-function renderDraft() { if (!active) return `<p class="eyebrow">FLOW DRAFT</p><h2>尚未保存步骤</h2><p class="meta">保存第一步后，流程会显示在这里。</p>`; return `<p class="eyebrow">FLOW DRAFT</p><h2>${escape(active.name)}</h2><p class="meta">${escape(active.repository)}</p>${active.stages.map((stage, index) => `<div class="draft-step"><span>${index + 1}</span><b>${escape(stage.source)} → ${escape(stage.target)}</b><button data-remove="${index}">删除</button></div>`).join('')}<button id="view-flow" class="ghost">查看流程详情</button>`; }
+function renderDraft() { if (!active) return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${t('draft.empty.title')}</h2><p class="meta">${t('draft.empty.desc')}</p>`; return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${escape(active.name)}</h2><p class="meta">${escape(active.repository)}</p>${active.stages.map((stage, index) => `<div class="draft-step"><span>${index + 1}</span><b>${escape(stage.source)} → ${escape(stage.target)}</b><button data-remove="${index}">${t('draft.remove')}</button></div>`).join('')}<button id="view-flow" class="ghost">${t('draft.viewDetail')}</button>`; }
 
 function detail() {
   const content = document.querySelector('#content')!;
   if (!active) { screen = 'overview'; return overview(); }
   const summary = workflowSummary(active);
-  content.innerHTML = `<section class="page-head"><p class="eyebrow">FLOW DETAIL</p><h1>${escape(active.name)}</h1><p>${escape(active.repository)} · ${escape(summary.route)}</p><button id="refresh-status" class="ghost">刷新 GitHub 状态</button></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">EXECUTION TIMELINE</p>${active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><aside class="panel next-action"><p class="eyebrow">NEXT ACTION</p><h2>${nextActionTitle()}</h2><p>${statuses ? '状态直接来自 GitHub；门禁满足时可在此创建或合并 PR。' : '点击“刷新 GitHub 状态”，读取每一步的 PR、Actions 和 Approval。'}</p><button id="edit-flow" class="primary">编辑流程</button></aside></section>`;
+  content.innerHTML = `<section class="page-head"><p class="eyebrow">${t('detail.eyebrow')}</p><h1>${escape(active.name)}</h1><p>${escape(active.repository)} · ${escape(summary.route)}</p><button id="refresh-status" class="ghost">${t('detail.refresh')}</button></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">${t('detail.timeline.eyebrow')}</p>${active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><aside class="panel next-action"><p class="eyebrow">${t('detail.nextAction.eyebrow')}</p><h2>${nextActionTitle()}</h2><p>${statuses ? t('detail.desc.withStatuses') : t('detail.desc.noStatuses')}</p><button id="edit-flow" class="primary">${t('detail.edit')}</button></aside></section>`;
   document.querySelector('#edit-flow')!.addEventListener('click', () => { screen = 'editor'; render(); });
   document.querySelector('#refresh-status')!.addEventListener('click', refreshStatuses);
   document.querySelectorAll<HTMLButtonElement>('[data-codex-repair]').forEach(button => button.addEventListener('click', () => void showCodexRepairDialog(Number(button.dataset.codexRepair))));
@@ -409,44 +445,44 @@ function positionMergeMenu(menu: HTMLElement, control: HTMLElement) {
 
 function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const status = statuses?.[index];
-  if (!status) return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p>尚未读取 GitHub 状态。</p></div></article>`;
-  if (status.kind === 'not-created') { const unlocked = canCreateStage(index, statuses!); return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">等待创建 PR</b> · GitHub 中尚无对应 PR。</p>${unlocked ? `<div class="timeline-actions"><button class="timeline-action" data-create-pr="${index}">创建 PR</button><a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">在 GitHub 创建 PR ↗</a></div>` : '<p class="meta">等待前序步骤合并且合并后 Actions 成功。</p>'}</div></article>`; }
-  if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status failure">读取失败</b> · ${escape(status.message || '')}</p></div></article>`;
-  const actions = status.checks?.total ? `${status.checks.passed}/${status.checks.total} Actions ${status.checks.state === 'success' ? '通过' : status.checks.state === 'failure' ? '失败' : '进行中'}` : '';
-  const approvals = status.requiredApprovals ? `${status.approvals || 0}/${status.requiredApprovals} 个审批` : '';
-  const mergeability = status.mergeable === false || status.mergeableState === 'dirty' ? '存在合并冲突' : status.mergeableState === 'behind' ? '需要更新分支' : status.mergeableState === 'blocked' ? 'GitHub 门禁未满足' : '';
+  if (!status) return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p>${t('detail.timeline.placeholder')}</p></div></article>`;
+  if (status.kind === 'not-created') { const unlocked = canCreateStage(index, statuses!); return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${unlocked ? `<div class="timeline-actions"><button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button><a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${t('status.locked')}</p>`}</div></article>`; }
+  if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status failure">${t('status.fetchFailed')}</b> · ${escape(status.message || '')}</p></div></article>`;
+  const actions = status.checks?.total ? t('status.actions.summary', { passed: status.checks.passed, total: status.checks.total, state: status.checks.state === 'success' ? t('status.actions.passed') : status.checks.state === 'failure' ? t('status.actions.failed') : t('status.actions.running') }) : '';
+  const approvals = status.requiredApprovals ? t('status.approvals', { approvals: status.approvals || 0, required: status.requiredApprovals }) : '';
+  const mergeability = status.mergeable === false || status.mergeableState === 'dirty' ? t('status.merge.conflict') : status.mergeableState === 'behind' ? t('status.merge.behind') : status.mergeableState === 'blocked' ? t('status.merge.blocked') : '';
   const mergedVerification = status.checks?.state;
-  const state = status.kind === 'merged' ? mergedVerification === 'success' ? '合并后验证通过' : mergedVerification === 'failure' ? '合并后验证失败' : status.checks ? '合并后验证中' : '已合并' : status.kind === 'closed' ? '已关闭' : status.checks?.total && status.checks.state === 'failure' ? 'Actions 失败' : status.checks?.total && status.checks.state === 'pending' ? '等待 Actions' : status.requiredApprovals && (status.approvals || 0) < status.requiredApprovals ? '等待审批' : mergeability ? '合并被阻塞' : '等待合并';
+  const state = status.kind === 'merged' ? mergedVerification === 'success' ? t('state.postMerge.passed') : mergedVerification === 'failure' ? t('state.postMerge.failed') : status.checks ? t('state.postMerge.running') : t('state.merged') : status.kind === 'closed' ? t('state.closed') : status.checks?.total && status.checks.state === 'failure' ? t('state.actionsFailed') : status.checks?.total && status.checks.state === 'pending' ? t('state.waitingActions') : status.requiredApprovals && (status.approvals || 0) < status.requiredApprovals ? t('state.waitingApprovals') : mergeability ? t('state.mergeBlocked') : t('state.waitingMerge');
   const gates = status.kind === 'merged' ? [actions] : [actions, approvals, mergeability];
   const canCreateNewPull = status.kind === 'merged' && Boolean(status.aheadBy) && canCreateStage(index, statuses!);
   const newCommits = status.kind === 'merged' && status.aheadBy
-    ? `<p><b class="status neutral">有 ${status.aheadBy} 个新提交</b> · ${canCreateNewPull ? '可创建新的 PR。' : '等待前序步骤合并后 Actions 成功。'}</p>`
+    ? `<p><b class="status neutral">${t('status.newCommits', { count: status.aheadBy })}</b> · ${canCreateNewPull ? t('status.newCommits.canCreate') : t('status.newCommits.waiting')}</p>`
     : '';
-  const newPullAction = canCreateNewPull ? `<button class="timeline-action" data-create-pr="${index}">创建新 PR</button>` : '';
+  const newPullAction = canCreateNewPull ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr.button')}</button>` : '';
   const stateClass = status.kind === 'merged' ? mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
-  const mergeAction = status.kind === 'open' && canMergePull(status) ? mergingStages.has(index) ? `<button class="create-pr" disabled>正在合并…</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">合并 PR</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="选择合并方式" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>✓　合并提交（merge）</b><small>保留此分支的全部提交，并创建一个合并提交。</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>压缩合并（squash）</b><small>需到 GitHub 页面操作</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>变基合并（rebase）</b><small>需到 GitHub 页面操作</small></button></span></span>` : '';
-  const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">交给 Codex 修复</button>` : '';
+  const mergeAction = status.kind === 'open' && canMergePull(status) ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
+  const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';
   const gateList = gates.filter(Boolean);
-  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b></p>${gateList.length ? `<div class="gate-list">${gateList.map(gate => `<span>${gate}</span>`).join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">打开 GitHub PR #${status.pr!.number} ↗</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
+  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b></p>${gateList.length ? `<div class="gate-list">${gateList.map(gate => `<span>${gate}</span>`).join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
 }
 async function showCodexRepairDialog(index: number) {
   if (!active) return;
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog repair-dialog';
-  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">CODEX REPAIR PACKAGE</p><h2>正在收集修复上下文…</h2><p class="meta">将包含 PR、失败检查、Actions Job 链接和改动摘要；不会发送代码或创建提交。</p></form>`;
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('repair.eyebrow')}</p><h2>${t('repair.collecting')}</h2><p class="meta">${t('repair.collecting.desc')}</p></form>`;
   document.body.append(dialog); dialog.showModal();
   try {
     const response = await fetch(githubAppApiUrl('/api/repair-context'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: active.id, stageIndex: index }) });
     const payload = await response.json().catch(() => ({})) as { markdown?: string; pullUrl?: string; message?: string };
-    if (!response.ok || !payload.markdown) throw new Error(payload.message || '无法生成 Codex 修复任务');
-    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">CODEX REPAIR PACKAGE</p><h2>修复任务已准备好</h2><p class="meta">复制后粘贴到该仓库的 Codex 任务中即可开始修复。</p><textarea id="repair-context" readonly></textarea><div class="dialog-actions"><a class="ghost" target="_blank" href="${escape(payload.pullUrl || '#')}">打开 GitHub Actions ↗</a><button id="copy-repair-context" type="button" class="primary">复制给 Codex</button><button value="cancel" class="ghost">关闭</button></div></form>`;
+    if (!response.ok || !payload.markdown) throw new Error(payload.message || t('repair.error.generate'));
+    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('repair.eyebrow')}</p><h2>${t('repair.ready.title')}</h2><p class="meta">${t('repair.ready.desc')}</p><textarea id="repair-context" readonly></textarea><div class="dialog-actions"><a class="ghost" target="_blank" href="${escape(payload.pullUrl || '#')}">${t('repair.openActions')}</a><button id="copy-repair-context" type="button" class="primary">${t('repair.copy')}</button><button value="cancel" class="ghost">${t('repair.close')}</button></div></form>`;
     dialog.querySelector<HTMLTextAreaElement>('#repair-context')!.value = payload.markdown;
     dialog.querySelector('#copy-repair-context')!.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(payload.markdown!); showToast('Codex 修复任务已复制。'); }
-      catch { showToast('复制失败，请手动复制修复任务内容。'); }
+      try { await navigator.clipboard.writeText(payload.markdown!); showToast(t('repair.toast.copied')); }
+      catch { showToast(t('repair.toast.copyFailed')); }
     });
   } catch (error) {
-    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">CODEX REPAIR PACKAGE</p><h2>无法生成修复任务</h2><p class="error">${escape(error instanceof Error ? error.message : '未知错误')}</p><div class="dialog-actions"><button value="cancel" class="ghost">关闭</button></div></form>`;
+    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('repair.eyebrow')}</p><h2>${t('repair.error.title')}</h2><p class="error">${escape(error instanceof Error ? error.message : t('repair.error.generic'))}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('repair.close')}</button></div></form>`;
   }
   dialog.addEventListener('close', () => dialog.remove());
 }
@@ -467,7 +503,7 @@ function positionNativeOnlyTooltip(event: MouseEvent) {
   nativeOnlyTooltip.style.top = `${Math.max(8, event.clientY - rect.height)}px`;
 }
 function showNativeOnlyTooltip(event: MouseEvent) {
-  nativeOnlyTooltip ||= Object.assign(document.createElement('div'), { className: 'native-only-tooltip', role: 'tooltip', textContent: '需到 GitHub 页面操作' });
+  nativeOnlyTooltip ||= Object.assign(document.createElement('div'), { className: 'native-only-tooltip', role: 'tooltip', textContent: t('nativeOnly.tooltip') });
   if (!nativeOnlyTooltip.isConnected) document.body.append(nativeOnlyTooltip);
   nativeOnlyTooltip.hidden = false;
   positionNativeOnlyTooltip(event);
@@ -475,9 +511,9 @@ function showNativeOnlyTooltip(event: MouseEvent) {
 function moveNativeOnlyTooltip(event: MouseEvent) { positionNativeOnlyTooltip(event); }
 function hideNativeOnlyTooltip() { if (nativeOnlyTooltip) nativeOnlyTooltip.hidden = true; }
 function mergeErrorMessage(error: unknown) {
-  const message = error instanceof Error ? error.message : '合并失败';
+  const message = error instanceof Error ? error.message : t('merge.error.generic');
   return message.includes('Resource not accessible by integration')
-    ? 'GitHub App 当前无权合并 PR。请确认 Contents 与 Pull requests 均为 Read & write；权限更新后，到 GitHub 已安装应用中重新批准或重新安装 PR Helper，再重试。'
+    ? t('merge.error.permission')
     : message;
 }
 function showMergeDialog(index: number) {
@@ -486,18 +522,18 @@ function showMergeDialog(index: number) {
   const pull = status.pr;
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
-  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">MERGE PULL REQUEST</p><h2>合并 PR #${pull.number}</h2><p class="meta">将创建一个合并提交。GitHub 会再次校验权限、分支保护和最新提交。</p><div class="dialog-actions"><button value="cancel" class="ghost">取消</button><button id="confirm-merge" class="primary">确认合并</button></div></form>`;
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('merge.eyebrow')}</p><h2>${t('merge.dialog.title', { number: pull.number })}</h2><p class="meta">${t('merge.dialog.desc')}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('merge.dialog.cancel')}</button><button id="confirm-merge" class="primary">${t('merge.dialog.confirm')}</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
   dialog.querySelector<HTMLButtonElement>('#confirm-merge')!.addEventListener('click', async event => {
     event.preventDefault();
     const button = event.currentTarget as HTMLButtonElement;
-    button.disabled = true; button.textContent = '正在合并…';
+    button.disabled = true; button.textContent = t('merge.merging');
     mergingStages.add(index);
     detail();
     try {
       const { owner, name } = parseRepository(active!.repository);
       const result = await githubFetch<MergeResult>(token, `/repos/${owner}/${name}/pulls/${pull.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) });
-      if (!result.merged) throw new Error(result.message || 'GitHub 未完成合并。');
+      if (!result.merged) throw new Error(result.message || t('merge.error.incomplete'));
       const pendingChecks = { state: 'pending' as const, passed: 0, total: 0 };
       statuses = statuses?.map((item, statusIndex) => statusIndex === index ? { ...item, kind: 'merged', pr: { ...pull, state: 'closed', merged_at: new Date().toISOString(), merge_commit_sha: result.sha }, checks: pendingChecks } : item) || null;
       recentlyMergedPullNumbers.set(index, pull.number);
@@ -509,19 +545,19 @@ function showMergeDialog(index: number) {
       mergingStages.delete(index);
       detail();
       showToast(mergeErrorMessage(err));
-      button.disabled = false; button.textContent = '确认合并';
+      button.disabled = false; button.textContent = t('merge.dialog.confirm');
     }
   });
   dialog.addEventListener('close', () => dialog.remove());
 }
-function nextActionTitle() { if (!statuses) return '尚未开始监控'; if (statuses.some(status => status.kind === 'open' && status.checks?.state === 'failure')) return '有门禁失败需要处理'; if (statuses.some(status => status.kind === 'not-created')) return '可检查下一步 PR'; return '流程状态已同步'; }
+function nextActionTitle() { if (!statuses) return t('nextAction.notStarted'); if (statuses.some(status => status.kind === 'open' && status.checks?.state === 'failure')) return t('nextAction.gateFailed'); if (statuses.some(status => status.kind === 'not-created')) return t('nextAction.canCheck'); return t('nextAction.synced'); }
 async function readBranchProtection(owner: string, name: string, branch: string) {
   try { return await githubFetch<BranchProtection>(token, `/repos/${owner}/${name}/branches/${encodeURIComponent(branch)}/protection`); } catch { return null; }
 }
 async function refreshStatuses() {
   if (!active) return;
   const button = document.querySelector<HTMLButtonElement>('#refresh-status');
-  if (button) { button.disabled = true; button.textContent = '正在读取…'; }
+  if (button) { button.disabled = true; button.textContent = t('detail.refresh.loading'); }
   const { owner, name } = parseRepository(active.repository);
   const previous = statuses;
   statuses = await Promise.all(active.stages.map(async (stage, index) => {
@@ -569,9 +605,20 @@ async function refreshStatuses() {
       const requiredApprovals = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
       const checks = runs.check_runs.length || commitStatuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, commitStatuses.statuses) : undefined;
       return { kind: 'open', pr: details, checks, approvals: reviews.filter(review => review.state === 'APPROVED').length, requiredApprovals: requiredApprovals || undefined, mergeable: details.mergeable, mergeableState: details.mergeable_state } as StepStatus;
-    } catch (err) { return { kind: 'error', message: err instanceof Error ? err.message : '未知错误' } as StepStatus; }
+    } catch (err) { return { kind: 'error', message: err instanceof Error ? err.message : t('toast.unknownError') } as StepStatus; }
   }));
-  if (previous) statuses.forEach((status, index) => { const before = previous[index]; const oldCheck = before?.checks?.state; const newCheck = status.checks?.state; if (before && statusChanged({ kind: before.kind, checks: oldCheck }, { kind: status.kind, checks: newCheck })) { const message = `第 ${index + 1} 步状态更新：${status.kind === 'merged' ? 'PR 已合并' : newCheck === 'failure' ? 'Actions 失败' : newCheck === 'success' ? 'Actions 全绿' : status.kind}`; showToast(message); if (Notification.permission === 'granted') new Notification('PR Flow', { body: message }); } });
+  statuses.forEach((status, index) => {
+    const before = previous?.[index];
+    const oldCheck = before?.checks?.state;
+    const newCheck = status.checks?.state;
+    const newPullReady = status.kind === 'merged' && Boolean(status.aheadBy) && canCreateStage(index, statuses!) && !(before?.kind === 'merged' && before.aheadBy);
+    const changed = Boolean(before && statusChanged({ kind: before.kind, checks: oldCheck }, { kind: status.kind, checks: newCheck }));
+    if (!changed && !newPullReady) return;
+    const detail = newPullReady ? t('notif.newPullReady') : status.kind === 'merged' ? t('notif.merged') : newCheck === 'failure' ? t('notif.actionsFailed') : newCheck === 'success' ? t('notif.actionsPassed') : status.kind;
+    const message = t('notif.stepUpdate', { index: index + 1, detail });
+    showToast(message);
+    if (Notification.permission === 'granted') new Notification(t('notif.title'), { body: message });
+  });
   detail();
 }
 
@@ -597,7 +644,7 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
   });
   const requestClose = () => {
     cacheCurrentDraft();
-    if (!hasUnsavedDrafts() || window.confirm('存在未保存的修改，确定放弃吗？')) dialog.close();
+    if (!hasUnsavedDrafts() || window.confirm(t('rules.confirm.discard'))) dialog.close();
   };
 
   const renderRuleManager = () => {
@@ -606,27 +653,27 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
     const preservedDraft = drafts.get(draftKey(editingId));
     const editorDraft = preservedDraft || { name: editing?.name || '', content: editing?.content || '' };
     dialog.innerHTML = `<form method="dialog">
-      <p class="eyebrow">PR GENERATION RULES</p>
-      <h2 id="generation-rules-title">生成规则</h2>
+      <p class="eyebrow">${t('rules.eyebrow')}</p>
+      <h2 id="generation-rules-title">${t('rules.title')}</h2>
       <div class="rules-layout">
         <aside class="rules-sidebar">
-          <div class="rules-list" role="radiogroup" aria-label="生成规则列表">
-            ${generationRules.length ? generationRules.map(rule => `<label class="rule-option${rule.id === editingId ? ' active' : ''}${rule.isDefault ? ' is-default' : ''}"><input type="radio" name="generation-rule" value="${escape(rule.id)}" ${rule.id === editingId ? 'checked' : ''} /><span class="rule-option-name">${escape(rule.name)}</span>${rule.isDefault ? '<small>默认</small>' : ''}</label>`).join('') : '<p class="meta">还没有生成规则。</p>'}
+          <div class="rules-list" role="radiogroup" aria-label="${t('rules.aria.list')}">
+            ${generationRules.length ? generationRules.map(rule => `<label class="rule-option${rule.id === editingId ? ' active' : ''}${rule.isDefault ? ' is-default' : ''}"><input type="radio" name="generation-rule" value="${escape(rule.id)}" ${rule.id === editingId ? 'checked' : ''} /><span class="rule-option-name">${escape(rule.name)}</span>${rule.isDefault ? `<small>${t('rules.badge.default')}</small>` : ''}</label>`).join('') : `<p class="meta">${t('rules.empty')}</p>`}
           </div>
-          <button id="new-generation-rule" type="button" class="ghost">＋ 添加文本</button>
-          <label class="ghost import-rule">导入 .md<input id="import-generation-rule" type="file" accept=".md,text/markdown" /></label>
+          <button id="new-generation-rule" type="button" class="ghost">${t('rules.addText')}</button>
+          <label class="ghost import-rule">${t('rules.import')}<input id="import-generation-rule" type="file" accept=".md,text/markdown" /></label>
         </aside>
         <section class="rule-editor">
-          <label>规则名称<input id="generation-rule-name" value="${escape(editorDraft.name)}" placeholder="例如：标准 PR" /></label>
-          <label>Markdown 内容<textarea id="generation-rule-content" placeholder="# 标题规则&#10;请使用简洁中文。">${escape(editorDraft.content)}</textarea></label>
+          <label>${t('rules.label.name')}<input id="generation-rule-name" value="${escape(editorDraft.name)}" placeholder="${t('rules.placeholder.name')}" /></label>
+          <label>${t('rules.label.content')}<textarea id="generation-rule-content" placeholder="${t('rules.placeholder.content')}">${escape(editorDraft.content)}</textarea></label>
           <p id="generation-rule-error" class="rule-error" role="alert"></p>
         </section>
       </div>
       <div class="dialog-actions">
-        <button id="cancel-generation-rules" type="button" class="ghost">取消</button>
-        <button id="save-generation-rule" type="button" class="ghost">保存</button>
-        <button id="default-generation-rule" type="button" class="ghost" ${editing ? '' : 'disabled'}>设为默认</button>
-        <button id="use-generation-rule" type="button" class="primary" ${editing ? '' : 'disabled'}>使用此规则</button>
+        <button id="cancel-generation-rules" type="button" class="ghost">${t('rules.cancel')}</button>
+        <button id="save-generation-rule" type="button" class="ghost">${t('rules.save')}</button>
+        <button id="default-generation-rule" type="button" class="ghost" ${editing ? '' : 'disabled'}>${t('rules.setDefault')}</button>
+        <button id="use-generation-rule" type="button" class="primary" ${editing ? '' : 'disabled'}>${t('rules.use')}</button>
       </div>
     </form>`;
 
@@ -662,13 +709,13 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
         const name = markdownRuleName(file.name);
         const content = await file.text();
         if (generation !== renderGeneration || request !== importRequest || !dialog.open) return;
-        if (!content.trim()) throw new Error('规则内容不能为空');
+        if (!content.trim()) throw new Error(t('rules.error.empty'));
         nameInput.value = name;
         contentInput.value = content;
         error('');
       } catch (err) {
         if (generation !== renderGeneration || request !== importRequest || !dialog.open) return;
-        error(err instanceof Error ? err.message : '无法读取 Markdown 文件');
+        error(err instanceof Error ? err.message : t('rules.error.import'));
       }
     });
 
@@ -684,7 +731,7 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
         onRulesChanged();
         renderRuleManager();
       } catch (err) {
-        error(err instanceof Error ? err.message : '无法保存规则');
+        error(err instanceof Error ? err.message : t('rules.error.save'));
       }
     });
 
@@ -696,7 +743,7 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
         onRulesChanged();
         renderRuleManager();
       } catch (err) {
-        error(err instanceof Error ? err.message : '无法设置默认规则');
+        error(err instanceof Error ? err.message : t('rules.error.default'));
       }
     });
 
@@ -704,7 +751,7 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
       if (!editing) return;
       cacheCurrentDraft();
       if (hasUnsavedDrafts()) {
-        error('请先保存所有修改，再使用此规则');
+        error(t('rules.error.use'));
         return;
       }
       onUse(editing.id);
@@ -734,7 +781,7 @@ function showCreateDialog(index: number) {
   const selectedGenerationRule = () => generationRuleById(generationRules, selectedGenerationRuleId);
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog pr-create-dialog';
-  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">CREATE PULL REQUEST</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><label>PR 标题<input id="create-title" value="${escape(restoredDraft ? restoredDraft.title : defaultTitle)}" /></label><label>PR 描述（可选）<textarea id="create-body" placeholder="可使用 AI 生成">${escape(restoredDraft?.body || '')}</textarea></label><p class="meta">确认后才会在 GitHub 创建 PR；不会自动合并。</p><p id="create-operation-status" class="meta" role="status" aria-live="polite" aria-atomic="true"></p><div class="dialog-actions"><button id="generation-rules" type="button" class="ghost">${escape(generationRuleButtonLabel(selectedGenerationRule()))}</button><button id="ai-settings" type="button" class="ghost">AI 设置</button><button id="generate-ai" type="button" class="ghost">AI 生成</button><button value="cancel" class="ghost">取消</button><button id="confirm-create" class="primary">确认创建 PR</button></div></form>`;
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('createPr.eyebrow')}</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><label>${t('createPr.label.title')}<input id="create-title" value="${escape(restoredDraft ? restoredDraft.title : defaultTitle)}" /></label><label>${t('createPr.label.body')}<textarea id="create-body" placeholder="${t('createPr.placeholder.body')}">${escape(restoredDraft?.body || '')}</textarea></label><p class="meta">${t('createPr.meta')}</p><p id="create-operation-status" class="meta" role="status" aria-live="polite" aria-atomic="true"></p><div class="dialog-actions"><button id="generation-rules" type="button" class="ghost">${escape(generationRuleButtonLabel(selectedGenerationRule()))}</button><button id="ai-settings" type="button" class="ghost">${t('createPr.aiSettings')}</button><button id="generate-ai" type="button" class="ghost">${t('createPr.aiGenerate')}</button><button value="cancel" class="ghost">${t('createPr.cancel')}</button><button id="confirm-create" class="primary">${t('createPr.confirm')}</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
   const dialogRect = dialog.getBoundingClientRect();
   dialog.style.position = 'fixed';
@@ -773,8 +820,8 @@ function showCreateDialog(index: number) {
     aiSettingsButton.disabled = busy;
     form.setAttribute('aria-busy', String(busy));
     operationStatus.textContent = operation === 'generation'
-      ? 'AI 正在生成标题和描述…'
-      : operation === 'creation' ? '正在创建 Pull Request…' : '';
+      ? t('createPr.aiLoading')
+      : operation === 'creation' ? t('createPr.creating') : '';
   };
   let draftDirty = false;
   let draftSaveTimer: number | undefined;
@@ -824,7 +871,7 @@ function showCreateDialog(index: number) {
     const controller = new AbortController();
     generationController = controller;
     setDialogOperation('generation');
-    generateButton.textContent = '生成中…';
+    generateButton.textContent = t('createPr.generating');
     const generationRuleContent = selectedGenerationRule()?.content;
 
     try {
@@ -846,13 +893,13 @@ function showCreateDialog(index: number) {
       const isAbortError = err instanceof Error && err.name === 'AbortError';
       if (isDialogOpen()) {
         flushDraft();
-        if (!isAbortError) showToast(err instanceof Error ? err.message : 'AI 生成失败');
+        if (!isAbortError) showToast(err instanceof Error ? err.message : t('createPr.aiError'));
       }
     } finally {
       if (generationController === controller) generationController = null;
       if (isDialogOpen() && !creationController) {
         setDialogOperation('idle');
-        generateButton.textContent = 'AI 生成';
+        generateButton.textContent = t('createPr.aiGenerate');
       }
     }
   };
@@ -870,7 +917,7 @@ function showCreateDialog(index: number) {
     const controller = new AbortController();
     creationController = controller;
     setDialogOperation('creation');
-    confirmButton.textContent = '正在创建…';
+    confirmButton.textContent = t('createPr.creatingShort');
     try {
       const { owner, name } = parseRepository(identity.repository);
       const createdPull = await githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify(pullRequestPayload(title, stage.source, stage.target, body)), signal: controller.signal });
@@ -887,12 +934,12 @@ function showCreateDialog(index: number) {
       window.setTimeout(() => { void refreshStatuses(); }, 1_000);
     } catch (err) {
       const isAbortError = err instanceof Error && err.name === 'AbortError';
-      if (isDialogOpen() && !isAbortError) showToast(err instanceof Error ? err.message : '创建失败');
+      if (isDialogOpen() && !isAbortError) showToast(err instanceof Error ? err.message : t('createPr.createError'));
     } finally {
       if (creationController === controller) creationController = null;
       if (isDialogOpen() && !generationController) {
         setDialogOperation('idle');
-        confirmButton.textContent = '确认创建 PR';
+        confirmButton.textContent = t('createPr.confirm');
       }
     }
   });
@@ -909,7 +956,7 @@ function confirmAiGenerationOverwrite() {
   return new Promise<boolean>(resolve => {
     const dialog = document.createElement('dialog');
     dialog.className = 'create-dialog confirm-dialog';
-    dialog.innerHTML = `<form method="dialog"><div class="confirm-icon" aria-hidden="true">AI</div><h2>重新生成 PR 内容？</h2><p>AI 生成会覆盖当前填写的 PR 标题和描述。此操作只影响弹窗中的草稿，不会修改 GitHub 上的内容。</p><div class="dialog-actions"><button value="cancel" class="ghost">取消</button><button value="confirm" class="primary">继续生成</button></div></form>`;
+    dialog.innerHTML = `<form method="dialog"><div class="confirm-icon" aria-hidden="true">AI</div><h2>${t('createPr.overwrite.title')}</h2><p>${t('createPr.overwrite.desc')}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('createPr.overwrite.cancel')}</button><button value="confirm" class="primary">${t('createPr.overwrite.confirm')}</button></div></form>`;
     document.body.append(dialog);
     dialog.showModal();
     dialog.addEventListener('close', () => { resolve(dialog.returnValue === 'confirm'); dialog.remove(); }, { once: true });
@@ -924,12 +971,15 @@ const apiKeyFieldObserver = new MutationObserver(() => {
   const toggle = document.createElement('button');
   toggle.type = 'button';
   toggle.className = 'toggle-api-key';
-  toggle.textContent = '显示';
-  toggle.setAttribute('aria-label', '显示 API Key');
-  toggle.addEventListener('click', () => { const shown = input.classList.toggle('is-visible'); toggle.textContent = shown ? '隐藏' : '显示'; toggle.setAttribute('aria-label', shown ? '隐藏 API Key' : '显示 API Key'); });
+  toggle.textContent = t('ai.key.show');
+  toggle.setAttribute('aria-label', t('ai.key.showLabel'));
+  toggle.addEventListener('click', () => { const shown = input.classList.toggle('is-visible'); toggle.textContent = shown ? t('ai.key.hide') : t('ai.key.show'); toggle.setAttribute('aria-label', shown ? t('ai.key.hideLabel') : t('ai.key.showLabel')); });
   input.insertAdjacentElement('afterend', toggle);
 });
 apiKeyFieldObserver.observe(document.body, { childList: true, subtree: true });
 
 document.addEventListener('click', event => { const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-remove]'); if (!button || !active) return; const next = removeStage(active, Number(button.dataset.remove)); if (!next.stages.length) { const workflowId = active.id; active = null; void removeWorkflowFromStorage(workflowId); } else save(next); editor(); });
+
+if (!localStorage.getItem('pr-helper-locale')) setLocale(detectLocale());
+applyTheme(currentTheme);
 void restoreConnection();
