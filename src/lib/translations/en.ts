@@ -99,6 +99,7 @@ const en: TranslationDict = {
   'overview.run.current': 'Current: step {step} · {status}',
   'overview.run.updated': 'Synced {time}',
   'overview.run.checkCount': 'Checks: {passed}/{total} passed',
+  'overview.run.history': 'Recent activity',
   'overview.board.close': 'Close',
   'overview.board.stepDetail': 'STEP DETAIL',
   'overview.board.noPull': 'No PR exists for this step yet',

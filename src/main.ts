@@ -25,6 +25,7 @@ type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'
 type MergeResult = { merged: boolean; message?: string; sha?: string };
 type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
 type WorkflowStageState = WorkflowStageRunState & { workflowId: string; stageIndex: number; repository: string; source: string; target: string; mergedAt: string | null; checksPassed: number; checksTotal: number; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string | null; aheadBy: number; lastEvent: string | null; updatedAt: string };
+type WorkflowStageEvent = { workflowId: string; stageIndex: number; kind: string; message: string; occurredAt: string };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
 const THEME_KEY = 'pr-helper-theme';
@@ -46,6 +47,7 @@ let pendingLocalWorkflowSync = false;
 let cloudWorkflowSyncError = '';
 let actionQueue: ActionQueueItem[] = [];
 let workflowStageStates: WorkflowStageState[] = [];
+let workflowStageEvents: WorkflowStageEvent[] = [];
 let actionQueueError = '';
 let overviewFilter: 'all' | 'attention' | 'failed' = 'all';
 let pushSubscribed = false;
@@ -137,22 +139,23 @@ async function loadCloudWorkflows() {
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
 }
 async function loadActionQueue() {
-  if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; actionQueueError = ''; return false; }
+  if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; workflowStageEvents = []; actionQueueError = ''; return false; }
   try {
     const response = await fetch(githubAppApiUrl('/api/inbox'));
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { message?: string };
-      actionQueue = []; workflowStageStates = [];
+      actionQueue = []; workflowStageStates = []; workflowStageEvents = [];
       actionQueueError = payload.message || t('toast.queue.failed');
       return false;
     }
-    const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[] };
+    const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[]; events?: WorkflowStageEvent[] };
     actionQueue = Array.isArray(payload.items) ? payload.items : [];
     workflowStageStates = Array.isArray(payload.states) ? payload.states : [];
+    workflowStageEvents = Array.isArray(payload.events) ? payload.events : [];
     actionQueueError = '';
     return true;
   } catch (error) {
-    actionQueue = []; workflowStageStates = [];
+    actionQueue = []; workflowStageStates = []; workflowStageEvents = [];
     actionQueueError = error instanceof Error ? error.message : t('toast.queue.failed');
     return false;
   }
@@ -401,6 +404,7 @@ function stageUpdatedAt(state?: WorkflowStageState) {
   if (Number.isNaN(date.getTime())) return '';
   return t('overview.run.updated', { time: new Intl.DateTimeFormat(getLocale() === 'zh' ? 'zh-CN' : 'en-US', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date) });
 }
+function stageEvents(workflowId: string, stageIndex: number) { return workflowStageEvents.filter(event => event.workflowId === workflowId && event.stageIndex === stageIndex).slice(0, 4); }
 function laneRunSummary(flow: Workflow) {
   const summary = workflowRunSummary(flow.stages.map((_, index) => stageState(flow.id, index)));
   return { ...summary, text: t('overview.run.current', { step: summary.stageIndex + 1, status: stageRunPresentationText(summary) }) };
@@ -500,9 +504,11 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number) {
   const pullNumber = queueItem?.pullNumber || state?.pullNumber || null;
   const checks = state?.checksTotal ? `<p>${t('overview.run.checkCount', { passed: state.checksPassed, total: state.checksTotal })}</p>` : '';
   const pull = pullNumber ? `<a class="drawer-pr-link" href="${githubPullUrl(flow.repository, pullNumber)}" target="_blank" rel="noreferrer">PR #${pullNumber} ↗</a>` : `<p>${t('overview.board.noPull')}</p>`;
+  const events = stageEvents(workflowId, stageIndex);
+  const history = events.length ? `<section class="drawer-events"><p class="eyebrow">${t('overview.run.history')}</p><ol>${events.map(event => `<li><b>${escape(event.message)}</b><time>${escape(stageUpdatedAt({ updatedAt: event.occurredAt } as WorkflowStageState))}</time></li>`).join('')}</ol></section>` : '';
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
-  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div><div class="dialog-actions"><button class="ghost drawer-close-action">${t('overview.board.close')}</button><button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
+  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${history}<div class="dialog-actions"><button class="ghost drawer-close-action">${t('overview.board.close')}</button><button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);

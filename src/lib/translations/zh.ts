@@ -99,6 +99,7 @@ const zh: TranslationDict = {
   'overview.run.current': '当前：第 {step} 步 · {status}',
   'overview.run.updated': '同步于 {time}',
   'overview.run.checkCount': '门禁：{passed}/{total} 已通过',
+  'overview.run.history': '最近动态',
   'overview.board.close': '关闭',
   'overview.board.stepDetail': 'STEP DETAIL',
   'overview.board.noPull': '当前步骤尚无 PR',
