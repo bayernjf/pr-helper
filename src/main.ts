@@ -19,6 +19,8 @@ type MergeResult = { merged: boolean; message?: string; sha?: string };
 type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
+const THEME_KEY = 'pr-helper-theme';
+type Theme = 'light' | 'dark';
 let token = sessionStorage.getItem('github-token') || '';
 let repos: Repo[] = [];
 let workflows = loadWorkflows();
@@ -46,10 +48,29 @@ let aiConfig: AiConfig | null = loadAiConfig();
 let generationRules = loadGenerationRules(() => localStorage.getItem(GENERATION_RULES_KEY));
 let pullRequestDrafts = loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), Date.now());
 let draftStorageSynchronized = true;
+let currentTheme: Theme = (localStorage.getItem(THEME_KEY) as Theme) || 'light';
 
 const app = () => document.querySelector<HTMLDivElement>('#app')!;
 const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 function loadWorkflows(): Workflow[] { try { return JSON.parse(localStorage.getItem('pr-helper-workflows') || '[]') as Workflow[]; } catch { return []; } }
+function applyTheme(theme: Theme) {
+  currentTheme = theme;
+  localStorage.setItem(THEME_KEY, theme);
+  document.documentElement.setAttribute('data-theme', theme);
+  updateThemeToggleButton();
+}
+function toggleTheme() {
+  applyTheme(currentTheme === 'light' ? 'dark' : 'light');
+}
+function updateThemeToggleButton() {
+  const button = document.querySelector<HTMLButtonElement>('#theme-toggle');
+  if (!button) return;
+  const sunIcon = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
+  const moonIcon = '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3a6 6 0 0 0 12 0V9a6 6 0 0 0-6-6z"/></svg>';
+  const isDark = currentTheme === 'dark';
+  button.innerHTML = `${isDark ? sunIcon : moonIcon}<span>${isDark ? '浅色' : '深色'}</span>`;
+  button.setAttribute('aria-label', isDark ? '切换到浅色模式' : '切换到深色模式');
+}
 function persistGenerationRules(next: GenerationRule[]) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(next)); generationRules = next; }
 function persistWorkflowsLocally() { localStorage.setItem('pr-helper-workflows', JSON.stringify(workflows)); }
 async function persistWorkflowRemotely(workflow: Workflow) {
@@ -230,7 +251,12 @@ function showAiSettings() {
 
 function connect(error = '') {
   const requiresRemoteAuthOrigin = import.meta.env.DEV && !import.meta.env.VITE_AUTH_ORIGIN;
-  app().innerHTML = `<main class="connect connect-onboarding"><section class="connect-hero"><p class="eyebrow">PR FLOW</p><h1>在一个地方跟踪 PR 流程与合并门禁。</h1><p class="sub">连接 GitHub → 选择仓库 → 创建流程。</p></section><section class="panel connection-card"><p class="eyebrow">SECURE CONNECTION</p><h2>连接 GitHub</h2><p class="connection-intro">授权后选择 PR Helper 可以访问的仓库，之后可随时调整。</p>${error ? `<p class="error">${escape(error)}</p>` : ''}<a id="github-app-connect" class="primary github-connect" href="${githubAppApiUrl('/api/auth/github/start')}">连接 GitHub <span aria-hidden="true">→</span></a><p id="github-app-hint" class="connection-hint" hidden></p><ul class="connection-benefits"><li>支持 public、private 与 organization 仓库</li><li>可授权全部或指定仓库，并随时在 GitHub 撤销</li><li>不会在浏览器中保存 GitHub 访问令牌</li></ul><details class="developer-connect"><summary>使用 Personal Access Token（仅本地开发）</summary><label>GitHub Personal Access Token<input id="token" type="password" placeholder="github_pat_…" autocomplete="off" /></label><p class="meta">Token 仅保存在当前浏览器会话，用于本地开发调试。</p><button id="connect" class="ghost">使用 PAT 连接</button></details></section></main>`;
+  const sunIcon = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
+  const moonIcon = '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3a6 6 0 0 0 12 0V9a6 6 0 0 0-6-6z"/></svg>';
+  const isDark = currentTheme === 'dark';
+  app().innerHTML = `<main class="connect connect-onboarding"><div class="connect-topbar"><button id="connect-theme-toggle" class="theme-toggle" aria-label="${isDark ? '切换到浅色模式' : '切换到深色模式'}">${isDark ? sunIcon : moonIcon}<span>${isDark ? '浅色' : '深色'}</span></button></div><section class="connect-hero"><p class="eyebrow">PR FLOW</p><h1>在一个地方跟踪 PR 流程与合并门禁。</h1><p class="sub">连接 GitHub → 选择仓库 → 创建流程。</p></section><section class="panel connection-card"><p class="eyebrow">SECURE CONNECTION</p><h2>连接 GitHub</h2><p class="connection-intro">授权后选择 PR Helper 可以访问的仓库，之后可随时调整。</p>${error ? `<p class="error">${escape(error)}</p>` : ''}<a id="github-app-connect" class="primary github-connect" href="${githubAppApiUrl('/api/auth/github/start')}">连接 GitHub <span aria-hidden="true">→</span></a><p id="github-app-hint" class="connection-hint" hidden></p><ul class="connection-benefits"><li>支持 public、private 与 organization 仓库</li><li>可授权全部或指定仓库，并随时在 GitHub 撤销</li><li>不会在浏览器中保存 GitHub 访问令牌</li></ul><details class="developer-connect"><summary>使用 Personal Access Token（仅本地开发）</summary><label>GitHub Personal Access Token<input id="token" type="password" placeholder="github_pat_…" autocomplete="off" /></label><p class="meta">Token 仅保存在当前浏览器会话，用于本地开发调试。</p><button id="connect" class="ghost">使用 PAT 连接</button></details></section></main>`;
+  const themeToggle = document.querySelector('#connect-theme-toggle');
+  themeToggle?.addEventListener('click', toggleTheme);
   if (requiresRemoteAuthOrigin) document.querySelector('#github-app-connect')!.addEventListener('click', event => { event.preventDefault(); const hint = document.querySelector<HTMLElement>('#github-app-hint')!; hint.hidden = false; hint.textContent = '本地 Vite 预览不会运行 GitHub App 授权 API。请先配置 VITE_AUTH_ORIGIN 指向 Vercel，或使用下方 PAT 进行本地开发。'; });
   document.querySelector('#connect')!.addEventListener('click', async () => { const value = document.querySelector<HTMLInputElement>('#token')!.value.trim(); try { await githubFetch(value, '/user'); token = value; sessionStorage.setItem('github-token', value); await init(); } catch (err) { connect(err instanceof Error ? err.message : '连接失败'); } });
 }
@@ -287,7 +313,8 @@ function render() {
   const manageRepositories = githubInstallationSettingsUrl ? '<button id="manage-repositories" class="account-menu-item">管理授权仓库 ↗</button>' : '';
   const account = githubLogin ? `GitHub · @${escape(githubLogin)}` : '账户与设置';
   const push = pushConfigured ? `<button id="push-settings" class="account-menu-item" ${pushSubscribed ? 'disabled title="浏览器通知已开启"' : ''}>${pushSubscribed ? '通知已开启' : '开启通知'}</button>` : '';
-  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">PR<span>FLOW</span></a><nav aria-label="主导航"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">流程总览</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">＋ 新建流程</button></nav><div class="topbar-actions"><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}<button id="ai-settings-top" class="account-menu-item">AI 设置</button><button id="disconnect" class="account-menu-item danger">断开 GitHub</button></div></div></div></header><section id="content"></section></main>`;
+  const themeIcon = currentTheme === 'dark' ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3a6 6 0 0 0 12 0V9a6 6 0 0 0-6-6z"/></svg>';
+  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">PR<span>FLOW</span></a><nav aria-label="主导航"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">流程总览</button><button class="${navigationClass(screen, 'editor')}" data-nav="editor">＋ 新建流程</button></nav><div class="topbar-actions"><button id="theme-toggle" class="theme-toggle" aria-label="${currentTheme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}">${themeIcon}<span>${currentTheme === 'dark' ? '浅色' : '深色'}</span></button><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}<button id="ai-settings-top" class="account-menu-item">AI 设置</button><button id="disconnect" class="account-menu-item danger">断开 GitHub</button></div></div></div></header><section id="content"></section></main>`;
   const accountMenuToggle = document.querySelector<HTMLButtonElement>('#account-menu-toggle')!, accountMenuPanel = document.querySelector<HTMLElement>('#account-menu-panel')!;
   const accountMenu = accountMenuToggle.closest<HTMLElement>('.account-menu')!;
   const closeAccountMenu = () => { accountMenuPanel.hidden = true; accountMenuToggle.setAttribute('aria-expanded', 'false'); };
@@ -300,6 +327,7 @@ function render() {
   });
   accountMenuPanel.addEventListener('click', closeAccountMenu);
   document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) active = null; goTo(target); }));
+  document.querySelector('#theme-toggle')!.addEventListener('click', toggleTheme);
   document.querySelector('#ai-settings-top')!.addEventListener('click', showAiSettings);
   document.querySelector('#manage-repositories')?.addEventListener('click', openRepositoryManagement);
   document.querySelector('#push-settings')?.addEventListener('click', () => void enablePushNotifications());
@@ -932,4 +960,6 @@ const apiKeyFieldObserver = new MutationObserver(() => {
 apiKeyFieldObserver.observe(document.body, { childList: true, subtree: true });
 
 document.addEventListener('click', event => { const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-remove]'); if (!button || !active) return; const next = removeStage(active, Number(button.dataset.remove)); if (!next.stages.length) { const workflowId = active.id; active = null; void removeWorkflowFromStorage(workflowId); } else save(next); editor(); });
+
+applyTheme(currentTheme);
 void restoreConnection();
