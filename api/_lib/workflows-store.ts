@@ -8,6 +8,7 @@ export type StoredWorkflow = {
   name: string;
   repository: string;
   stages: { source: string; target: string }[];
+  position?: number;
 };
 
 type DatabaseUser = { id: string };
@@ -136,8 +137,23 @@ export function isStoredWorkflow(value: unknown): value is StoredWorkflow {
   if (!value || typeof value !== 'object') return false;
   const workflow = value as Partial<StoredWorkflow>;
   return typeof workflow.id === 'string' && typeof workflow.name === 'string' && typeof workflow.repository === 'string'
+    && (workflow.position === undefined || Number.isInteger(workflow.position) && workflow.position >= 0)
     && Array.isArray(workflow.stages) && workflow.stages.length > 0
     && workflow.stages.every(stage => Boolean(stage) && typeof stage.source === 'string' && typeof stage.target === 'string' && stage.source.length > 0 && stage.target.length > 0);
+}
+
+export function sortStoredWorkflows(workflows: readonly StoredWorkflow[]) {
+  return workflows
+    .map((workflow, index) => ({ workflow, index }))
+    .sort((left, right) => {
+      const leftPosition = left.workflow.position;
+      const rightPosition = right.workflow.position;
+      if (leftPosition === undefined && rightPosition === undefined) return left.index - right.index;
+      if (leftPosition === undefined) return 1;
+      if (rightPosition === undefined) return -1;
+      return leftPosition - rightPosition || left.index - right.index;
+    })
+    .map(({ workflow }) => workflow);
 }
 
 export function storedWorkflowFromPayload(payload: unknown): StoredWorkflow | undefined {
@@ -157,7 +173,7 @@ export async function listWorkflows(environment: Record<string, string | undefin
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
   const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} ORDER BY updated_at DESC`;
-  return rows.map(row => storedWorkflowFromPayload(row.payload)).filter((workflow): workflow is StoredWorkflow => Boolean(workflow));
+  return sortStoredWorkflows(rows.map(row => storedWorkflowFromPayload(row.payload)).filter((workflow): workflow is StoredWorkflow => Boolean(workflow)));
 }
 
 export async function upsertWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflow: StoredWorkflow) {

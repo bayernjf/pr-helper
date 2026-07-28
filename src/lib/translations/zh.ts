@@ -84,10 +84,16 @@ const zh: TranslationDict = {
   'overview.board.showAll': '查看全部项目',
   'overview.board.waitingSync': '等待状态同步',
   'overview.board.edit': '编辑流程',
+  'overview.board.dragProject': '拖动排序：{{name}}',
+  'overview.board.moveUp': '上移项目：{{name}}',
+  'overview.board.moveDown': '下移项目：{{name}}',
+  'overview.board.sortAllOnly': '切换到“全部项目”后可调整顺序',
   'overview.board.close': '关闭',
   'overview.board.stepDetail': 'STEP DETAIL',
   'overview.board.noPull': '当前步骤尚无 PR',
   'overview.board.viewDetail': '查看完整流程',
+  'toast.order.saved': '项目顺序已保存',
+  'toast.order.local': '项目顺序已保存在本机；云端同步失败：{{error}}',
 
   // Storage sync
   'sync.warning.title': '云端流程同步失败',

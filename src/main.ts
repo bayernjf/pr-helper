@@ -6,7 +6,7 @@ import { canCreateStage, canMergeOpenPull, githubCompareUrl, githubPullUrl, need
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addStage, createWorkflow, deleteWorkflow, removeStage, saveWorkflow, workflowSummary, type Workflow } from './lib/workflow';
+import { addStage, createWorkflow, deleteWorkflow, removeStage, reorderWorkflows, saveWorkflow, sortWorkflows, workflowSummary, type Workflow } from './lib/workflow';
 import { t, getLocale, setLocale, detectLocale, registerTranslations, type Locale } from './lib/i18n';
 import en from './lib/translations/en';
 import zh from './lib/translations/zh';
@@ -60,7 +60,7 @@ let currentTheme: Theme = (localStorage.getItem(THEME_KEY) as Theme) || 'light';
 
 const app = () => document.querySelector<HTMLDivElement>('#app')!;
 const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
-function loadWorkflows(): Workflow[] { try { return JSON.parse(localStorage.getItem('pr-helper-workflows') || '[]') as Workflow[]; } catch { return []; } }
+function loadWorkflows(): Workflow[] { try { const stored = JSON.parse(localStorage.getItem('pr-helper-workflows') || '[]') as unknown; return Array.isArray(stored) ? sortWorkflows(stored as Workflow[]) : []; } catch { return []; } }
 function applyTheme(theme: Theme) {
   currentTheme = theme;
   localStorage.setItem(THEME_KEY, theme);
@@ -89,6 +89,23 @@ async function persistWorkflowRemotely(workflow: Workflow) {
     cloudWorkflowSyncError = '';
   } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail'); showToast(t('toast.saved.local', { error: cloudWorkflowSyncError })); render(); }
 }
+async function persistWorkflowOrder(next: Workflow[]) {
+  workflows = next;
+  persistWorkflowsLocally();
+  render();
+  if (!cloudWorkflowStorage) { showToast(t('toast.order.saved')); return; }
+  try {
+    const responses = await Promise.all(next.map(workflow => fetch(githubAppApiUrl('/api/workflows'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflow }) })));
+    const failedResponse = responses.find(response => !response.ok);
+    if (failedResponse) throw new Error(await workflowApiError(failedResponse));
+    cloudWorkflowSyncError = '';
+    showToast(t('toast.order.saved'));
+  } catch (error) {
+    cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail');
+    render();
+    showToast(t('toast.order.local', { error: cloudWorkflowSyncError }));
+  }
+}
 function save(next: Workflow) { active = next; workflows = saveWorkflow(workflows, next); persistWorkflowsLocally(); void persistWorkflowRemotely(next); }
 async function removeWorkflowFromStorage(workflowId: string) {
   workflows = deleteWorkflow(workflows, workflowId); persistWorkflowsLocally();
@@ -112,7 +129,7 @@ async function loadCloudWorkflows() {
     if (!Array.isArray(payload.workflows)) return;
     cloudWorkflowStorage = true;
     cloudWorkflowSyncError = '';
-    if (payload.workflows.length) { workflows = payload.workflows; active = workflows[0] || null; persistWorkflowsLocally(); }
+    if (payload.workflows.length) { workflows = sortWorkflows(payload.workflows); active = workflows[0] || null; persistWorkflowsLocally(); }
     else pendingLocalWorkflowSync = workflows.length > 0;
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
 }
@@ -382,6 +399,7 @@ function overview() {
   document.querySelectorAll<HTMLButtonElement>('[data-board-filter]').forEach(button => button.addEventListener('click', () => { overviewFilter = button.dataset.boardFilter as typeof overviewFilter; render(); }));
   document.querySelectorAll<HTMLButtonElement>('[data-lane-step]').forEach(button => button.addEventListener('click', () => showProjectStepDrawer(button.dataset.workflowId || '', Number(button.dataset.laneStep))));
   document.querySelectorAll<HTMLButtonElement>('[data-edit-project]').forEach(button => button.addEventListener('click', () => { active = workflows.find(item => item.id === button.dataset.editProject) || null; screen = 'editor'; render(); }));
+  bindLaneSorting();
   bindFlowCards();
 }
 function projectLane(flow: Workflow) {
@@ -392,7 +410,59 @@ function projectLane(flow: Workflow) {
     const label = item?.message || t('overview.board.waitingSync');
     return `<button class="lane-step ${tone}" data-lane-step="${index}" data-workflow-id="${escape(flow.id)}"><span class="lane-step-index">${index + 1}</span><b>${escape(stage.source)} → ${escape(stage.target)}</b><small>${escape(label)}</small></button>`;
   }).join('<span class="lane-connector" aria-hidden="true">→</span>');
-  return `<article class="project-lane"><header><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${escape(flow.name)}</h2></div><div class="lane-actions"><button data-edit-project="${escape(flow.id)}" class="link-button">${t('overview.board.edit')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button></div></header><div class="lane-track">${steps}</div></article>`;
+  const orderIndex = workflows.findIndex(workflow => workflow.id === flow.id);
+  const sortingDisabled = overviewFilter !== 'all';
+  const dragLabel = t('overview.board.dragProject', { name: flow.name });
+  return `<article class="project-lane" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 22" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div></div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${escape(flow.name)}</h2></div></div><div class="lane-actions"><button data-edit-project="${escape(flow.id)}" class="link-button">${t('overview.board.edit')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button></div></header><div class="lane-track">${steps}</div></article>`;
+}
+function bindLaneSorting() {
+  const lanes = [...document.querySelectorAll<HTMLElement>('[data-project-lane]')];
+  let draggedWorkflowId = '';
+  const clearLaneClasses = () => lanes.forEach(lane => lane.classList.remove('is-dragging', 'is-drop-before', 'is-drop-after'));
+  const clearDragState = () => { clearLaneClasses(); draggedWorkflowId = ''; };
+  document.querySelectorAll<HTMLButtonElement>('[data-lane-drag]').forEach(handle => {
+    handle.addEventListener('dragstart', event => {
+      const workflowId = handle.dataset.laneDrag;
+      const lane = handle.closest<HTMLElement>('[data-project-lane]');
+      if (!workflowId || !lane || !event.dataTransfer) { event.preventDefault(); return; }
+      clearLaneClasses();
+      draggedWorkflowId = workflowId;
+      lane.classList.add('is-dragging');
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', workflowId);
+    });
+    handle.addEventListener('dragend', clearDragState);
+  });
+  lanes.forEach(lane => {
+    lane.addEventListener('dragover', event => {
+      const draggedId = draggedWorkflowId || event.dataTransfer?.getData('text/plain');
+      const targetId = lane.dataset.projectLane;
+      if (!draggedId || !targetId || draggedId === targetId) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+      lanes.forEach(item => item.classList.remove('is-drop-before', 'is-drop-after'));
+      const bounds = lane.getBoundingClientRect();
+      lane.classList.add(event.clientY < bounds.top + bounds.height / 2 ? 'is-drop-before' : 'is-drop-after');
+    });
+    lane.addEventListener('drop', event => {
+      event.preventDefault();
+      const draggedId = draggedWorkflowId || event.dataTransfer?.getData('text/plain');
+      const targetId = lane.dataset.projectLane;
+      const placement = lane.classList.contains('is-drop-after') ? 'after' : 'before';
+      clearDragState();
+      if (!draggedId || !targetId || draggedId === targetId) return;
+      void persistWorkflowOrder(reorderWorkflows(workflows, draggedId, targetId, placement));
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>('[data-lane-move]').forEach(button => button.addEventListener('click', () => {
+    const workflowId = button.dataset.workflowId;
+    const direction = button.dataset.laneMove;
+    const currentIndex = workflows.findIndex(workflow => workflow.id === workflowId);
+    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+    const target = workflows[targetIndex];
+    if (!workflowId || !target || currentIndex < 0) return;
+    void persistWorkflowOrder(reorderWorkflows(workflows, workflowId, target.id, direction === 'up' ? 'before' : 'after'));
+  }));
 }
 function showProjectStepDrawer(workflowId: string, stageIndex: number) {
   const flow = workflows.find(item => item.id === workflowId), stage = flow?.stages[stageIndex];

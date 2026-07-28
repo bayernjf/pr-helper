@@ -84,10 +84,16 @@ const en: TranslationDict = {
   'overview.board.showAll': 'Show all projects',
   'overview.board.waitingSync': 'Waiting for status sync',
   'overview.board.edit': 'Edit flow',
+  'overview.board.dragProject': 'Drag to reorder: {{name}}',
+  'overview.board.moveUp': 'Move project up: {{name}}',
+  'overview.board.moveDown': 'Move project down: {{name}}',
+  'overview.board.sortAllOnly': 'Switch to All projects to change the order',
   'overview.board.close': 'Close',
   'overview.board.stepDetail': 'STEP DETAIL',
   'overview.board.noPull': 'No PR exists for this step yet',
   'overview.board.viewDetail': 'View full flow',
+  'toast.order.saved': 'Project order saved',
+  'toast.order.local': 'Project order was saved locally; cloud sync failed: {{error}}',
 
   // Storage sync
   'sync.warning.title': 'Cloud flow sync failed',

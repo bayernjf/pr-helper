@@ -1,10 +1,22 @@
 import { describe, expect, it } from 'vitest';
 
-import { compactFailureDetails, initialWebhookChecksState, isStoredWorkflow, matchingWorkflowStages, repairCommitSha, storedWorkflowFromPayload } from './workflows-store';
+import { compactFailureDetails, initialWebhookChecksState, isStoredWorkflow, matchingWorkflowStages, repairCommitSha, sortStoredWorkflows, storedWorkflowFromPayload } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('accepts a workflow with real branch stages', () => {
     expect(isStoredWorkflow({ id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature/payments', target: 'dev' }, { source: 'dev', target: 'main' }] })).toBe(true);
+  });
+
+  it('accepts an optional non-negative lane position and rejects invalid positions', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature/payments', target: 'dev' }] };
+    expect(isStoredWorkflow({ ...workflow, position: 0 })).toBe(true);
+    expect(isStoredWorkflow({ ...workflow, position: -1 })).toBe(false);
+    expect(isStoredWorkflow({ ...workflow, position: 1.5 })).toBe(false);
+  });
+
+  it('sorts cloud workflows by lane position and keeps legacy payloads last', () => {
+    const workflow = (id: string, position?: number) => ({ id, name: id, repository: `octo/${id}`, stages: [{ source: 'dev', target: 'main' }], ...(position === undefined ? {} : { position }) });
+    expect(sortStoredWorkflows([workflow('legacy'), workflow('last', 3), workflow('first', 0)]).map(item => item.id)).toEqual(['first', 'last', 'legacy']);
   });
 
   it('rejects incomplete data before it can reach the database', () => {
