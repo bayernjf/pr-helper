@@ -44,6 +44,7 @@ let pendingLocalWorkflowSync = false;
 let cloudWorkflowSyncError = '';
 let actionQueue: ActionQueueItem[] = [];
 let actionQueueError = '';
+let overviewFilter: 'all' | 'attention' | 'failed' = 'all';
 let pushSubscribed = false;
 let pushConfigured = false;
 let repositoryManagementWindow: Window | null = null;
@@ -370,16 +371,43 @@ function overview() {
   const storageWarning = cloudWorkflowSyncError ? `<section class="local-sync-notice is-error"><div><b>${t('sync.warning.title')}</b><p>${escape(cloudWorkflowSyncError)}。${t('sync.warning.desc')}</p></div></section>` : '';
   const queueWarning = actionQueueError ? `<section class="local-sync-notice is-error"><div><b>${t('overview.queue.error.title')}</b><p>${escape(actionQueueError)}</p></div></section>` : '';
   const syncPrompt = pendingLocalWorkflowSync ? `<section class="local-sync-notice"><div><b>${t('sync.prompt.title', { count: workflows.length })}</b><p>${t('sync.prompt.desc', { login: githubLogin || '' })}</p></div><button id="sync-local-workflows" class="ghost">${t('sync.prompt.button')}</button></section>` : '';
-  const queue = actionQueue.length ? `<section class="action-queue"><div class="section-head"><div><p class="eyebrow">${t('overview.eyebrow.queue')}</p><h2>${t('overview.queue.title', { count: actionQueue.length })}</h2></div><button id="refresh-action-queue" class="ghost">${t('overview.queue.refresh')}</button></div><div class="action-queue-list">${actionQueue.map(item => `<button class="action-queue-item ${escape(item.kind)}" data-open-queue="${escape(item.workflowId)}"><span>${item.kind === 'checks-failed' ? '!' : item.kind === 'needs-approval' ? '✓' : '→'}</span><div><b>${escape(item.workflowName)} · ${t('overview.queue.step', { index: item.stageIndex + 1 })}</b><p>${escape(item.repository)} · ${escape(item.source)} → ${escape(item.target)}${item.pullNumber ? ` · PR #${item.pullNumber}` : ''}</p></div><em>${escape(item.message)}</em></button>`).join('')}</div></section>` : '';
-  content.innerHTML = `<section class="hero"><p class="eyebrow">${t('overview.eyebrow.workspace')}</p><h1>${t('overview.hero.title')}</h1><p>${t('overview.hero.sub')}</p><button id="new-flow" class="primary">${t('overview.hero.createFlow')}</button></section>${storageWarning}${queueWarning}${syncPrompt}${queue}<section class="section-head"><div><p class="eyebrow">${t('overview.savedFlows')}</p><h2>${workflows.length ? t('overview.flowsCount', { count: workflows.length }) : t('overview.noFlows')}</h2></div></section><section class="flow-grid">${workflows.length ? workflows.map(card).join('') : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
+  const failedCount = actionQueue.filter(item => item.kind === 'checks-failed').length;
+  const activeProjectCount = new Set(actionQueue.map(item => item.workflowId)).size;
+  const visibleWorkflows = workflows.filter(flow => overviewFilter === 'all' || actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed')));
+  content.innerHTML = `<section class="board-head"><div><p class="eyebrow">${t('overview.board.eyebrow')}</p><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div><button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${storageWarning}${queueWarning}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${activeProjectCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button id="refresh-action-queue" class="board-refresh">${t('overview.queue.refresh')}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
   document.querySelector('#new-flow')!.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
   document.querySelector('#refresh-action-queue')?.addEventListener('click', async () => { const loaded = await loadActionQueue(); render(); showToast(loaded ? t('toast.queue.refreshed') : t('toast.queue.failed')); });
-  document.querySelectorAll<HTMLButtonElement>('[data-open-queue]').forEach(button => button.addEventListener('click', () => { active = workflows.find(item => item.id === button.dataset.openQueue) || null; goTo('detail'); }));
+  document.querySelectorAll<HTMLButtonElement>('[data-board-filter]').forEach(button => button.addEventListener('click', () => { overviewFilter = button.dataset.boardFilter as typeof overviewFilter; render(); }));
+  document.querySelectorAll<HTMLButtonElement>('[data-lane-step]').forEach(button => button.addEventListener('click', () => showProjectStepDrawer(button.dataset.workflowId || '', Number(button.dataset.laneStep))));
+  document.querySelectorAll<HTMLButtonElement>('[data-edit-project]').forEach(button => button.addEventListener('click', () => { active = workflows.find(item => item.id === button.dataset.editProject) || null; screen = 'editor'; render(); }));
   bindFlowCards();
 }
-function card(flow: Workflow) { const summary = workflowSummary(flow); return `<article class="flow-card"><p class="eyebrow">${escape(flow.repository)}</p><h3>${escape(flow.name)}</h3><p class="route">${escape(summary.route)}</p><footer><span>${t('overview.flowCard.steps', { count: summary.stepCount })}</span><button data-open="${flow.id}" class="link-button">${t('overview.flowCard.view')}</button></footer></article>`; }
+function projectLane(flow: Workflow) {
+  const items = actionQueue.filter(item => item.workflowId === flow.id);
+  const steps = flow.stages.map((stage, index) => {
+    const item = items.find(candidate => candidate.stageIndex === index);
+    const tone = item?.kind === 'checks-failed' ? 'failed' : item ? 'attention' : 'idle';
+    const label = item?.message || t('overview.board.waitingSync');
+    return `<button class="lane-step ${tone}" data-lane-step="${index}" data-workflow-id="${escape(flow.id)}"><span class="lane-step-index">${index + 1}</span><b>${escape(stage.source)} → ${escape(stage.target)}</b><small>${escape(label)}</small></button>`;
+  }).join('<span class="lane-connector" aria-hidden="true">→</span>');
+  return `<article class="project-lane"><header><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${escape(flow.name)}</h2></div><div class="lane-actions"><button data-edit-project="${escape(flow.id)}" class="link-button">${t('overview.board.edit')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button></div></header><div class="lane-track">${steps}</div></article>`;
+}
+function showProjectStepDrawer(workflowId: string, stageIndex: number) {
+  const flow = workflows.find(item => item.id === workflowId), stage = flow?.stages[stageIndex];
+  if (!flow || !stage) return;
+  const queueItem = actionQueue.find(item => item.workflowId === workflowId && item.stageIndex === stageIndex);
+  const dialog = document.createElement('dialog');
+  dialog.className = 'step-drawer';
+  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${queueItem?.kind === 'checks-failed' ? 'failed' : queueItem ? 'attention' : 'idle'}"><b>${escape(queueItem?.message || t('overview.board.waitingSync'))}</b><p>${queueItem?.pullNumber ? `PR #${queueItem.pullNumber}` : t('overview.board.noPull')}</p></div><div class="dialog-actions"><button class="ghost drawer-close-action">${t('overview.board.close')}</button><button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
+  document.body.append(dialog); dialog.showModal();
+  const close = () => dialog.close();
+  dialog.querySelector('.drawer-close')!.addEventListener('click', close);
+  dialog.querySelector('.drawer-close-action')!.addEventListener('click', close);
+  dialog.querySelector('.drawer-view-flow')!.addEventListener('click', () => { active = flow; dialog.close(); goTo('detail'); });
+  dialog.addEventListener('close', () => dialog.remove());
+}
 function bindFlowCards() { document.querySelectorAll<HTMLButtonElement>('[data-open]').forEach(button => button.addEventListener('click', () => { active = workflows.find(item => item.id === button.dataset.open) || null; goTo('detail'); })); }
 
 function editor() {
