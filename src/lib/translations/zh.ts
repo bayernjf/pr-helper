@@ -150,6 +150,7 @@ const zh: TranslationDict = {
   'state.waitingApprovals': '等待审批',
   'state.mergeBlocked': '合并被阻塞',
   'state.waitingMerge': '等待合并',
+  'state.readyToMerge': '可以合并',
   'status.newCommits': '有 {count} 个新提交',
   'status.newCommits.canCreate': '可创建新的 PR。',
   'status.newCommits.waiting': '等待前序步骤合并后 Actions 成功。',
