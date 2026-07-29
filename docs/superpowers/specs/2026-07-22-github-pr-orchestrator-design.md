@@ -1,5 +1,7 @@
 # GitHub PR Orchestrator Design
 
+> **状态：已归档，初始 MVP 基线。** 本文保留最早的 Mock/Next.js 方案用于决策追溯；当前产品已经改为 Vite + vanilla TypeScript、Vercel API、GitHub App、Supabase、Webhook/Web Push 和真实部署编排。请以 [`../../current-state.md`](../../current-state.md) 为当前事实来源。
+
 ## Goal
 
 Build a GitHub-only web application that lets a user save a repository-specific sequence of real source and target branches, create each pull request in order, and track the approvals and checks that determine the next action.

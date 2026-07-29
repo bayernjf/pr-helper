@@ -26,7 +26,7 @@ PR Helper 不是一个“创建 PR 的表单”，也不是 Claude Code 或 Code
 | 写代码、提交、push、修 CI | Claude Code / Codex 擅长 | 不是竞争对象；应把失败上下文交给 Agent。 |
 | 查看单个 PR 的 Checks | GitHub 页面可查看 | 聚合多个仓库、多个阶段的“待处理事项”。 |
 | 合并后等待 Actions | GitHub 各页面分散显示 | 监控后续验证，并阻止后序阶段被错误放行。 |
-| 维护团队流程 | 靠口头约定、分支保护和多个页面 | 把流程模板、门禁、审批和确认步骤显式化。 |
+| 维护团队流程 | 靠口头约定、分支保护和多个页面 | 把真实分支路径、门禁、审批和确认步骤显式化。 |
 
 结论：Agent 解决“如何完成一次工程操作”；PR Helper 解决“此刻所有发布链路中，什么事情值得我处理，以及下一步是什么”。
 
@@ -48,29 +48,35 @@ CI 失败       所有门禁通过               需要人工判断
 
 长期目标是让用户只看到需要决策的事项，而不是持续盯着所有 GitHub Actions。
 
-## 现阶段 MVP 已验证的内容
+## 当前已交付的产品闭环
 
 - 基于真实 GitHub 仓库和分支配置流程，例如 `feature → dev → main`。
-- 按顺序创建 PR，并链接到原生 GitHub PR / Compare 页面。
-- 读取 PR、Actions、Approval、合并可行性和合并后验证状态。
-- 阻止前序 PR 未合并、合并后 Actions 未成功或未完成预览确认时的后续步骤。
-- AI 自定义模型生成 PR 标题和描述。
-- GitHub App 授权访问 private、public 与 organization 仓库。
-- GitHub 用户级流程持久化基础。
+- 使用多项目 Lane 看板展示当前执行位置、待办、失败和最近动态，并支持拖拽排序。
+- 支持 `feature/*`、`fix/*` 等动态来源、多分支汇聚到同一目标分支，以及下游汇聚门禁。
+- 在 Lane 步骤抽屉中创建 PR、执行 merge commit、查看原生 GitHub 页面和重跑失败 Actions。
+- 按 GitHub 实际存在的门禁读取 Checks、Commit Status、Approval、mergeability、分支保护和合并后 Actions。
+- 通过 Webhook 和定时 reconciliation 持续校准状态；Web Push 可在页面关闭后发送通知。
+- AI 流式生成 PR 标题和描述，覆盖前确认，并保存 24 小时本地草稿。
+- Markdown 生成规则支持新增、编辑、导入、默认规则和每次 PR 单选。
+- GitHub App 授权访问 private、public 与 organization 仓库；流程和运行状态按 GitHub 用户持久化到 Supabase。
+- 跟踪 Vercel / Cloudflare Preview 与 Production 部署、健康检查、失败详情和最近运行历史。
+- 成功的 Production 部署可在用户确认后通过 GitHub Actions 回滚，GitHub Environment 仍保留最终保护。
 
-## 产品护城河与优先级
+当前产品已超过纯浏览器 Mock MVP，处于需要完成真实发布回归和运维可观测性的阶段。实时架构与边界见 [`current-state.md`](current-state.md)。
 
-仅有“创建 PR + 看 Actions”不足以形成产品价值。下一阶段优先级应是：
+## 下一阶段优先级
 
-1. **后端持续监控**：GitHub Webhook、持久化状态与关闭页面后的通知，而非只靠前端轮询。
-2. **全局待办队列**：跨仓库显示“CI 失败”“等待审批”“可合并”“可创建下一阶段”，按需要处理的优先级排序。
-3. **AI 修复交接**：Actions 失败时，将仓库、分支、PR、失败日志、流程位置和预期结果一键交给 Codex / Claude Code。
-4. **自动推进建议**：Actions 全绿或审批满足时，解锁下一步；保持人对合并和生产发布的最终控制。
-5. **团队流程治理**：共享模板、发布确认、权限、审计记录和环境策略。
+核心编排闭环已经建立，接下来优先增强可靠性，而不是继续堆叠流程模板：
+
+1. **线上回归**：完整验证 `feature → dev → main`、合并后 Actions、双平台部署和 Production 回滚。
+2. **监控可观测性**：展示 Webhook/cron 延迟、最近成功校准时间和失败原因，避免“状态停住但不知道为什么”。
+3. **失败恢复策略**：在现有失败摘要、重跑和 Codex 交接之上，增加可配置重试次数、冷却时间和人工升级。
+4. **权限回归**：持续验证 public、private、organization 仓库以及 GitHub App 权限更新后的行为。
+5. **安全云同步评估**：为生成规则和 PR 草稿设计加密与密钥管理；方案明确前继续本地保存。
 
 ## 非目标
 
-- 不取代 GitHub 的代码审查和最终合并界面。
+- 不取代 GitHub 的代码审查、分支保护和 Environment protection；PR Helper 可以发起受 GitHub 原生规则约束的 merge commit。
 - 不把 GitHub token、GitHub App installation token 暴露给浏览器。
 - 不试图成为通用代码编辑器或直接和 Coding Agent 竞争。
 - 不在未经明确授权时自动合并到生产分支。
@@ -101,7 +107,7 @@ CI 失败       所有门禁通过               需要人工判断
 
 1. 选择真实仓库和分支，保存可复用流程。
 2. 创建 PR，查看原生 GitHub 页面或在 PR Helper 中监控门禁。
-3. Actions 全绿、审批和预览确认后，自动解锁下一步。
+3. Actions、审批和配置的 Preview/Production 部署门禁全部通过后，自动解锁下一步。
 4. 失败时，把完整上下文交给 AI Agent 修复。
 
 ### 对比区
