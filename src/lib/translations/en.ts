@@ -88,6 +88,7 @@ const en: TranslationDict = {
   'overview.board.moveUp': 'Move project up: {{name}}',
   'overview.board.moveDown': 'Move project down: {{name}}',
   'overview.board.sortAllOnly': 'Switch to All projects to change the order',
+  'overview.board.mergeTarget': 'Merges into {target}',
   'overview.run.waiting-sync': 'Waiting for status sync',
   'overview.run.waiting-for-changes': 'Waiting for new commits',
   'overview.run.ready-to-create': 'Ready to create PR',
@@ -137,17 +138,23 @@ const en: TranslationDict = {
   'editor.label.target': 'Target',
   'editor.compare': 'View Compare on GitHub ↗',
   'editor.addStep': 'Add next step',
+  'editor.addRoute': 'Add merge route',
   'editor.saveFlow': 'Save flow',
+  'editor.independent.label': 'Independent merge route',
+  'editor.independent.desc': 'This route can create and merge its PR without waiting for an earlier route.',
   'editor.error.branches': 'Unable to load branches',
   'editor.error.sameBranch': 'Source and Target cannot be the same branch.',
+  'editor.error.duplicateRoute': 'This merge route already exists.',
   'editor.toast.saved': 'Flow "{name}" saved.',
   'editor.toast.stepSaved': 'Saved step {step}: {source} → {target}',
+  'editor.toast.routeSaved': 'Saved merge route: {source} → {target}',
 
   // Draft panel
   'draft.eyebrow': 'FLOW DRAFT',
   'draft.empty.title': 'No steps saved yet',
   'draft.empty.desc': 'Once you save the first step, the flow will appear here.',
   'draft.remove': 'Remove',
+  'draft.independent': 'Independent',
   'draft.viewDetail': 'View flow details',
 
   // Detail

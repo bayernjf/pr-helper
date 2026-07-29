@@ -1,12 +1,12 @@
-export type WorkflowStage = { source: string; target: string };
+export type WorkflowStage = { source: string; target: string; independent?: boolean };
 export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; position?: number };
 
 export function createWorkflow(repository: string, source: string, target: string, name = repository): Workflow {
   return { id: `${repository}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, repository, stages: [{ source, target }] };
 }
 
-export function addStage(workflow: Workflow, source: string, target: string): Workflow {
-  return { ...workflow, stages: [...workflow.stages, { source, target }] };
+export function addStage(workflow: Workflow, source: string, target: string, independent = false): Workflow {
+  return { ...workflow, stages: [...workflow.stages, { source, target, ...(independent ? { independent: true } : {}) }] };
 }
 
 export function removeStage(workflow: Workflow, index: number): Workflow {
@@ -48,5 +48,9 @@ export function reorderWorkflows(workflows: readonly Workflow[], draggedId: stri
 }
 
 export function workflowSummary(workflow: Workflow) {
-  return { route: workflow.stages.flatMap((stage, index) => index === 0 ? [stage.source, stage.target] : [stage.target]).join(' → '), stepCount: workflow.stages.length };
+  const isLinear = workflow.stages.every((stage, index) => index === 0 || !stage.independent && workflow.stages[index - 1]?.target === stage.source);
+  const route = isLinear
+    ? workflow.stages.flatMap((stage, index) => index === 0 ? [stage.source, stage.target] : [stage.target]).join(' → ')
+    : workflow.stages.map(stage => `${stage.source} → ${stage.target}`).join(' · ');
+  return { route, stepCount: workflow.stages.length };
 }

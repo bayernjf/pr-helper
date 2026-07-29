@@ -20,6 +20,15 @@ describe('workflow configuration', () => {
     ]);
   });
 
+  it('adds an independent merge route without changing legacy linear routes', () => {
+    const workflow = addStage(createWorkflow('bayernjf/pr-helper', 'feature/login', 'dev'), 'fix/payment', 'dev', true);
+    expect(workflow.stages).toEqual([
+      { source: 'feature/login', target: 'dev' },
+      { source: 'fix/payment', target: 'dev', independent: true },
+    ]);
+    expect(workflowSummary(workflow)).toEqual({ route: 'feature/login → dev · fix/payment → dev', stepCount: 2 });
+  });
+
   it('removes one configured step without changing the other steps', () => {
     const workflow = addStage(createWorkflow('bayernjf/pr-helper', 'feature/20260722', 'dev'), 'dev', 'main');
     expect(removeStage(workflow, 0).stages).toEqual([{ source: 'dev', target: 'main' }]);

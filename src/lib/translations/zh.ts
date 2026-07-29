@@ -88,6 +88,7 @@ const zh: TranslationDict = {
   'overview.board.moveUp': '上移项目：{{name}}',
   'overview.board.moveDown': '下移项目：{{name}}',
   'overview.board.sortAllOnly': '切换到“全部项目”后可调整顺序',
+  'overview.board.mergeTarget': '汇聚到 {target}',
   'overview.run.waiting-sync': '等待状态同步',
   'overview.run.waiting-for-changes': '等待新提交',
   'overview.run.ready-to-create': '等待创建 PR',
@@ -137,17 +138,23 @@ const zh: TranslationDict = {
   'editor.label.target': 'Target',
   'editor.compare': '在 GitHub 查看 Compare ↗',
   'editor.addStep': '添加下一步',
+  'editor.addRoute': '添加合并路径',
   'editor.saveFlow': '保存流程',
+  'editor.independent.label': '独立合并路径',
+  'editor.independent.desc': '此路径可独立创建和合并 PR，不等待前一条路径。',
   'editor.error.branches': '无法读取分支',
   'editor.error.sameBranch': 'Source 和 Target 不能是同一分支。',
+  'editor.error.duplicateRoute': '该合并路径已经存在。',
   'editor.toast.saved': '流程"{name}"已保存。',
   'editor.toast.stepSaved': '已保存第 {step} 步：{source} → {target}',
+  'editor.toast.routeSaved': '已保存合并路径：{source} → {target}',
 
   // Draft panel
   'draft.eyebrow': 'FLOW DRAFT',
   'draft.empty.title': '尚未保存步骤',
   'draft.empty.desc': '保存第一步后，流程会显示在这里。',
   'draft.remove': '删除',
+  'draft.independent': '独立',
   'draft.viewDetail': '查看流程详情',
 
   // Detail

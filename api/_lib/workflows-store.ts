@@ -7,7 +7,7 @@ export type StoredWorkflow = {
   id: string;
   name: string;
   repository: string;
-  stages: { source: string; target: string }[];
+  stages: { source: string; target: string; independent?: boolean }[];
   position?: number;
 };
 
@@ -165,7 +165,7 @@ export function isStoredWorkflow(value: unknown): value is StoredWorkflow {
   return typeof workflow.id === 'string' && typeof workflow.name === 'string' && typeof workflow.repository === 'string'
     && (workflow.position === undefined || Number.isInteger(workflow.position) && workflow.position >= 0)
     && Array.isArray(workflow.stages) && workflow.stages.length > 0
-    && workflow.stages.every(stage => Boolean(stage) && typeof stage.source === 'string' && typeof stage.target === 'string' && stage.source.length > 0 && stage.target.length > 0);
+    && workflow.stages.every(stage => Boolean(stage) && typeof stage.source === 'string' && typeof stage.target === 'string' && stage.source.length > 0 && stage.target.length > 0 && (stage.independent === undefined || typeof stage.independent === 'boolean'));
 }
 
 export function sortStoredWorkflows(workflows: readonly StoredWorkflow[]) {
@@ -189,6 +189,10 @@ export function storedWorkflowFromPayload(payload: unknown): StoredWorkflow | un
 
 export function matchingWorkflowStages(workflows: readonly StoredWorkflow[], pull: Pick<PullRequestWebhook, 'repository' | 'source' | 'target'>) {
   return workflows.flatMap(workflow => workflow.repository !== pull.repository ? [] : workflow.stages.flatMap((stage, stageIndex) => stage.source === pull.source && stage.target === pull.target ? [{ workflow, stageIndex }] : []));
+}
+
+function stageIsUnlocked(workflow: StoredWorkflow, stageIndex: number, previous?: { pull_state: string; checks_state: string }) {
+  return workflow.stages[stageIndex]?.independent === true || stageIndex === 0 || previous?.pull_state === 'merged' && previous.checks_state === 'success';
 }
 
 export function initialWebhookChecksState(mergedAt?: string | null) {
@@ -270,7 +274,7 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   if (!pull) {
     await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, repository, source, target, pull_state, checks_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${workflow.repository}, ${stage.source}, ${stage.target}, 'none', 'unknown', ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_index) DO UPDATE SET pull_number = NULL, pull_state = 'none', merged_at = NULL, head_sha = NULL, checks_state = 'unknown', checks_passed = 0, checks_total = 0, approvals = 0, required_approvals = 0, mergeable = NULL, mergeable_state = NULL, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`;
     if (previous[0]?.pull_state && previous[0].pull_state !== 'none') await recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, `${workflow.id}:${stageIndex}:pull-cleared:${Date.now()}`, 'pull-cleared', 'PR 状态已清除，等待新提交');
-    const unlocked = stageIndex === 0 || preceding[0]?.pull_state === 'merged' && preceding[0]?.checks_state === 'success';
+    const unlocked = stageIsUnlocked(workflow, stageIndex, preceding[0]);
     if (unlocked && comparison.ahead_by > 0 && (previous[0]?.ahead_by || 0) === 0) {
       await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:new-pr:none`, kind: 'new-pr-ready', title: '可以创建下一步 PR', body: `${workflow.repository} · ${stage.source} → ${stage.target}`, url: '/' });
     }
@@ -298,7 +302,7 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   if (!pull.merged_at && requiredApprovals > 0 && approvals >= requiredApprovals && (!before || before.approvals < before.required_approvals)) {
     await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:merge-ready:${pull.number}:${pull.head.sha}`, kind: 'merge-ready', title: 'PR 已满足合并条件', body: `${workflow.repository} · ${route} · PR #${pull.number}`, url: `/` });
   }
-  const unlocked = stageIndex === 0 || preceding[0]?.pull_state === 'merged' && preceding[0]?.checks_state === 'success';
+  const unlocked = stageIsUnlocked(workflow, stageIndex, preceding[0]);
   if (pull.merged_at && unlocked && comparison.ahead_by > 0 && (before?.ahead_by || 0) === 0) {
     await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:new-pr:${pull.number}`, kind: 'new-pr-ready', title: '有新提交，可以创建新 PR', body: `${workflow.repository} · ${route}`, url: '/' });
   }
@@ -372,7 +376,7 @@ export async function listActionableStages(environment: Record<string, string | 
       else if (state?.pull_state === 'open' && state.approvals < state.required_approvals) items.push({ ...base, kind: 'needs-approval', message: `PR 还需要 ${state.required_approvals - state.approvals} 个 Approval` });
       else if (state?.pull_state === 'open' && state.checks_state === 'success' && state.approvals >= state.required_approvals && state.mergeable !== false && !['dirty', 'behind', 'blocked'].includes(state.mergeable_state || '')) items.push({ ...base, kind: 'ready-to-merge', message: 'PR 已满足合并条件' });
       else {
-        const unlocked = stageIndex === 0 || previous?.pull_state === 'merged' && previous.checks_state === 'success';
+        const unlocked = stageIsUnlocked(workflow, stageIndex, previous);
         const hasNoPullWithChanges = state?.pull_state === 'none' && state.ahead_by > 0;
         const hasMergedPullWithNewChanges = state?.pull_state === 'merged' && state.ahead_by > 0;
         if (unlocked && (hasNoPullWithChanges || hasMergedPullWithNewChanges)) items.push({ ...base, kind: 'ready-to-create', message: hasMergedPullWithNewChanges ? '有新提交，可以创建新 PR' : '可以创建下一步 PR' });
