@@ -34,6 +34,18 @@ describe('workflow configuration', () => {
     expect(removeStage(workflow, 0).stages).toEqual([{ source: 'dev', target: 'main' }]);
   });
 
+  it('keeps selected release dependencies valid when a route is removed', () => {
+    const workflow = {
+      ...createWorkflow('bayernjf/pr-helper', 'feature/login', 'dev'),
+      stages: [
+        { source: 'feature/login', target: 'dev' },
+        { source: 'fix/payment', target: 'dev', independent: true },
+        { source: 'dev', target: 'main', independent: true, waitFor: [0, 1] },
+      ],
+    };
+    expect(removeStage(workflow, 0).stages.at(-1)).toEqual({ source: 'dev', target: 'main', independent: true, waitFor: [0] });
+  });
+
   it('keeps configurations for different repositories instead of overwriting them', () => {
     const payments = createWorkflow('bayernjf/payments', 'feature/payments', 'dev', 'Payments release');
     const website = createWorkflow('bayernjf/website', 'feature/homepage', 'main', 'Website release');

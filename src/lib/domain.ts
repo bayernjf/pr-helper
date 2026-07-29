@@ -39,7 +39,9 @@ export function canCreateStage(index: number, statuses: { kind: string; checks?:
   return statuses.slice(0, index).every(status => status.kind === 'merged' && (!status.checks || status.checks.state === 'success'));
 }
 
-export function canCreateWorkflowStage(index: number, stages: { independent?: boolean }[], statuses: { kind: string; checks?: { state: string } }[]) {
+export function canCreateWorkflowStage(index: number, stages: { independent?: boolean; waitFor?: number[] }[], statuses: { kind: string; checks?: { state: string } }[]) {
+  const waitFor = stages[index]?.waitFor;
+  if (waitFor?.length) return waitFor.every(dependency => statuses[dependency]?.kind === 'merged' && (!statuses[dependency]?.checks || statuses[dependency]?.checks?.state === 'success'));
   return stages[index]?.independent === true || canCreateStage(index, statuses);
 }
 

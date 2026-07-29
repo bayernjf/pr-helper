@@ -143,6 +143,8 @@ const en: TranslationDict = {
   'editor.saveFlow': 'Save flow',
   'editor.independent.label': 'Independent merge route',
   'editor.independent.desc': 'This route can create and merge its PR without waiting for an earlier route.',
+  'editor.dependencies.label': 'Release convergence gate (optional)',
+  'editor.dependencies.desc': 'This PR can be created only after every selected route merges and its post-merge Actions pass.',
   'editor.error.branches': 'Unable to load branches',
   'editor.error.sameBranch': 'Source and Target cannot be the same branch.',
   'editor.error.duplicateRoute': 'This merge route already exists.',
@@ -156,6 +158,7 @@ const en: TranslationDict = {
   'draft.empty.desc': 'Once you save the first step, the flow will appear here.',
   'draft.remove': 'Remove',
   'draft.independent': 'Independent',
+  'draft.waitFor': 'Wait for {count} routes',
   'draft.viewDetail': 'View flow details',
 
   // Detail

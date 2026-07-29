@@ -447,6 +447,7 @@ body {
 }
 
 .route-mode{display:flex!important;align-items:flex-start;gap:10px;margin:0 0 18px!important;padding:12px;border:1px solid var(--border-default);border-radius:10px;background:var(--bg-input);cursor:pointer}.route-mode input{width:16px;height:16px;margin:2px 0 0;accent-color:var(--text-accent)}.route-mode span{display:grid;gap:2px}.route-mode b{font-size:.8rem}.route-mode small{color:var(--text-muted);font-size:.72rem;line-height:1.45}
+.route-dependencies{display:grid;gap:8px;margin:0 0 18px;padding:12px;border:1px solid var(--border-default);border-radius:10px;background:var(--bg-input)}.route-dependencies legend{padding:0 4px;font:700 .78rem Manrope}.route-dependencies>small{color:var(--text-muted);font-size:.72rem;line-height:1.45}.route-dependencies>div{display:grid;gap:6px}.route-dependencies label{display:flex!important;align-items:center;gap:8px;margin:0!important;font-size:.75rem!important}.route-dependencies input{width:15px;height:15px;margin:0;accent-color:var(--text-accent)}
 
 .actions {
   display: flex;

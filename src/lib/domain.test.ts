@@ -39,6 +39,20 @@ describe('workflow stages', () => {
     expect(canCreateWorkflowStage(1, [{}, {}], statuses)).toBe(false);
   });
 
+  it('waits only for the explicitly selected merge routes before release', () => {
+    const stages = [{}, { independent: true }, { independent: true, waitFor: [0, 1] }];
+    expect(canCreateWorkflowStage(2, stages, [
+      { kind: 'merged', checks: { state: 'success' } },
+      { kind: 'open', checks: { state: 'success' } },
+      { kind: 'not-created' },
+    ])).toBe(false);
+    expect(canCreateWorkflowStage(2, stages, [
+      { kind: 'merged', checks: { state: 'success' } },
+      { kind: 'merged', checks: { state: 'success' } },
+      { kind: 'not-created' },
+    ])).toBe(true);
+  });
+
   it('only signals a meaningful status transition', () => {
     expect(statusChanged({ kind: 'open', checks: 'pending' }, { kind: 'open', checks: 'success' })).toBe(true);
     expect(statusChanged({ kind: 'open', checks: 'pending' }, { kind: 'open', checks: 'pending' })).toBe(false);

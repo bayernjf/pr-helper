@@ -1,16 +1,21 @@
-export type WorkflowStage = { source: string; target: string; independent?: boolean };
+export type WorkflowStage = { source: string; target: string; independent?: boolean; waitFor?: number[] };
 export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; position?: number };
 
 export function createWorkflow(repository: string, source: string, target: string, name = repository): Workflow {
   return { id: `${repository}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, repository, stages: [{ source, target }] };
 }
 
-export function addStage(workflow: Workflow, source: string, target: string, independent = false): Workflow {
-  return { ...workflow, stages: [...workflow.stages, { source, target, ...(independent ? { independent: true } : {}) }] };
+export function addStage(workflow: Workflow, source: string, target: string, independent = false, waitFor: number[] = []): Workflow {
+  return { ...workflow, stages: [...workflow.stages, { source, target, ...(independent ? { independent: true } : {}), ...(waitFor.length ? { waitFor } : {}) }] };
 }
 
 export function removeStage(workflow: Workflow, index: number): Workflow {
-  return { ...workflow, stages: workflow.stages.filter((_, stageIndex) => stageIndex !== index) };
+  return {
+    ...workflow,
+    stages: workflow.stages
+      .filter((_, stageIndex) => stageIndex !== index)
+      .map(stage => !stage.waitFor ? stage : { ...stage, waitFor: stage.waitFor.filter(dependency => dependency !== index).map(dependency => dependency > index ? dependency - 1 : dependency) }),
+  };
 }
 
 export function saveWorkflow(workflows: Workflow[], workflow: Workflow): Workflow[] {

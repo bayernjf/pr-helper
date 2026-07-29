@@ -143,6 +143,8 @@ const zh: TranslationDict = {
   'editor.saveFlow': '保存流程',
   'editor.independent.label': '独立合并路径',
   'editor.independent.desc': '此路径可独立创建和合并 PR，不等待前一条路径。',
+  'editor.dependencies.label': '汇聚发布门禁（可选）',
+  'editor.dependencies.desc': '仅当勾选的路径全部合并且合并后 Actions 通过时，才允许创建此 PR。',
   'editor.error.branches': '无法读取分支',
   'editor.error.sameBranch': 'Source 和 Target 不能是同一分支。',
   'editor.error.duplicateRoute': '该合并路径已经存在。',
@@ -156,6 +158,7 @@ const zh: TranslationDict = {
   'draft.empty.desc': '保存第一步后，流程会显示在这里。',
   'draft.remove': '删除',
   'draft.independent': '独立',
+  'draft.waitFor': '等待 {count} 条路径',
   'draft.viewDetail': '查看流程详情',
 
   // Detail
