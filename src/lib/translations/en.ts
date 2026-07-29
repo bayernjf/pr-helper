@@ -169,6 +169,8 @@ const en: TranslationDict = {
   'editor.deployments.target': 'Target branch',
   'editor.deployments.provider': 'Deployment platform',
   'editor.deployments.workflow': 'GitHub Actions workflow name',
+  'editor.deployments.workflowHint': 'Choose a workflow from this repository or enter a name manually.',
+  'editor.deployments.workflowUnavailable': 'No selectable workflows were loaded; enter a workflow name manually.',
   'editor.deployments.environment': 'Deployment environment',
   'editor.deployments.githubEnvironment': 'GitHub Environment (optional)',
   'editor.deployments.preview': 'Preview',

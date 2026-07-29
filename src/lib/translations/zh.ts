@@ -169,6 +169,8 @@ const zh: TranslationDict = {
   'editor.deployments.target': '目标分支',
   'editor.deployments.provider': '部署平台',
   'editor.deployments.workflow': 'GitHub Actions 工作流名称',
+  'editor.deployments.workflowHint': '可从当前仓库的工作流列表中选择，也可手动输入。',
+  'editor.deployments.workflowUnavailable': '暂未读取到可选工作流；仍可手动输入名称。',
   'editor.deployments.environment': '部署环境',
   'editor.deployments.githubEnvironment': 'GitHub Environment（可选）',
   'editor.deployments.preview': 'Preview',

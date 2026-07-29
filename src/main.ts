@@ -21,6 +21,7 @@ type CheckRun = { status: string; conclusion: string | null };
 type CommitStatus = { state: string };
 type Review = { state: string };
 type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
+type GitHubActionsWorkflow = { name: string; state: string; path: string };
 type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string };
 type MergeResult = { merged: boolean; message?: string; sha?: string };
 type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
@@ -37,6 +38,7 @@ let workflows = loadWorkflows();
 let active: Workflow | null = workflows[0] || null;
 let screen: Screen = 'overview';
 let branches: string[] = [];
+let repositoryActionWorkflows: GitHubActionsWorkflow[] = [];
 let statuses: StepStatus[] | null = null;
 let refreshOnNextDetail = false;
 let pollTimer: number | undefined;
@@ -586,7 +588,16 @@ function editor() {
 
 async function loadBranches(repository: string) {
   const form = document.querySelector('#step-form')!;
-  try { const { owner, name } = parseRepository(repository); branches = (await githubFetch<{ name: string }[]>(token, `/repos/${owner}/${name}/branches?per_page=100`)).map(item => item.name); renderStepForm(repository); } catch (err) { form.innerHTML = `<p class="error">${escape(err instanceof Error ? err.message : t('editor.error.branches'))}</p>`; }
+  try {
+    const { owner, name } = parseRepository(repository);
+    const [branchData, actions] = await Promise.all([
+      githubFetch<{ name: string }[]>(token, `/repos/${owner}/${name}/branches?per_page=100`),
+      githubFetch<{ workflows: GitHubActionsWorkflow[] }>(token, `/repos/${owner}/${name}/actions/workflows?per_page=100`).catch(() => ({ workflows: [] })),
+    ]);
+    branches = branchData.map(item => item.name);
+    repositoryActionWorkflows = actions.workflows.filter(workflow => workflow.state === 'active');
+    renderStepForm(repository);
+  } catch (err) { form.innerHTML = `<p class="error">${escape(err instanceof Error ? err.message : t('editor.error.branches'))}</p>`; }
 }
 function renderStepForm(repository: string) {
   const last = active?.repository === repository ? active.stages.at(-1) : undefined;
@@ -620,7 +631,9 @@ function renderDeploymentSettings() {
   if (!active) return '';
   const configured = deploymentConfigs(active);
   const target = branches.find(branch => branch === 'dev') || branches.find(branch => branch === 'main') || branches[0] || '';
-  return `<fieldset class="deployment-settings"><legend>${t('editor.deployments.label')}</legend><small>${t('editor.deployments.desc')}</small><div class="deployment-config-list">${configured.length ? configured.map((deployment, index) => `<div><b>${escape(deployment.target)} · ${deployment.provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages'}</b><small>${escape(deployment.workflowName)} · ${t(`editor.deployments.${deployment.environment}`)}${deployment.githubEnvironment ? ` · ${escape(deployment.githubEnvironment)}` : ''}</small><button class="ghost" type="button" data-remove-deployment="${index}">${t('editor.deployments.remove')}</button></div>`).join('') : `<p class="meta">${t('editor.deployments.empty')}</p>`}</div><div class="two"><label>${t('editor.deployments.target')}<select id="deployment-target">${options(target)}</select></label><label>${t('editor.deployments.provider')}<select id="deployment-provider"><option value="vercel">Vercel</option><option value="cloudflare">Cloudflare Pages</option></select></label></div><label>${t('editor.deployments.workflow')}<input id="deployment-workflow" placeholder="Deploy frontend to Vercel" /></label><div class="two"><label>${t('editor.deployments.environment')}<select id="deployment-environment"><option value="preview">${t('editor.deployments.preview')}</option><option value="production">${t('editor.deployments.production')}</option></select></label><label>${t('editor.deployments.githubEnvironment')}<input id="deployment-github-environment" placeholder="preview-vercel" /></label></div><button id="add-deployment" type="button" class="ghost">${t('editor.deployments.add')}</button></fieldset>`;
+  const workflows = repositoryActionWorkflows.map(workflow => `<option value="${escape(workflow.name)}">${escape(workflow.path)}</option>`).join('');
+  const workflowHint = repositoryActionWorkflows.length ? t('editor.deployments.workflowHint') : t('editor.deployments.workflowUnavailable');
+  return `<fieldset class="deployment-settings"><legend>${t('editor.deployments.label')}</legend><small>${t('editor.deployments.desc')}</small><div class="deployment-config-list">${configured.length ? configured.map((deployment, index) => `<div><b>${escape(deployment.target)} · ${deployment.provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages'}</b><small>${escape(deployment.workflowName)} · ${t(`editor.deployments.${deployment.environment}`)}${deployment.githubEnvironment ? ` · ${escape(deployment.githubEnvironment)}` : ''}</small><button class="ghost" type="button" data-remove-deployment="${index}">${t('editor.deployments.remove')}</button></div>`).join('') : `<p class="meta">${t('editor.deployments.empty')}</p>`}</div><div class="two"><label>${t('editor.deployments.target')}<select id="deployment-target">${options(target)}</select></label><label>${t('editor.deployments.provider')}<select id="deployment-provider"><option value="vercel">Vercel</option><option value="cloudflare">Cloudflare Pages</option></select></label></div><label>${t('editor.deployments.workflow')}<input id="deployment-workflow" list="deployment-workflows" placeholder="Deploy frontend to Vercel" /><datalist id="deployment-workflows">${workflows}</datalist><small>${workflowHint}</small></label><div class="two"><label>${t('editor.deployments.environment')}<select id="deployment-environment"><option value="preview">${t('editor.deployments.preview')}</option><option value="production">${t('editor.deployments.production')}</option></select></label><label>${t('editor.deployments.githubEnvironment')}<input id="deployment-github-environment" placeholder="preview-vercel" /></label></div><button id="add-deployment" type="button" class="ghost">${t('editor.deployments.add')}</button></fieldset>`;
 }
 function options(selected: string) { return branches.map(branch => `<option ${branch === selected ? 'selected' : ''}>${escape(branch)}</option>`).join(''); }
 function value(id: string) { return document.querySelector<HTMLSelectElement | HTMLInputElement>(`#${id}`)!.value; }
