@@ -118,6 +118,7 @@ const en: TranslationDict = {
   'overview.deployment.health': 'Health check',
   'overview.deployment.healthPassed': 'passed',
   'overview.deployment.healthFailed': 'failed',
+  'overview.deployment.rollback': 'Roll back to this version',
   'overview.board.close': 'Close',
   'overview.board.stepDetail': 'STEP DETAIL',
   'overview.board.noPull': 'No PR exists for this step yet',
@@ -188,6 +189,23 @@ const en: TranslationDict = {
   'editor.deployments.healthPath': 'Health check path (optional)',
   'editor.deployments.healthPathHint': 'Runs only against the public URL returned by this deployment, for example /health.',
   'editor.deployments.healthPathInvalid': 'The health check path must start with /.',
+  'editor.deployments.rollbackWorkflow': 'Rollback Actions workflow (optional)',
+  'editor.deployments.rollbackWorkflowHint': 'Shown only when configured. Its workflow_dispatch must accept target_run_id, deployment_url, environment, and provider.',
+  'editor.deployments.rollbackSummary': 'Rollback: {workflow}',
+
+  // Deployment rollback
+  'rollback.eyebrow': 'CONFIRM DEPLOYMENT ROLLBACK',
+  'rollback.title': 'Roll back this deployment?',
+  'rollback.desc': 'GitHub Actions will roll back {provider} {environment}; PR Helper will not change the platform version directly.',
+  'rollback.target': 'Rollback target',
+  'rollback.workflow': 'Workflow: {workflow}',
+  'rollback.warning': 'Rollback is never automatic. It starts only after confirmation and is recorded in the audit history.',
+  'rollback.cancel': 'Cancel',
+  'rollback.confirm': 'Confirm and start rollback',
+  'rollback.starting': 'Starting…',
+  'rollback.started': 'Rollback workflow started: {workflow}',
+  'rollback.failed': 'Unable to start deployment rollback.',
+  'rollback.unavailable': 'No usable rollback workflow is configured for this deployment.',
 
   // Draft panel
   'draft.eyebrow': 'FLOW DRAFT',

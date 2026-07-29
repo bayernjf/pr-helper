@@ -31,7 +31,7 @@ type GitHubWorkflowJob = { name: string; conclusion: string | null; html_url: st
 
 export type DeploymentProvider = 'vercel' | 'cloudflare';
 export type DeploymentState = 'pending' | 'success' | 'failure';
-export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string; healthCheckPath?: string };
+export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string; healthCheckPath?: string; rollbackWorkflowName?: string };
 
 export function canCheckDeploymentUrl(value: string) {
   try { const url = new URL(value); return url.protocol === 'https:' && !['localhost', '127.0.0.1', '::1'].includes(url.hostname) && !url.hostname.endsWith('.local'); } catch { return false; }
@@ -184,6 +184,42 @@ export async function recordRecoveryEvent(environment: Record<string, string | u
   await recordWorkflowStageEvent(sql, user.id, input.workflowId, input.stageIndex, input.source, `${input.workflowId}:${input.stageIndex}:${input.source}:actions-rerun:${Date.now()}`, 'actions-rerun', '已重新触发失败的 GitHub Actions');
 }
 
+export async function requestDeploymentRollback(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, input: { workflowId: string; stageIndex: number; source: string; provider: DeploymentProvider; runId: number }) {
+  if (!input.workflowId || !input.source || !Number.isInteger(input.stageIndex) || input.stageIndex < 0 || !['vercel', 'cloudflare'].includes(input.provider) || !Number.isInteger(input.runId) || input.runId <= 0) throw new Error('无效的部署回滚请求');
+  if (!identity.installationId) throw new Error('尚未选择 GitHub App 可访问的仓库');
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${input.workflowId}`;
+  const workflow = storedWorkflowFromPayload(rows[0]?.payload);
+  const stage = workflow?.stages[input.stageIndex];
+  if (!workflow || !stage) throw new Error('未找到对应流程步骤');
+  const deployment = deploymentConfigsForTarget(workflow, stage.target).find(candidate => candidate.provider === input.provider);
+  if (!deployment?.rollbackWorkflowName) throw new Error('该部署门禁未配置回滚工作流');
+  const runs = await sql<{ deployment_url: string | null }[]>`SELECT deployment_url FROM workflow_stage_deployment_runs WHERE user_id = ${user.id} AND workflow_id = ${input.workflowId} AND stage_index = ${input.stageIndex} AND source = ${input.source} AND provider = ${input.provider} AND run_id = ${input.runId} AND state = 'success' LIMIT 1`;
+  if (!runs.length) throw new Error('只能回滚到已成功且仍在历史记录中的部署');
+  const { owner, name } = ownerAndName(workflow.repository);
+  const config = parseGithubAppConfig(environment);
+  const available = await installationRequest<{ workflows: { id: number; name: string; path: string; state: string }[] }>(config, identity.installationId, `/repos/${owner}/${name}/actions/workflows?per_page=100`);
+  const rollbackWorkflow = available.workflows.find(candidate => candidate.state === 'active' && (candidate.name === deployment.rollbackWorkflowName || candidate.path === deployment.rollbackWorkflowName));
+  if (!rollbackWorkflow) throw new Error(`未找到可用的回滚工作流：${deployment.rollbackWorkflowName}`);
+  await installationRequest<Record<string, never>>(config, identity.installationId, `/repos/${owner}/${name}/actions/workflows/${encodeURIComponent(String(rollbackWorkflow.id))}/dispatches`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ref: deployment.target,
+      inputs: {
+        target_run_id: String(input.runId),
+        deployment_url: runs[0].deployment_url || '',
+        environment: deployment.environment,
+        provider: deployment.provider,
+      },
+    }),
+  });
+  const providerName = input.provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages';
+  await recordWorkflowStageEvent(sql, user.id, input.workflowId, input.stageIndex, input.source, `${input.workflowId}:${input.stageIndex}:${input.source}:rollback:${input.provider}:${input.runId}:${Date.now()}`, 'deployment-rollback', `已确认触发 ${providerName} 回滚到部署 #${input.runId}`);
+  return { workflowName: rollbackWorkflow.name };
+}
+
 export async function codexRepairContext(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string, stageIndex: number, source?: string): Promise<CodexRepairContext> {
   if (!Number.isInteger(stageIndex) || stageIndex < 0) throw new Error('无效的流程步骤');
   if (!identity.installationId) throw new Error('尚未选择 GitHub App 可访问的仓库');
@@ -242,7 +278,7 @@ export function isStoredWorkflow(value: unknown): value is StoredWorkflow {
   return typeof workflow.id === 'string' && typeof workflow.name === 'string' && typeof workflow.repository === 'string'
     && (workflow.position === undefined || Number.isInteger(workflow.position) && workflow.position >= 0)
     && Array.isArray(workflow.stages) && workflow.stages.length > 0
-    && (workflow.deployments === undefined || Array.isArray(workflow.deployments) && workflow.deployments.every(deployment => Boolean(deployment) && typeof deployment.target === 'string' && deployment.target.length > 0 && ['vercel', 'cloudflare'].includes(deployment.provider || '') && typeof deployment.workflowName === 'string' && deployment.workflowName.length > 0 && ['preview', 'production'].includes(deployment.environment || '') && (deployment.githubEnvironment === undefined || typeof deployment.githubEnvironment === 'string') && (deployment.healthCheckPath === undefined || typeof deployment.healthCheckPath === 'string' && deployment.healthCheckPath.startsWith('/'))))
+    && (workflow.deployments === undefined || Array.isArray(workflow.deployments) && workflow.deployments.every(deployment => Boolean(deployment) && typeof deployment.target === 'string' && deployment.target.length > 0 && ['vercel', 'cloudflare'].includes(deployment.provider || '') && typeof deployment.workflowName === 'string' && deployment.workflowName.length > 0 && ['preview', 'production'].includes(deployment.environment || '') && (deployment.githubEnvironment === undefined || typeof deployment.githubEnvironment === 'string') && (deployment.healthCheckPath === undefined || typeof deployment.healthCheckPath === 'string' && deployment.healthCheckPath.startsWith('/')) && (deployment.rollbackWorkflowName === undefined || typeof deployment.rollbackWorkflowName === 'string' && deployment.rollbackWorkflowName.length > 0)))
     && workflow.stages.every((stage, index) => Boolean(stage) && typeof stage.source === 'string' && typeof stage.target === 'string' && stage.source.length > 0 && stage.target.length > 0 && (stage.independent === undefined || typeof stage.independent === 'boolean') && (stage.waitFor === undefined || Array.isArray(stage.waitFor) && stage.waitFor.every(dependency => Number.isInteger(dependency) && dependency >= 0 && dependency < index)));
 }
 

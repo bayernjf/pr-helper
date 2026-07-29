@@ -102,4 +102,23 @@ describe('workflow configuration', () => {
     expect(deploymentConfigsForTarget(customized, 'staging')).toEqual([{ target: 'staging', provider: 'vercel', workflowName: 'Deploy staging', environment: 'preview', githubEnvironment: 'staging-vercel' }]);
     expect(removeDeployment(customized, 0).deployments).toEqual([]);
   });
+
+  it('preserves an explicitly configured rollback workflow on a deployment gate', () => {
+    const workflow = { ...createWorkflow('octo/app', 'dev', 'main'), deployments: [] };
+    const configured = addDeployment(workflow, {
+      target: 'main',
+      provider: 'vercel',
+      workflowName: 'Deploy production',
+      environment: 'production',
+      rollbackWorkflowName: 'Rollback production',
+    });
+
+    expect(deploymentConfigsForTarget(configured, 'main')).toEqual([{
+      target: 'main',
+      provider: 'vercel',
+      workflowName: 'Deploy production',
+      environment: 'production',
+      rollbackWorkflowName: 'Rollback production',
+    }]);
+  });
 });

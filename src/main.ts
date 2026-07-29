@@ -430,10 +430,16 @@ function deploymentCards(workflowId: string, stageIndex: number, source?: string
     return `<article class="deployment-card ${deployment.state}"><div><b>${deploymentProviderName(deployment.provider)}</b><small>${t(`overview.deployment.${deployment.environment}`)} · ${deploymentStateText(deployment.state)}</small>${health}${failure}</div><span>${retry}${jobLink}${link}${logLink}</span></article>`;
   }).join('')}</div></section>`;
 }
-function deploymentRunHistory(workflowId: string, stageIndex: number, source?: string) {
-  const runs = workflowStageDeploymentRuns.filter(run => run.workflowId === workflowId && run.stageIndex === stageIndex && (source === undefined || run.source === source));
+function deploymentRunHistory(flow: Workflow, stageIndex: number, source?: string) {
+  const runs = workflowStageDeploymentRuns.filter(run => run.workflowId === flow.id && run.stageIndex === stageIndex && (source === undefined || run.source === source));
   if (!runs.length) return '';
-  return `<section class="drawer-deployment-history"><p class="eyebrow">${t('overview.deployment.history')}</p><ol>${runs.map(run => `<li class="${run.state}"><div><b>${deploymentProviderName(run.provider)} · ${t(`overview.deployment.${run.environment}`)}</b><small>${deploymentStateText(run.state)}${run.healthState ? ` · ${t('overview.deployment.health')} ${run.healthState === 'success' ? t('overview.deployment.healthPassed') : t('overview.deployment.healthFailed')}` : ''}</small></div><time>${escape(stageUpdatedAt({ updatedAt: run.firstSeenAt } as WorkflowStageState))}</time>${run.runUrl ? `<a href="${escape(run.runUrl)}" target="_blank" rel="noreferrer">${t('overview.deployment.openLogs')} ↗</a>` : ''}</li>`).join('')}</ol></section>`;
+  const target = flow.stages[stageIndex]?.target;
+  return `<section class="drawer-deployment-history"><p class="eyebrow">${t('overview.deployment.history')}</p><ol>${runs.map(run => {
+    const rollback = run.state === 'success' && run.runId && deploymentConfigs(flow).some(configuration => configuration.target === target && configuration.provider === run.provider && configuration.rollbackWorkflowName)
+      ? `<button type="button" class="ghost deployment-rollback" data-deployment-run="${run.runId}" data-deployment-provider="${run.provider}">${t('overview.deployment.rollback')}</button>`
+      : '';
+    return `<li class="${run.state}"><div><b>${deploymentProviderName(run.provider)} · ${t(`overview.deployment.${run.environment}`)}</b><small>${deploymentStateText(run.state)}${run.healthState ? ` · ${t('overview.deployment.health')} ${run.healthState === 'success' ? t('overview.deployment.healthPassed') : t('overview.deployment.healthFailed')}` : ''}</small></div><time>${escape(stageUpdatedAt({ updatedAt: run.firstSeenAt } as WorkflowStageState))}</time><span>${rollback}${run.runUrl ? `<a href="${escape(run.runUrl)}" target="_blank" rel="noreferrer">${t('overview.deployment.openLogs')} ↗</a>` : ''}</span></li>`;
+  }).join('')}</ol></section>`;
 }
 function laneRunSummary(flow: Workflow) {
   const summary = workflowRunSummary(flow.stages.map((_, index) => stageState(flow.id, index)));
@@ -548,7 +554,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const events = stageEvents(workflowId, stageIndex, routeSource);
   const history = events.length ? `<section class="drawer-events"><p class="eyebrow">${t('overview.run.history')}</p><ol>${events.map(event => `<li><b>${escape(event.message)}</b><time>${escape(stageUpdatedAt({ updatedAt: event.occurredAt } as WorkflowStageState))}</time></li>`).join('')}</ol></section>` : '';
   const deployments = deploymentCards(workflowId, stageIndex, routeSource);
-  const deploymentHistory = deploymentRunHistory(workflowId, stageIndex, routeSource);
+  const deploymentHistory = deploymentRunHistory(flow, stageIndex, routeSource);
   const createAction = queueItem?.kind === 'ready-to-create' ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
   const mergeStatus = laneMergeStatus(state);
   const mergeAction = mergeStatus && canMergePull(mergeStatus) ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
@@ -580,6 +586,14 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
     const runId = Number(button.dataset.deploymentRun);
     const provider = button.dataset.deploymentProvider;
     if (state && Number.isInteger(runId) && provider) void retryDeployment(flow, state, runId, provider, button);
+  }));
+  dialog.querySelectorAll<HTMLButtonElement>('.deployment-rollback').forEach(button => button.addEventListener('click', () => {
+    const runId = Number(button.dataset.deploymentRun);
+    const provider = button.dataset.deploymentProvider as WorkflowStageDeployment['provider'] | undefined;
+    const run = workflowStageDeploymentRuns.find(candidate => candidate.workflowId === flow.id && candidate.stageIndex === stageIndex && candidate.source === routeSource && candidate.provider === provider && candidate.runId === runId);
+    if (!run || !provider) return;
+    dialog.close();
+    showDeploymentRollbackDialog(flow, stageIndex, routeSource, run);
   }));
   dialog.querySelector('.drawer-view-flow')!.addEventListener('click', () => { active = flow; dialog.close(); goTo('detail'); });
   dialog.addEventListener('click', event => { if (event.target === dialog) close(); });
@@ -624,7 +638,7 @@ function renderStepForm(repository: string) {
   document.querySelector<HTMLButtonElement>('#add-deployment')?.addEventListener('click', () => {
     if (!active) return;
     const healthCheckPath = value('deployment-health-path').trim();
-    const deployment: DeploymentConfig = { target: value('deployment-target'), provider: value('deployment-provider') as DeploymentConfig['provider'], workflowName: value('deployment-workflow').trim(), environment: value('deployment-environment') as DeploymentConfig['environment'], ...(value('deployment-github-environment').trim() ? { githubEnvironment: value('deployment-github-environment').trim() } : {}), ...(healthCheckPath ? { healthCheckPath } : {}) };
+    const deployment: DeploymentConfig = { target: value('deployment-target'), provider: value('deployment-provider') as DeploymentConfig['provider'], workflowName: value('deployment-workflow').trim(), environment: value('deployment-environment') as DeploymentConfig['environment'], ...(value('deployment-github-environment').trim() ? { githubEnvironment: value('deployment-github-environment').trim() } : {}), ...(healthCheckPath ? { healthCheckPath } : {}), ...(value('deployment-rollback-workflow').trim() ? { rollbackWorkflowName: value('deployment-rollback-workflow').trim() } : {}) };
     if (!deployment.workflowName) { showToast(t('editor.deployments.workflowRequired')); return; }
     if (healthCheckPath && !healthCheckPath.startsWith('/')) { showToast(t('editor.deployments.healthPathInvalid')); return; }
     if (deploymentConfigs(active).some(item => item.target === deployment.target && item.provider === deployment.provider)) { showToast(t('editor.deployments.duplicate')); return; }
@@ -645,7 +659,7 @@ function renderDeploymentSettings() {
   const target = branches.find(branch => branch === 'dev') || branches.find(branch => branch === 'main') || branches[0] || '';
   const workflows = repositoryActionWorkflows.map(workflow => `<option value="${escape(workflow.name)}">${escape(workflow.path)}</option>`).join('');
   const workflowHint = repositoryActionWorkflows.length ? t('editor.deployments.workflowHint') : t('editor.deployments.workflowUnavailable');
-  return `<fieldset class="deployment-settings"><legend>${t('editor.deployments.label')}</legend><small>${t('editor.deployments.desc')}</small><div class="deployment-config-list">${configured.length ? configured.map((deployment, index) => `<div><b>${escape(deployment.target)} · ${deployment.provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages'}</b><small>${escape(deployment.workflowName)} · ${t(`editor.deployments.${deployment.environment}`)}${deployment.githubEnvironment ? ` · ${escape(deployment.githubEnvironment)}` : ''}${deployment.healthCheckPath ? ` · ${escape(deployment.healthCheckPath)}` : ''}</small><button class="ghost" type="button" data-remove-deployment="${index}">${t('editor.deployments.remove')}</button></div>`).join('') : `<p class="meta">${t('editor.deployments.empty')}</p>`}</div><div class="two"><label>${t('editor.deployments.target')}<select id="deployment-target">${options(target)}</select></label><label>${t('editor.deployments.provider')}<select id="deployment-provider"><option value="vercel">Vercel</option><option value="cloudflare">Cloudflare Pages</option></select></label></div><label>${t('editor.deployments.workflow')}<input id="deployment-workflow" list="deployment-workflows" placeholder="Deploy frontend to Vercel" /><datalist id="deployment-workflows">${workflows}</datalist><small>${workflowHint}</small></label><div class="two"><label>${t('editor.deployments.environment')}<select id="deployment-environment"><option value="preview">${t('editor.deployments.preview')}</option><option value="production">${t('editor.deployments.production')}</option></select></label><label>${t('editor.deployments.githubEnvironment')}<input id="deployment-github-environment" placeholder="preview-vercel" /></label></div><label>${t('editor.deployments.healthPath')}<input id="deployment-health-path" placeholder="/health" /><small>${t('editor.deployments.healthPathHint')}</small></label><button id="add-deployment" type="button" class="ghost">${t('editor.deployments.add')}</button></fieldset>`;
+  return `<fieldset class="deployment-settings"><legend>${t('editor.deployments.label')}</legend><small>${t('editor.deployments.desc')}</small><div class="deployment-config-list">${configured.length ? configured.map((deployment, index) => `<div><b>${escape(deployment.target)} · ${deployment.provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages'}</b><small>${escape(deployment.workflowName)} · ${t(`editor.deployments.${deployment.environment}`)}${deployment.githubEnvironment ? ` · ${escape(deployment.githubEnvironment)}` : ''}${deployment.healthCheckPath ? ` · ${escape(deployment.healthCheckPath)}` : ''}${deployment.rollbackWorkflowName ? ` · ${t('editor.deployments.rollbackSummary', { workflow: escape(deployment.rollbackWorkflowName) })}` : ''}</small><button class="ghost" type="button" data-remove-deployment="${index}">${t('editor.deployments.remove')}</button></div>`).join('') : `<p class="meta">${t('editor.deployments.empty')}</p>`}</div><div class="two"><label>${t('editor.deployments.target')}<select id="deployment-target">${options(target)}</select></label><label>${t('editor.deployments.provider')}<select id="deployment-provider"><option value="vercel">Vercel</option><option value="cloudflare">Cloudflare Pages</option></select></label></div><label>${t('editor.deployments.workflow')}<input id="deployment-workflow" list="deployment-workflows" placeholder="Deploy frontend to Vercel" /><datalist id="deployment-workflows">${workflows}</datalist><small>${workflowHint}</small></label><div class="two"><label>${t('editor.deployments.environment')}<select id="deployment-environment"><option value="preview">${t('editor.deployments.preview')}</option><option value="production">${t('editor.deployments.production')}</option></select></label><label>${t('editor.deployments.githubEnvironment')}<input id="deployment-github-environment" placeholder="preview-vercel" /></label></div><label>${t('editor.deployments.healthPath')}<input id="deployment-health-path" placeholder="/health" /><small>${t('editor.deployments.healthPathHint')}</small></label><label>${t('editor.deployments.rollbackWorkflow')}<input id="deployment-rollback-workflow" list="deployment-workflows" placeholder="Rollback production" /><small>${t('editor.deployments.rollbackWorkflowHint')}</small></label><button id="add-deployment" type="button" class="ghost">${t('editor.deployments.add')}</button></fieldset>`;
 }
 function options(selected: string) { return branches.map(branch => `<option ${branch === selected ? 'selected' : ''}>${escape(branch)}</option>`).join(''); }
 function value(id: string) { return document.querySelector<HTMLSelectElement | HTMLInputElement>(`#${id}`)!.value; }
@@ -744,6 +758,35 @@ async function showCodexRepairDialog(index: number, source?: string) {
   dialog.addEventListener('close', () => dialog.remove());
 }
 type WorkflowRun = { id: number; conclusion: string | null };
+function showDeploymentRollbackDialog(flow: Workflow, stageIndex: number, source: string, run: WorkflowStageDeploymentRun) {
+  const stage = flow.stages[stageIndex];
+  const deployment = deploymentConfigs(flow).find(configuration => configuration.target === stage?.target && configuration.provider === run.provider);
+  if (!stage || !deployment?.rollbackWorkflowName || !run.runId) { showToast(t('rollback.unavailable')); return; }
+  const rollbackWorkflowName = deployment.rollbackWorkflowName;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog confirm-dialog rollback-dialog';
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('rollback.eyebrow')}</p><h2>${t('rollback.title')}</h2><p>${t('rollback.desc', { provider: deploymentProviderName(run.provider), environment: t(`overview.deployment.${run.environment}`) })}</p><div class="rollback-target"><b>${t('rollback.target')}</b><span>${escape(flow.repository)} · ${escape(source)} → ${escape(stage.target)}</span><span>${deploymentProviderName(run.provider)} · #${run.runId}</span><small>${t('rollback.workflow', { workflow: escape(deployment.rollbackWorkflowName) })}</small></div><p class="meta">${t('rollback.warning')}</p><p class="error" id="rollback-error" hidden></p><div class="dialog-actions"><button value="cancel" class="ghost">${t('rollback.cancel')}</button><button id="confirm-rollback" type="button" class="danger-button">${t('rollback.confirm')}</button></div></form>`;
+  document.body.append(dialog); dialog.showModal();
+  dialog.querySelector<HTMLButtonElement>('#confirm-rollback')!.addEventListener('click', async event => {
+    const button = event.currentTarget as HTMLButtonElement;
+    const errorElement = dialog.querySelector<HTMLElement>('#rollback-error')!;
+    button.disabled = true; button.textContent = t('rollback.starting'); errorElement.hidden = true;
+    try {
+      const response = await fetch(githubAppApiUrl('/api/deployment-rollback'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: flow.id, stageIndex, source, provider: run.provider, runId: run.runId }) });
+      const payload = await response.json().catch(() => ({})) as { message?: string; workflowName?: string };
+      if (!response.ok) throw new Error(payload.message || t('rollback.failed'));
+      dialog.close();
+      showToast(t('rollback.started', { workflow: payload.workflowName || rollbackWorkflowName }));
+      void loadActionQueue().finally(render);
+      window.setTimeout(() => void loadActionQueue().finally(render), 1_500);
+    } catch (error) {
+      errorElement.textContent = error instanceof Error ? error.message : t('rollback.failed');
+      errorElement.hidden = false;
+      button.disabled = false; button.textContent = t('rollback.confirm');
+    }
+  });
+  dialog.addEventListener('close', () => dialog.remove(), { once: true });
+}
 async function retryDeployment(flow: Workflow, state: WorkflowStageState, runId: number, provider: string, button: HTMLButtonElement) {
   button.disabled = true; button.textContent = t('overview.deployment.retrying');
   try {

@@ -14,6 +14,13 @@ describe('stored workflow validation', () => {
     expect(isStoredWorkflow({ ...workflow, position: 1.5 })).toBe(false);
   });
 
+  it('accepts a named rollback workflow and rejects an empty rollback workflow', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main' }] };
+    const deployment = { target: 'main', provider: 'vercel', workflowName: 'Deploy production', environment: 'production' };
+    expect(isStoredWorkflow({ ...workflow, deployments: [{ ...deployment, rollbackWorkflowName: 'Rollback production' }] })).toBe(true);
+    expect(isStoredWorkflow({ ...workflow, deployments: [{ ...deployment, rollbackWorkflowName: '' }] })).toBe(false);
+  });
+
   it('sorts cloud workflows by lane position and keeps legacy payloads last', () => {
     const workflow = (id: string, position?: number) => ({ id, name: id, repository: `octo/${id}`, stages: [{ source: 'dev', target: 'main' }], ...(position === undefined ? {} : { position }) });
     expect(sortStoredWorkflows([workflow('legacy'), workflow('last', 3), workflow('first', 0)]).map(item => item.id)).toEqual(['first', 'last', 'legacy']);

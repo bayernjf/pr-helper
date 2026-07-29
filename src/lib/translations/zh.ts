@@ -118,6 +118,7 @@ const zh: TranslationDict = {
   'overview.deployment.health': '健康检查',
   'overview.deployment.healthPassed': '通过',
   'overview.deployment.healthFailed': '失败',
+  'overview.deployment.rollback': '回滚到此版本',
   'overview.board.close': '关闭',
   'overview.board.stepDetail': 'STEP DETAIL',
   'overview.board.noPull': '当前步骤尚无 PR',
@@ -188,6 +189,23 @@ const zh: TranslationDict = {
   'editor.deployments.healthPath': '健康检查路径（可选）',
   'editor.deployments.healthPathHint': '仅对本次部署返回的公网地址执行，例如 /health。',
   'editor.deployments.healthPathInvalid': '健康检查路径必须以 / 开头。',
+  'editor.deployments.rollbackWorkflow': '回滚 Actions 工作流（可选）',
+  'editor.deployments.rollbackWorkflowHint': '仅配置后显示回滚入口；该 workflow_dispatch 需接收 target_run_id、deployment_url、environment、provider。',
+  'editor.deployments.rollbackSummary': '回滚：{workflow}',
+
+  // Deployment rollback
+  'rollback.eyebrow': 'CONFIRM DEPLOYMENT ROLLBACK',
+  'rollback.title': '确认回滚这个部署？',
+  'rollback.desc': '将通过 GitHub Actions 回滚 {provider} {environment}，不会直接修改平台版本。',
+  'rollback.target': '回滚目标',
+  'rollback.workflow': '执行工作流：{workflow}',
+  'rollback.warning': '回滚不会自动执行。只有点击下方确认后才会触发，并会留下审计记录。',
+  'rollback.cancel': '取消',
+  'rollback.confirm': '确认并触发回滚',
+  'rollback.starting': '正在触发…',
+  'rollback.started': '已触发回滚工作流：{workflow}',
+  'rollback.failed': '无法触发部署回滚。',
+  'rollback.unavailable': '该部署未配置可用的回滚工作流。',
 
   // Draft panel
   'draft.eyebrow': 'FLOW DRAFT',
