@@ -28,6 +28,7 @@ type ActionQueueItem = { workflowId: string; workflowName: string; repository: s
 type WorkflowStageState = WorkflowStageRunState & { workflowId: string; stageIndex: number; repository: string; source: string; target: string; mergedAt: string | null; headSha: string | null; checksPassed: number; checksTotal: number; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string | null; aheadBy: number; lastEvent: string | null; updatedAt: string };
 type WorkflowStageEvent = { workflowId: string; stageIndex: number; source: string | null; kind: string; message: string; occurredAt: string };
 type WorkflowStageDeployment = { workflowId: string; stageIndex: number; source: string; provider: 'vercel' | 'cloudflare'; environment: 'preview' | 'production'; runId: number | null; runName: string; runUrl: string | null; deploymentUrl: string | null; state: 'pending' | 'success' | 'failure'; conclusion: string | null; failureSummary: string | null; failureJobUrl: string | null; healthState: 'pending' | 'success' | 'failure' | null; healthUrl: string | null; healthDetail: string | null; updatedAt: string };
+type WorkflowStageDeploymentRun = WorkflowStageDeployment & { firstSeenAt: string };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
 const THEME_KEY = 'pr-helper-theme';
@@ -52,6 +53,7 @@ let actionQueue: ActionQueueItem[] = [];
 let workflowStageStates: WorkflowStageState[] = [];
 let workflowStageEvents: WorkflowStageEvent[] = [];
 let workflowStageDeployments: WorkflowStageDeployment[] = [];
+let workflowStageDeploymentRuns: WorkflowStageDeploymentRun[] = [];
 let actionQueueError = '';
 let overviewFilter: 'all' | 'attention' | 'failed' = 'all';
 let pushSubscribed = false;
@@ -143,24 +145,25 @@ async function loadCloudWorkflows() {
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
 }
 async function loadActionQueue() {
-  if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; actionQueueError = ''; return false; }
+  if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; actionQueueError = ''; return false; }
   try {
     const response = await fetch(githubAppApiUrl('/api/inbox'));
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { message?: string };
-      actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = [];
+      actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = [];
       actionQueueError = payload.message || t('toast.queue.failed');
       return false;
     }
-    const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[]; events?: WorkflowStageEvent[]; deployments?: WorkflowStageDeployment[] };
+    const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[]; events?: WorkflowStageEvent[]; deployments?: WorkflowStageDeployment[]; deploymentRuns?: WorkflowStageDeploymentRun[] };
     actionQueue = Array.isArray(payload.items) ? payload.items : [];
     workflowStageStates = Array.isArray(payload.states) ? payload.states : [];
     workflowStageEvents = Array.isArray(payload.events) ? payload.events : [];
     workflowStageDeployments = Array.isArray(payload.deployments) ? payload.deployments : [];
+    workflowStageDeploymentRuns = Array.isArray(payload.deploymentRuns) ? payload.deploymentRuns : [];
     actionQueueError = '';
     return true;
   } catch (error) {
-    actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = [];
+    actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = [];
     actionQueueError = error instanceof Error ? error.message : t('toast.queue.failed');
     return false;
   }
@@ -427,6 +430,11 @@ function deploymentCards(workflowId: string, stageIndex: number, source?: string
     return `<article class="deployment-card ${deployment.state}"><div><b>${deploymentProviderName(deployment.provider)}</b><small>${t(`overview.deployment.${deployment.environment}`)} · ${deploymentStateText(deployment.state)}</small>${health}${failure}</div><span>${retry}${jobLink}${link}${logLink}</span></article>`;
   }).join('')}</div></section>`;
 }
+function deploymentRunHistory(workflowId: string, stageIndex: number, source?: string) {
+  const runs = workflowStageDeploymentRuns.filter(run => run.workflowId === workflowId && run.stageIndex === stageIndex && (source === undefined || run.source === source));
+  if (!runs.length) return '';
+  return `<section class="drawer-deployment-history"><p class="eyebrow">${t('overview.deployment.history')}</p><ol>${runs.map(run => `<li class="${run.state}"><div><b>${deploymentProviderName(run.provider)} · ${t(`overview.deployment.${run.environment}`)}</b><small>${deploymentStateText(run.state)}${run.healthState ? ` · ${t('overview.deployment.health')} ${run.healthState === 'success' ? t('overview.deployment.healthPassed') : t('overview.deployment.healthFailed')}` : ''}</small></div><time>${escape(stageUpdatedAt({ updatedAt: run.firstSeenAt } as WorkflowStageState))}</time>${run.runUrl ? `<a href="${escape(run.runUrl)}" target="_blank" rel="noreferrer">${t('overview.deployment.openLogs')} ↗</a>` : ''}</li>`).join('')}</ol></section>`;
+}
 function laneRunSummary(flow: Workflow) {
   const summary = workflowRunSummary(flow.stages.map((_, index) => stageState(flow.id, index)));
   return { ...summary, text: t('overview.run.current', { step: summary.stageIndex + 1, status: stageRunPresentationText(summary) }) };
@@ -540,13 +548,14 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const events = stageEvents(workflowId, stageIndex, routeSource);
   const history = events.length ? `<section class="drawer-events"><p class="eyebrow">${t('overview.run.history')}</p><ol>${events.map(event => `<li><b>${escape(event.message)}</b><time>${escape(stageUpdatedAt({ updatedAt: event.occurredAt } as WorkflowStageState))}</time></li>`).join('')}</ol></section>` : '';
   const deployments = deploymentCards(workflowId, stageIndex, routeSource);
+  const deploymentHistory = deploymentRunHistory(workflowId, stageIndex, routeSource);
   const createAction = queueItem?.kind === 'ready-to-create' ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
   const mergeStatus = laneMergeStatus(state);
   const mergeAction = mergeStatus && canMergePull(mergeStatus) ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
   const recoveryActions = state?.checksState === 'failure' ? `<button class="ghost drawer-repair">${t('repair.codex')}</button><button class="ghost drawer-retry-actions">${t('recovery.retryActions')}</button>` : '';
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
-  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${deployments}${history}<div class="dialog-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
+  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${deployments}${deploymentHistory}${history}<div class="dialog-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);

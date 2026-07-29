@@ -103,6 +103,7 @@ const zh: TranslationDict = {
   'overview.run.history': '最近动态',
   'overview.run.createPr': '创建 PR',
   'overview.deployment.title': '公网部署',
+  'overview.deployment.history': '部署运行历史',
   'overview.deployment.preview': 'Preview',
   'overview.deployment.production': 'Production',
   'overview.deployment.pending': '部署中',

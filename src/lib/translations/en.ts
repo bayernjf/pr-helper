@@ -103,6 +103,7 @@ const en: TranslationDict = {
   'overview.run.history': 'Recent activity',
   'overview.run.createPr': 'Create PR',
   'overview.deployment.title': 'PUBLIC DEPLOYMENTS',
+  'overview.deployment.history': 'DEPLOYMENT RUN HISTORY',
   'overview.deployment.preview': 'Preview',
   'overview.deployment.production': 'Production',
   'overview.deployment.pending': 'Deploying',
