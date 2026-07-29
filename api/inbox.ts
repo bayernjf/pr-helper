@@ -1,6 +1,6 @@
 import { type ApiRequest, type ApiResponse } from './_lib/http.js';
 import { currentGitHubIdentity } from './_lib/session.js';
-import { listActionableStages, listRecentWorkflowStageEvents, listWorkflowStageStates, reconcileWorkflowStages } from './_lib/workflows-store.js';
+import { listActionableStages, listRecentWorkflowStageEvents, listWorkflowStageDeployments, listWorkflowStageStates, reconcileWorkflowStages } from './_lib/workflows-store.js';
 
 export default async function handler(request: ApiRequest, response: ApiResponse) {
   if (request.method && request.method !== 'GET') { response.status(405).json({ message: 'Method not allowed' }); return; }
@@ -10,8 +10,8 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     // webhook monitoring was enabled cannot leave a stale, non-actionable queue item.
     if (session.installationId) await reconcileWorkflowStages(process.env, { installationId: session.installationId, eventName: 'inbox_refresh' });
     const identity = { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId };
-    const [items, states, events] = await Promise.all([listActionableStages(process.env, identity), listWorkflowStageStates(process.env, identity), listRecentWorkflowStageEvents(process.env, identity)]);
-    response.status(200).json({ items, states, events });
+    const [items, states, events, deployments] = await Promise.all([listActionableStages(process.env, identity), listWorkflowStageStates(process.env, identity), listRecentWorkflowStageEvents(process.env, identity), listWorkflowStageDeployments(process.env, identity)]);
+    response.status(200).json({ items, states, events, deployments });
   } catch (error) {
     response.status(500).json({ message: error instanceof Error ? error.message : '无法读取待办队列' });
   }

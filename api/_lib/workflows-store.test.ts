@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { compactFailureDetails, initialWebhookChecksState, isStoredWorkflow, matchingWorkflowStages, repairCommitSha, sortStoredWorkflows, storedWorkflowFromPayload } from './workflows-store';
+import { compactFailureDetails, deploymentProviderForWorkflowRun, deploymentRunState, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, repairCommitSha, sortStoredWorkflows, storedWorkflowFromPayload } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('accepts a workflow with real branch stages', () => {
@@ -48,5 +48,22 @@ describe('stored workflow validation', () => {
     expect(repairCommitSha({ merged_at: '2026-07-27T10:00:00Z', merge_commit_sha: 'merge-sha', head: { sha: 'head-sha' } })).toBe('merge-sha');
     expect(repairCommitSha({ merged_at: null, merge_commit_sha: 'merge-sha', head: { sha: 'head-sha' } })).toBe('head-sha');
     expect(compactFailureDetails(['curl: (22) The requested URL returned error: 401', 'more details'])).toBe('curl: (22) The requested URL returned error: 401 more details');
+  });
+
+  it('recognizes the public deployment workflows and preserves their GitHub Actions state', () => {
+    expect(deploymentProviderForWorkflowRun('Deploy frontend to Vercel')).toBe('vercel');
+    expect(deploymentProviderForWorkflowRun('Deploy frontend to Cloudflare Pages')).toBe('cloudflare');
+    expect(deploymentProviderForWorkflowRun('CI')).toBeNull();
+    expect(deploymentRunState({ status: 'queued', conclusion: null })).toBe('pending');
+    expect(deploymentRunState({ status: 'completed', conclusion: 'success' })).toBe('success');
+    expect(deploymentRunState({ status: 'completed', conclusion: 'failure' })).toBe('failure');
+  });
+
+  it('keeps a merged route locked while public deployments are pending or failed', () => {
+    const checks = { state: 'success' as const, passed: 4, total: 4 };
+    expect(mergeChecksWithDeployments(checks, ['success', 'pending'])).toEqual({ ...checks, state: 'pending' });
+    expect(mergeChecksWithDeployments(checks, ['success', 'failure'])).toEqual({ ...checks, state: 'failure' });
+    expect(mergeChecksWithDeployments(checks, ['success', 'success'])).toEqual(checks);
+    expect(mergeChecksWithDeployments({ ...checks, state: 'failure' }, ['success', 'pending'])).toEqual({ ...checks, state: 'failure' });
   });
 });

@@ -23,6 +23,23 @@ type CheckRun = { status: string; conclusion: string | null };
 type CommitStatus = { state: string };
 type Review = { state: string };
 type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
+type GitHubWorkflowRun = { id: number; name: string; status: string; conclusion: string | null; html_url: string; head_sha: string; created_at?: string };
+type GitHubDeployment = { id: number; environment: string; statuses_url: string };
+type GitHubDeploymentStatus = { state: string; environment_url?: string | null; log_url?: string | null };
+
+export type DeploymentProvider = 'vercel' | 'cloudflare';
+export type DeploymentState = 'pending' | 'success' | 'failure';
+
+export function deploymentProviderForWorkflowRun(name: string): DeploymentProvider | null {
+  if (name === 'Deploy frontend to Vercel') return 'vercel';
+  if (name === 'Deploy frontend to Cloudflare Pages') return 'cloudflare';
+  return null;
+}
+
+export function deploymentRunState(run: Pick<GitHubWorkflowRun, 'status' | 'conclusion'>): DeploymentState {
+  if (run.status !== 'completed' || !run.conclusion) return 'pending';
+  return run.conclusion === 'success' ? 'success' : 'failure';
+}
 
 export function repairCommitSha(pull: Pick<Pull, 'merged_at' | 'merge_commit_sha' | 'head'>) {
   return pull.merged_at ? pull.merge_commit_sha || pull.head.sha : pull.head.sha;
@@ -65,6 +82,19 @@ export type WorkflowStageState = {
   updatedAt: string;
 };
 export type WorkflowStageEvent = { workflowId: string; stageIndex: number; source: string | null; kind: string; message: string; occurredAt: string };
+export type WorkflowStageDeployment = {
+  workflowId: string;
+  stageIndex: number;
+  source: string;
+  provider: DeploymentProvider;
+  environment: 'preview' | 'production';
+  runName: string;
+  runUrl: string | null;
+  deploymentUrl: string | null;
+  state: DeploymentState;
+  conclusion: string | null;
+  updatedAt: string;
+};
 export type CodexRepairContext = { markdown: string; pullNumber: number; pullUrl: string };
 
 function databaseUrl(environment: Record<string, string | undefined>) {
@@ -269,6 +299,13 @@ function checkSummary(checkRuns: CheckRun[], statuses: CommitStatus[]) {
   return { state: failed ? 'failure' : checks.length > 0 && passed === checks.length ? 'success' : 'pending', passed, total: checks.length };
 }
 
+export function mergeChecksWithDeployments<T extends { state: string }>(checks: T, deployments: readonly DeploymentState[]) {
+  if (checks.state === 'failure') return checks;
+  if (deployments.includes('failure')) return { ...checks, state: 'failure' };
+  if (deployments.includes('pending')) return { ...checks, state: 'pending' };
+  return checks;
+}
+
 function ownerAndName(repository: string) {
   const [owner, name] = repository.split('/');
   if (!owner || !name) throw new Error(`无效仓库：${repository}`);
@@ -296,6 +333,45 @@ async function routeSourcesForStage(environment: Record<string, string | undefin
   return [...new Set([...branches.map(branch => branch.name), ...saved.map(state => state.source)].filter(source => branchRuleMatches(stage.source, source)))];
 }
 
+function deploymentEnvironment(target: string): 'preview' | 'production' | null {
+  if (target === 'dev') return 'preview';
+  if (target === 'main') return 'production';
+  return null;
+}
+
+function githubEnvironment(provider: DeploymentProvider, environment: 'preview' | 'production') {
+  if (provider === 'vercel') return `${environment}-vercel`;
+  return `${environment}-cloudflare-pages`;
+}
+
+async function reconcileStageDeployments(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, target: string, sha: string): Promise<DeploymentState[]> {
+  const deploymentEnvironmentName = deploymentEnvironment(target);
+  if (!deploymentEnvironmentName || !row.github_installation_id) return [];
+  const { owner, name } = ownerAndName(workflow.repository);
+  const config = parseGithubAppConfig(environment);
+  await sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_index = ${stageIndex} AND source = ${source}`;
+  const actionRuns = await installationRequest<{ workflow_runs: GitHubWorkflowRun[] }>(config, row.github_installation_id, `/repos/${owner}/${name}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`).catch(() => ({ workflow_runs: [] }));
+  const deployments = actionRuns.workflow_runs
+    .map(run => ({ run, provider: deploymentProviderForWorkflowRun(run.name) }))
+    .filter((item): item is { run: GitHubWorkflowRun; provider: DeploymentProvider } => Boolean(item.provider))
+    .sort((left, right) => (right.run.created_at || '').localeCompare(left.run.created_at || ''));
+  const latestByProvider = new Map<DeploymentProvider, GitHubWorkflowRun>();
+  deployments.forEach(({ run, provider }) => { if (!latestByProvider.has(provider)) latestByProvider.set(provider, run); });
+  await Promise.all([...latestByProvider].map(async ([provider, run]) => {
+    const environmentName = githubEnvironment(provider, deploymentEnvironmentName);
+    const githubDeployments = await installationRequest<GitHubDeployment[]>(config, row.github_installation_id!, `/repos/${owner}/${name}/deployments?sha=${encodeURIComponent(sha)}&environment=${encodeURIComponent(environmentName)}&per_page=1`).catch(() => []);
+    const status = githubDeployments[0]
+      ? await installationRequest<GitHubDeploymentStatus[]>(config, row.github_installation_id!, `/repos/${owner}/${name}/deployments/${githubDeployments[0].id}/statuses?per_page=1`).catch(() => [])
+      : [];
+    const latestStatus = status[0];
+    await sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${source}, ${provider}, ${deploymentEnvironmentName}, ${run.id}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${deploymentRunState(run)}, ${run.conclusion}) ON CONFLICT (user_id, workflow_id, stage_index, source, provider) DO UPDATE SET environment = EXCLUDED.environment, run_id = EXCLUDED.run_id, run_name = EXCLUDED.run_name, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, updated_at = now()`;
+  }));
+  return (['vercel', 'cloudflare'] as const).map(provider => {
+    const run = latestByProvider.get(provider);
+    return run ? deploymentRunState(run) : 'pending';
+  });
+}
+
 async function reconcileOneStage(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string) {
   if (!row.github_installation_id) return false;
   const stage = { ...workflow.stages[stageIndex], source };
@@ -309,6 +385,7 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   const config = parseGithubAppConfig(environment);
   const comparison = await installationRequest<{ ahead_by: number }>(config, row.github_installation_id, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`).catch(() => ({ ahead_by: 0 }));
   if (!pull) {
+    await sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_index = ${stageIndex} AND source = ${source}`;
     await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, repository, source, target, pull_state, checks_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${workflow.repository}, ${stage.source}, ${stage.target}, 'none', 'unknown', ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_index, source) DO UPDATE SET pull_number = NULL, pull_state = 'none', merged_at = NULL, head_sha = NULL, checks_state = 'unknown', checks_passed = 0, checks_total = 0, approvals = 0, required_approvals = 0, mergeable = NULL, mergeable_state = NULL, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`;
     if (previous[0]?.pull_state && previous[0].pull_state !== 'none') await recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageIndex}:${source}:pull-cleared:${Date.now()}`, 'pull-cleared', 'PR 状态已清除，等待新提交');
     const unlocked = stageIsUnlocked(workflow, stageIndex, preceding);
@@ -318,13 +395,15 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
     return true;
   }
   const sha = pull.merged_at ? pull.merge_commit_sha : pull.head.sha;
+  if (!pull.merged_at) await sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_index = ${stageIndex} AND source = ${source}`;
   const [runs, statuses, reviews, protection] = await Promise.all([
     sha ? installationRequest<{ check_runs: CheckRun[] }>(config, row.github_installation_id, `/repos/${owner}/${name}/commits/${sha}/check-runs?per_page=100`).catch(() => ({ check_runs: [] })) : Promise.resolve({ check_runs: [] }),
     sha ? installationRequest<{ statuses: CommitStatus[] }>(config, row.github_installation_id, `/repos/${owner}/${name}/commits/${sha}/status`).catch(() => ({ statuses: [] })) : Promise.resolve({ statuses: [] }),
     pull.merged_at ? Promise.resolve([] as Review[]) : installationRequest<Review[]>(config, row.github_installation_id, `/repos/${owner}/${name}/pulls/${pull.number}/reviews?per_page=100`).catch(() => []),
     pull.merged_at ? Promise.resolve(null as BranchProtection | null) : installationRequest<BranchProtection>(config, row.github_installation_id, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}/protection`).catch(() => null),
   ]);
-  const checks = checkSummary(runs.check_runs, statuses.statuses);
+  const deploymentStates = pull.merged_at && sha ? await reconcileStageDeployments(environment, sql, row, workflow, stageIndex, source, stage.target, sha) : [];
+  const checks = mergeChecksWithDeployments(checkSummary(runs.check_runs, statuses.statuses), deploymentStates);
   const requiredApprovals = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
   const approvals = reviews.filter(review => review.state === 'APPROVED').length;
   await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${workflow.repository}, ${stage.source}, ${stage.target}, ${pull.number}, ${pull.merged_at ? 'merged' : pull.state}, ${pull.merged_at || null}, ${sha || null}, ${checks.state}, ${checks.passed}, ${checks.total}, ${approvals}, ${requiredApprovals}, ${pull.mergeable ?? null}, ${pull.mergeable_state || null}, ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_index, source) DO UPDATE SET pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, head_sha = EXCLUDED.head_sha, checks_state = EXCLUDED.checks_state, checks_passed = EXCLUDED.checks_passed, checks_total = EXCLUDED.checks_total, approvals = EXCLUDED.approvals, required_approvals = EXCLUDED.required_approvals, mergeable = EXCLUDED.mergeable, mergeable_state = EXCLUDED.mergeable_state, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`;
@@ -362,6 +441,7 @@ export async function reconcileWorkflowStages(environment: Record<string, string
 }
 
 type StageStateRow = { workflow_id: string; stage_index: number; repository: string; source: string; target: string; pull_number: number | null; pull_state: string; merged_at: string | null; head_sha: string | null; checks_state: string; checks_passed: number; checks_total: number; approvals: number; required_approvals: number; mergeable: boolean | null; mergeable_state: string | null; ahead_by: number; last_event: string | null; updated_at: string };
+type StageDeploymentRow = { workflow_id: string; stage_index: number; source: string; provider: DeploymentProvider; environment: 'preview' | 'production'; run_name: string; run_url: string | null; deployment_url: string | null; state: DeploymentState; conclusion: string | null; updated_at: string };
 
 export async function listWorkflowStageStates(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageState[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
@@ -388,6 +468,13 @@ export async function listWorkflowStageStates(environment: Record<string, string
     lastEvent: row.last_event,
     updatedAt: row.updated_at,
   }));
+}
+
+export async function listWorkflowStageDeployments(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageDeployment[]> {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  const rows = await sql<StageDeploymentRow[]>`SELECT workflow_id, stage_index, source, provider, environment, run_name, run_url, deployment_url, state, conclusion, updated_at FROM workflow_stage_deployments WHERE user_id = ${user.id} ORDER BY workflow_id, stage_index, provider`;
+  return rows.map(row => ({ workflowId: row.workflow_id, stageIndex: row.stage_index, source: row.source, provider: row.provider, environment: row.environment, runName: row.run_name, runUrl: row.run_url, deploymentUrl: row.deployment_url, state: row.state, conclusion: row.conclusion, updatedAt: row.updated_at }));
 }
 
 export async function listRecentWorkflowStageEvents(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageEvent[]> {

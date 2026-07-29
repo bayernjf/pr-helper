@@ -26,6 +26,7 @@ type MergeResult = { merged: boolean; message?: string; sha?: string };
 type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
 type WorkflowStageState = WorkflowStageRunState & { workflowId: string; stageIndex: number; repository: string; source: string; target: string; mergedAt: string | null; headSha: string | null; checksPassed: number; checksTotal: number; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string | null; aheadBy: number; lastEvent: string | null; updatedAt: string };
 type WorkflowStageEvent = { workflowId: string; stageIndex: number; source: string | null; kind: string; message: string; occurredAt: string };
+type WorkflowStageDeployment = { workflowId: string; stageIndex: number; source: string; provider: 'vercel' | 'cloudflare'; environment: 'preview' | 'production'; runName: string; runUrl: string | null; deploymentUrl: string | null; state: 'pending' | 'success' | 'failure'; conclusion: string | null; updatedAt: string };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
 const THEME_KEY = 'pr-helper-theme';
@@ -48,6 +49,7 @@ let cloudWorkflowSyncError = '';
 let actionQueue: ActionQueueItem[] = [];
 let workflowStageStates: WorkflowStageState[] = [];
 let workflowStageEvents: WorkflowStageEvent[] = [];
+let workflowStageDeployments: WorkflowStageDeployment[] = [];
 let actionQueueError = '';
 let overviewFilter: 'all' | 'attention' | 'failed' = 'all';
 let pushSubscribed = false;
@@ -139,23 +141,24 @@ async function loadCloudWorkflows() {
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
 }
 async function loadActionQueue() {
-  if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; workflowStageEvents = []; actionQueueError = ''; return false; }
+  if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; actionQueueError = ''; return false; }
   try {
     const response = await fetch(githubAppApiUrl('/api/inbox'));
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { message?: string };
-      actionQueue = []; workflowStageStates = []; workflowStageEvents = [];
+      actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = [];
       actionQueueError = payload.message || t('toast.queue.failed');
       return false;
     }
-    const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[]; events?: WorkflowStageEvent[] };
+    const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[]; events?: WorkflowStageEvent[]; deployments?: WorkflowStageDeployment[] };
     actionQueue = Array.isArray(payload.items) ? payload.items : [];
     workflowStageStates = Array.isArray(payload.states) ? payload.states : [];
     workflowStageEvents = Array.isArray(payload.events) ? payload.events : [];
+    workflowStageDeployments = Array.isArray(payload.deployments) ? payload.deployments : [];
     actionQueueError = '';
     return true;
   } catch (error) {
-    actionQueue = []; workflowStageStates = []; workflowStageEvents = [];
+    actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = [];
     actionQueueError = error instanceof Error ? error.message : t('toast.queue.failed');
     return false;
   }
@@ -405,6 +408,19 @@ function stageUpdatedAt(state?: WorkflowStageState) {
   return t('overview.run.updated', { time: new Intl.DateTimeFormat(getLocale() === 'zh' ? 'zh-CN' : 'en-US', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date) });
 }
 function stageEvents(workflowId: string, stageIndex: number, source?: string) { return workflowStageEvents.filter(event => event.workflowId === workflowId && event.stageIndex === stageIndex && (source === undefined || event.source === null || event.source === source)).slice(0, 4); }
+function stageDeployments(workflowId: string, stageIndex: number, source?: string) { return workflowStageDeployments.filter(deployment => deployment.workflowId === workflowId && deployment.stageIndex === stageIndex && (source === undefined || deployment.source === source)); }
+function deploymentProviderName(provider: WorkflowStageDeployment['provider']) { return provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages'; }
+function deploymentStateText(state: WorkflowStageDeployment['state']) { return t(`overview.deployment.${state}`); }
+function deploymentCards(workflowId: string, stageIndex: number, source?: string) {
+  const deployments = stageDeployments(workflowId, stageIndex, source);
+  if (!deployments.length) return '';
+  return `<section class="drawer-deployments"><p class="eyebrow">${t('overview.deployment.title')}</p><div>${deployments.map(deployment => {
+    const primaryUrl = deployment.deploymentUrl || deployment.runUrl;
+    const link = primaryUrl ? `<a href="${escape(primaryUrl)}" target="_blank" rel="noreferrer">${deployment.deploymentUrl ? t('overview.deployment.openSite') : t('overview.deployment.openLogs')} ↗</a>` : '';
+    const logLink = deployment.deploymentUrl && deployment.runUrl ? `<a href="${escape(deployment.runUrl)}" target="_blank" rel="noreferrer">${t('overview.deployment.openLogs')} ↗</a>` : '';
+    return `<article class="deployment-card ${deployment.state}"><div><b>${deploymentProviderName(deployment.provider)}</b><small>${t(`overview.deployment.${deployment.environment}`)} · ${deploymentStateText(deployment.state)}</small></div><span>${link}${logLink}</span></article>`;
+  }).join('')}</div></section>`;
+}
 function laneRunSummary(flow: Workflow) {
   const summary = workflowRunSummary(flow.stages.map((_, index) => stageState(flow.id, index)));
   return { ...summary, text: t('overview.run.current', { step: summary.stageIndex + 1, status: stageRunPresentationText(summary) }) };
@@ -517,13 +533,14 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const pull = pullNumber ? `<a class="drawer-pr-link" href="${githubPullUrl(flow.repository, pullNumber)}" target="_blank" rel="noreferrer">PR #${pullNumber} ↗</a>` : `<p>${t('overview.board.noPull')}</p>`;
   const events = stageEvents(workflowId, stageIndex, routeSource);
   const history = events.length ? `<section class="drawer-events"><p class="eyebrow">${t('overview.run.history')}</p><ol>${events.map(event => `<li><b>${escape(event.message)}</b><time>${escape(stageUpdatedAt({ updatedAt: event.occurredAt } as WorkflowStageState))}</time></li>`).join('')}</ol></section>` : '';
+  const deployments = deploymentCards(workflowId, stageIndex, routeSource);
   const createAction = queueItem?.kind === 'ready-to-create' ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
   const mergeStatus = laneMergeStatus(state);
   const mergeAction = mergeStatus && canMergePull(mergeStatus) ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
   const recoveryActions = state?.checksState === 'failure' ? `<button class="ghost drawer-repair">${t('repair.codex')}</button><button class="ghost drawer-retry-actions">${t('recovery.retryActions')}</button>` : '';
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
-  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${history}<div class="dialog-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
+  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${deployments}${history}<div class="dialog-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);
