@@ -114,6 +114,13 @@ export async function removePushSubscription(environment: Record<string, string 
   await sql`DELETE FROM pr_helper_push_subscriptions WHERE user_id = ${user.id} AND endpoint = ${endpoint}`;
 }
 
+export async function recordRecoveryEvent(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, input: { workflowId: string; stageIndex: number; source: string }) {
+  if (!input.workflowId || !input.source || !Number.isInteger(input.stageIndex) || input.stageIndex < 0) throw new Error('无效的失败恢复记录');
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  await recordWorkflowStageEvent(sql, user.id, input.workflowId, input.stageIndex, input.source, `${input.workflowId}:${input.stageIndex}:${input.source}:actions-rerun:${Date.now()}`, 'actions-rerun', '已重新触发失败的 GitHub Actions');
+}
+
 export async function codexRepairContext(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string, stageIndex: number, source?: string): Promise<CodexRepairContext> {
   if (!Number.isInteger(stageIndex) || stageIndex < 0) throw new Error('无效的流程步骤');
   if (!identity.installationId) throw new Error('尚未选择 GitHub App 可访问的仓库');

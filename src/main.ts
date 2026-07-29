@@ -678,6 +678,7 @@ async function retryFailedActions(flow: Workflow, state: WorkflowStageState, but
     const failed = runs.workflow_runs.filter(run => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(run.conclusion || ''));
     if (!failed.length) throw new Error(t('recovery.retryUnavailable'));
     await Promise.all(failed.map(run => githubFetch<Record<string, never>>(token, `/repos/${owner}/${name}/actions/runs/${run.id}/rerun`, { method: 'POST' })));
+    await fetch(githubAppApiUrl('/api/recovery-event'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: flow.id, stageIndex: state.stageIndex, source: state.source }) }).catch(() => undefined);
     showToast(t('recovery.retryStarted', { count: failed.length }));
     void loadActionQueue().finally(render);
     window.setTimeout(() => void loadActionQueue().finally(render), 1_500);
