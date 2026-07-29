@@ -24,7 +24,7 @@ type BranchProtection = { required_pull_request_reviews?: { required_approving_r
 type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string };
 type MergeResult = { merged: boolean; message?: string; sha?: string };
 type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
-type WorkflowStageState = WorkflowStageRunState & { workflowId: string; stageIndex: number; repository: string; source: string; target: string; mergedAt: string | null; checksPassed: number; checksTotal: number; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string | null; aheadBy: number; lastEvent: string | null; updatedAt: string };
+type WorkflowStageState = WorkflowStageRunState & { workflowId: string; stageIndex: number; repository: string; source: string; target: string; mergedAt: string | null; headSha: string | null; checksPassed: number; checksTotal: number; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string | null; aheadBy: number; lastEvent: string | null; updatedAt: string };
 type WorkflowStageEvent = { workflowId: string; stageIndex: number; kind: string; message: string; occurredAt: string };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
@@ -507,9 +507,11 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number) {
   const events = stageEvents(workflowId, stageIndex);
   const history = events.length ? `<section class="drawer-events"><p class="eyebrow">${t('overview.run.history')}</p><ol>${events.map(event => `<li><b>${escape(event.message)}</b><time>${escape(stageUpdatedAt({ updatedAt: event.occurredAt } as WorkflowStageState))}</time></li>`).join('')}</ol></section>` : '';
   const createAction = queueItem?.kind === 'ready-to-create' ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
+  const mergeStatus = laneMergeStatus(state);
+  const mergeAction = mergeStatus && canMergePull(mergeStatus) ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
-  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${history}<div class="dialog-actions"><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${createAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
+  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${history}<div class="dialog-actions"><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);
@@ -518,6 +520,14 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number) {
     active = flow;
     dialog.close();
     showCreateDialog(stageIndex, () => { void loadActionQueue().finally(render); });
+  });
+  dialog.querySelector<HTMLButtonElement>('.drawer-merge-pr')?.addEventListener('click', () => {
+    if (!mergeStatus) return;
+    active = flow;
+    dialog.close();
+    showMergeDialog(stageIndex, mergeStatus, () => {
+      void loadActionQueue().finally(render);
+    });
   });
   dialog.querySelector('.drawer-view-flow')!.addEventListener('click', () => { active = flow; dialog.close(); goTo('detail'); });
   dialog.addEventListener('click', event => { if (event.target === dialog) close(); });
@@ -650,6 +660,30 @@ function canMergePull(status: StepStatus) {
     mergeableState: status.mergeableState,
   });
 }
+function laneMergeStatus(state?: WorkflowStageState): StepStatus | undefined {
+  if (!state?.pullNumber || state.pullState !== 'open' || !state.headSha) return undefined;
+  return {
+    kind: 'open',
+    pr: {
+      number: state.pullNumber,
+      state: 'open',
+      merged_at: null,
+      html_url: githubPullUrl(state.repository, state.pullNumber),
+      head: { sha: state.headSha },
+      mergeable: state.mergeable,
+      mergeable_state: state.mergeableState || undefined,
+    },
+    checks: {
+      state: state.checksState as ReturnType<typeof summarizeGitHubChecks>['state'],
+      passed: state.checksPassed,
+      total: state.checksTotal,
+    },
+    approvals: state.approvals,
+    requiredApprovals: state.requiredApprovals || undefined,
+    mergeable: state.mergeable,
+    mergeableState: state.mergeableState || undefined,
+  };
+}
 let nativeOnlyTooltip: HTMLElement | null = null;
 function positionNativeOnlyTooltip(event: MouseEvent) {
   if (!nativeOnlyTooltip) return;
@@ -672,8 +706,8 @@ function mergeErrorMessage(error: unknown) {
     ? t('merge.error.permission')
     : message;
 }
-function showMergeDialog(index: number) {
-  const status = statuses?.[index];
+function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: () => void) {
+  const status = statusOverride || statuses?.[index];
   if (!active || !status?.pr || !canMergePull(status)) return;
   const pull = status.pr;
   const dialog = document.createElement('dialog');
@@ -685,7 +719,7 @@ function showMergeDialog(index: number) {
     const button = event.currentTarget as HTMLButtonElement;
     button.disabled = true; button.textContent = t('merge.merging');
     mergingStages.add(index);
-    detail();
+    if (!onMerged) detail();
     try {
       const { owner, name } = parseRepository(active!.repository);
       const result = await githubFetch<MergeResult>(token, `/repos/${owner}/${name}/pulls/${pull.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) });
@@ -695,11 +729,16 @@ function showMergeDialog(index: number) {
       recentlyMergedPullNumbers.set(index, pull.number);
       mergingStages.delete(index);
       dialog.close();
-      detail();
-      window.setTimeout(() => { void refreshStatuses(); }, 1_000);
+      if (onMerged) {
+        onMerged();
+        window.setTimeout(onMerged, 1_000);
+      } else {
+        detail();
+        window.setTimeout(() => { void refreshStatuses(); }, 1_000);
+      }
     } catch (err) {
       mergingStages.delete(index);
-      detail();
+      if (!onMerged) detail();
       showToast(mergeErrorMessage(err));
       button.disabled = false; button.textContent = t('merge.dialog.confirm');
     }
