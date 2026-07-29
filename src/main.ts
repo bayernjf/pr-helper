@@ -506,13 +506,19 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number) {
   const pull = pullNumber ? `<a class="drawer-pr-link" href="${githubPullUrl(flow.repository, pullNumber)}" target="_blank" rel="noreferrer">PR #${pullNumber} ↗</a>` : `<p>${t('overview.board.noPull')}</p>`;
   const events = stageEvents(workflowId, stageIndex);
   const history = events.length ? `<section class="drawer-events"><p class="eyebrow">${t('overview.run.history')}</p><ol>${events.map(event => `<li><b>${escape(event.message)}</b><time>${escape(stageUpdatedAt({ updatedAt: event.occurredAt } as WorkflowStageState))}</time></li>`).join('')}</ol></section>` : '';
+  const createAction = queueItem?.kind === 'ready-to-create' ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
-  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${history}<div class="dialog-actions"><button class="ghost drawer-close-action">${t('overview.board.close')}</button><button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
+  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(stage.source)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${history}<div class="dialog-actions"><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${createAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);
   dialog.querySelector('.drawer-close-action')!.addEventListener('click', close);
+  dialog.querySelector<HTMLButtonElement>('.drawer-create-pr')?.addEventListener('click', () => {
+    active = flow;
+    dialog.close();
+    showCreateDialog(stageIndex, () => { void loadActionQueue().finally(render); });
+  });
   dialog.querySelector('.drawer-view-flow')!.addEventListener('click', () => { active = flow; dialog.close(); goTo('detail'); });
   dialog.addEventListener('click', event => { if (event.target === dialog) close(); });
   dialog.addEventListener('close', () => dialog.remove());
@@ -916,7 +922,7 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
   dialog.addEventListener('close', () => { renderGeneration += 1; importRequest += 1; onRulesChanged(); dialog.remove(); });
 }
 
-function showCreateDialog(index: number) {
+function showCreateDialog(index: number, onCreated?: () => void) {
   if (!active) return;
   const stage = active.stages[index];
   const identity: PullRequestDraftIdentity = { repository: active.repository, source: stage.source, target: stage.target };
@@ -1080,8 +1086,13 @@ function showCreateDialog(index: number) {
       // `false` means a confirmed conflict, so keep the optimistic value unknown until refreshStatuses reads GitHub's detail response.
       statuses = statuses?.map((status, statusIndex) => statusIndex === index ? { kind: 'open', pr: createdPull, checks: { state: 'pending', passed: 0, total: 0 }, approvals: 0, mergeable: null } : status) || null;
       dialog.close();
-      detail();
-      window.setTimeout(() => { void refreshStatuses(); }, 1_000);
+      if (onCreated) {
+        onCreated();
+        window.setTimeout(onCreated, 1_000);
+      } else {
+        detail();
+        window.setTimeout(() => { void refreshStatuses(); }, 1_000);
+      }
     } catch (err) {
       const isAbortError = err instanceof Error && err.name === 'AbortError';
       if (isDialogOpen() && !isAbortError) showToast(err instanceof Error ? err.message : t('createPr.createError'));
