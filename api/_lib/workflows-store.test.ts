@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { compactFailureDetails, deploymentFailureSummary, deploymentNotification, deploymentProviderForWorkflowRun, deploymentRunState, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, repairCommitSha, sortStoredWorkflows, storedWorkflowFromPayload } from './workflows-store';
+import { canCheckDeploymentUrl, compactFailureDetails, deploymentFailureSummary, deploymentNotification, deploymentProviderForWorkflowRun, deploymentRunState, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, repairCommitSha, sortStoredWorkflows, storedWorkflowFromPayload } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('accepts a workflow with real branch stages', () => {
@@ -76,5 +76,12 @@ describe('stored workflow validation', () => {
   it('uses a provider and environment specific notification for public deployments', () => {
     expect(deploymentNotification('vercel', 'preview', 'success')).toEqual({ kind: 'deployment-success', title: 'Vercel Preview 部署成功', message: 'Vercel Preview 已上线。' });
     expect(deploymentNotification('cloudflare', 'production', 'failure')).toEqual({ kind: 'deployment-failure', title: 'Cloudflare Pages Production 部署失败', message: '请打开失败 Job 日志处理后重试。' });
+  });
+
+  it('only accepts public HTTPS deployment URLs for server-side health checks', () => {
+    expect(canCheckDeploymentUrl('https://preview.example.com/health')).toBe(true);
+    expect(canCheckDeploymentUrl('http://preview.example.com/health')).toBe(false);
+    expect(canCheckDeploymentUrl('https://localhost/health')).toBe(false);
+    expect(canCheckDeploymentUrl('https://127.0.0.1/health')).toBe(false);
   });
 });

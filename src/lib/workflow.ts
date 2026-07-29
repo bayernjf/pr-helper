@@ -1,6 +1,6 @@
 export type WorkflowStage = { source: string; target: string; independent?: boolean; waitFor?: number[] };
 export type DeploymentProvider = 'vercel' | 'cloudflare';
-export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string };
+export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string; healthCheckPath?: string };
 export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; deployments?: DeploymentConfig[]; position?: number };
 
 export const defaultDeployments: DeploymentConfig[] = [

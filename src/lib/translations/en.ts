@@ -114,6 +114,9 @@ const en: TranslationDict = {
   'overview.deployment.retry': 'Redeploy',
   'overview.deployment.retrying': 'Redeploying…',
   'overview.deployment.retryStarted': '{provider} deployment was triggered again.',
+  'overview.deployment.health': 'Health check',
+  'overview.deployment.healthPassed': 'passed',
+  'overview.deployment.healthFailed': 'failed',
   'overview.board.close': 'Close',
   'overview.board.stepDetail': 'STEP DETAIL',
   'overview.board.noPull': 'No PR exists for this step yet',
@@ -181,6 +184,9 @@ const en: TranslationDict = {
   'editor.deployments.removed': 'Deployment gate removed.',
   'editor.deployments.workflowRequired': 'Enter the GitHub Actions workflow name.',
   'editor.deployments.duplicate': 'Only one deployment platform may be configured for a target branch.',
+  'editor.deployments.healthPath': 'Health check path (optional)',
+  'editor.deployments.healthPathHint': 'Runs only against the public URL returned by this deployment, for example /health.',
+  'editor.deployments.healthPathInvalid': 'The health check path must start with /.',
 
   // Draft panel
   'draft.eyebrow': 'FLOW DRAFT',

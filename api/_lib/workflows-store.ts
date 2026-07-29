@@ -31,7 +31,11 @@ type GitHubWorkflowJob = { name: string; conclusion: string | null; html_url: st
 
 export type DeploymentProvider = 'vercel' | 'cloudflare';
 export type DeploymentState = 'pending' | 'success' | 'failure';
-export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string };
+export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string; healthCheckPath?: string };
+
+export function canCheckDeploymentUrl(value: string) {
+  try { const url = new URL(value); return url.protocol === 'https:' && !['localhost', '127.0.0.1', '::1'].includes(url.hostname) && !url.hostname.endsWith('.local'); } catch { return false; }
+}
 
 const defaultDeploymentConfigs: DeploymentConfig[] = [
   { target: 'dev', provider: 'vercel', workflowName: 'Deploy frontend to Vercel', environment: 'preview', githubEnvironment: 'preview-vercel' },
@@ -118,6 +122,9 @@ export type WorkflowStageDeployment = {
   conclusion: string | null;
   failureSummary: string | null;
   failureJobUrl: string | null;
+  healthState: DeploymentState | null;
+  healthUrl: string | null;
+  healthDetail: string | null;
   updatedAt: string;
 };
 export type CodexRepairContext = { markdown: string; pullNumber: number; pullUrl: string };
@@ -234,7 +241,7 @@ export function isStoredWorkflow(value: unknown): value is StoredWorkflow {
   return typeof workflow.id === 'string' && typeof workflow.name === 'string' && typeof workflow.repository === 'string'
     && (workflow.position === undefined || Number.isInteger(workflow.position) && workflow.position >= 0)
     && Array.isArray(workflow.stages) && workflow.stages.length > 0
-    && (workflow.deployments === undefined || Array.isArray(workflow.deployments) && workflow.deployments.every(deployment => Boolean(deployment) && typeof deployment.target === 'string' && deployment.target.length > 0 && ['vercel', 'cloudflare'].includes(deployment.provider || '') && typeof deployment.workflowName === 'string' && deployment.workflowName.length > 0 && ['preview', 'production'].includes(deployment.environment || '') && (deployment.githubEnvironment === undefined || typeof deployment.githubEnvironment === 'string')))
+    && (workflow.deployments === undefined || Array.isArray(workflow.deployments) && workflow.deployments.every(deployment => Boolean(deployment) && typeof deployment.target === 'string' && deployment.target.length > 0 && ['vercel', 'cloudflare'].includes(deployment.provider || '') && typeof deployment.workflowName === 'string' && deployment.workflowName.length > 0 && ['preview', 'production'].includes(deployment.environment || '') && (deployment.githubEnvironment === undefined || typeof deployment.githubEnvironment === 'string') && (deployment.healthCheckPath === undefined || typeof deployment.healthCheckPath === 'string' && deployment.healthCheckPath.startsWith('/'))))
     && workflow.stages.every((stage, index) => Boolean(stage) && typeof stage.source === 'string' && typeof stage.target === 'string' && stage.source.length > 0 && stage.target.length > 0 && (stage.independent === undefined || typeof stage.independent === 'boolean') && (stage.waitFor === undefined || Array.isArray(stage.waitFor) && stage.waitFor.every(dependency => Number.isInteger(dependency) && dependency >= 0 && dependency < index)));
 }
 
@@ -398,8 +405,13 @@ async function reconcileStageDeployments(environment: Record<string, string | un
     const failure = deploymentRunState(run) === 'failure'
       ? deploymentFailureSummary((await installationRequest<{ jobs: GitHubWorkflowJob[] }>(config, row.github_installation_id!, `/repos/${owner}/${name}/actions/runs/${run.id}/jobs?per_page=100`).catch(() => ({ jobs: [] }))).jobs)
       : { summary: null, jobUrl: null };
-    const state = deploymentRunState(run);
-    await sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${source}, ${provider}, ${configuration.environment}, ${run.id}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${state}, ${run.conclusion}, ${failure.summary}, ${failure.jobUrl}) ON CONFLICT (user_id, workflow_id, stage_index, source, provider) DO UPDATE SET environment = EXCLUDED.environment, run_id = EXCLUDED.run_id, run_name = EXCLUDED.run_name, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, failure_summary = EXCLUDED.failure_summary, failure_job_url = EXCLUDED.failure_job_url, updated_at = now()`;
+    const actionState = deploymentRunState(run);
+    const healthUrl = actionState === 'success' && latestStatus?.environment_url && configuration.healthCheckPath ? new URL(configuration.healthCheckPath, latestStatus.environment_url).toString() : null;
+    const health = healthUrl && canCheckDeploymentUrl(healthUrl)
+      ? await fetch(healthUrl, { signal: AbortSignal.timeout(10_000), redirect: 'follow' }).then(response => ({ state: response.ok ? 'success' : 'failure', detail: `HTTP ${response.status}` })).catch(error => ({ state: 'failure', detail: error instanceof Error ? error.message.slice(0, 240) : '请求失败' }))
+      : { state: null, detail: null };
+    const state: DeploymentState = actionState === 'success' && health.state === 'failure' ? 'failure' : actionState;
+    await sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${source}, ${provider}, ${configuration.environment}, ${run.id}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${state}, ${run.conclusion}, ${failure.summary}, ${failure.jobUrl}, ${health.state}, ${healthUrl}, ${health.detail}) ON CONFLICT (user_id, workflow_id, stage_index, source, provider) DO UPDATE SET environment = EXCLUDED.environment, run_id = EXCLUDED.run_id, run_name = EXCLUDED.run_name, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, failure_summary = EXCLUDED.failure_summary, failure_job_url = EXCLUDED.failure_job_url, health_state = EXCLUDED.health_state, health_url = EXCLUDED.health_url, health_detail = EXCLUDED.health_detail, updated_at = now()`;
     const previous = previousByProvider.get(provider);
     if (['success', 'failure'].includes(state) && (previous?.state !== state || previous.run_id !== run.id)) {
       const notification = deploymentNotification(provider, configuration.environment, state);
@@ -482,7 +494,7 @@ export async function reconcileWorkflowStages(environment: Record<string, string
 }
 
 type StageStateRow = { workflow_id: string; stage_index: number; repository: string; source: string; target: string; pull_number: number | null; pull_state: string; merged_at: string | null; head_sha: string | null; checks_state: string; checks_passed: number; checks_total: number; approvals: number; required_approvals: number; mergeable: boolean | null; mergeable_state: string | null; ahead_by: number; last_event: string | null; updated_at: string };
-type StageDeploymentRow = { workflow_id: string; stage_index: number; source: string; provider: DeploymentProvider; environment: 'preview' | 'production'; run_id: number | null; run_name: string; run_url: string | null; deployment_url: string | null; state: DeploymentState; conclusion: string | null; failure_summary: string | null; failure_job_url: string | null; updated_at: string };
+type StageDeploymentRow = { workflow_id: string; stage_index: number; source: string; provider: DeploymentProvider; environment: 'preview' | 'production'; run_id: number | null; run_name: string; run_url: string | null; deployment_url: string | null; state: DeploymentState; conclusion: string | null; failure_summary: string | null; failure_job_url: string | null; health_state: DeploymentState | null; health_url: string | null; health_detail: string | null; updated_at: string };
 
 export async function listWorkflowStageStates(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageState[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
@@ -514,8 +526,8 @@ export async function listWorkflowStageStates(environment: Record<string, string
 export async function listWorkflowStageDeployments(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageDeployment[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<StageDeploymentRow[]>`SELECT workflow_id, stage_index, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, updated_at FROM workflow_stage_deployments WHERE user_id = ${user.id} ORDER BY workflow_id, stage_index, provider`;
-  return rows.map(row => ({ workflowId: row.workflow_id, stageIndex: row.stage_index, source: row.source, provider: row.provider, environment: row.environment, runId: row.run_id, runName: row.run_name, runUrl: row.run_url, deploymentUrl: row.deployment_url, state: row.state, conclusion: row.conclusion, failureSummary: row.failure_summary, failureJobUrl: row.failure_job_url, updatedAt: row.updated_at }));
+  const rows = await sql<StageDeploymentRow[]>`SELECT workflow_id, stage_index, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, health_state, health_url, health_detail, updated_at FROM workflow_stage_deployments WHERE user_id = ${user.id} ORDER BY workflow_id, stage_index, provider`;
+  return rows.map(row => ({ workflowId: row.workflow_id, stageIndex: row.stage_index, source: row.source, provider: row.provider, environment: row.environment, runId: row.run_id, runName: row.run_name, runUrl: row.run_url, deploymentUrl: row.deployment_url, state: row.state, conclusion: row.conclusion, failureSummary: row.failure_summary, failureJobUrl: row.failure_job_url, healthState: row.health_state, healthUrl: row.health_url, healthDetail: row.health_detail, updatedAt: row.updated_at }));
 }
 
 export async function listRecentWorkflowStageEvents(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageEvent[]> {
