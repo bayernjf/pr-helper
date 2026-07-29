@@ -26,7 +26,7 @@ type MergeResult = { merged: boolean; message?: string; sha?: string };
 type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
 type WorkflowStageState = WorkflowStageRunState & { workflowId: string; stageIndex: number; repository: string; source: string; target: string; mergedAt: string | null; headSha: string | null; checksPassed: number; checksTotal: number; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string | null; aheadBy: number; lastEvent: string | null; updatedAt: string };
 type WorkflowStageEvent = { workflowId: string; stageIndex: number; source: string | null; kind: string; message: string; occurredAt: string };
-type WorkflowStageDeployment = { workflowId: string; stageIndex: number; source: string; provider: 'vercel' | 'cloudflare'; environment: 'preview' | 'production'; runName: string; runUrl: string | null; deploymentUrl: string | null; state: 'pending' | 'success' | 'failure'; conclusion: string | null; updatedAt: string };
+type WorkflowStageDeployment = { workflowId: string; stageIndex: number; source: string; provider: 'vercel' | 'cloudflare'; environment: 'preview' | 'production'; runName: string; runUrl: string | null; deploymentUrl: string | null; state: 'pending' | 'success' | 'failure'; conclusion: string | null; failureSummary: string | null; failureJobUrl: string | null; updatedAt: string };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
 const THEME_KEY = 'pr-helper-theme';
@@ -418,7 +418,9 @@ function deploymentCards(workflowId: string, stageIndex: number, source?: string
     const primaryUrl = deployment.deploymentUrl || deployment.runUrl;
     const link = primaryUrl ? `<a href="${escape(primaryUrl)}" target="_blank" rel="noreferrer">${deployment.deploymentUrl ? t('overview.deployment.openSite') : t('overview.deployment.openLogs')} ↗</a>` : '';
     const logLink = deployment.deploymentUrl && deployment.runUrl ? `<a href="${escape(deployment.runUrl)}" target="_blank" rel="noreferrer">${t('overview.deployment.openLogs')} ↗</a>` : '';
-    return `<article class="deployment-card ${deployment.state}"><div><b>${deploymentProviderName(deployment.provider)}</b><small>${t(`overview.deployment.${deployment.environment}`)} · ${deploymentStateText(deployment.state)}</small></div><span>${link}${logLink}</span></article>`;
+    const failure = deployment.state === 'failure' && deployment.failureSummary ? `<p>${escape(deployment.failureSummary)}</p>` : '';
+    const jobLink = deployment.failureJobUrl ? `<a href="${escape(deployment.failureJobUrl)}" target="_blank" rel="noreferrer">${t('overview.deployment.openFailedJob')} ↗</a>` : '';
+    return `<article class="deployment-card ${deployment.state}"><div><b>${deploymentProviderName(deployment.provider)}</b><small>${t(`overview.deployment.${deployment.environment}`)} · ${deploymentStateText(deployment.state)}</small>${failure}</div><span>${jobLink}${link}${logLink}</span></article>`;
   }).join('')}</div></section>`;
 }
 function laneRunSummary(flow: Workflow) {

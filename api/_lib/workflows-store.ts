@@ -26,6 +26,7 @@ type BranchProtection = { required_pull_request_reviews?: { required_approving_r
 type GitHubWorkflowRun = { id: number; name: string; status: string; conclusion: string | null; html_url: string; head_sha: string; created_at?: string };
 type GitHubDeployment = { id: number; environment: string; statuses_url: string };
 type GitHubDeploymentStatus = { state: string; environment_url?: string | null; log_url?: string | null };
+type GitHubWorkflowJob = { name: string; conclusion: string | null; html_url: string; steps?: { name: string; conclusion: string | null }[] };
 
 export type DeploymentProvider = 'vercel' | 'cloudflare';
 export type DeploymentState = 'pending' | 'success' | 'failure';
@@ -39,6 +40,13 @@ export function deploymentProviderForWorkflowRun(name: string): DeploymentProvid
 export function deploymentRunState(run: Pick<GitHubWorkflowRun, 'status' | 'conclusion'>): DeploymentState {
   if (run.status !== 'completed' || !run.conclusion) return 'pending';
   return run.conclusion === 'success' ? 'success' : 'failure';
+}
+
+export function deploymentFailureSummary(jobs: readonly GitHubWorkflowJob[]) {
+  const job = jobs.find(candidate => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(candidate.conclusion || ''));
+  if (!job) return { summary: 'GitHub Actions 部署失败，请打开日志查看详情。', jobUrl: null };
+  const failedSteps = job.steps?.filter(step => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(step.conclusion || '')).map(step => step.name) || [];
+  return { summary: `${job.name}${failedSteps.length ? `：失败步骤 ${failedSteps.join('、')}` : '：部署失败'}`, jobUrl: job.html_url || null };
 }
 
 export function repairCommitSha(pull: Pick<Pull, 'merged_at' | 'merge_commit_sha' | 'head'>) {
@@ -93,6 +101,8 @@ export type WorkflowStageDeployment = {
   deploymentUrl: string | null;
   state: DeploymentState;
   conclusion: string | null;
+  failureSummary: string | null;
+  failureJobUrl: string | null;
   updatedAt: string;
 };
 export type CodexRepairContext = { markdown: string; pullNumber: number; pullUrl: string };
@@ -195,7 +205,11 @@ export async function codexRepairContext(environment: Record<string, string | un
     const failedSteps = job.steps?.filter(step => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(step.conclusion || '')).map(step => step.name) || [];
     return `- [${job.run.name} / ${job.name}](${job.html_url || job.run.html_url})${failedSteps.length ? `\n  - 失败步骤：${failedSteps.join('、')}` : ''}`;
   }).join('\n') : failedRuns.length ? failedRuns.map(run => `- [${run.name}](${run.html_url})\n  - 未读取到失败 Job；请打开该运行日志确认。`).join('\n') : '- 未读取到 Actions Job；请从 PR 链接进入 Actions 日志。';
-  const markdown = `# 修复 CI 失败\n\n## 目标\n修复当前 PR 的失败门禁；运行相关测试后汇报结果。不要执行 git push、创建 PR 或合并。\n\n## PR\n- 仓库：\`${workflow.repository}\`\n- PR：[#${pullNumber} ${pull.title}](${pull.html_url})\n- 分支：\`${pull.head.ref}\` → \`${pull.base.ref}\`\n- 检查 SHA：\`${checkedSha}\`${pull.merged_at ? '（合并提交）' : ''}\n- 流程步骤：${stageIndex + 1}（\`${stage.source}\` → \`${stage.target}\`）\n\n## 失败检查\n${failedChecks.length ? failedChecks.join('\n') : '- GitHub 未返回具体失败 check；请打开 PR 的 Actions 页面确认。'}\n\n## 失败 Actions Job\n${failedJobSummary}\n\n## PR 改动摘要\n${fileSummary || '- 未读取到改动文件。'}\n\n## 执行要求\n1. 在本地复现失败，优先阅读上方失败 Job 日志与错误摘要。\n2. 只修改解决本次 CI 失败所需的代码。\n3. 运行最小相关测试；若可行再运行完整检查。\n4. 输出根因、修改内容、执行过的命令和结果。`;
+  const failedDeployments = failedRuns.flatMap(run => {
+    const provider = deploymentProviderForWorkflowRun(run.name);
+    return provider ? [`- ${provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages'} 公网部署：[${run.name}](${run.html_url})`] : [];
+  });
+  const markdown = `# 修复 CI 失败\n\n## 目标\n修复当前 PR 的失败门禁；运行相关测试后汇报结果。不要执行 git push、创建 PR 或合并。\n\n## PR\n- 仓库：\`${workflow.repository}\`\n- PR：[#${pullNumber} ${pull.title}](${pull.html_url})\n- 分支：\`${pull.head.ref}\` → \`${pull.base.ref}\`\n- 检查 SHA：\`${checkedSha}\`${pull.merged_at ? '（合并提交）' : ''}\n- 流程步骤：${stageIndex + 1}（\`${stage.source}\` → \`${stage.target}\`）\n\n## 失败检查\n${failedChecks.length ? failedChecks.join('\n') : '- GitHub 未返回具体失败 check；请打开 PR 的 Actions 页面确认。'}\n\n## 失败 Actions Job\n${failedJobSummary}\n\n${failedDeployments.length ? `## 失败的公网部署\n${failedDeployments.join('\n')}\n\n` : ''}## PR 改动摘要\n${fileSummary || '- 未读取到改动文件。'}\n\n## 执行要求\n1. 在本地复现失败，优先阅读上方失败 Job 日志与错误摘要。\n2. 只修改解决本次 CI 失败所需的代码。\n3. 运行最小相关测试；若可行再运行完整检查。\n4. 输出根因、修改内容、执行过的命令和结果。`;
   return { markdown, pullNumber, pullUrl: pull.html_url };
 }
 
@@ -364,7 +378,10 @@ async function reconcileStageDeployments(environment: Record<string, string | un
       ? await installationRequest<GitHubDeploymentStatus[]>(config, row.github_installation_id!, `/repos/${owner}/${name}/deployments/${githubDeployments[0].id}/statuses?per_page=1`).catch(() => [])
       : [];
     const latestStatus = status[0];
-    await sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${source}, ${provider}, ${deploymentEnvironmentName}, ${run.id}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${deploymentRunState(run)}, ${run.conclusion}) ON CONFLICT (user_id, workflow_id, stage_index, source, provider) DO UPDATE SET environment = EXCLUDED.environment, run_id = EXCLUDED.run_id, run_name = EXCLUDED.run_name, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, updated_at = now()`;
+    const failure = deploymentRunState(run) === 'failure'
+      ? deploymentFailureSummary((await installationRequest<{ jobs: GitHubWorkflowJob[] }>(config, row.github_installation_id!, `/repos/${owner}/${name}/actions/runs/${run.id}/jobs?per_page=100`).catch(() => ({ jobs: [] }))).jobs)
+      : { summary: null, jobUrl: null };
+    await sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${source}, ${provider}, ${deploymentEnvironmentName}, ${run.id}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${deploymentRunState(run)}, ${run.conclusion}, ${failure.summary}, ${failure.jobUrl}) ON CONFLICT (user_id, workflow_id, stage_index, source, provider) DO UPDATE SET environment = EXCLUDED.environment, run_id = EXCLUDED.run_id, run_name = EXCLUDED.run_name, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, failure_summary = EXCLUDED.failure_summary, failure_job_url = EXCLUDED.failure_job_url, updated_at = now()`;
   }));
   return (['vercel', 'cloudflare'] as const).map(provider => {
     const run = latestByProvider.get(provider);
@@ -441,7 +458,7 @@ export async function reconcileWorkflowStages(environment: Record<string, string
 }
 
 type StageStateRow = { workflow_id: string; stage_index: number; repository: string; source: string; target: string; pull_number: number | null; pull_state: string; merged_at: string | null; head_sha: string | null; checks_state: string; checks_passed: number; checks_total: number; approvals: number; required_approvals: number; mergeable: boolean | null; mergeable_state: string | null; ahead_by: number; last_event: string | null; updated_at: string };
-type StageDeploymentRow = { workflow_id: string; stage_index: number; source: string; provider: DeploymentProvider; environment: 'preview' | 'production'; run_name: string; run_url: string | null; deployment_url: string | null; state: DeploymentState; conclusion: string | null; updated_at: string };
+type StageDeploymentRow = { workflow_id: string; stage_index: number; source: string; provider: DeploymentProvider; environment: 'preview' | 'production'; run_name: string; run_url: string | null; deployment_url: string | null; state: DeploymentState; conclusion: string | null; failure_summary: string | null; failure_job_url: string | null; updated_at: string };
 
 export async function listWorkflowStageStates(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageState[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
@@ -473,8 +490,8 @@ export async function listWorkflowStageStates(environment: Record<string, string
 export async function listWorkflowStageDeployments(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageDeployment[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<StageDeploymentRow[]>`SELECT workflow_id, stage_index, source, provider, environment, run_name, run_url, deployment_url, state, conclusion, updated_at FROM workflow_stage_deployments WHERE user_id = ${user.id} ORDER BY workflow_id, stage_index, provider`;
-  return rows.map(row => ({ workflowId: row.workflow_id, stageIndex: row.stage_index, source: row.source, provider: row.provider, environment: row.environment, runName: row.run_name, runUrl: row.run_url, deploymentUrl: row.deployment_url, state: row.state, conclusion: row.conclusion, updatedAt: row.updated_at }));
+  const rows = await sql<StageDeploymentRow[]>`SELECT workflow_id, stage_index, source, provider, environment, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, updated_at FROM workflow_stage_deployments WHERE user_id = ${user.id} ORDER BY workflow_id, stage_index, provider`;
+  return rows.map(row => ({ workflowId: row.workflow_id, stageIndex: row.stage_index, source: row.source, provider: row.provider, environment: row.environment, runName: row.run_name, runUrl: row.run_url, deploymentUrl: row.deployment_url, state: row.state, conclusion: row.conclusion, failureSummary: row.failure_summary, failureJobUrl: row.failure_job_url, updatedAt: row.updated_at }));
 }
 
 export async function listRecentWorkflowStageEvents(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageEvent[]> {

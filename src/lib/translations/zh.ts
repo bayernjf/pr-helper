@@ -110,6 +110,7 @@ const zh: TranslationDict = {
   'overview.deployment.failure': '部署失败',
   'overview.deployment.openSite': '打开站点',
   'overview.deployment.openLogs': '打开日志',
+  'overview.deployment.openFailedJob': '打开失败步骤',
   'overview.board.close': '关闭',
   'overview.board.stepDetail': 'STEP DETAIL',
   'overview.board.noPull': '当前步骤尚无 PR',

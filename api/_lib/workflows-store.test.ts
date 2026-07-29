@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { compactFailureDetails, deploymentProviderForWorkflowRun, deploymentRunState, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, repairCommitSha, sortStoredWorkflows, storedWorkflowFromPayload } from './workflows-store';
+import { compactFailureDetails, deploymentFailureSummary, deploymentProviderForWorkflowRun, deploymentRunState, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, repairCommitSha, sortStoredWorkflows, storedWorkflowFromPayload } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('accepts a workflow with real branch stages', () => {
@@ -65,5 +65,10 @@ describe('stored workflow validation', () => {
     expect(mergeChecksWithDeployments(checks, ['success', 'failure'])).toEqual({ ...checks, state: 'failure' });
     expect(mergeChecksWithDeployments(checks, ['success', 'success'])).toEqual(checks);
     expect(mergeChecksWithDeployments({ ...checks, state: 'failure' }, ['success', 'pending'])).toEqual({ ...checks, state: 'failure' });
+  });
+
+  it('turns a failed deployment job into a short, actionable error summary', () => {
+    expect(deploymentFailureSummary([{ name: 'Deploy to Vercel', conclusion: 'failure', html_url: 'https://github.com/example/run/job', steps: [{ name: 'Deploy to Vercel', conclusion: 'failure' }] }])).toEqual({ summary: 'Deploy to Vercel：失败步骤 Deploy to Vercel', jobUrl: 'https://github.com/example/run/job' });
+    expect(deploymentFailureSummary([])).toEqual({ summary: 'GitHub Actions 部署失败，请打开日志查看详情。', jobUrl: null });
   });
 });

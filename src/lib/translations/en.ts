@@ -110,6 +110,7 @@ const en: TranslationDict = {
   'overview.deployment.failure': 'Deployment failed',
   'overview.deployment.openSite': 'Open site',
   'overview.deployment.openLogs': 'Open logs',
+  'overview.deployment.openFailedJob': 'Open failed step',
   'overview.board.close': 'Close',
   'overview.board.stepDetail': 'STEP DETAIL',
   'overview.board.noPull': 'No PR exists for this step yet',
