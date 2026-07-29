@@ -520,9 +520,10 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const createAction = queueItem?.kind === 'ready-to-create' ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
   const mergeStatus = laneMergeStatus(state);
   const mergeAction = mergeStatus && canMergePull(mergeStatus) ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
+  const recoveryActions = state?.checksState === 'failure' ? `<button class="ghost drawer-repair">${t('repair.codex')}</button><button class="ghost drawer-retry-actions">${t('recovery.retryActions')}</button>` : '';
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
-  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${history}<div class="dialog-actions"><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
+  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${history}<div class="dialog-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);
@@ -540,6 +541,9 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
       void loadActionQueue().finally(render);
     });
   });
+  dialog.querySelector<HTMLButtonElement>('.drawer-sync')?.addEventListener('click', () => { dialog.close(); void loadActionQueue().finally(render); });
+  dialog.querySelector<HTMLButtonElement>('.drawer-repair')?.addEventListener('click', () => { active = flow; dialog.close(); void showCodexRepairDialog(stageIndex, routeSource); });
+  dialog.querySelector<HTMLButtonElement>('.drawer-retry-actions')?.addEventListener('click', event => { if (state) void retryFailedActions(flow, state, event.currentTarget as HTMLButtonElement); });
   dialog.querySelector('.drawer-view-flow')!.addEventListener('click', () => { active = flow; dialog.close(); goTo('detail'); });
   dialog.addEventListener('click', event => { if (event.target === dialog) close(); });
   dialog.addEventListener('close', () => dialog.remove());
@@ -643,14 +647,14 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const gateList = gates.filter(Boolean);
   return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b></p>${gateList.length ? `<div class="gate-list">${gateList.map(gate => `<span>${gate}</span>`).join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
 }
-async function showCodexRepairDialog(index: number) {
+async function showCodexRepairDialog(index: number, source?: string) {
   if (!active) return;
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog repair-dialog';
   dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('repair.eyebrow')}</p><h2>${t('repair.collecting')}</h2><p class="meta">${t('repair.collecting.desc')}</p></form>`;
   document.body.append(dialog); dialog.showModal();
   try {
-    const response = await fetch(githubAppApiUrl('/api/repair-context'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: active.id, stageIndex: index }) });
+    const response = await fetch(githubAppApiUrl('/api/repair-context'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: active.id, stageIndex: index, source }) });
     const payload = await response.json().catch(() => ({})) as { markdown?: string; pullUrl?: string; message?: string };
     if (!response.ok || !payload.markdown) throw new Error(payload.message || t('repair.error.generate'));
     dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('repair.eyebrow')}</p><h2>${t('repair.ready.title')}</h2><p class="meta">${t('repair.ready.desc')}</p><textarea id="repair-context" readonly></textarea><div class="dialog-actions"><a class="ghost" target="_blank" href="${escape(payload.pullUrl || '#')}">${t('repair.openActions')}</a><button id="copy-repair-context" type="button" class="primary">${t('repair.copy')}</button><button value="cancel" class="ghost">${t('repair.close')}</button></div></form>`;
@@ -663,6 +667,25 @@ async function showCodexRepairDialog(index: number) {
     dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('repair.eyebrow')}</p><h2>${t('repair.error.title')}</h2><p class="error">${escape(error instanceof Error ? error.message : t('repair.error.generic'))}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('repair.close')}</button></div></form>`;
   }
   dialog.addEventListener('close', () => dialog.remove());
+}
+type WorkflowRun = { id: number; conclusion: string | null };
+async function retryFailedActions(flow: Workflow, state: WorkflowStageState, button: HTMLButtonElement) {
+  if (!state.headSha) { showToast(t('recovery.retryUnavailable')); return; }
+  button.disabled = true; button.textContent = t('recovery.retrying');
+  try {
+    const { owner, name } = parseRepository(flow.repository);
+    const runs = await githubFetch<{ workflow_runs: WorkflowRun[] }>(token, `/repos/${owner}/${name}/actions/runs?head_sha=${encodeURIComponent(state.headSha)}&per_page=100`);
+    const failed = runs.workflow_runs.filter(run => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(run.conclusion || ''));
+    if (!failed.length) throw new Error(t('recovery.retryUnavailable'));
+    await Promise.all(failed.map(run => githubFetch<Record<string, never>>(token, `/repos/${owner}/${name}/actions/runs/${run.id}/rerun`, { method: 'POST' })));
+    showToast(t('recovery.retryStarted', { count: failed.length }));
+    void loadActionQueue().finally(render);
+    window.setTimeout(() => void loadActionQueue().finally(render), 1_500);
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : t('recovery.retryFailed'));
+  } finally {
+    button.disabled = false; button.textContent = t('recovery.retryActions');
+  }
 }
 function canMergePull(status: StepStatus) {
   return status.kind === 'open' && canMergeOpenPull({

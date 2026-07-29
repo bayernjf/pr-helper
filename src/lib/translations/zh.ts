@@ -235,6 +235,12 @@ const zh: TranslationDict = {
   'repair.toast.copied': 'Codex 修复任务已复制。',
   'repair.toast.copyFailed': '复制失败，请手动复制修复任务内容。',
   'repair.codex': '交给 Codex 修复',
+  'recovery.sync': '重新同步',
+  'recovery.retryActions': '重新触发 Actions',
+  'recovery.retrying': '正在重新触发…',
+  'recovery.retryStarted': '已重新触发 {count} 个失败的 Actions。',
+  'recovery.retryUnavailable': '未找到可重新触发的失败 Actions。',
+  'recovery.retryFailed': '重新触发 Actions 失败。',
 
   // AI settings
   'ai.eyebrow': 'AI MODEL SETTINGS',

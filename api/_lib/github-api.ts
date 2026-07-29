@@ -16,6 +16,7 @@ async function githubResponse<T>(path: string, token: string, init?: RequestInit
     const detail = await response.json().catch(() => ({ message: response.statusText })) as { message?: string };
     throw new Error(detail.message || `GitHub 请求失败 (${response.status})`);
   }
+  if (response.status === 204 || response.headers.get('content-length') === '0') return {} as T;
   return response.json() as Promise<T>;
 }
 

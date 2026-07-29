@@ -114,7 +114,7 @@ export async function removePushSubscription(environment: Record<string, string 
   await sql`DELETE FROM pr_helper_push_subscriptions WHERE user_id = ${user.id} AND endpoint = ${endpoint}`;
 }
 
-export async function codexRepairContext(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string, stageIndex: number): Promise<CodexRepairContext> {
+export async function codexRepairContext(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string, stageIndex: number, source?: string): Promise<CodexRepairContext> {
   if (!Number.isInteger(stageIndex) || stageIndex < 0) throw new Error('无效的流程步骤');
   if (!identity.installationId) throw new Error('尚未选择 GitHub App 可访问的仓库');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
@@ -123,7 +123,9 @@ export async function codexRepairContext(environment: Record<string, string | un
   const workflow = storedWorkflowFromPayload(rows[0]?.payload);
   const stage = workflow?.stages[stageIndex];
   if (!workflow || !stage) throw new Error('未找到对应流程步骤');
-  const states = await sql<{ pull_number: number | null }[]>`SELECT pull_number FROM workflow_stage_states WHERE user_id = ${user.id} AND workflow_id = ${workflowId} AND stage_index = ${stageIndex}`;
+  const states = source
+    ? await sql<{ pull_number: number | null }[]>`SELECT pull_number FROM workflow_stage_states WHERE user_id = ${user.id} AND workflow_id = ${workflowId} AND stage_index = ${stageIndex} AND source = ${source}`
+    : await sql<{ pull_number: number | null }[]>`SELECT pull_number FROM workflow_stage_states WHERE user_id = ${user.id} AND workflow_id = ${workflowId} AND stage_index = ${stageIndex}`;
   const pullNumber = states[0]?.pull_number;
   if (!pullNumber) throw new Error('该步骤没有可用于修复的 PR');
   const { owner, name } = ownerAndName(workflow.repository);

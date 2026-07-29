@@ -235,6 +235,12 @@ const en: TranslationDict = {
   'repair.toast.copied': 'Codex repair task copied.',
   'repair.toast.copyFailed': 'Copy failed — please copy the repair task manually.',
   'repair.codex': 'Send to Codex',
+  'recovery.sync': 'Sync again',
+  'recovery.retryActions': 'Rerun Actions',
+  'recovery.retrying': 'Rerunning…',
+  'recovery.retryStarted': 'Reran {count} failed Actions.',
+  'recovery.retryUnavailable': 'No failed Actions can be rerun.',
+  'recovery.retryFailed': 'Unable to rerun Actions.',
 
   // AI settings
   'ai.eyebrow': 'AI MODEL SETTINGS',
