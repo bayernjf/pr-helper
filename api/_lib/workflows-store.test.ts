@@ -33,6 +33,12 @@ describe('stored workflow validation', () => {
     expect(matchingWorkflowStages([workflow], { repository: 'octo/app', source: 'feature/payments', target: 'dev' })).toEqual([{ workflow, stageIndex: 0 }]);
   });
 
+  it('matches every concrete branch covered by a dynamic source rule', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature/*', target: 'dev', independent: true }] };
+    expect(matchingWorkflowStages([workflow], { repository: 'octo/app', source: 'feature/login', target: 'dev' })).toEqual([{ workflow, stageIndex: 0 }]);
+    expect(matchingWorkflowStages([workflow], { repository: 'octo/app', source: 'fix/login', target: 'dev' })).toEqual([]);
+  });
+
   it('locks a merged stage until its post-merge Actions have been reconciled', () => {
     expect(initialWebhookChecksState('2026-07-27T10:00:00Z')).toBe('pending');
     expect(initialWebhookChecksState(null)).toBe('unknown');

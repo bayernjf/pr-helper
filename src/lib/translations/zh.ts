@@ -135,6 +135,7 @@ const zh: TranslationDict = {
   'editor.branch.loading': '正在读取分支…',
   'editor.branch.hint': '选择仓库后显示实际分支。',
   'editor.label.source': 'Source',
+  'editor.sourceRuleHint': '可输入精确分支，或规则如 feature/*、fix/*。',
   'editor.label.target': 'Target',
   'editor.compare': '在 GitHub 查看 Compare ↗',
   'editor.addStep': '添加下一步',
@@ -167,6 +168,7 @@ const zh: TranslationDict = {
   'detail.desc.withStatuses': '状态直接来自 GitHub；门禁满足时可在此创建或合并 PR。',
   'detail.desc.noStatuses': '点击"刷新 GitHub 状态"，读取每一步的 PR、Actions 和 Approval。',
   'detail.timeline.placeholder': '尚未读取 GitHub 状态。',
+  'detail.dynamicRoute': '动态分支规则会在项目看板中按实际匹配到的分支分别显示。',
   'detail.timeline.refreshError': '未知错误',
 
   // Status labels

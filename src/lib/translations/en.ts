@@ -135,6 +135,7 @@ const en: TranslationDict = {
   'editor.branch.loading': 'Loading branches…',
   'editor.branch.hint': 'Select a repository to see actual branches.',
   'editor.label.source': 'Source',
+  'editor.sourceRuleHint': 'Enter an exact branch or a rule such as feature/* or fix/*.',
   'editor.label.target': 'Target',
   'editor.compare': 'View Compare on GitHub ↗',
   'editor.addStep': 'Add next step',
@@ -167,6 +168,7 @@ const en: TranslationDict = {
   'detail.desc.withStatuses': 'Status comes directly from GitHub. When gates pass, you can create or merge PRs here.',
   'detail.desc.noStatuses': 'Click "Refresh GitHub status" to load PRs, Actions, and approvals for each step.',
   'detail.timeline.placeholder': 'GitHub status not yet loaded.',
+  'detail.dynamicRoute': 'Dynamic branch rules are shown on the project board for each matched branch.',
   'detail.timeline.refreshError': 'Unknown error',
 
   // Status labels
