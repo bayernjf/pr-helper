@@ -32,6 +32,8 @@ type GitHubWorkflowJob = { name: string; conclusion: string | null; html_url: st
 export type DeploymentProvider = 'vercel' | 'cloudflare';
 export type DeploymentState = 'pending' | 'success' | 'failure';
 export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string; healthCheckPath?: string; rollbackWorkflowName?: string };
+export type WorkflowConfigurationWarningCode = 'no-deployments' | 'actions-unavailable' | 'workflow-not-found' | 'environment-missing' | 'environment-not-found' | 'rollback-workflow-not-found';
+export type WorkflowConfigurationWarning = { workflowId: string; code: WorkflowConfigurationWarningCode; target?: string; provider?: DeploymentProvider; value?: string };
 
 export function canCheckDeploymentUrl(value: string) {
   try { const url = new URL(value); return url.protocol === 'https:' && !['localhost', '127.0.0.1', '::1'].includes(url.hostname) && !url.hostname.endsWith('.local'); } catch { return false; }
@@ -43,6 +45,22 @@ const defaultDeploymentConfigs: DeploymentConfig[] = [
   { target: 'main', provider: 'vercel', workflowName: 'Deploy frontend to Vercel', environment: 'production', githubEnvironment: 'production-vercel' },
   { target: 'main', provider: 'cloudflare', workflowName: 'Deploy frontend to Cloudflare Pages', environment: 'production', githubEnvironment: 'production-cloudflare-pages' },
 ];
+
+export function workflowConfigurationWarnings(workflow: StoredWorkflow, context: { actionsAvailable: boolean; workflows: readonly { name: string; path: string }[]; environmentsAvailable: boolean; environments: readonly string[] }): WorkflowConfigurationWarning[] {
+  const configured = workflow.deployments || defaultDeploymentConfigs;
+  if (!configured.length) return [{ workflowId: workflow.id, code: 'no-deployments' }];
+  if (!context.actionsAvailable) return [{ workflowId: workflow.id, code: 'actions-unavailable' }];
+  const warnings: WorkflowConfigurationWarning[] = [];
+  const workflowExists = (value: string) => context.workflows.some(candidate => candidate.name === value || candidate.path === value);
+  configured.forEach(deployment => {
+    const base = { workflowId: workflow.id, target: deployment.target, provider: deployment.provider };
+    if (!workflowExists(deployment.workflowName)) warnings.push({ ...base, code: 'workflow-not-found', value: deployment.workflowName });
+    if (!deployment.githubEnvironment) warnings.push({ ...base, code: 'environment-missing' });
+    else if (context.environmentsAvailable && !context.environments.includes(deployment.githubEnvironment)) warnings.push({ ...base, code: 'environment-not-found', value: deployment.githubEnvironment });
+    if (deployment.rollbackWorkflowName && !workflowExists(deployment.rollbackWorkflowName)) warnings.push({ ...base, code: 'rollback-workflow-not-found', value: deployment.rollbackWorkflowName });
+  });
+  return warnings;
+}
 
 export function deploymentProviderForWorkflowRun(name: string, configurations: readonly DeploymentConfig[] = defaultDeploymentConfigs): DeploymentProvider | null {
   return configurations.find(configuration => configuration.workflowName === name)?.provider || null;
@@ -574,6 +592,25 @@ export async function listWorkflowStageDeploymentRuns(environment: Record<string
   const sql = query(environment);
   const rows = await sql<StageDeploymentRunRow[]>`SELECT workflow_id, stage_index, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, NULL::text AS failure_summary, NULL::text AS failure_job_url, health_state, health_url, health_detail, first_seen_at, updated_at FROM (SELECT runs.*, row_number() OVER (PARTITION BY workflow_id, stage_index, source ORDER BY updated_at DESC) AS position FROM workflow_stage_deployment_runs runs WHERE user_id = ${user.id}) recent WHERE position <= 8 ORDER BY workflow_id, stage_index, source, updated_at DESC`;
   return rows.map(row => ({ workflowId: row.workflow_id, stageIndex: row.stage_index, source: row.source, provider: row.provider, environment: row.environment, runId: row.run_id, runName: row.run_name, runUrl: row.run_url, deploymentUrl: row.deployment_url, state: row.state, conclusion: row.conclusion, failureSummary: null, failureJobUrl: null, healthState: row.health_state, healthUrl: row.health_url, healthDetail: row.health_detail, firstSeenAt: row.first_seen_at, updatedAt: row.updated_at }));
+}
+
+export async function listWorkflowConfigurationWarnings(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowConfigurationWarning[]> {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id}`;
+  const stored = rows.map(row => storedWorkflowFromPayload(row.payload)).filter((workflow): workflow is StoredWorkflow => Boolean(workflow));
+  if (!identity.installationId) return stored.flatMap(workflow => workflowConfigurationWarnings(workflow, { actionsAvailable: false, workflows: [], environmentsAvailable: false, environments: [] }));
+  const config = parseGithubAppConfig(environment);
+  const results = await Promise.all(stored.map(async workflow => {
+    if (workflow.deployments?.length === 0) return workflowConfigurationWarnings(workflow, { actionsAvailable: true, workflows: [], environmentsAvailable: true, environments: [] });
+    const { owner, name } = ownerAndName(workflow.repository);
+    const [actions, environmentsResult] = await Promise.all([
+      installationRequest<{ workflows: { name: string; path: string; state: string }[] }>(config, identity.installationId!, `/repos/${owner}/${name}/actions/workflows?per_page=100`).then(result => ({ available: true, values: result.workflows.filter(item => item.state === 'active') })).catch(() => ({ available: false, values: [] as { name: string; path: string }[] })),
+      installationRequest<{ environments: { name: string }[] }>(config, identity.installationId!, `/repos/${owner}/${name}/environments?per_page=100`).then(result => ({ available: true, values: result.environments.map(item => item.name) })).catch(() => ({ available: false, values: [] as string[] })),
+    ]);
+    return workflowConfigurationWarnings(workflow, { actionsAvailable: actions.available, workflows: actions.values, environmentsAvailable: environmentsResult.available, environments: environmentsResult.values });
+  }));
+  return results.flat();
 }
 
 export async function listRecentWorkflowStageEvents(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageEvent[]> {

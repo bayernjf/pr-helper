@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canCheckDeploymentUrl, compactFailureDetails, deploymentFailureSummary, deploymentNotification, deploymentProviderForWorkflowRun, deploymentRunState, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, repairCommitSha, sortStoredWorkflows, storedWorkflowFromPayload } from './workflows-store';
+import { canCheckDeploymentUrl, compactFailureDetails, deploymentFailureSummary, deploymentNotification, deploymentProviderForWorkflowRun, deploymentRunState, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, repairCommitSha, sortStoredWorkflows, storedWorkflowFromPayload, workflowConfigurationWarnings } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('accepts a workflow with real branch stages', () => {
@@ -90,5 +90,20 @@ describe('stored workflow validation', () => {
     expect(canCheckDeploymentUrl('http://preview.example.com/health')).toBe(false);
     expect(canCheckDeploymentUrl('https://localhost/health')).toBe(false);
     expect(canCheckDeploymentUrl('https://127.0.0.1/health')).toBe(false);
+  });
+
+  it('reports GitHub configuration mismatches without treating them as deployment results', () => {
+    const workflow = {
+      id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main' }], deployments: [
+        { target: 'main', provider: 'vercel' as const, workflowName: 'Deploy production', environment: 'production' as const, githubEnvironment: 'production-vercel', rollbackWorkflowName: 'Rollback production' },
+      ],
+    };
+    expect(workflowConfigurationWarnings(workflow, {
+      actionsAvailable: true,
+      workflows: [{ name: 'CI', path: '.github/workflows/ci.yml' }],
+      environmentsAvailable: true,
+      environments: ['production'],
+    }).map(warning => warning.code)).toEqual(['workflow-not-found', 'environment-not-found', 'rollback-workflow-not-found']);
+    expect(workflowConfigurationWarnings(workflow, { actionsAvailable: false, workflows: [], environmentsAvailable: false, environments: [] }).map(warning => warning.code)).toEqual(['actions-unavailable']);
   });
 });

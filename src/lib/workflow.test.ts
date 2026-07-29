@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, addStage, createWorkflow, deploymentConfigsForTarget, removeDeployment, removeStage, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, workflowSummary } from './workflow';
+import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, removeDeployment, removeStage, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
   it('saves the repository and its first selected branch transition', () => {
@@ -120,5 +120,32 @@ describe('workflow configuration', () => {
       environment: 'production',
       rollbackWorkflowName: 'Rollback production',
     }]);
+  });
+
+  it('reports actionable deployment configuration safety warnings', () => {
+    const workflow = {
+      ...createWorkflow('octo/app', 'dev', 'main'),
+      deployments: [{
+        target: 'main',
+        provider: 'vercel' as const,
+        workflowName: 'Missing deploy',
+        environment: 'production' as const,
+        githubEnvironment: 'missing-production',
+        healthCheckPath: 'health',
+        rollbackWorkflowName: 'Missing rollback',
+      }],
+    };
+    expect(deploymentConfigurationWarnings(workflow, {
+      actionsLoaded: true,
+      actionWorkflows: [{ name: 'CI', path: '.github/workflows/ci.yml' }],
+      environmentsLoaded: true,
+      environments: ['production'],
+    }).map(warning => warning.code)).toEqual(['workflow-not-found', 'environment-not-found', 'health-path-invalid', 'rollback-workflow-not-found']);
+  });
+
+  it('distinguishes missing gates and unavailable Actions permissions', () => {
+    const workflow = { ...createWorkflow('octo/app', 'dev', 'main'), deployments: [] };
+    expect(deploymentConfigurationWarnings(workflow, { actionsLoaded: true, actionWorkflows: [], environmentsLoaded: true, environments: [] }).map(warning => warning.code)).toEqual(['no-deployments']);
+    expect(deploymentConfigurationWarnings({ ...workflow, deployments: [{ target: 'main', provider: 'vercel', workflowName: 'Deploy', environment: 'production' }] }, { actionsLoaded: false, actionWorkflows: [], environmentsLoaded: false, environments: [] }).map(warning => warning.code)).toEqual(['actions-unavailable', 'environment-missing']);
   });
 });
