@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canCheckDeploymentUrl, compactFailureDetails, deploymentFailureSummary, deploymentNotification, deploymentProviderForWorkflowRun, deploymentRunState, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, repairCommitSha, sortStoredWorkflows, storedWorkflowFromPayload, workflowConfigurationWarnings } from './workflows-store';
+import { canCheckDeploymentUrl, compactFailureDetails, deploymentFailureSummary, deploymentNotification, deploymentProviderForWorkflowRun, deploymentRunState, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, repairCommitSha, rollbackDeploymentIsAvailable, sortStoredWorkflows, storedWorkflowFromPayload, workflowConfigurationWarnings } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('accepts a workflow with real branch stages', () => {
@@ -105,5 +105,25 @@ describe('stored workflow validation', () => {
       environments: ['production'],
     }).map(warning => warning.code)).toEqual(['workflow-not-found', 'environment-not-found', 'rollback-workflow-not-found']);
     expect(workflowConfigurationWarnings(workflow, { actionsAvailable: false, workflows: [], environmentsAvailable: false, environments: [] }).map(warning => warning.code)).toEqual(['actions-unavailable']);
+  });
+
+  it('expects the bundled rollback workflow only for PR Helper production deployments', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'bayernjf/pr-helper', stages: [{ source: 'dev', target: 'main' }] };
+    const warnings = workflowConfigurationWarnings(workflow, {
+      actionsAvailable: true,
+      workflows: [
+        { name: 'Deploy frontend to Vercel', path: '.github/workflows/deploy-vercel.yml' },
+        { name: 'Deploy frontend to Cloudflare Pages', path: '.github/workflows/deploy-cloudflare-pages.yml' },
+      ],
+      environmentsAvailable: false,
+      environments: [],
+    });
+    expect(warnings.filter(warning => warning.code === 'rollback-workflow-not-found')).toHaveLength(2);
+  });
+
+  it('only offers rollback for a successful deployment with an immutable URL', () => {
+    expect(rollbackDeploymentIsAvailable({ state: 'success', deploymentUrl: 'https://release.vercel.app' })).toBe(true);
+    expect(rollbackDeploymentIsAvailable({ state: 'success', deploymentUrl: null })).toBe(false);
+    expect(rollbackDeploymentIsAvailable({ state: 'failure', deploymentUrl: 'https://release.vercel.app' })).toBe(false);
   });
 });

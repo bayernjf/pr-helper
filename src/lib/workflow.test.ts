@@ -122,6 +122,16 @@ describe('workflow configuration', () => {
     }]);
   });
 
+  it('enables the bundled production rollback workflow for the PR Helper repository', () => {
+    const workflow = createWorkflow('bayernjf/pr-helper', 'dev', 'main');
+    expect(deploymentConfigsForTarget(workflow, 'main')).toEqual([
+      expect.objectContaining({ provider: 'vercel', rollbackWorkflowName: 'Rollback frontend deployment' }),
+      expect.objectContaining({ provider: 'cloudflare', rollbackWorkflowName: 'Rollback frontend deployment' }),
+    ]);
+    expect(deploymentConfigsForTarget(createWorkflow('octo/app', 'dev', 'main'), 'main').every(deployment => deployment.rollbackWorkflowName === undefined)).toBe(true);
+    expect(deploymentConfigsForTarget({ ...workflow, deployments: [{ target: 'main', provider: 'vercel', workflowName: 'Custom production', environment: 'production' }] }, 'main')[0].rollbackWorkflowName).toBeUndefined();
+  });
+
   it('reports actionable deployment configuration safety warnings', () => {
     const workflow = {
       ...createWorkflow('octo/app', 'dev', 'main'),

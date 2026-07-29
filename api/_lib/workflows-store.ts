@@ -35,6 +35,10 @@ export type DeploymentConfig = { target: string; provider: DeploymentProvider; w
 export type WorkflowConfigurationWarningCode = 'no-deployments' | 'actions-unavailable' | 'workflow-not-found' | 'environment-missing' | 'environment-not-found' | 'rollback-workflow-not-found';
 export type WorkflowConfigurationWarning = { workflowId: string; code: WorkflowConfigurationWarningCode; target?: string; provider?: DeploymentProvider; value?: string };
 
+export function rollbackDeploymentIsAvailable(run: { state: string; deploymentUrl: string | null }) {
+  return run.state === 'success' && Boolean(run.deploymentUrl);
+}
+
 export function canCheckDeploymentUrl(value: string) {
   try { const url = new URL(value); return url.protocol === 'https:' && !['localhost', '127.0.0.1', '::1'].includes(url.hostname) && !url.hostname.endsWith('.local'); } catch { return false; }
 }
@@ -46,8 +50,19 @@ const defaultDeploymentConfigs: DeploymentConfig[] = [
   { target: 'main', provider: 'cloudflare', workflowName: 'Deploy frontend to Cloudflare Pages', environment: 'production', githubEnvironment: 'production-cloudflare-pages' },
 ];
 
-export function workflowConfigurationWarnings(workflow: StoredWorkflow, context: { actionsAvailable: boolean; workflows: readonly { name: string; path: string }[]; environmentsAvailable: boolean; environments: readonly string[] }): WorkflowConfigurationWarning[] {
+const bundledRollbackRepository = 'bayernjf/pr-helper';
+const bundledRollbackWorkflow = 'Rollback frontend deployment';
+
+function deploymentConfigs(workflow: StoredWorkflow) {
   const configured = workflow.deployments || defaultDeploymentConfigs;
+  if (workflow.repository !== bundledRollbackRepository) return configured;
+  return configured.map(deployment => deployment.environment === 'production' && deployment.workflowName === (deployment.provider === 'vercel' ? 'Deploy frontend to Vercel' : 'Deploy frontend to Cloudflare Pages') && !deployment.rollbackWorkflowName
+    ? { ...deployment, rollbackWorkflowName: bundledRollbackWorkflow }
+    : deployment);
+}
+
+export function workflowConfigurationWarnings(workflow: StoredWorkflow, context: { actionsAvailable: boolean; workflows: readonly { name: string; path: string }[]; environmentsAvailable: boolean; environments: readonly string[] }): WorkflowConfigurationWarning[] {
+  const configured = deploymentConfigs(workflow);
   if (!configured.length) return [{ workflowId: workflow.id, code: 'no-deployments' }];
   if (!context.actionsAvailable) return [{ workflowId: workflow.id, code: 'actions-unavailable' }];
   const warnings: WorkflowConfigurationWarning[] = [];
@@ -213,8 +228,8 @@ export async function requestDeploymentRollback(environment: Record<string, stri
   if (!workflow || !stage) throw new Error('未找到对应流程步骤');
   const deployment = deploymentConfigsForTarget(workflow, stage.target).find(candidate => candidate.provider === input.provider);
   if (!deployment?.rollbackWorkflowName) throw new Error('该部署门禁未配置回滚工作流');
-  const runs = await sql<{ deployment_url: string | null }[]>`SELECT deployment_url FROM workflow_stage_deployment_runs WHERE user_id = ${user.id} AND workflow_id = ${input.workflowId} AND stage_index = ${input.stageIndex} AND source = ${input.source} AND provider = ${input.provider} AND run_id = ${input.runId} AND state = 'success' LIMIT 1`;
-  if (!runs.length) throw new Error('只能回滚到已成功且仍在历史记录中的部署');
+  const runs = await sql<{ deployment_url: string | null; state: string }[]>`SELECT deployment_url, state FROM workflow_stage_deployment_runs WHERE user_id = ${user.id} AND workflow_id = ${input.workflowId} AND stage_index = ${input.stageIndex} AND source = ${input.source} AND provider = ${input.provider} AND run_id = ${input.runId} LIMIT 1`;
+  if (!runs.length || !rollbackDeploymentIsAvailable({ state: runs[0].state, deploymentUrl: runs[0].deployment_url })) throw new Error('只能回滚到已成功且带有部署地址的历史版本');
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
   const available = await installationRequest<{ workflows: { id: number; name: string; path: string; state: string }[] }>(config, identity.installationId, `/repos/${owner}/${name}/actions/workflows?per_page=100`);
@@ -426,7 +441,7 @@ async function routeSourcesForStage(environment: Record<string, string | undefin
 }
 
 function deploymentConfigsForTarget(workflow: StoredWorkflow, target: string) {
-  return (workflow.deployments || defaultDeploymentConfigs).filter(deployment => deployment.target === target);
+  return deploymentConfigs(workflow).filter(deployment => deployment.target === target);
 }
 
 function githubEnvironment(provider: DeploymentProvider, environment: 'preview' | 'production') {

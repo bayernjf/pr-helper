@@ -12,8 +12,18 @@ export const defaultDeployments: DeploymentConfig[] = [
   { target: 'main', provider: 'cloudflare', workflowName: 'Deploy frontend to Cloudflare Pages', environment: 'production', githubEnvironment: 'production-cloudflare-pages' },
 ];
 
+const bundledRollbackRepository = 'bayernjf/pr-helper';
+const bundledRollbackWorkflow = 'Rollback frontend deployment';
+
+function withBundledRollback(workflow: object, configurations: readonly DeploymentConfig[]) {
+  if ((workflow as { repository?: string }).repository !== bundledRollbackRepository) return [...configurations];
+  return configurations.map(configuration => configuration.environment === 'production' && configuration.workflowName === (configuration.provider === 'vercel' ? 'Deploy frontend to Vercel' : 'Deploy frontend to Cloudflare Pages') && !configuration.rollbackWorkflowName
+    ? { ...configuration, rollbackWorkflowName: bundledRollbackWorkflow }
+    : configuration);
+}
+
 export function deploymentConfigs(workflow: object): DeploymentConfig[] {
-  return (workflow as { deployments?: DeploymentConfig[] }).deployments || defaultDeployments;
+  return withBundledRollback(workflow, (workflow as { deployments?: DeploymentConfig[] }).deployments || defaultDeployments);
 }
 
 export function deploymentConfigsForTarget(workflow: object, target: string) {

@@ -441,7 +441,7 @@ function deploymentRunHistory(flow: Workflow, stageIndex: number, source?: strin
   if (!runs.length) return '';
   const target = flow.stages[stageIndex]?.target;
   return `<section class="drawer-deployment-history"><p class="eyebrow">${t('overview.deployment.history')}</p><ol>${runs.map(run => {
-    const rollback = run.state === 'success' && run.runId && deploymentConfigs(flow).some(configuration => configuration.target === target && configuration.provider === run.provider && configuration.rollbackWorkflowName)
+    const rollback = run.state === 'success' && run.runId && run.deploymentUrl && deploymentConfigs(flow).some(configuration => configuration.target === target && configuration.provider === run.provider && configuration.rollbackWorkflowName)
       ? `<button type="button" class="ghost deployment-rollback" data-deployment-run="${run.runId}" data-deployment-provider="${run.provider}">${t('overview.deployment.rollback')}</button>`
       : '';
     return `<li class="${run.state}"><div><b>${deploymentProviderName(run.provider)} · ${t(`overview.deployment.${run.environment}`)}</b><small>${deploymentStateText(run.state)}${run.healthState ? ` · ${t('overview.deployment.health')} ${run.healthState === 'success' ? t('overview.deployment.healthPassed') : t('overview.deployment.healthFailed')}` : ''}</small></div><time>${escape(stageUpdatedAt({ updatedAt: run.firstSeenAt } as WorkflowStageState))}</time><span>${rollback}${run.runUrl ? `<a href="${escape(run.runUrl)}" target="_blank" rel="noreferrer">${t('overview.deployment.openLogs')} ↗</a>` : ''}</span></li>`;
