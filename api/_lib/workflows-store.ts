@@ -8,6 +8,7 @@ export type StoredWorkflow = {
   name: string;
   repository: string;
   stages: { source: string; target: string; independent?: boolean; waitFor?: number[] }[];
+  deployments?: DeploymentConfig[];
   position?: number;
 };
 
@@ -30,11 +31,17 @@ type GitHubWorkflowJob = { name: string; conclusion: string | null; html_url: st
 
 export type DeploymentProvider = 'vercel' | 'cloudflare';
 export type DeploymentState = 'pending' | 'success' | 'failure';
+export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string };
 
-export function deploymentProviderForWorkflowRun(name: string): DeploymentProvider | null {
-  if (name === 'Deploy frontend to Vercel') return 'vercel';
-  if (name === 'Deploy frontend to Cloudflare Pages') return 'cloudflare';
-  return null;
+const defaultDeploymentConfigs: DeploymentConfig[] = [
+  { target: 'dev', provider: 'vercel', workflowName: 'Deploy frontend to Vercel', environment: 'preview', githubEnvironment: 'preview-vercel' },
+  { target: 'dev', provider: 'cloudflare', workflowName: 'Deploy frontend to Cloudflare Pages', environment: 'preview', githubEnvironment: 'preview-cloudflare-pages' },
+  { target: 'main', provider: 'vercel', workflowName: 'Deploy frontend to Vercel', environment: 'production', githubEnvironment: 'production-vercel' },
+  { target: 'main', provider: 'cloudflare', workflowName: 'Deploy frontend to Cloudflare Pages', environment: 'production', githubEnvironment: 'production-cloudflare-pages' },
+];
+
+export function deploymentProviderForWorkflowRun(name: string, configurations: readonly DeploymentConfig[] = defaultDeploymentConfigs): DeploymentProvider | null {
+  return configurations.find(configuration => configuration.workflowName === name)?.provider || null;
 }
 
 export function deploymentRunState(run: Pick<GitHubWorkflowRun, 'status' | 'conclusion'>): DeploymentState {
@@ -214,7 +221,7 @@ export async function codexRepairContext(environment: Record<string, string | un
     return `- [${job.run.name} / ${job.name}](${job.html_url || job.run.html_url})${failedSteps.length ? `\n  - 失败步骤：${failedSteps.join('、')}` : ''}`;
   }).join('\n') : failedRuns.length ? failedRuns.map(run => `- [${run.name}](${run.html_url})\n  - 未读取到失败 Job；请打开该运行日志确认。`).join('\n') : '- 未读取到 Actions Job；请从 PR 链接进入 Actions 日志。';
   const failedDeployments = failedRuns.flatMap(run => {
-    const provider = deploymentProviderForWorkflowRun(run.name);
+    const provider = deploymentProviderForWorkflowRun(run.name, deploymentConfigsForTarget(workflow, stage.target));
     return provider ? [`- ${provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages'} 公网部署：[${run.name}](${run.html_url})`] : [];
   });
   const markdown = `# 修复 CI 失败\n\n## 目标\n修复当前 PR 的失败门禁；运行相关测试后汇报结果。不要执行 git push、创建 PR 或合并。\n\n## PR\n- 仓库：\`${workflow.repository}\`\n- PR：[#${pullNumber} ${pull.title}](${pull.html_url})\n- 分支：\`${pull.head.ref}\` → \`${pull.base.ref}\`\n- 检查 SHA：\`${checkedSha}\`${pull.merged_at ? '（合并提交）' : ''}\n- 流程步骤：${stageIndex + 1}（\`${stage.source}\` → \`${stage.target}\`）\n\n## 失败检查\n${failedChecks.length ? failedChecks.join('\n') : '- GitHub 未返回具体失败 check；请打开 PR 的 Actions 页面确认。'}\n\n## 失败 Actions Job\n${failedJobSummary}\n\n${failedDeployments.length ? `## 失败的公网部署\n${failedDeployments.join('\n')}\n\n` : ''}## PR 改动摘要\n${fileSummary || '- 未读取到改动文件。'}\n\n## 执行要求\n1. 在本地复现失败，优先阅读上方失败 Job 日志与错误摘要。\n2. 只修改解决本次 CI 失败所需的代码。\n3. 运行最小相关测试；若可行再运行完整检查。\n4. 输出根因、修改内容、执行过的命令和结果。`;
@@ -227,6 +234,7 @@ export function isStoredWorkflow(value: unknown): value is StoredWorkflow {
   return typeof workflow.id === 'string' && typeof workflow.name === 'string' && typeof workflow.repository === 'string'
     && (workflow.position === undefined || Number.isInteger(workflow.position) && workflow.position >= 0)
     && Array.isArray(workflow.stages) && workflow.stages.length > 0
+    && (workflow.deployments === undefined || Array.isArray(workflow.deployments) && workflow.deployments.every(deployment => Boolean(deployment) && typeof deployment.target === 'string' && deployment.target.length > 0 && ['vercel', 'cloudflare'].includes(deployment.provider || '') && typeof deployment.workflowName === 'string' && deployment.workflowName.length > 0 && ['preview', 'production'].includes(deployment.environment || '') && (deployment.githubEnvironment === undefined || typeof deployment.githubEnvironment === 'string')))
     && workflow.stages.every((stage, index) => Boolean(stage) && typeof stage.source === 'string' && typeof stage.target === 'string' && stage.source.length > 0 && stage.target.length > 0 && (stage.independent === undefined || typeof stage.independent === 'boolean') && (stage.waitFor === undefined || Array.isArray(stage.waitFor) && stage.waitFor.every(dependency => Number.isInteger(dependency) && dependency >= 0 && dependency < index)));
 }
 
@@ -355,10 +363,8 @@ async function routeSourcesForStage(environment: Record<string, string | undefin
   return [...new Set([...branches.map(branch => branch.name), ...saved.map(state => state.source)].filter(source => branchRuleMatches(stage.source, source)))];
 }
 
-function deploymentEnvironment(target: string): 'preview' | 'production' | null {
-  if (target === 'dev') return 'preview';
-  if (target === 'main') return 'production';
-  return null;
+function deploymentConfigsForTarget(workflow: StoredWorkflow, target: string) {
+  return (workflow.deployments || defaultDeploymentConfigs).filter(deployment => deployment.target === target);
 }
 
 function githubEnvironment(provider: DeploymentProvider, environment: 'preview' | 'production') {
@@ -367,8 +373,8 @@ function githubEnvironment(provider: DeploymentProvider, environment: 'preview' 
 }
 
 async function reconcileStageDeployments(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, target: string, sha: string): Promise<DeploymentState[]> {
-  const deploymentEnvironmentName = deploymentEnvironment(target);
-  if (!deploymentEnvironmentName || !row.github_installation_id) return [];
+  const configurations = deploymentConfigsForTarget(workflow, target);
+  if (!configurations.length || !row.github_installation_id) return [];
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
   const previousDeployments = await sql<{ provider: DeploymentProvider; state: DeploymentState; run_id: number | null }[]>`SELECT provider, state, run_id FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_index = ${stageIndex} AND source = ${source}`;
@@ -376,13 +382,14 @@ async function reconcileStageDeployments(environment: Record<string, string | un
   await sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_index = ${stageIndex} AND source = ${source}`;
   const actionRuns = await installationRequest<{ workflow_runs: GitHubWorkflowRun[] }>(config, row.github_installation_id, `/repos/${owner}/${name}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`).catch(() => ({ workflow_runs: [] }));
   const deployments = actionRuns.workflow_runs
-    .map(run => ({ run, provider: deploymentProviderForWorkflowRun(run.name) }))
+    .map(run => ({ run, provider: deploymentProviderForWorkflowRun(run.name, configurations) }))
     .filter((item): item is { run: GitHubWorkflowRun; provider: DeploymentProvider } => Boolean(item.provider))
     .sort((left, right) => (right.run.created_at || '').localeCompare(left.run.created_at || ''));
   const latestByProvider = new Map<DeploymentProvider, GitHubWorkflowRun>();
   deployments.forEach(({ run, provider }) => { if (!latestByProvider.has(provider)) latestByProvider.set(provider, run); });
   await Promise.all([...latestByProvider].map(async ([provider, run]) => {
-    const environmentName = githubEnvironment(provider, deploymentEnvironmentName);
+    const configuration = configurations.find(item => item.provider === provider)!;
+    const environmentName = configuration.githubEnvironment || githubEnvironment(provider, configuration.environment);
     const githubDeployments = await installationRequest<GitHubDeployment[]>(config, row.github_installation_id!, `/repos/${owner}/${name}/deployments?sha=${encodeURIComponent(sha)}&environment=${encodeURIComponent(environmentName)}&per_page=1`).catch(() => []);
     const status = githubDeployments[0]
       ? await installationRequest<GitHubDeploymentStatus[]>(config, row.github_installation_id!, `/repos/${owner}/${name}/deployments/${githubDeployments[0].id}/statuses?per_page=1`).catch(() => [])
@@ -392,16 +399,16 @@ async function reconcileStageDeployments(environment: Record<string, string | un
       ? deploymentFailureSummary((await installationRequest<{ jobs: GitHubWorkflowJob[] }>(config, row.github_installation_id!, `/repos/${owner}/${name}/actions/runs/${run.id}/jobs?per_page=100`).catch(() => ({ jobs: [] }))).jobs)
       : { summary: null, jobUrl: null };
     const state = deploymentRunState(run);
-    await sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${source}, ${provider}, ${deploymentEnvironmentName}, ${run.id}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${state}, ${run.conclusion}, ${failure.summary}, ${failure.jobUrl}) ON CONFLICT (user_id, workflow_id, stage_index, source, provider) DO UPDATE SET environment = EXCLUDED.environment, run_id = EXCLUDED.run_id, run_name = EXCLUDED.run_name, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, failure_summary = EXCLUDED.failure_summary, failure_job_url = EXCLUDED.failure_job_url, updated_at = now()`;
+    await sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${source}, ${provider}, ${configuration.environment}, ${run.id}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${state}, ${run.conclusion}, ${failure.summary}, ${failure.jobUrl}) ON CONFLICT (user_id, workflow_id, stage_index, source, provider) DO UPDATE SET environment = EXCLUDED.environment, run_id = EXCLUDED.run_id, run_name = EXCLUDED.run_name, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, failure_summary = EXCLUDED.failure_summary, failure_job_url = EXCLUDED.failure_job_url, updated_at = now()`;
     const previous = previousByProvider.get(provider);
     if (['success', 'failure'].includes(state) && (previous?.state !== state || previous.run_id !== run.id)) {
-      const notification = deploymentNotification(provider, deploymentEnvironmentName, state);
+      const notification = deploymentNotification(provider, configuration.environment, state);
       await recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageIndex}:${source}:deployment:${provider}:${run.id}:${state}`, notification.kind, notification.title);
       await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:deployment:${provider}:${run.id}:${state}`, kind: notification.kind, title: notification.title, body: `${workflow.repository} · ${source} → ${target} · ${notification.message}`, url: run.html_url || '/' });
     }
   }));
-  return (['vercel', 'cloudflare'] as const).map(provider => {
-    const run = latestByProvider.get(provider);
+  return configurations.map(configuration => {
+    const run = latestByProvider.get(configuration.provider);
     return run ? deploymentRunState(run) : 'pending';
   });
 }

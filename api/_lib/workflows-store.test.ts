@@ -54,6 +54,7 @@ describe('stored workflow validation', () => {
     expect(deploymentProviderForWorkflowRun('Deploy frontend to Vercel')).toBe('vercel');
     expect(deploymentProviderForWorkflowRun('Deploy frontend to Cloudflare Pages')).toBe('cloudflare');
     expect(deploymentProviderForWorkflowRun('CI')).toBeNull();
+    expect(deploymentProviderForWorkflowRun('Deploy staging', [{ target: 'staging', provider: 'vercel', workflowName: 'Deploy staging', environment: 'preview' }])).toBe('vercel');
     expect(deploymentRunState({ status: 'queued', conclusion: null })).toBe('pending');
     expect(deploymentRunState({ status: 'completed', conclusion: 'success' })).toBe('success');
     expect(deploymentRunState({ status: 'completed', conclusion: 'failure' })).toBe('failure');

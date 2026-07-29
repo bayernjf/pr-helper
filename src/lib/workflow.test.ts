@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addStage, createWorkflow, removeStage, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, workflowSummary } from './workflow';
+import { addDeployment, addStage, createWorkflow, deploymentConfigsForTarget, removeDeployment, removeStage, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
   it('saves the repository and its first selected branch transition', () => {
@@ -90,5 +90,16 @@ describe('workflow configuration', () => {
     const first = { ...createWorkflow('octo/first', 'feature/first', 'main'), id: 'first', position: 0 };
 
     expect(sortWorkflows([legacy, last, first]).map(workflow => workflow.id)).toEqual(['first', 'last', 'legacy']);
+  });
+
+  it('keeps default public deployments for legacy workflows and allows each project to replace them', () => {
+    const legacy = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature/login', target: 'dev' }] };
+    expect(deploymentConfigsForTarget(legacy, 'dev')).toEqual([
+      { target: 'dev', provider: 'vercel', workflowName: 'Deploy frontend to Vercel', environment: 'preview', githubEnvironment: 'preview-vercel' },
+      { target: 'dev', provider: 'cloudflare', workflowName: 'Deploy frontend to Cloudflare Pages', environment: 'preview', githubEnvironment: 'preview-cloudflare-pages' },
+    ]);
+    const customized = addDeployment({ ...legacy, deployments: [] }, { target: 'staging', provider: 'vercel', workflowName: 'Deploy staging', environment: 'preview', githubEnvironment: 'staging-vercel' });
+    expect(deploymentConfigsForTarget(customized, 'staging')).toEqual([{ target: 'staging', provider: 'vercel', workflowName: 'Deploy staging', environment: 'preview', githubEnvironment: 'staging-vercel' }]);
+    expect(removeDeployment(customized, 0).deployments).toEqual([]);
   });
 });

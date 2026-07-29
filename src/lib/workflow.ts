@@ -1,8 +1,33 @@
 export type WorkflowStage = { source: string; target: string; independent?: boolean; waitFor?: number[] };
-export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; position?: number };
+export type DeploymentProvider = 'vercel' | 'cloudflare';
+export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string };
+export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; deployments?: DeploymentConfig[]; position?: number };
+
+export const defaultDeployments: DeploymentConfig[] = [
+  { target: 'dev', provider: 'vercel', workflowName: 'Deploy frontend to Vercel', environment: 'preview', githubEnvironment: 'preview-vercel' },
+  { target: 'dev', provider: 'cloudflare', workflowName: 'Deploy frontend to Cloudflare Pages', environment: 'preview', githubEnvironment: 'preview-cloudflare-pages' },
+  { target: 'main', provider: 'vercel', workflowName: 'Deploy frontend to Vercel', environment: 'production', githubEnvironment: 'production-vercel' },
+  { target: 'main', provider: 'cloudflare', workflowName: 'Deploy frontend to Cloudflare Pages', environment: 'production', githubEnvironment: 'production-cloudflare-pages' },
+];
+
+export function deploymentConfigs(workflow: object): DeploymentConfig[] {
+  return (workflow as { deployments?: DeploymentConfig[] }).deployments || defaultDeployments;
+}
+
+export function deploymentConfigsForTarget(workflow: object, target: string) {
+  return deploymentConfigs(workflow).filter(deployment => deployment.target === target);
+}
+
+export function addDeployment(workflow: Workflow, deployment: DeploymentConfig): Workflow {
+  return { ...workflow, deployments: [...deploymentConfigs(workflow), deployment] };
+}
+
+export function removeDeployment(workflow: Workflow, index: number): Workflow {
+  return { ...workflow, deployments: deploymentConfigs(workflow).filter((_, deploymentIndex) => deploymentIndex !== index) };
+}
 
 export function createWorkflow(repository: string, source: string, target: string, name = repository): Workflow {
-  return { id: `${repository}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, repository, stages: [{ source, target }] };
+  return { id: `${repository}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, repository, stages: [{ source, target }], deployments: defaultDeployments };
 }
 
 export function addStage(workflow: Workflow, source: string, target: string, independent = false, waitFor: number[] = []): Workflow {
