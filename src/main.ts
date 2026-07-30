@@ -725,7 +725,13 @@ function renderDeploymentSettings() {
 }
 function options(selected: string) { return branches.map(branch => `<option ${branch === selected ? 'selected' : ''}>${escape(branch)}</option>`).join(''); }
 function value(id: string) { return document.querySelector<HTMLSelectElement | HTMLInputElement>(`#${id}`)!.value; }
-function renderDraft() { if (!active) return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${t('draft.empty.title')}</h2><p class="meta">${t('draft.empty.desc')}</p>`; return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${escape(active.name)}</h2><p class="meta">${escape(active.repository)}</p>${active.stages.map((stage, index) => `<div class="draft-step"><span>${index + 1}</span><b>${escape(stage.source)} → ${escape(stage.target)}</b>${stage.waitFor?.length ? `<small>${t('draft.waitFor', { count: stage.waitFor.length })}</small>` : stage.independent ? `<small>${t('draft.independent')}</small>` : ''}<button data-remove="${index}">${t('draft.remove')}</button></div>`).join('')}<button id="view-flow" class="ghost">${t('draft.viewDetail')}</button>`; }
+function renderDraft() {
+  if (!active) return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${t('draft.empty.title')}</h2><p class="meta">${t('draft.empty.desc')}</p>`;
+  return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${escape(active.name)}</h2><p class="meta">${escape(active.repository)}</p>${active.stages.map((stage, index) => {
+    const badge = stage.waitFor?.length ? `<small>${t('draft.waitFor', { count: stage.waitFor.length })}</small>` : stage.independent ? `<small>${t('draft.independent')}</small>` : '';
+    return `<div class="draft-step"><span>${index + 1}</span><div class="draft-step-main"><b>${escape(stage.source)} → ${escape(stage.target)}</b>${badge}</div><button data-remove="${index}">${t('draft.remove')}</button></div>`;
+  }).join('')}<button id="view-flow" class="ghost">${t('draft.viewDetail')}</button>`;
+}
 
 function detail() {
   const content = document.querySelector('#content')!;

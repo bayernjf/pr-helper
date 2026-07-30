@@ -608,7 +608,7 @@ button.text-link {
 
 .draft-step {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto auto;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   border-top: 1px solid var(--border-light);
@@ -622,13 +622,28 @@ button.text-link {
   z-index: 1;
 }
 
-.draft-step > b {
-  grid-column: 1 / -1;
+.draft-step-main {
+  grid-column: 2;
   grid-row: 1;
+  display: flex;
+  min-width: 0;
+  align-items: center;
   justify-self: center;
-  max-width: calc(100% - 150px);
+  gap: 8px;
+}
+
+.draft-step-main b {
+  min-width: 0;
   overflow-wrap: anywhere;
   text-align: center;
+}
+
+.draft-step-main small {
+  justify-self: center;
+  margin: 0;
+  color: var(--text-accent);
+  font: 700 .66rem 'DM Mono';
+  text-transform: uppercase;
 }
 
 .draft-step span, .timeline article>span {
@@ -643,7 +658,7 @@ button.text-link {
 }
 
 .draft-step button {
-  grid-column: 4;
+  grid-column: 3;
   grid-row: 1;
   z-index: 1;
   border: 0;
@@ -652,7 +667,6 @@ button.text-link {
   font: 700 .72rem Manrope;
   cursor: pointer;
 }
-.draft-step small{grid-column:3;grid-row:1;z-index:1;margin:0;color:var(--text-accent);font:700 .66rem 'DM Mono';text-transform:uppercase}
 
 .timeline article {
   display: flex;
