@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canCheckDeploymentUrl, compactFailureDetails, deploymentFailureSummary, deploymentNotification, deploymentProviderForWorkflowRun, deploymentRunState, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, repairCommitSha, rollbackDeploymentIsAvailable, sortStoredWorkflows, storedWorkflowFromPayload, workflowConfigurationWarnings } from './workflows-store';
+import { canCheckDeploymentUrl, compactFailureDetails, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, repairCommitSha, rollbackDeploymentIsAvailable, sortStoredWorkflows, storedWorkflowFromPayload, workflowConfigurationWarnings } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('accepts a workflow with real branch stages', () => {
@@ -65,6 +65,11 @@ describe('stored workflow validation', () => {
     expect(deploymentRunState({ status: 'queued', conclusion: null })).toBe('pending');
     expect(deploymentRunState({ status: 'completed', conclusion: 'success' })).toBe('success');
     expect(deploymentRunState({ status: 'completed', conclusion: 'failure' })).toBe('failure');
+  });
+
+  it('creates the matching stage-state parent before persisting a deployment', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main' }] };
+    expect(deploymentParentState(workflow, 0, 'dev', 'merge-sha')).toEqual({ repository: 'octo/app', source: 'dev', target: 'main', headSha: 'merge-sha' });
   });
 
   it('keeps a merged route locked while public deployments are pending or failed', () => {
