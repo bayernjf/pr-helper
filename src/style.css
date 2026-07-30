@@ -983,6 +983,10 @@ button.text-link {
   margin-top: 18px;
 }
 
+.step-drawer .drawer-actions {
+  margin: 16px 0 20px;
+}
+
 .confirm-dialog {
   width: min(420px, calc(100vw - 32px));
   padding: 28px;
