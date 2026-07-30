@@ -423,8 +423,8 @@ function goTo(target: Screen | 'back') {
 
 function renderContent() { if (screen === 'overview') overview(); else if (screen === 'editor') editor(); else detail(); }
 
-function stageState(workflowId: string, stageIndex: number, source?: string) {
-  return workflowStageStates.find(state => state.workflowId === workflowId && state.stageIndex === stageIndex && (source === undefined || state.source === source));
+function stageState(workflowId: string, stageIndex: number, source?: string, target?: string) {
+  return workflowStageStates.find(state => state.workflowId === workflowId && state.stageIndex === stageIndex && (source === undefined || state.source === source) && (target === undefined || state.target === target));
 }
 function stageRunPresentationText(run: ReturnType<typeof stageRunPresentation>) {
   const status = t(`overview.run.${run.status}`);
@@ -514,7 +514,7 @@ function drawerConfigurationWarnings(flow: Workflow, stageIndex: number, source:
   return `<section class="drawer-config-warnings"><p class="eyebrow">${t('overview.configWarning.title')}</p><ul>${warnings.map(warning => `<li>${escape(configurationWarningText(warning))}</li>`).join('')}</ul></section>`;
 }
 function laneRunSummary(flow: Workflow) {
-  const summary = workflowRunSummary(flow.stages.map((_, index) => stageState(flow.id, index)));
+  const summary = workflowRunSummary(flow.stages.map((stage, index) => stageState(flow.id, index, undefined, stage.target)));
   return { ...summary, text: t('overview.run.current', { step: summary.stageIndex + 1, status: stageRunPresentationText(summary) }) };
 }
 function overview() {
@@ -551,7 +551,7 @@ function projectLane(flow: Workflow) {
   flow.stages.forEach((stage, index) => targets.set(stage.target, [...(targets.get(stage.target) || []), { stage, index }]));
   const hasFanIn = [...targets.values()].some(routes => routes.length > 1);
   const routeCards = (stage: Workflow['stages'][number], index: number) => {
-    const states = workflowStageStates.filter(state => state.workflowId === flow.id && state.stageIndex === index);
+    const states = workflowStageStates.filter(state => state.workflowId === flow.id && state.stageIndex === index && state.target === stage.target && (stage.source.endsWith('*') ? state.source.startsWith(stage.source.slice(0, -1)) : state.source === stage.source));
     return states.length ? states.map(state => laneStep(stage, index, state)).join('') : laneStep(stage, index);
   };
   const steps = hasFanIn
@@ -618,7 +618,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const flow = workflows.find(item => item.id === workflowId), stage = flow?.stages[stageIndex];
   if (!flow || !stage) return;
   const queueItem = actionQueue.find(item => item.workflowId === workflowId && item.stageIndex === stageIndex && (!source || item.source === source));
-  const state = stageState(workflowId, stageIndex, source);
+  const state = stageState(workflowId, stageIndex, source, stage.target);
   const routeSource = state?.source || source || stage.source;
   const detailStatus = active?.id === flow.id ? statuses?.[stageIndex] : undefined;
   const run = stageRunPresentation(state);

@@ -346,6 +346,20 @@ export function branchRuleMatches(rule: string, branch: string) {
   return isBranchRule(rule) ? branch.startsWith(rule.slice(0, -1)) : rule === branch;
 }
 
+export function workflowStageStateMatchesDefinition(workflow: StoredWorkflow, state: { stageIndex: number; source: string; target: string }) {
+  const stage = workflow.stages[state.stageIndex];
+  return Boolean(stage && stage.target === state.target && branchRuleMatches(stage.source, state.source));
+}
+
+async function pruneStaleWorkflowStageData(sql: ReturnType<typeof query>, userId: string, workflow: StoredWorkflow) {
+  const states = await sql<{ stage_index: number; source: string; target: string }[]>`SELECT stage_index, source, target FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
+  for (const state of states) {
+    if (workflowStageStateMatchesDefinition(workflow, { stageIndex: state.stage_index, source: state.source, target: state.target })) continue;
+    await sql`DELETE FROM workflow_stage_events WHERE user_id = ${userId} AND workflow_id = ${workflow.id} AND stage_index = ${state.stage_index} AND (source = ${state.source} OR source IS NULL)`;
+    await sql`DELETE FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id} AND stage_index = ${state.stage_index} AND source = ${state.source}`;
+  }
+}
+
 function stageIsUnlocked(workflow: StoredWorkflow, stageIndex: number, states: { stage_index: number; pull_state: string; checks_state: string }[]) {
   const waitFor = workflow.stages[stageIndex]?.waitFor;
   if (waitFor?.length) return waitFor.every(dependency => {
@@ -371,7 +385,17 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
   if (!isStoredWorkflow(workflow)) throw new Error('流程数据无效');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
+  const previousRows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflow.id}`;
+  const previous = storedWorkflowFromPayload(previousRows[0]?.payload);
   await sql`INSERT INTO pr_helper_workflows (id, user_id, payload) VALUES (${workflow.id}, ${user.id}, ${sql.json(workflow)}) ON CONFLICT (user_id, id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`;
+  if (previous) {
+    const changedStageIndexes = previous.stages.flatMap((stage, index) => {
+      const next = workflow.stages[index];
+      return !next || stage.source !== next.source || stage.target !== next.target ? [index] : [];
+    });
+    for (const stageIndex of changedStageIndexes) await sql`DELETE FROM workflow_stage_events WHERE user_id = ${user.id} AND workflow_id = ${workflow.id} AND stage_index = ${stageIndex}`;
+  }
+  await pruneStaleWorkflowStageData(sql, user.id, workflow);
 }
 
 export async function removeWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string) {
@@ -562,11 +586,13 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
 export async function reconcileWorkflowStages(environment: Record<string, string | undefined>, filter: { repository?: string; installationId?: string; eventName?: string } = {}) {
   const sql = query(environment);
   const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
-  const tracked = rows.flatMap(row => {
+  const workflowsToReconcile = rows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
     if (!workflow || (filter.repository && workflow.repository !== filter.repository) || (filter.installationId && row.github_installation_id !== filter.installationId)) return [];
-    return workflow.stages.map((_, stageIndex) => ({ row, workflow, stageIndex }));
+    return [{ row, workflow }];
   });
+  for (const item of workflowsToReconcile) await pruneStaleWorkflowStageData(sql, item.row.user_id, item.workflow);
+  const tracked = workflowsToReconcile.flatMap(({ row, workflow }) => workflow.stages.map((_, stageIndex) => ({ row, workflow, stageIndex })));
   const routeTasks = await Promise.all(tracked.map(async item => (await routeSourcesForStage(environment, sql, item.row, item.workflow, item.stageIndex)).map(source => ({ ...item, source }))));
   const results = await Promise.allSettled(routeTasks.flat().map(item => reconcileOneStage(environment, item.row, item.workflow, item.stageIndex, item.source, filter.eventName)));
   const failed = results.find(result => result.status === 'rejected');
