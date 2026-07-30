@@ -497,7 +497,16 @@ body {
   background: transparent;
   color: var(--text-primary);
   cursor: pointer;
-  font: 700 1.25rem/1 Manrope;
+}
+
+.source-branch-toggle svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .source-branch-toggle:hover,
