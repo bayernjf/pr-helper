@@ -1,6 +1,18 @@
 # PR Helper
 
-GitHub-first web application for managing ordered pull-request workflows, such as `feature/xxx → dev → main`.
+GitHub-first PR / Release Control Tower for managing real pull-request and deployment workflows across repositories, including linear paths and convergence routes such as `feature/* + fix/* → dev → main`.
+
+The current implementation includes:
+
+- A multi-project Lane board with ordering, filters, live status, and step drawers.
+- GitHub App authorization and user-scoped workflow persistence in Supabase.
+- PR creation, merge-commit execution, five-category GitHub gates, and post-merge Actions tracking.
+- Dynamic source rules, independent routes, and multi-route convergence gates.
+- Streaming AI-generated PR titles/descriptions, 24-hour local drafts, and Markdown generation rules.
+- GitHub Webhook + scheduled reconciliation, Web Push, failure details, Actions reruns, and Codex repair packages.
+- Vercel/Cloudflare deployment gates, health checks, run history, configuration warnings, and confirmed Production rollback.
+
+See [docs/current-state.md](docs/current-state.md) for the authoritative architecture, feature boundaries, and next priorities. Historical specifications and plans under `docs/superpowers/` are retained for decision history.
 
 ## Local development
 
@@ -8,6 +20,50 @@ GitHub-first web application for managing ordered pull-request workflows, such a
 npm ci
 npm run dev
 ```
+
+The local Vite server does not host the Vercel API functions. Set `VITE_AUTH_ORIGIN` to the canonical Vercel deployment to exercise GitHub App flows locally, or use the collapsed PAT development fallback. A PAT is not the production authentication path.
+
+Useful checks:
+
+```bash
+npm test
+npx tsc --noEmit
+npm run lint
+```
+
+## Architecture
+
+| Layer | Current implementation |
+| --- | --- |
+| Frontend | Vite + vanilla TypeScript + CSS |
+| Secure API | Vercel Serverless Functions under `api/` |
+| GitHub | GitHub App OAuth, signed session cookie, short-lived installation tokens |
+| Persistence | Supabase Postgres through `DATABASE_URL` |
+| Monitoring | Signed GitHub Webhook plus scheduled reconciliation |
+| Notifications | Web Push + Service Worker |
+| Static mirror | Cloudflare Pages using `VITE_AUTH_ORIGIN` for the canonical Vercel API |
+
+## Database
+
+Run every migration in `db/migrations/` in numeric order. The current schema baseline is `001` through `013`; request handlers never create or alter tables. See [db/README.md](db/README.md).
+
+Required Vercel settings for the secure API include:
+
+- `GITHUB_APP_ID`
+- `GITHUB_APP_CLIENT_ID`
+- `GITHUB_APP_CLIENT_SECRET`
+- `GITHUB_APP_PRIVATE_KEY`
+- `GITHUB_APP_SLUG`
+- `GITHUB_WEBHOOK_SECRET`
+- `AUTH_SESSION_SECRET`
+- `APP_ORIGIN`
+- `DATABASE_URL`
+- `CRON_SECRET`
+- `VAPID_PUBLIC_KEY`
+- `VAPID_PRIVATE_KEY`
+- `VAPID_SUBJECT`
+
+GitHub App repository permissions currently require Metadata read, Contents read/write, Pull requests read/write, Checks read, Actions read/write, Commit statuses read, and Administration read. Actions write access is used for reruns and `workflow_dispatch`; GitHub still enforces branch protection and Environment rules.
 
 ## CI and deployments
 
@@ -27,5 +83,7 @@ Configure these repository secrets before the first deployment:
 - `VERCEL_PROJECT_ID`
 
 Optionally set the repository variable `CLOUDFLARE_PAGES_PROJECT`. It defaults to `pr-helper`; create a Cloudflare Pages project with that name first if you do not set a different value.
+
+The `Rollback frontend deployment` workflow powers confirmed rollbacks from PR Helper. It accepts the recorded deployment run and immutable URL, verifies that the run was a successful `main` production deployment, then uses the same provider secrets above to restore that version. Preview deployments are intentionally excluded. Keep approval rules enabled on the `production-vercel` and `production-cloudflare-pages` GitHub Environments if production rollback should require an additional GitHub approval.
 
 For GitHub App authentication, Vercel is the canonical secure origin. Set GitHub App secrets in Vercel (never in this repository) and set the GitHub repository variable `VITE_AUTH_ORIGIN` to that Vercel origin so the Cloudflare Pages mirror redirects users to the correct authorization API.

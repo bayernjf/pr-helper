@@ -1,5 +1,7 @@
 # GitHub App Authentication and Onboarding Plan
 
+> **Status: implemented; retained as an operational decision record.** GitHub App authorization, installation management, server-side provider routes, signed sessions, and the production connection UI are live. Workflow persistence, Webhooks, Web Push, Actions reruns, and rollback dispatch were delivered after this plan. See [`../../current-state.md`](../../current-state.md) for current permissions and architecture.
+
 ## Goal
 
 Replace the production Personal Access Token (PAT) entry point with a GitHub App installation flow that can access user-authorized public, private, and organization repositories. Redesign the first-visit screen around that secure connection path. Keep PAT only as an explicit local-development fallback.
@@ -27,7 +29,7 @@ Repository permissions:
 - Contents: Read & write (required for in-app PR merge)
 - Pull requests: Read & write
 - Checks: Read-only
-- Actions: Read-only
+- Actions: Read & write (required to read runs, rerun failed Actions, and dispatch confirmed rollback workflows)
 - Commit statuses: Read-only
 - Administration: Read-only
 
@@ -84,20 +86,24 @@ Required Vercel environment variables:
 
 ### 5. Deployment and production verification
 
-- [ ] Add non-secret environment variable documentation to `README.md`.
-- [ ] Configure Vercel production and preview environment variables.
-- [ ] Configure GitHub App callback/setup URLs for the canonical domain.
+- [x] Add non-secret environment variable documentation to `README.md`.
+- [x] Configure Vercel production and preview environment variables.
+- [x] Configure GitHub App callback/setup URLs for the canonical domain.
 - [ ] Validate the flow against one public repository, one private repository, and one organization repository (where installation is permitted).
 - [ ] Verify Cloudflare mirror messaging redirects users to the canonical authorization origin until cross-origin session support is introduced.
 
 **Acceptance:** CI passes; Vercel deployment completes; GitHub App connection works end-to-end for authorized repositories; no secrets appear in source, browser storage, logs, or Actions output.
 
-## Deferred follow-up
+## Follow-up delivered after this plan
 
-- Persist workflows, drafts, and AI generation rules per user in a database.
-- GitHub webhooks for closed-browser monitoring and push notifications.
+- Persisted workflow configuration and monitoring/deployment state per GitHub user in Supabase; PR drafts and AI generation rules deliberately remain browser-local.
+- Added signed GitHub Webhooks, scheduled reconciliation, Service Worker/Web Push, failure recovery, deployment tracking, and confirmed rollback dispatch.
+
+## Remaining follow-up
+
 - Installation management for multiple GitHub accounts and organizations.
 - Cloudflare-native API/session layer if Cloudflare becomes the canonical production origin.
+- Periodic live regression against public, private, and organization repositories.
 
 ## Progress log
 
@@ -108,3 +114,5 @@ Required Vercel environment variables:
 | 2026-07-26 | Complete | Added OAuth, installation, logout, session, and protected GitHub-provider routes; production browser requests now use the API layer instead of exposing an installation token. |
 | 2026-07-26 | Complete | Reworked the first-visit screen around GitHub App authorization and moved PAT into a development-only disclosure. |
 | 2026-07-26 | Blocked externally | End-to-end verification awaits GitHub App creation, Vercel environment variables, and canonical callback/setup URL configuration. |
+| 2026-07-27 | Complete | GitHub App was configured and the application moved to server-side installation-token access with Supabase persistence, Webhook monitoring, and Web Push. |
+| 2026-07-30 | Updated | Actions permission is now Read & write for reruns and confirmed rollback `workflow_dispatch`; GitHub continues to enforce repository and Environment protections. |

@@ -1,5 +1,7 @@
 # Streaming PR Generation and Draft Persistence Implementation Plan
 
+> **状态：已完成的历史实施计划。** SSE 流式生成、覆盖确认、取消处理和 24 小时草稿均已交付。下面的原始复选框保留用于追溯，不表示仍待开发；当前边界见 [`../../current-state.md`](../../current-state.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stream AI-generated PR titles and descriptions into the create-PR dialog while preserving per-repository and per-branch drafts for 24 hours.

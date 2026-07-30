@@ -1,5 +1,7 @@
 # PR Generation Rules Implementation Plan
 
+> **状态：已完成的历史实施计划。** 生成规则、Markdown 导入、默认选择和 AI prompt 集成均已交付。下面的原始复选框保留用于追溯，不表示仍待开发；当前边界见 [`../../current-state.md`](../../current-state.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add locally persisted Markdown generation rules that are automatically selected for new PRs and can be managed from the Create Pull Request dialog.

@@ -1,5 +1,7 @@
 # GitHub Account and Workflow Persistence Plan
 
+> **Status: implemented through database migration `013`.** User-scoped workflows, monitoring state, audit events, Push subscriptions, deployment state, health checks, and deployment history now use Supabase. PR drafts, AI keys, and Markdown generation rules retain their documented browser-local boundaries. See [`../../current-state.md`](../../current-state.md).
+
 ## Goal
 
 Keep GitHub as PR Helper's only account identity. Store workflow configurations per GitHub user so they follow the user across browsers and devices, without storing AI provider secrets in the database.
@@ -37,9 +39,9 @@ Keep GitHub as PR Helper's only account identity. Store workflow configurations 
 
 ### 4. Production enablement
 
-- [ ] Create or choose a PostgreSQL database (Neon, Vercel Postgres, or an existing managed Postgres).
-- [ ] Add `DATABASE_URL` to Vercel Production and Preview environments.
-- [ ] Run migration files in order through Supabase SQL Editor or a dedicated migration job (`001_users_and_workflows.sql`, then `002_normalize_workflow_payloads.sql`).
+- [x] Create or choose a PostgreSQL database (Supabase Postgres).
+- [x] Add `DATABASE_URL` to Vercel Production and Preview environments.
+- [x] Run migration files in order through Supabase SQL Editor (current baseline: `001`–`013`).
 - [ ] Deploy and verify: create a workflow in one browser, sign in with the same GitHub account in another browser, and confirm it appears.
 
 ## Data boundaries
@@ -57,3 +59,4 @@ Keep GitHub as PR Helper's only account identity. Store workflow configurations 
 | --- | --- | --- |
 | 2026-07-27 | In progress | Implemented code-level Postgres persistence boundary and local fallback; production database connection still needs a user-selected database and `DATABASE_URL`. |
 | 2026-07-27 | Updated | Removed runtime DDL. The migration SQL is now the only schema source and must be applied explicitly before workflows can use the database. |
+| 2026-07-30 | Complete | Supabase is active and migrations through `013_deployment_run_history.sql` have been applied. Cross-browser verification remains a release regression item. |

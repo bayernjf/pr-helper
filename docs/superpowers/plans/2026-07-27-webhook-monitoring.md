@@ -1,5 +1,7 @@
 # P1: GitHub Webhook Monitoring Plan
 
+> **Status: delivered.** Signed Webhooks, delivery deduplication, persisted stage state, scheduled reconciliation, and the server-derived action queue are implemented. Current architecture and remaining observability work are tracked in [`../../current-state.md`](../../current-state.md).
+
 ## Goal
 
 Move workflow monitoring off the open browser: GitHub delivers signed events to PR Helper, which durably records them in Supabase before later stages derive per-workflow status and notifications.
