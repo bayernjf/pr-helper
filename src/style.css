@@ -485,6 +485,19 @@ body {
   text-decoration: underline;
 }
 
+button.text-link {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+
+.editor-repository-help {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+}
+
 .draft h2 {
   margin: 7px 0 2px;
 }
