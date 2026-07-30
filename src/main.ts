@@ -384,6 +384,7 @@ function render() {
     }
   });
   accountMenuPanel.addEventListener('click', closeAccountMenu);
+  document.querySelector<HTMLAnchorElement>('.brand')!.addEventListener('click', event => { event.preventDefault(); goTo('overview'); });
   document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) active = null; goTo(target); }));
   document.querySelector('#theme-toggle')!.addEventListener('click', toggleTheme);
   document.querySelector('#lang-toggle')!.addEventListener('click', () => { setLocale(getLocale() === 'zh' ? 'en' : 'zh'); render(); });
