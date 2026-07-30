@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canCheckDeploymentUrl, compactFailureDetails, deploymentFailureSummary, deploymentNotification, deploymentProviderForWorkflowRun, deploymentRunState, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, repairCommitSha, rollbackDeploymentIsAvailable, sortStoredWorkflows, storedWorkflowFromPayload, workflowConfigurationWarnings } from './workflows-store';
+import { canCheckDeploymentUrl, compactFailureDetails, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, repairCommitSha, rollbackDeploymentIsAvailable, sortStoredWorkflows, storedWorkflowFromPayload, workflowConfigurationWarnings, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('accepts a workflow with real branch stages', () => {
@@ -65,6 +65,24 @@ describe('stored workflow validation', () => {
     expect(deploymentRunState({ status: 'queued', conclusion: null })).toBe('pending');
     expect(deploymentRunState({ status: 'completed', conclusion: 'success' })).toBe('success');
     expect(deploymentRunState({ status: 'completed', conclusion: 'failure' })).toBe('failure');
+  });
+
+  it('creates the matching stage-state parent before persisting a deployment', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main' }] };
+    expect(deploymentParentState(workflow, 0, 'dev', 'merge-sha')).toEqual({ repository: 'octo/app', source: 'dev', target: 'main', headSha: 'merge-sha' });
+  });
+
+  it('rejects stale stage state rows after routes are edited or reordered', () => {
+    const workflow = {
+      id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [
+        { source: 'feature/20260722', target: 'dev' },
+        { source: 'fix-test', target: 'dev', independent: true },
+        { source: 'dev', target: 'main', independent: true },
+      ],
+    };
+    expect(workflowStageStateMatchesDefinition(workflow, { stageIndex: 0, source: 'feature/20260722', target: 'dev' })).toBe(true);
+    expect(workflowStageStateMatchesDefinition(workflow, { stageIndex: 1, source: 'dev', target: 'dev' })).toBe(false);
+    expect(workflowStageStateMatchesDefinition(workflow, { stageIndex: 2, source: 'fix-test', target: 'main' })).toBe(false);
   });
 
   it('keeps a merged route locked while public deployments are pending or failed', () => {
