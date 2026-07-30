@@ -155,7 +155,7 @@ const zh: TranslationDict = {
   'editor.title.new': '新建流程',
   'editor.subtitle': '流程配置不会创建任何 GitHub PR。',
   'editor.label.name': '流程名称',
-  'editor.placeholder.name': '例如：支付功能上线',
+  'editor.placeholder.name': '不填则默认为仓库名',
   'editor.label.repo': '仓库',
   'editor.repo.placeholder': '选择 GitHub 仓库',
   'editor.repo.private': ' · private',
@@ -234,6 +234,15 @@ const zh: TranslationDict = {
   'draft.independent': '独立',
   'draft.waitFor': '等待 {count} 条路径',
   'draft.viewDetail': '查看流程详情',
+
+  'workflowDelete.action': '删除整个流程',
+  'workflowDelete.eyebrow': '危险操作',
+  'workflowDelete.title': '删除整个流程？',
+  'workflowDelete.desc': '将删除流程“{name}”及其步骤配置。',
+  'workflowDelete.warning': '不会删除 GitHub PR、分支或已部署内容。此操作无法撤销。',
+  'workflowDelete.cancel': '取消',
+  'workflowDelete.confirm': '确认删除',
+  'workflowDelete.success': '流程已删除',
 
   // Detail
   'detail.eyebrow': 'FLOW DETAIL',

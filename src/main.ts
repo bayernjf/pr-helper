@@ -226,6 +226,24 @@ function showDisconnectDialog() {
     connect();
   }, { once: true });
 }
+
+function showDeleteWorkflowDialog(workflow: Workflow) {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog confirm-dialog delete-workflow-dialog';
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('workflowDelete.eyebrow')}</p><h2>${t('workflowDelete.title')}</h2><p>${t('workflowDelete.desc', { name: escape(workflow.name) })}</p><p class="meta">${t('workflowDelete.warning')}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('workflowDelete.cancel')}</button><button value="confirm" class="danger-button">${t('workflowDelete.confirm')}</button></div></form>`;
+  document.body.append(dialog); dialog.showModal();
+  dialog.addEventListener('close', async () => {
+    const confirmed = dialog.returnValue === 'confirm';
+    dialog.remove();
+    if (!confirmed) return;
+    active = null;
+    screen = 'overview';
+    await removeWorkflowFromStorage(workflow.id);
+    await loadActionQueue();
+    render();
+    showToast(t('workflowDelete.success'));
+  }, { once: true });
+}
 async function syncLocalWorkflows() {
   if (!cloudWorkflowStorage || !workflows.length) return;
   try {
@@ -384,6 +402,7 @@ function render() {
     }
   });
   accountMenuPanel.addEventListener('click', closeAccountMenu);
+  document.querySelector<HTMLAnchorElement>('.brand')!.addEventListener('click', event => { event.preventDefault(); goTo('overview'); });
   document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) active = null; goTo(target); }));
   document.querySelector('#theme-toggle')!.addEventListener('click', toggleTheme);
   document.querySelector('#lang-toggle')!.addEventListener('click', () => { setLocale(getLocale() === 'zh' ? 'en' : 'zh'); render(); });
@@ -595,9 +614,10 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const mergeStatus = laneMergeStatus(state);
   const mergeAction = mergeStatus && canMergePull(mergeStatus) ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
   const recoveryActions = state?.checksState === 'failure' ? `<button class="ghost drawer-repair">${t('repair.codex')}</button><button class="ghost drawer-retry-actions">${t('recovery.retryActions')}</button>` : '';
+  const actions = `<div class="dialog-actions drawer-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div>`;
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
-  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p><div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${configurationWarnings}${deployments}${deploymentHistory}${history}<div class="dialog-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div></section>`;
+  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p>${actions}<div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${configurationWarnings}${deployments}${deploymentHistory}${history}</section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);
@@ -644,6 +664,7 @@ function editor() {
   content.innerHTML = `<section class="page-head"><button id="back-from-editor" class="ghost">${active ? t('editor.back.detail') : t('editor.back.overview')}</button><p class="eyebrow">${t('editor.eyebrow')}</p><h1>${active ? t('editor.title.edit') : t('editor.title.new')}</h1><p>${t('editor.subtitle')}</p></section><section class="editor-layout"><section class="panel editor-panel"><label>${t('editor.label.name')}<input id="flow-name" value="${escape(active?.name || '')}" placeholder="${t('editor.placeholder.name')}" /></label><label>${t('editor.label.repo')}<select id="repo"><option value="">${t('editor.repo.placeholder')}</option>${repos.map(repo => `<option value="${repo.full_name}" ${repo.full_name === selected ? 'selected' : ''}>${repo.full_name}${repo.private ? t('editor.repo.private') : ''}</option>`).join('')}</select></label><div id="step-form">${selected ? `<p class="meta">${t('editor.branch.loading')}</p>` : `<div class="editor-repository-help"><p class="meta">${t('editor.branch.hint')}</p>${repositoryManagementAction}</div>`}</div></section><aside id="draft" class="panel draft">${renderDraft()}</aside></section>`;
   document.querySelector('#back-from-editor')!.addEventListener('click', () => goTo('back'));
   document.querySelector('#editor-manage-repositories')?.addEventListener('click', openRepositoryManagement);
+  document.querySelector('#delete-flow')?.addEventListener('click', () => { if (active) showDeleteWorkflowDialog(active); });
   document.querySelector<HTMLSelectElement>('#repo')!.addEventListener('change', async event => { active = active?.repository === (event.target as HTMLSelectElement).value ? active : null; await loadBranches((event.target as HTMLSelectElement).value); });
   if (selected) loadBranches(selected);
 }
@@ -673,9 +694,25 @@ function renderStepForm(repository: string) {
     ? `<fieldset class="route-dependencies"><legend>${t('editor.dependencies.label')}</legend><small>${t('editor.dependencies.desc')}</small><div>${active.stages.map((stage, index) => `<label><input type="checkbox" name="wait-for-route" value="${index}" /><span>${escape(stage.source)} → ${escape(stage.target)}</span></label>`).join('')}</div></fieldset>`
     : '';
   const deploymentSettings = active?.repository === repository ? renderDeploymentSettings() : '';
-  document.querySelector('#step-form')!.innerHTML = `<div class="two"><label>${t('editor.label.source')}<input id="source" list="source-branches" value="${escape(source)}" placeholder="feature/*" /><datalist id="source-branches">${options(source)}</datalist><small>${t('editor.sourceRuleHint')}</small></label><label>${t('editor.label.target')}<select id="target">${options(target)}</select></label></div><label class="route-mode"><input id="independent-route" type="checkbox" ${active?.repository === repository ? 'checked' : ''} /><span><b>${t('editor.independent.label')}</b><small>${t('editor.independent.desc')}</small></span></label>${dependencyOptions}<div class="actions"><a id="compare" target="_blank" class="text-link">${t('editor.compare')}</a><button id="add-step" class="primary">${active?.repository === repository ? t('editor.addRoute') : t('editor.saveFlow')}</button></div>${deploymentSettings}`;
+  const sourceBranches = branches.map(branch => `<button type="button" role="option" data-source-branch="${escape(branch)}">${escape(branch)}</button>`).join('');
+  document.querySelector('#step-form')!.innerHTML = `<div class="two"><div class="source-field"><label for="source">${t('editor.label.source')}</label><div class="branch-picker"><input id="source" value="${escape(source)}" placeholder="feature/*" role="combobox" aria-autocomplete="list" aria-controls="source-branches" aria-expanded="false" /><button id="source-branch-toggle" type="button" class="source-branch-toggle" aria-label="${t('editor.label.source')}" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button><div id="source-branches" class="source-branch-options" role="listbox" hidden>${sourceBranches}</div></div><small>${t('editor.sourceRuleHint')}</small></div><label>${t('editor.label.target')}<select id="target">${options(target)}</select></label></div><label class="route-mode"><input id="independent-route" type="checkbox" ${active?.repository === repository ? 'checked' : ''} /><span><b>${t('editor.independent.label')}</b><small>${t('editor.independent.desc')}</small></span></label>${dependencyOptions}<div class="actions"><a id="compare" target="_blank" class="text-link">${t('editor.compare')}</a><button id="add-step" class="primary">${active?.repository === repository ? t('editor.addRoute') : t('editor.saveFlow')}</button></div>${deploymentSettings}`;
   const sync = () => document.querySelector<HTMLAnchorElement>('#compare')!.href = githubCompareUrl(repository, value('source'), value('target'));
-  document.querySelector('#source')!.addEventListener('input', sync); document.querySelector('#target')!.addEventListener('change', sync); sync();
+  const sourceInput = document.querySelector<HTMLInputElement>('#source')!;
+  const sourcePicker = document.querySelector<HTMLElement>('.branch-picker')!;
+  const sourceBranchOptions = document.querySelector<HTMLElement>('#source-branches')!;
+  const sourceBranchToggle = document.querySelector<HTMLButtonElement>('#source-branch-toggle')!;
+  const closeSourceBranches = () => { sourceBranchOptions.hidden = true; sourceInput.setAttribute('aria-expanded', 'false'); sourceBranchToggle.setAttribute('aria-expanded', 'false'); document.removeEventListener('pointerdown', closeWhenOutside); };
+  const filterSourceBranches = () => {
+    const query = sourceInput.value.trim().toLowerCase();
+    sourceBranchOptions.querySelectorAll<HTMLButtonElement>('[data-source-branch]').forEach(button => { button.hidden = Boolean(query && !button.dataset.sourceBranch?.toLowerCase().includes(query)); });
+  };
+  const closeWhenOutside = (event: PointerEvent) => { if (!sourcePicker.contains(event.target as Node)) closeSourceBranches(); };
+  const openSourceBranches = () => { filterSourceBranches(); sourceBranchOptions.hidden = false; sourceInput.setAttribute('aria-expanded', 'true'); sourceBranchToggle.setAttribute('aria-expanded', 'true'); document.addEventListener('pointerdown', closeWhenOutside); };
+  sourceInput.addEventListener('focus', openSourceBranches); sourceInput.addEventListener('click', openSourceBranches); sourceInput.addEventListener('input', () => { sync(); openSourceBranches(); });
+  sourceInput.addEventListener('keydown', event => { if (event.key === 'ArrowDown') { event.preventDefault(); openSourceBranches(); } if (event.key === 'Escape') closeSourceBranches(); });
+  sourceBranchToggle.addEventListener('click', () => { if (sourceBranchOptions.hidden) { sourceInput.focus(); openSourceBranches(); } else closeSourceBranches(); });
+  sourceBranchOptions.querySelectorAll<HTMLButtonElement>('[data-source-branch]').forEach(button => button.addEventListener('click', () => { sourceInput.value = button.dataset.sourceBranch || ''; sync(); closeSourceBranches(); sourceInput.focus(); }));
+  document.querySelector('#target')!.addEventListener('change', sync); sync();
   document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } if (active?.repository === repository && active.stages.some(stage => stage.source === source && stage.target === target)) { showToast(t('editor.error.duplicateRoute')); return; } const name = value('flow-name') || repository; const isNew = active?.repository !== repository; const independent = document.querySelector<HTMLInputElement>('#independent-route')!.checked; const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="wait-for-route"]:checked')].map(input => Number(input.value)); const next = active?.repository === repository ? { ...addStage(active, source, target, independent, waitFor), name } : createWorkflow(repository, source, target, name); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.routeSaved', { source, target })); renderStepForm(repository); });
   document.querySelector<HTMLButtonElement>('#add-deployment')?.addEventListener('click', () => {
     if (!active) return;
@@ -707,7 +744,13 @@ function renderDeploymentSettings() {
 }
 function options(selected: string) { return branches.map(branch => `<option ${branch === selected ? 'selected' : ''}>${escape(branch)}</option>`).join(''); }
 function value(id: string) { return document.querySelector<HTMLSelectElement | HTMLInputElement>(`#${id}`)!.value; }
-function renderDraft() { if (!active) return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${t('draft.empty.title')}</h2><p class="meta">${t('draft.empty.desc')}</p>`; return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${escape(active.name)}</h2><p class="meta">${escape(active.repository)}</p>${active.stages.map((stage, index) => `<div class="draft-step"><span>${index + 1}</span><b>${escape(stage.source)} → ${escape(stage.target)}</b>${stage.waitFor?.length ? `<small>${t('draft.waitFor', { count: stage.waitFor.length })}</small>` : stage.independent ? `<small>${t('draft.independent')}</small>` : ''}<button data-remove="${index}">${t('draft.remove')}</button></div>`).join('')}<button id="view-flow" class="ghost">${t('draft.viewDetail')}</button>`; }
+function renderDraft() {
+  if (!active) return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${t('draft.empty.title')}</h2><p class="meta">${t('draft.empty.desc')}</p>`;
+  return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${escape(active.name)}</h2><p class="meta">${escape(active.repository)}</p>${active.stages.map((stage, index) => {
+    const badge = stage.waitFor?.length ? `<small>${t('draft.waitFor', { count: stage.waitFor.length })}</small>` : stage.independent ? `<small>${t('draft.independent')}</small>` : '';
+    return `<div class="draft-step"><span>${index + 1}</span><div class="draft-step-main"><b>${escape(stage.source)} → ${escape(stage.target)}</b>${badge}</div><button data-remove="${index}">${t('draft.remove')}</button></div>`;
+  }).join('')}<div class="draft-footer"><button id="view-flow" class="ghost">${t('draft.viewDetail')}</button><button id="delete-flow" class="draft-delete-flow" type="button">${t('workflowDelete.action')}</button></div>`;
+}
 
 function detail() {
   const content = document.querySelector('#content')!;

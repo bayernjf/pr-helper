@@ -155,7 +155,7 @@ const en: TranslationDict = {
   'editor.title.new': 'New Flow',
   'editor.subtitle': 'Configuring a flow does not create any GitHub PRs.',
   'editor.label.name': 'Flow name',
-  'editor.placeholder.name': 'e.g., Payment feature rollout',
+  'editor.placeholder.name': 'Defaults to the repository name if left blank',
   'editor.label.repo': 'Repository',
   'editor.repo.placeholder': 'Select a GitHub repository',
   'editor.repo.private': ' · private',
@@ -234,6 +234,15 @@ const en: TranslationDict = {
   'draft.independent': 'Independent',
   'draft.waitFor': 'Wait for {count} routes',
   'draft.viewDetail': 'View flow details',
+
+  'workflowDelete.action': 'Delete flow',
+  'workflowDelete.eyebrow': 'Danger zone',
+  'workflowDelete.title': 'Delete this flow?',
+  'workflowDelete.desc': 'This will delete the “{name}” flow and its step configuration.',
+  'workflowDelete.warning': 'GitHub pull requests, branches, and deployments will not be deleted. This cannot be undone.',
+  'workflowDelete.cancel': 'Cancel',
+  'workflowDelete.confirm': 'Delete flow',
+  'workflowDelete.success': 'Flow deleted',
 
   // Detail
   'detail.eyebrow': 'FLOW DETAIL',
