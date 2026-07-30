@@ -325,6 +325,7 @@ const en: TranslationDict = {
   'repair.toast.copyFailed': 'Copy failed — please copy the repair task manually.',
   'repair.codex': 'Send to Codex',
   'recovery.sync': 'Sync again',
+  'recovery.syncing': 'Syncing…',
   'recovery.retryActions': 'Rerun Actions',
   'recovery.retrying': 'Rerunning…',
   'recovery.retryStarted': 'Reran {count} failed Actions.',

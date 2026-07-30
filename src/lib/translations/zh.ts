@@ -325,6 +325,7 @@ const zh: TranslationDict = {
   'repair.toast.copyFailed': '复制失败，请手动复制修复任务内容。',
   'repair.codex': '交给 Codex 修复',
   'recovery.sync': '重新同步',
+  'recovery.syncing': '正在同步…',
   'recovery.retryActions': '重新触发 Actions',
   'recovery.retrying': '正在重新触发…',
   'recovery.retryStarted': '已重新触发 {count} 个失败的 Actions。',

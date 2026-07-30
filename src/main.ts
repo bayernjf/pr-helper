@@ -658,7 +658,23 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
       void loadActionQueue().finally(render);
     });
   });
-  dialog.querySelector<HTMLButtonElement>('.drawer-sync')?.addEventListener('click', () => { dialog.close(); void loadActionQueue().finally(render); });
+  dialog.querySelector<HTMLButtonElement>('.drawer-sync')?.addEventListener('click', async event => {
+    const button = event.currentTarget as HTMLButtonElement;
+    button.disabled = true;
+    button.textContent = t('recovery.syncing');
+    active = flow;
+    try {
+      await refreshStatuses(false);
+      const queueLoaded = await loadActionQueue();
+      if (!queueLoaded && actionQueueError) showToast(actionQueueError);
+      dialog.addEventListener('close', () => showProjectStepDrawer(flow.id, stageIndex, routeSource), { once: true });
+      dialog.close();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : t('toast.unknownError'));
+      button.disabled = false;
+      button.textContent = t('recovery.sync');
+    }
+  });
   dialog.querySelector<HTMLButtonElement>('.drawer-repair')?.addEventListener('click', () => { active = flow; dialog.close(); void showCodexRepairDialog(stageIndex, routeSource); });
   dialog.querySelector<HTMLButtonElement>('.drawer-retry-actions')?.addEventListener('click', event => { if (state) void retryFailedActions(flow, state, event.currentTarget as HTMLButtonElement); });
   dialog.querySelectorAll<HTMLButtonElement>('.deployment-retry').forEach(button => button.addEventListener('click', () => {
@@ -838,7 +854,7 @@ function detail() {
   const summary = workflowSummary(active);
   content.innerHTML = `<section class="page-head"><p class="eyebrow">${t('detail.eyebrow')}</p><h1>${escape(active.name)}</h1><p>${escape(active.repository)} · ${escape(summary.route)}</p><button id="refresh-status" class="ghost">${t('detail.refresh')}</button></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">${t('detail.timeline.eyebrow')}</p>${active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><aside class="panel next-action"><p class="eyebrow">${t('detail.nextAction.eyebrow')}</p><h2>${nextActionTitle()}</h2><p>${statuses ? t('detail.desc.withStatuses') : t('detail.desc.noStatuses')}</p><button id="edit-flow" class="primary">${t('detail.edit')}</button></aside></section>`;
   document.querySelector('#edit-flow')!.addEventListener('click', () => { screen = 'editor'; render(); });
-  document.querySelector('#refresh-status')!.addEventListener('click', refreshStatuses);
+  document.querySelector('#refresh-status')!.addEventListener('click', () => { void refreshStatuses(); });
   document.querySelectorAll<HTMLButtonElement>('[data-codex-repair]').forEach(button => button.addEventListener('click', () => void showCodexRepairDialog(Number(button.dataset.codexRepair))));
   if (!pollTimer) pollTimer = window.setInterval(() => refreshStatuses(), 30000);
   if (!refreshOnFocusBound) {
@@ -1085,7 +1101,7 @@ function nextActionTitle() { if (!statuses) return t('nextAction.notStarted'); i
 async function readBranchProtection(owner: string, name: string, branch: string) {
   try { return await githubFetch<BranchProtection>(token, `/repos/${owner}/${name}/branches/${encodeURIComponent(branch)}/protection`); } catch { return null; }
 }
-async function refreshStatuses() {
+async function refreshStatuses(renderDetail = true) {
   if (!active) return;
   const button = document.querySelector<HTMLButtonElement>('#refresh-status');
   if (button) { button.disabled = true; button.textContent = t('detail.refresh.loading'); }
@@ -1151,7 +1167,7 @@ async function refreshStatuses() {
     showToast(message);
     if (Notification.permission === 'granted') new Notification(t('notif.title'), { body: message });
   });
-  detail();
+  if (renderDetail) detail();
 }
 
 function showGenerationRules(selectedId: string | null, onUse: (id: string) => void, onRulesChanged: () => void) {
