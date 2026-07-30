@@ -233,6 +233,9 @@ const zh: TranslationDict = {
   'draft.remove': '删除',
   'draft.independent': '独立',
   'draft.waitFor': '等待 {count} 条路径',
+  'draft.drag': '拖动排序：{name}',
+  'draft.moveUp': '上移步骤：{name}',
+  'draft.moveDown': '下移步骤：{name}',
   'draft.viewDetail': '查看流程详情',
 
   'workflowDelete.action': '删除整个流程',
