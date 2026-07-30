@@ -1,5 +1,7 @@
 # GitHub PR Orchestrator Implementation Plan
 
+> **状态：已归档，未按原架构执行。** 本计划记录初始 Next.js/React/内存 Provider 设想；最终实现采用 Vite + vanilla TypeScript，并已接入 GitHub App、Vercel API、Supabase 和 Webhook。下面的未勾选清单不是当前 backlog。请以 [`../../current-state.md`](../../current-state.md) 为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a GitHub-only web MVP for saving ordered PR workflows and tracking their PR readiness.

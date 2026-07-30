@@ -1,16 +1,73 @@
-export type WorkflowStage = { source: string; target: string };
-export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; position?: number };
+export type WorkflowStage = { source: string; target: string; independent?: boolean; waitFor?: number[] };
+export type DeploymentProvider = 'vercel' | 'cloudflare';
+export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string; healthCheckPath?: string; rollbackWorkflowName?: string };
+export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; deployments?: DeploymentConfig[]; position?: number };
+export type DeploymentConfigurationWarningCode = 'no-deployments' | 'actions-unavailable' | 'workflow-not-found' | 'environment-missing' | 'environment-not-found' | 'health-path-invalid' | 'rollback-workflow-not-found';
+export type DeploymentConfigurationWarning = { code: DeploymentConfigurationWarningCode; deploymentIndex?: number; value?: string };
 
-export function createWorkflow(repository: string, source: string, target: string, name = repository): Workflow {
-  return { id: `${repository}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, repository, stages: [{ source, target }] };
+export const defaultDeployments: DeploymentConfig[] = [
+  { target: 'dev', provider: 'vercel', workflowName: 'Deploy frontend to Vercel', environment: 'preview', githubEnvironment: 'preview-vercel' },
+  { target: 'dev', provider: 'cloudflare', workflowName: 'Deploy frontend to Cloudflare Pages', environment: 'preview', githubEnvironment: 'preview-cloudflare-pages' },
+  { target: 'main', provider: 'vercel', workflowName: 'Deploy frontend to Vercel', environment: 'production', githubEnvironment: 'production-vercel' },
+  { target: 'main', provider: 'cloudflare', workflowName: 'Deploy frontend to Cloudflare Pages', environment: 'production', githubEnvironment: 'production-cloudflare-pages' },
+];
+
+const bundledRollbackRepository = 'bayernjf/pr-helper';
+const bundledRollbackWorkflow = 'Rollback frontend deployment';
+
+function withBundledRollback(workflow: object, configurations: readonly DeploymentConfig[]) {
+  if ((workflow as { repository?: string }).repository !== bundledRollbackRepository) return [...configurations];
+  return configurations.map(configuration => configuration.environment === 'production' && configuration.workflowName === (configuration.provider === 'vercel' ? 'Deploy frontend to Vercel' : 'Deploy frontend to Cloudflare Pages') && !configuration.rollbackWorkflowName
+    ? { ...configuration, rollbackWorkflowName: bundledRollbackWorkflow }
+    : configuration);
 }
 
-export function addStage(workflow: Workflow, source: string, target: string): Workflow {
-  return { ...workflow, stages: [...workflow.stages, { source, target }] };
+export function deploymentConfigs(workflow: object): DeploymentConfig[] {
+  return withBundledRollback(workflow, (workflow as { deployments?: DeploymentConfig[] }).deployments || defaultDeployments);
+}
+
+export function deploymentConfigsForTarget(workflow: object, target: string) {
+  return deploymentConfigs(workflow).filter(deployment => deployment.target === target);
+}
+
+export function deploymentConfigurationWarnings(workflow: Workflow, context: { actionsLoaded: boolean; actionWorkflows: readonly { name: string; path: string }[]; environmentsLoaded: boolean; environments: readonly string[] }): DeploymentConfigurationWarning[] {
+  const configured = deploymentConfigs(workflow);
+  if (!configured.length) return [{ code: 'no-deployments' }];
+  const warnings: DeploymentConfigurationWarning[] = context.actionsLoaded ? [] : [{ code: 'actions-unavailable' }];
+  const workflowExists = (value: string) => context.actionWorkflows.some(candidate => candidate.name === value || candidate.path === value);
+  configured.forEach((deployment, deploymentIndex) => {
+    if (context.actionsLoaded && !workflowExists(deployment.workflowName)) warnings.push({ code: 'workflow-not-found', deploymentIndex, value: deployment.workflowName });
+    if (!deployment.githubEnvironment) warnings.push({ code: 'environment-missing', deploymentIndex });
+    else if (context.environmentsLoaded && !context.environments.includes(deployment.githubEnvironment)) warnings.push({ code: 'environment-not-found', deploymentIndex, value: deployment.githubEnvironment });
+    if (deployment.healthCheckPath && !deployment.healthCheckPath.startsWith('/')) warnings.push({ code: 'health-path-invalid', deploymentIndex, value: deployment.healthCheckPath });
+    if (deployment.rollbackWorkflowName && context.actionsLoaded && !workflowExists(deployment.rollbackWorkflowName)) warnings.push({ code: 'rollback-workflow-not-found', deploymentIndex, value: deployment.rollbackWorkflowName });
+  });
+  return warnings;
+}
+
+export function addDeployment(workflow: Workflow, deployment: DeploymentConfig): Workflow {
+  return { ...workflow, deployments: [...deploymentConfigs(workflow), deployment] };
+}
+
+export function removeDeployment(workflow: Workflow, index: number): Workflow {
+  return { ...workflow, deployments: deploymentConfigs(workflow).filter((_, deploymentIndex) => deploymentIndex !== index) };
+}
+
+export function createWorkflow(repository: string, source: string, target: string, name = repository): Workflow {
+  return { id: `${repository}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, repository, stages: [{ source, target }], deployments: defaultDeployments };
+}
+
+export function addStage(workflow: Workflow, source: string, target: string, independent = false, waitFor: number[] = []): Workflow {
+  return { ...workflow, stages: [...workflow.stages, { source, target, ...(independent ? { independent: true } : {}), ...(waitFor.length ? { waitFor } : {}) }] };
 }
 
 export function removeStage(workflow: Workflow, index: number): Workflow {
-  return { ...workflow, stages: workflow.stages.filter((_, stageIndex) => stageIndex !== index) };
+  return {
+    ...workflow,
+    stages: workflow.stages
+      .filter((_, stageIndex) => stageIndex !== index)
+      .map(stage => !stage.waitFor ? stage : { ...stage, waitFor: stage.waitFor.filter(dependency => dependency !== index).map(dependency => dependency > index ? dependency - 1 : dependency) }),
+  };
 }
 
 export function saveWorkflow(workflows: Workflow[], workflow: Workflow): Workflow[] {
@@ -48,5 +105,9 @@ export function reorderWorkflows(workflows: readonly Workflow[], draggedId: stri
 }
 
 export function workflowSummary(workflow: Workflow) {
-  return { route: workflow.stages.flatMap((stage, index) => index === 0 ? [stage.source, stage.target] : [stage.target]).join(' → '), stepCount: workflow.stages.length };
+  const isLinear = workflow.stages.every((stage, index) => index === 0 || !stage.independent && workflow.stages[index - 1]?.target === stage.source);
+  const route = isLinear
+    ? workflow.stages.flatMap((stage, index) => index === 0 ? [stage.source, stage.target] : [stage.target]).join(' → ')
+    : workflow.stages.map(stage => `${stage.source} → ${stage.target}`).join(' · ');
+  return { route, stepCount: workflow.stages.length };
 }

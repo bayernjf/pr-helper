@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addStage, createWorkflow, removeStage, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, workflowSummary } from './workflow';
+import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, removeDeployment, removeStage, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
   it('saves the repository and its first selected branch transition', () => {
@@ -20,9 +20,30 @@ describe('workflow configuration', () => {
     ]);
   });
 
+  it('adds an independent merge route without changing legacy linear routes', () => {
+    const workflow = addStage(createWorkflow('bayernjf/pr-helper', 'feature/login', 'dev'), 'fix/payment', 'dev', true);
+    expect(workflow.stages).toEqual([
+      { source: 'feature/login', target: 'dev' },
+      { source: 'fix/payment', target: 'dev', independent: true },
+    ]);
+    expect(workflowSummary(workflow)).toEqual({ route: 'feature/login → dev · fix/payment → dev', stepCount: 2 });
+  });
+
   it('removes one configured step without changing the other steps', () => {
     const workflow = addStage(createWorkflow('bayernjf/pr-helper', 'feature/20260722', 'dev'), 'dev', 'main');
     expect(removeStage(workflow, 0).stages).toEqual([{ source: 'dev', target: 'main' }]);
+  });
+
+  it('keeps selected release dependencies valid when a route is removed', () => {
+    const workflow = {
+      ...createWorkflow('bayernjf/pr-helper', 'feature/login', 'dev'),
+      stages: [
+        { source: 'feature/login', target: 'dev' },
+        { source: 'fix/payment', target: 'dev', independent: true },
+        { source: 'dev', target: 'main', independent: true, waitFor: [0, 1] },
+      ],
+    };
+    expect(removeStage(workflow, 0).stages.at(-1)).toEqual({ source: 'dev', target: 'main', independent: true, waitFor: [0] });
   });
 
   it('keeps configurations for different repositories instead of overwriting them', () => {
@@ -69,5 +90,72 @@ describe('workflow configuration', () => {
     const first = { ...createWorkflow('octo/first', 'feature/first', 'main'), id: 'first', position: 0 };
 
     expect(sortWorkflows([legacy, last, first]).map(workflow => workflow.id)).toEqual(['first', 'last', 'legacy']);
+  });
+
+  it('keeps default public deployments for legacy workflows and allows each project to replace them', () => {
+    const legacy = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature/login', target: 'dev' }] };
+    expect(deploymentConfigsForTarget(legacy, 'dev')).toEqual([
+      { target: 'dev', provider: 'vercel', workflowName: 'Deploy frontend to Vercel', environment: 'preview', githubEnvironment: 'preview-vercel' },
+      { target: 'dev', provider: 'cloudflare', workflowName: 'Deploy frontend to Cloudflare Pages', environment: 'preview', githubEnvironment: 'preview-cloudflare-pages' },
+    ]);
+    const customized = addDeployment({ ...legacy, deployments: [] }, { target: 'staging', provider: 'vercel', workflowName: 'Deploy staging', environment: 'preview', githubEnvironment: 'staging-vercel' });
+    expect(deploymentConfigsForTarget(customized, 'staging')).toEqual([{ target: 'staging', provider: 'vercel', workflowName: 'Deploy staging', environment: 'preview', githubEnvironment: 'staging-vercel' }]);
+    expect(removeDeployment(customized, 0).deployments).toEqual([]);
+  });
+
+  it('preserves an explicitly configured rollback workflow on a deployment gate', () => {
+    const workflow = { ...createWorkflow('octo/app', 'dev', 'main'), deployments: [] };
+    const configured = addDeployment(workflow, {
+      target: 'main',
+      provider: 'vercel',
+      workflowName: 'Deploy production',
+      environment: 'production',
+      rollbackWorkflowName: 'Rollback production',
+    });
+
+    expect(deploymentConfigsForTarget(configured, 'main')).toEqual([{
+      target: 'main',
+      provider: 'vercel',
+      workflowName: 'Deploy production',
+      environment: 'production',
+      rollbackWorkflowName: 'Rollback production',
+    }]);
+  });
+
+  it('enables the bundled production rollback workflow for the PR Helper repository', () => {
+    const workflow = createWorkflow('bayernjf/pr-helper', 'dev', 'main');
+    expect(deploymentConfigsForTarget(workflow, 'main')).toEqual([
+      expect.objectContaining({ provider: 'vercel', rollbackWorkflowName: 'Rollback frontend deployment' }),
+      expect.objectContaining({ provider: 'cloudflare', rollbackWorkflowName: 'Rollback frontend deployment' }),
+    ]);
+    expect(deploymentConfigsForTarget(createWorkflow('octo/app', 'dev', 'main'), 'main').every(deployment => deployment.rollbackWorkflowName === undefined)).toBe(true);
+    expect(deploymentConfigsForTarget({ ...workflow, deployments: [{ target: 'main', provider: 'vercel', workflowName: 'Custom production', environment: 'production' }] }, 'main')[0].rollbackWorkflowName).toBeUndefined();
+  });
+
+  it('reports actionable deployment configuration safety warnings', () => {
+    const workflow = {
+      ...createWorkflow('octo/app', 'dev', 'main'),
+      deployments: [{
+        target: 'main',
+        provider: 'vercel' as const,
+        workflowName: 'Missing deploy',
+        environment: 'production' as const,
+        githubEnvironment: 'missing-production',
+        healthCheckPath: 'health',
+        rollbackWorkflowName: 'Missing rollback',
+      }],
+    };
+    expect(deploymentConfigurationWarnings(workflow, {
+      actionsLoaded: true,
+      actionWorkflows: [{ name: 'CI', path: '.github/workflows/ci.yml' }],
+      environmentsLoaded: true,
+      environments: ['production'],
+    }).map(warning => warning.code)).toEqual(['workflow-not-found', 'environment-not-found', 'health-path-invalid', 'rollback-workflow-not-found']);
+  });
+
+  it('distinguishes missing gates and unavailable Actions permissions', () => {
+    const workflow = { ...createWorkflow('octo/app', 'dev', 'main'), deployments: [] };
+    expect(deploymentConfigurationWarnings(workflow, { actionsLoaded: true, actionWorkflows: [], environmentsLoaded: true, environments: [] }).map(warning => warning.code)).toEqual(['no-deployments']);
+    expect(deploymentConfigurationWarnings({ ...workflow, deployments: [{ target: 'main', provider: 'vercel', workflowName: 'Deploy', environment: 'production' }] }, { actionsLoaded: false, actionWorkflows: [], environmentsLoaded: false, environments: [] }).map(warning => warning.code)).toEqual(['actions-unavailable', 'environment-missing']);
   });
 });

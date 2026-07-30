@@ -1,5 +1,7 @@
 # P4 Web Push and P5.1 Codex Handoff
 
+> **Status: delivered.** This document now describes operational prerequisites and the deliberate Codex handoff boundary, not future work. Current system status is tracked in [`../../current-state.md`](../../current-state.md).
+
 ## Delivered
 
 - Browser Push subscriptions are stored per GitHub user in Supabase.

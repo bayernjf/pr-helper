@@ -1,0 +1,105 @@
+name: Rollback frontend deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_run_id:
+        description: Successful deployment Actions run recorded by PR Helper
+        required: true
+        type: string
+      deployment_url:
+        description: Immutable deployment URL to restore
+        required: true
+        type: string
+      environment:
+        description: Deployment environment
+        required: true
+        type: choice
+        options:
+          - production
+      provider:
+        description: Deployment provider
+        required: true
+        type: choice
+        options:
+          - vercel
+          - cloudflare
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: frontend-rollback-${{ inputs.provider }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Confirmed ${{ inputs.provider }} rollback
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.provider == 'vercel' && 'production-vercel' || 'production-cloudflare-pages' }}
+    steps:
+      - name: Validate the recorded deployment
+        env:
+          DEPLOYMENT_URL: ${{ inputs.deployment_url }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          GH_TOKEN: ${{ github.token }}
+          PROVIDER: ${{ inputs.provider }}
+          TARGET_RUN_ID: ${{ inputs.target_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_RUN_ID" =~ ^[0-9]+$ ]] || { echo "target_run_id must be numeric" >&2; exit 1; }
+          [[ "$ENVIRONMENT" == "production" ]] || { echo "Only production can be rolled back" >&2; exit 1; }
+          [[ "$PROVIDER" == "vercel" || "$PROVIDER" == "cloudflare" ]] || { echo "Unsupported provider" >&2; exit 1; }
+          DEPLOYMENT_HOST="$(node -e "const url = new URL(process.env.DEPLOYMENT_URL); if (url.protocol !== 'https:') process.exit(1); process.stdout.write(url.hostname)")"
+          if [[ "$PROVIDER" == "vercel" ]]; then
+            [[ "$DEPLOYMENT_HOST" == *.vercel.app ]] || { echo "Vercel rollback requires a vercel.app deployment URL" >&2; exit 1; }
+            EXPECTED_WORKFLOW="Deploy frontend to Vercel"
+          else
+            [[ "$DEPLOYMENT_HOST" == *.pages.dev ]] || { echo "Cloudflare rollback requires a pages.dev deployment URL" >&2; exit 1; }
+            EXPECTED_WORKFLOW="Deploy frontend to Cloudflare Pages"
+          fi
+          RUN_JSON="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$TARGET_RUN_ID")"
+          [[ "$(jq -r '.conclusion' <<< "$RUN_JSON")" == "success" ]] || { echo "The recorded deployment run was not successful" >&2; exit 1; }
+          [[ "$(jq -r '.name' <<< "$RUN_JSON")" == "$EXPECTED_WORKFLOW" ]] || { echo "The run does not belong to $EXPECTED_WORKFLOW" >&2; exit 1; }
+          [[ "$(jq -r '.head_branch' <<< "$RUN_JSON")" == "main" ]] || { echo "Only main production deployments can be rolled back" >&2; exit 1; }
+
+      - name: Roll back Vercel production
+        if: inputs.provider == 'vercel'
+        env:
+          DEPLOYMENT_URL: ${{ inputs.deployment_url }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          set -euo pipefail
+          : "${VERCEL_ORG_ID:?Missing VERCEL_ORG_ID}"
+          : "${VERCEL_PROJECT_ID:?Missing VERCEL_PROJECT_ID}"
+          : "${VERCEL_TOKEN:?Missing VERCEL_TOKEN}"
+          npx --yes vercel@latest rollback "$DEPLOYMENT_URL" --yes --timeout=5m --token="$VERCEL_TOKEN"
+          echo "Rolled back Vercel production to $DEPLOYMENT_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Roll back Cloudflare Pages production
+        if: inputs.provider == 'cloudflare'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'pr-helper' }}
+          DEPLOYMENT_URL: ${{ inputs.deployment_url }}
+        run: |
+          set -euo pipefail
+          : "${CLOUDFLARE_ACCOUNT_ID:?Missing CLOUDFLARE_ACCOUNT_ID}"
+          : "${CLOUDFLARE_API_TOKEN:?Missing CLOUDFLARE_API_TOKEN}"
+          DEPLOYMENTS_JSON="$(curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$CLOUDFLARE_PAGES_PROJECT/deployments?per_page=100")"
+          DEPLOYMENT_ID="$(jq -er --arg url "${DEPLOYMENT_URL%/}" '[.result[] | select((.url | rtrimstr("/")) == $url)][0].id' <<< "$DEPLOYMENTS_JSON")"
+          ROLLBACK_JSON="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data '{}' \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$CLOUDFLARE_PAGES_PROJECT/deployments/$DEPLOYMENT_ID/rollback")"
+          [[ "$(jq -r '.success' <<< "$ROLLBACK_JSON")" == "true" ]] || { jq '.errors' <<< "$ROLLBACK_JSON" >&2; exit 1; }
+          echo "Rolled back Cloudflare Pages production to $DEPLOYMENT_URL" >> "$GITHUB_STEP_SUMMARY"

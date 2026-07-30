@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canCreateStage, canMergeOpenPull, getStageAction, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks, summarizeGitHubChecks } from './domain';
+import { canCreateStage, canCreateWorkflowStage, canMergeOpenPull, getStageAction, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks, summarizeGitHubChecks } from './domain';
 
 describe('workflow stages', () => {
   it('keeps the release stage locked until the previous PR and its checks succeed', () => {
@@ -31,6 +31,26 @@ describe('workflow stages', () => {
     expect(canCreateStage(1, [{ kind: 'merged' }, { kind: 'not-created' }])).toBe(true);
     expect(canCreateStage(1, [{ kind: 'merged', checks: { state: 'pending' } }, { kind: 'not-created' }])).toBe(false);
     expect(canCreateStage(1, [{ kind: 'open' }, { kind: 'not-created' }])).toBe(false);
+  });
+
+  it('allows an independent merge route to run alongside an earlier route', () => {
+    const statuses = [{ kind: 'open', checks: { state: 'pending' } }, { kind: 'not-created' }];
+    expect(canCreateWorkflowStage(1, [{}, { independent: true }], statuses)).toBe(true);
+    expect(canCreateWorkflowStage(1, [{}, {}], statuses)).toBe(false);
+  });
+
+  it('waits only for the explicitly selected merge routes before release', () => {
+    const stages = [{}, { independent: true }, { independent: true, waitFor: [0, 1] }];
+    expect(canCreateWorkflowStage(2, stages, [
+      { kind: 'merged', checks: { state: 'success' } },
+      { kind: 'open', checks: { state: 'success' } },
+      { kind: 'not-created' },
+    ])).toBe(false);
+    expect(canCreateWorkflowStage(2, stages, [
+      { kind: 'merged', checks: { state: 'success' } },
+      { kind: 'merged', checks: { state: 'success' } },
+      { kind: 'not-created' },
+    ])).toBe(true);
   });
 
   it('only signals a meaningful status transition', () => {

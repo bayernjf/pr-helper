@@ -11,11 +11,28 @@ permissions:
 jobs:
   reconcile:
     runs-on: ubuntu-latest
+    env:
+      CRON_SECRET: ${{ secrets.PR_HELPER_CRON_SECRET }}
+      RECONCILE_URL: https://pr-helper-ten.vercel.app/api/cron/reconcile
     steps:
-      - name: Calibrate active workflows
-        env:
-          CRON_SECRET: ${{ secrets.PR_HELPER_CRON_SECRET }}
+      - name: Check reconcile configuration
+        id: config
         run: |
-          curl --fail --silent --show-error \
+          if [[ -z "$CRON_SECRET" ]]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Reconcile skipped::Missing repository secret PR_HELPER_CRON_SECRET."
+            {
+              echo "### Reconcile skipped"
+              echo ""
+              echo "Set the repository secret \`PR_HELPER_CRON_SECRET\` to enable scheduled monitoring reconciliation."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+      - name: Calibrate active workflows
+        if: steps.config.outputs.configured == 'true'
+        run: |
+          curl --fail-with-body --silent --show-error --max-time 30 --retry 2 \
             --header "Authorization: Bearer ${CRON_SECRET}" \
-            https://pr-helper-ten.vercel.app/api/cron/reconcile
+            "$RECONCILE_URL"
