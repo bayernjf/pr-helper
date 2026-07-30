@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, removeDeployment, removeStage, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, workflowSummary } from './workflow';
+import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
   it('saves the repository and its first selected branch transition', () => {
@@ -44,6 +44,28 @@ describe('workflow configuration', () => {
       ],
     };
     expect(removeStage(workflow, 0).stages.at(-1)).toEqual({ source: 'dev', target: 'main', independent: true, waitFor: [0] });
+  });
+
+  it('moves a configured step and keeps its dependency graph attached to the same routes', () => {
+    const workflow = {
+      ...createWorkflow('bayernjf/pr-helper', 'feature/login', 'dev'),
+      stages: [
+        { source: 'feature/login', target: 'dev' },
+        { source: 'fix/payment', target: 'dev', independent: true },
+        { source: 'dev', target: 'main', independent: true, waitFor: [0, 1] },
+      ],
+    };
+
+    expect(reorderStages(workflow, 2, 0).stages).toEqual([
+      { source: 'dev', target: 'main', independent: true, waitFor: [1, 2] },
+      { source: 'feature/login', target: 'dev' },
+      { source: 'fix/payment', target: 'dev', independent: true },
+    ]);
+  });
+
+  it('leaves a workflow unchanged when a step reorder target is invalid', () => {
+    const workflow = createWorkflow('bayernjf/pr-helper', 'feature/login', 'dev');
+    expect(reorderStages(workflow, 0, 1)).toEqual(workflow);
   });
 
   it('keeps configurations for different repositories instead of overwriting them', () => {
