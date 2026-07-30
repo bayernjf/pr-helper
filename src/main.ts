@@ -431,6 +431,26 @@ function stageRunPresentationText(run: ReturnType<typeof stageRunPresentation>) 
   return run.pullNumber ? t('overview.run.prStatus', { number: run.pullNumber, status }) : status;
 }
 function stageRunText(state?: WorkflowStageRunState) { return stageRunPresentationText(stageRunPresentation(state)); }
+function drawerStatusText(state?: WorkflowStageState, detailStatus?: StepStatus) {
+  if (!detailStatus) {
+    if (state?.pullState === 'open' && (state.mergeable === false || ['dirty', 'behind', 'blocked'].includes(state.mergeableState || ''))) return t('state.mergeBlocked');
+    if (state?.pullState === 'open' && (state.mergeable !== true || state.mergeableState !== 'clean')) return t('state.mergeChecking');
+    return stageRunText(state);
+  }
+  if (detailStatus.kind === 'error') return detailStatus.message || t('toast.unknownError');
+  if (detailStatus.kind === 'not-created') return `${t('status.waitingPr')} · ${t('status.noPr')}`;
+  if (detailStatus.kind === 'closed') return t('state.closed');
+  if (detailStatus.kind === 'merged') {
+    const verification = detailStatus.checks?.state === 'success' ? t('state.postMerge.passed') : detailStatus.checks?.state === 'failure' ? t('state.postMerge.failed') : detailStatus.checks ? t('state.postMerge.running') : t('state.merged');
+    return detailStatus.aheadBy ? `${verification} · ${t('status.newCommits', { count: detailStatus.aheadBy })}` : verification;
+  }
+  if (detailStatus.checks?.state === 'failure') return t('state.actionsFailed');
+  if (detailStatus.checks?.state === 'pending') return t('state.waitingActions');
+  if (detailStatus.requiredApprovals && (detailStatus.approvals || 0) < detailStatus.requiredApprovals) return t('state.waitingApprovals');
+  if (detailStatus.mergeable === false || ['dirty', 'behind', 'blocked'].includes(detailStatus.mergeableState || '')) return t('state.mergeBlocked');
+  if (detailStatus.mergeable !== true || detailStatus.mergeableState !== 'clean') return t('state.mergeChecking');
+  return t('state.waitingMerge');
+}
 function stageUpdatedAt(state?: WorkflowStageState) {
   if (!state?.updatedAt) return '';
   const date = new Date(state.updatedAt);
@@ -600,24 +620,39 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const queueItem = actionQueue.find(item => item.workflowId === workflowId && item.stageIndex === stageIndex && (!source || item.source === source));
   const state = stageState(workflowId, stageIndex, source);
   const routeSource = state?.source || source || stage.source;
+  const detailStatus = active?.id === flow.id ? statuses?.[stageIndex] : undefined;
   const run = stageRunPresentation(state);
   const tone = queueItem?.kind === 'checks-failed' ? 'failed' : queueItem ? 'attention' : run.tone;
-  const pullNumber = queueItem?.pullNumber || state?.pullNumber || null;
-  const checks = state?.checksTotal ? `<p>${t('overview.run.checkCount', { passed: state.checksPassed, total: state.checksTotal })}</p>` : '';
+  const pullNumber = detailStatus?.pr?.number || queueItem?.pullNumber || state?.pullNumber || null;
+  const checks = detailStatus?.checks?.total
+    ? `<p>${t('overview.run.checkCount', { passed: detailStatus.checks.passed, total: detailStatus.checks.total })}</p>`
+    : !detailStatus && state?.checksTotal
+      ? `<p>${t('overview.run.checkCount', { passed: state.checksPassed, total: state.checksTotal })}</p>`
+      : '';
   const pull = pullNumber ? `<a class="drawer-pr-link" href="${githubPullUrl(flow.repository, pullNumber)}" target="_blank" rel="noreferrer">PR #${pullNumber} ↗</a>` : `<p>${t('overview.board.noPull')}</p>`;
   const events = stageEvents(workflowId, stageIndex, routeSource);
   const history = events.length ? `<section class="drawer-events"><p class="eyebrow">${t('overview.run.history')}</p><ol>${events.map(event => `<li><b>${escape(event.message)}</b><time>${escape(stageUpdatedAt({ updatedAt: event.occurredAt } as WorkflowStageState))}</time></li>`).join('')}</ol></section>` : '';
   const deployments = deploymentCards(workflowId, stageIndex, routeSource);
   const deploymentHistory = deploymentRunHistory(flow, stageIndex, routeSource);
   const configurationWarnings = drawerConfigurationWarnings(flow, stageIndex, routeSource);
-  const createAction = queueItem?.kind === 'ready-to-create' ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
-  const mergeStatus = laneMergeStatus(state);
-  const mergeAction = mergeStatus && canMergePull(mergeStatus) ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
+  const canCreateFromDetail = Boolean(
+    detailStatus
+      && statuses
+      && !stage.source.includes('*')
+      && canCreateWorkflowStage(stageIndex, flow.stages, statuses)
+      && (detailStatus.kind === 'not-created' || detailStatus.kind === 'merged' && Boolean(detailStatus.aheadBy)),
+  );
+  const createAction = queueItem?.kind === 'ready-to-create' || canCreateFromDetail ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
+  const statusText = detailStatus ? drawerStatusText(state, detailStatus) : queueItem?.message || drawerStatusText(state);
+  // `detailStatus` is freshly read from GitHub (or optimistically set after creating a PR),
+  // so it must win over a possibly delayed reconciliation record.
+  const mergeStatus = detailStatus || laneMergeStatus(state);
+  const mergeAction = mergeStatus && !recentlyCreatedPullNumbers.has(stageIndex) && canMergePull(mergeStatus) ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
   const recoveryActions = state?.checksState === 'failure' ? `<button class="ghost drawer-repair">${t('repair.codex')}</button><button class="ghost drawer-retry-actions">${t('recovery.retryActions')}</button>` : '';
   const actions = `<div class="dialog-actions drawer-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div>`;
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
-  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p>${actions}<div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${configurationWarnings}${deployments}${deploymentHistory}${history}</section>`;
+  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p>${actions}<div class="drawer-status ${tone}"><b>${escape(statusText)}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${configurationWarnings}${deployments}${deploymentHistory}${history}</section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);
@@ -635,7 +670,23 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
       void loadActionQueue().finally(render);
     });
   });
-  dialog.querySelector<HTMLButtonElement>('.drawer-sync')?.addEventListener('click', () => { dialog.close(); void loadActionQueue().finally(render); });
+  dialog.querySelector<HTMLButtonElement>('.drawer-sync')?.addEventListener('click', async event => {
+    const button = event.currentTarget as HTMLButtonElement;
+    button.disabled = true;
+    button.textContent = t('recovery.syncing');
+    active = flow;
+    try {
+      await refreshStatuses(false);
+      const queueLoaded = await loadActionQueue();
+      if (!queueLoaded && actionQueueError) showToast(actionQueueError);
+      dialog.addEventListener('close', () => showProjectStepDrawer(flow.id, stageIndex, routeSource), { once: true });
+      dialog.close();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : t('toast.unknownError'));
+      button.disabled = false;
+      button.textContent = t('recovery.sync');
+    }
+  });
   dialog.querySelector<HTMLButtonElement>('.drawer-repair')?.addEventListener('click', () => { active = flow; dialog.close(); void showCodexRepairDialog(stageIndex, routeSource); });
   dialog.querySelector<HTMLButtonElement>('.drawer-retry-actions')?.addEventListener('click', event => { if (state) void retryFailedActions(flow, state, event.currentTarget as HTMLButtonElement); });
   dialog.querySelectorAll<HTMLButtonElement>('.deployment-retry').forEach(button => button.addEventListener('click', () => {
@@ -815,7 +866,7 @@ function detail() {
   const summary = workflowSummary(active);
   content.innerHTML = `<section class="page-head"><p class="eyebrow">${t('detail.eyebrow')}</p><h1>${escape(active.name)}</h1><p>${escape(active.repository)} · ${escape(summary.route)}</p><button id="refresh-status" class="ghost">${t('detail.refresh')}</button></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">${t('detail.timeline.eyebrow')}</p>${active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><aside class="panel next-action"><p class="eyebrow">${t('detail.nextAction.eyebrow')}</p><h2>${nextActionTitle()}</h2><p>${statuses ? t('detail.desc.withStatuses') : t('detail.desc.noStatuses')}</p><button id="edit-flow" class="primary">${t('detail.edit')}</button></aside></section>`;
   document.querySelector('#edit-flow')!.addEventListener('click', () => { screen = 'editor'; render(); });
-  document.querySelector('#refresh-status')!.addEventListener('click', refreshStatuses);
+  document.querySelector('#refresh-status')!.addEventListener('click', () => { void refreshStatuses(); });
   document.querySelectorAll<HTMLButtonElement>('[data-codex-repair]').forEach(button => button.addEventListener('click', () => void showCodexRepairDialog(Number(button.dataset.codexRepair))));
   if (!pollTimer) pollTimer = window.setInterval(() => refreshStatuses(), 30000);
   if (!refreshOnFocusBound) {
@@ -866,8 +917,9 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const actions = status.checks?.total ? t('status.actions.summary', { passed: status.checks.passed, total: status.checks.total, state: status.checks.state === 'success' ? t('status.actions.passed') : status.checks.state === 'failure' ? t('status.actions.failed') : t('status.actions.running') }) : '';
   const approvals = status.requiredApprovals ? t('status.approvals', { approvals: status.approvals || 0, required: status.requiredApprovals }) : '';
   const mergeability = status.mergeable === false || status.mergeableState === 'dirty' ? t('status.merge.conflict') : status.mergeableState === 'behind' ? t('status.merge.behind') : status.mergeableState === 'blocked' ? t('status.merge.blocked') : '';
+  const mergeabilityPending = status.mergeable !== true || status.mergeableState !== 'clean';
   const mergedVerification = status.checks?.state;
-  const state = status.kind === 'merged' ? mergedVerification === 'success' ? t('state.postMerge.passed') : mergedVerification === 'failure' ? t('state.postMerge.failed') : status.checks ? t('state.postMerge.running') : t('state.merged') : status.kind === 'closed' ? t('state.closed') : status.checks?.total && status.checks.state === 'failure' ? t('state.actionsFailed') : status.checks?.total && status.checks.state === 'pending' ? t('state.waitingActions') : status.requiredApprovals && (status.approvals || 0) < status.requiredApprovals ? t('state.waitingApprovals') : mergeability ? t('state.mergeBlocked') : t('state.waitingMerge');
+  const state = status.kind === 'merged' ? mergedVerification === 'success' ? t('state.postMerge.passed') : mergedVerification === 'failure' ? t('state.postMerge.failed') : status.checks ? t('state.postMerge.running') : t('state.merged') : status.kind === 'closed' ? t('state.closed') : status.checks?.state === 'failure' ? t('state.actionsFailed') : status.checks?.state === 'pending' ? t('state.waitingActions') : status.requiredApprovals && (status.approvals || 0) < status.requiredApprovals ? t('state.waitingApprovals') : mergeability ? t('state.mergeBlocked') : mergeabilityPending ? t('state.mergeChecking') : t('state.waitingMerge');
   const gates = status.kind === 'merged' ? [actions] : [actions, approvals, mergeability];
   const canCreateNewPull = status.kind === 'merged' && Boolean(status.aheadBy) && canCreateWorkflowStage(index, active!.stages, statuses!);
   const newCommits = status.kind === 'merged' && status.aheadBy
@@ -875,7 +927,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
     : '';
   const newPullAction = canCreateNewPull ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr.button')}</button>` : '';
   const stateClass = status.kind === 'merged' ? mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
-  const mergeAction = status.kind === 'open' && canMergePull(status) ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
+  const mergeAction = status.kind === 'open' && !recentlyCreatedPullNumbers.has(index) && canMergePull(status) ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
   const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';
   const gateList = gates.filter(Boolean);
   return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b></p>${gateList.length ? `<div class="gate-list">${gateList.map(gate => `<span>${gate}</span>`).join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
@@ -1062,7 +1114,7 @@ function nextActionTitle() { if (!statuses) return t('nextAction.notStarted'); i
 async function readBranchProtection(owner: string, name: string, branch: string) {
   try { return await githubFetch<BranchProtection>(token, `/repos/${owner}/${name}/branches/${encodeURIComponent(branch)}/protection`); } catch { return null; }
 }
-async function refreshStatuses() {
+async function refreshStatuses(renderDetail = true) {
   if (!active) return;
   const button = document.querySelector<HTMLButtonElement>('#refresh-status');
   if (button) { button.disabled = true; button.textContent = t('detail.refresh.loading'); }
@@ -1128,7 +1180,7 @@ async function refreshStatuses() {
     showToast(message);
     if (Notification.permission === 'granted') new Notification(t('notif.title'), { body: message });
   });
-  detail();
+  if (renderDetail) detail();
 }
 
 function showGenerationRules(selectedId: string | null, onUse: (id: string) => void, onRulesChanged: () => void) {
@@ -1439,6 +1491,10 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
       // GitHub has accepted the PR, but its mergeability calculation is not available yet.
       // `false` means a confirmed conflict, so keep the optimistic value unknown until refreshStatuses reads GitHub's detail response.
       statuses = statuses?.map((status, statusIndex) => statusIndex === index ? { kind: 'open', pr: createdPull, checks: { state: 'pending', passed: 0, total: 0 }, approvals: 0, mergeable: null } : status) || null;
+      // The reconciliation queue may still contain the previously merged PR for this route.
+      // Do not let that stale record expose a merge action for the new PR before GitHub reports its checks.
+      workflowStageStates = workflowStageStates.filter(state => state.workflowId !== active!.id || state.stageIndex !== index || state.source !== source);
+      actionQueue = actionQueue.filter(item => item.workflowId !== active!.id || item.stageIndex !== index || item.source !== source);
       dialog.close();
       if (onCreated) {
         onCreated();
