@@ -66,6 +66,7 @@ describe('workflow stages', () => {
   it('does not wait for Actions when the PR has no checks, but waits for GitHub mergeability', () => {
     expect(canMergeOpenPull({ checks: undefined, approvalsMet: true, mergeable: true, mergeableState: 'clean' })).toBe(true);
     expect(canMergeOpenPull({ checks: undefined, approvalsMet: true, mergeable: null, mergeableState: 'unknown' })).toBe(false);
+    expect(canMergeOpenPull({ checks: undefined, approvalsMet: true, mergeable: true, mergeableState: 'unknown' })).toBe(false);
   });
 
   it('never allows merging before observed Actions succeed or required approvals arrive', () => {

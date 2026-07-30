@@ -283,6 +283,7 @@ const en: TranslationDict = {
   'state.actionsFailed': 'Actions failed',
   'state.waitingActions': 'Waiting for Actions',
   'state.waitingApprovals': 'Waiting for approvals',
+  'state.mergeChecking': 'GitHub is checking whether this PR can merge',
   'state.mergeBlocked': 'Merge blocked',
   'state.waitingMerge': 'Waiting for merge',
   'status.newCommits': '{count} new commits',

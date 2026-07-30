@@ -57,5 +57,5 @@ export function canMergeOpenPull(input: { checks?: string; approvalsMet: boolean
   return (!input.checks || input.checks === 'success')
     && input.approvalsMet
     && input.mergeable === true
-    && !['dirty', 'behind', 'blocked'].includes(input.mergeableState || '');
+    && input.mergeableState === 'clean';
 }

@@ -283,6 +283,7 @@ const zh: TranslationDict = {
   'state.actionsFailed': 'Actions 失败',
   'state.waitingActions': '等待 Actions',
   'state.waitingApprovals': '等待审批',
+  'state.mergeChecking': 'GitHub 正在检查是否可合并',
   'state.mergeBlocked': '合并被阻塞',
   'state.waitingMerge': '等待合并',
   'status.newCommits': '有 {count} 个新提交',

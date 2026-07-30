@@ -431,8 +431,12 @@ function stageRunPresentationText(run: ReturnType<typeof stageRunPresentation>) 
   return run.pullNumber ? t('overview.run.prStatus', { number: run.pullNumber, status }) : status;
 }
 function stageRunText(state?: WorkflowStageRunState) { return stageRunPresentationText(stageRunPresentation(state)); }
-function drawerStatusText(state?: WorkflowStageRunState, detailStatus?: StepStatus) {
-  if (!detailStatus) return stageRunText(state);
+function drawerStatusText(state?: WorkflowStageState, detailStatus?: StepStatus) {
+  if (!detailStatus) {
+    if (state?.pullState === 'open' && (state.mergeable === false || ['dirty', 'behind', 'blocked'].includes(state.mergeableState || ''))) return t('state.mergeBlocked');
+    if (state?.pullState === 'open' && (state.mergeable !== true || state.mergeableState !== 'clean')) return t('state.mergeChecking');
+    return stageRunText(state);
+  }
   if (detailStatus.kind === 'error') return detailStatus.message || t('toast.unknownError');
   if (detailStatus.kind === 'not-created') return `${t('status.waitingPr')} · ${t('status.noPr')}`;
   if (detailStatus.kind === 'closed') return t('state.closed');
@@ -443,6 +447,8 @@ function drawerStatusText(state?: WorkflowStageRunState, detailStatus?: StepStat
   if (detailStatus.checks?.state === 'failure') return t('state.actionsFailed');
   if (detailStatus.checks?.state === 'pending') return t('state.waitingActions');
   if (detailStatus.requiredApprovals && (detailStatus.approvals || 0) < detailStatus.requiredApprovals) return t('state.waitingApprovals');
+  if (detailStatus.mergeable === false || ['dirty', 'behind', 'blocked'].includes(detailStatus.mergeableState || '')) return t('state.mergeBlocked');
+  if (detailStatus.mergeable !== true || detailStatus.mergeableState !== 'clean') return t('state.mergeChecking');
   return t('state.waitingMerge');
 }
 function stageUpdatedAt(state?: WorkflowStageState) {
@@ -911,8 +917,9 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const actions = status.checks?.total ? t('status.actions.summary', { passed: status.checks.passed, total: status.checks.total, state: status.checks.state === 'success' ? t('status.actions.passed') : status.checks.state === 'failure' ? t('status.actions.failed') : t('status.actions.running') }) : '';
   const approvals = status.requiredApprovals ? t('status.approvals', { approvals: status.approvals || 0, required: status.requiredApprovals }) : '';
   const mergeability = status.mergeable === false || status.mergeableState === 'dirty' ? t('status.merge.conflict') : status.mergeableState === 'behind' ? t('status.merge.behind') : status.mergeableState === 'blocked' ? t('status.merge.blocked') : '';
+  const mergeabilityPending = status.mergeable !== true || status.mergeableState !== 'clean';
   const mergedVerification = status.checks?.state;
-  const state = status.kind === 'merged' ? mergedVerification === 'success' ? t('state.postMerge.passed') : mergedVerification === 'failure' ? t('state.postMerge.failed') : status.checks ? t('state.postMerge.running') : t('state.merged') : status.kind === 'closed' ? t('state.closed') : status.checks?.state === 'failure' ? t('state.actionsFailed') : status.checks?.state === 'pending' ? t('state.waitingActions') : status.requiredApprovals && (status.approvals || 0) < status.requiredApprovals ? t('state.waitingApprovals') : mergeability ? t('state.mergeBlocked') : t('state.waitingMerge');
+  const state = status.kind === 'merged' ? mergedVerification === 'success' ? t('state.postMerge.passed') : mergedVerification === 'failure' ? t('state.postMerge.failed') : status.checks ? t('state.postMerge.running') : t('state.merged') : status.kind === 'closed' ? t('state.closed') : status.checks?.state === 'failure' ? t('state.actionsFailed') : status.checks?.state === 'pending' ? t('state.waitingActions') : status.requiredApprovals && (status.approvals || 0) < status.requiredApprovals ? t('state.waitingApprovals') : mergeability ? t('state.mergeBlocked') : mergeabilityPending ? t('state.mergeChecking') : t('state.waitingMerge');
   const gates = status.kind === 'merged' ? [actions] : [actions, approvals, mergeability];
   const canCreateNewPull = status.kind === 'merged' && Boolean(status.aheadBy) && canCreateWorkflowStage(index, active!.stages, statuses!);
   const newCommits = status.kind === 'merged' && status.aheadBy
