@@ -6,7 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, githubCompareUrl, githubPullU
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, removeDeployment, removeStage, reorderWorkflows, saveWorkflow, sortWorkflows, workflowSummary, type DeploymentConfig, type Workflow } from './lib/workflow';
+import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, sortWorkflows, workflowSummary, type DeploymentConfig, type Workflow } from './lib/workflow';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
 import { t, getLocale, setLocale, detectLocale, registerTranslations, type Locale } from './lib/i18n';
 import en from './lib/translations/en';
@@ -657,6 +657,60 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
 }
 function bindFlowCards() { document.querySelectorAll<HTMLButtonElement>('[data-open]').forEach(button => button.addEventListener('click', () => { active = workflows.find(item => item.id === button.dataset.open) || null; goTo('detail'); })); }
 
+function bindDraftStepSorting() {
+  const steps = [...document.querySelectorAll<HTMLElement>('[data-draft-step]')];
+  let draggedIndex: number | null = null;
+  const clearStepClasses = () => steps.forEach(step => step.classList.remove('is-dragging', 'is-drop-before', 'is-drop-after'));
+  const moveStage = (fromIndex: number, toIndex: number) => {
+    if (!active || fromIndex === toIndex) return;
+    save(reorderStages(active, fromIndex, toIndex));
+    const draft = document.querySelector('#draft');
+    if (draft) draft.innerHTML = renderDraft();
+    bindDraftStepSorting();
+    renderStepForm(active.repository);
+  };
+  document.querySelectorAll<HTMLButtonElement>('[data-draft-drag]').forEach(handle => {
+    handle.addEventListener('dragstart', event => {
+      const step = handle.closest<HTMLElement>('[data-draft-step]');
+      const index = Number(step?.dataset.draftStep);
+      if (!step || !Number.isInteger(index) || !event.dataTransfer) { event.preventDefault(); return; }
+      clearStepClasses();
+      draggedIndex = index;
+      step.classList.add('is-dragging');
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', String(index));
+    });
+    handle.addEventListener('dragend', () => { clearStepClasses(); draggedIndex = null; });
+  });
+  steps.forEach(step => {
+    step.addEventListener('dragover', event => {
+      const fromIndex = draggedIndex ?? Number(event.dataTransfer?.getData('text/plain'));
+      const targetIndex = Number(step.dataset.draftStep);
+      if (!Number.isInteger(fromIndex) || !Number.isInteger(targetIndex) || fromIndex === targetIndex) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+      steps.forEach(item => item.classList.remove('is-drop-before', 'is-drop-after'));
+      const bounds = step.getBoundingClientRect();
+      step.classList.add(event.clientY < bounds.top + bounds.height / 2 ? 'is-drop-before' : 'is-drop-after');
+    });
+    step.addEventListener('drop', event => {
+      event.preventDefault();
+      const fromIndex = draggedIndex ?? Number(event.dataTransfer?.getData('text/plain'));
+      const targetIndex = Number(step.dataset.draftStep);
+      const placement = step.classList.contains('is-drop-after') ? 'after' : 'before';
+      clearStepClasses();
+      draggedIndex = null;
+      if (!Number.isInteger(fromIndex) || !Number.isInteger(targetIndex) || fromIndex === targetIndex) return;
+      moveStage(fromIndex, placement === 'before' ? targetIndex - (fromIndex < targetIndex ? 1 : 0) : targetIndex + (fromIndex > targetIndex ? 1 : 0));
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>('[data-draft-move]').forEach(button => button.addEventListener('click', () => {
+    const fromIndex = Number(button.dataset.draftMove);
+    const direction = button.dataset.draftDirection;
+    moveStage(fromIndex, direction === 'up' ? fromIndex - 1 : fromIndex + 1);
+  }));
+}
+
 function editor() {
   const content = document.querySelector('#content')!;
   const selected = active?.repository || '';
@@ -666,6 +720,7 @@ function editor() {
   document.querySelector('#editor-manage-repositories')?.addEventListener('click', openRepositoryManagement);
   document.querySelector('#delete-flow')?.addEventListener('click', () => { if (active) showDeleteWorkflowDialog(active); });
   document.querySelector<HTMLSelectElement>('#repo')!.addEventListener('change', async event => { active = active?.repository === (event.target as HTMLSelectElement).value ? active : null; await loadBranches((event.target as HTMLSelectElement).value); });
+  bindDraftStepSorting();
   if (selected) loadBranches(selected);
 }
 
@@ -713,7 +768,7 @@ function renderStepForm(repository: string) {
   sourceBranchToggle.addEventListener('click', () => { if (sourceBranchOptions.hidden) { sourceInput.focus(); openSourceBranches(); } else closeSourceBranches(); });
   sourceBranchOptions.querySelectorAll<HTMLButtonElement>('[data-source-branch]').forEach(button => button.addEventListener('click', () => { sourceInput.value = button.dataset.sourceBranch || ''; sync(); closeSourceBranches(); sourceInput.focus(); }));
   document.querySelector('#target')!.addEventListener('change', sync); sync();
-  document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } if (active?.repository === repository && active.stages.some(stage => stage.source === source && stage.target === target)) { showToast(t('editor.error.duplicateRoute')); return; } const name = value('flow-name') || repository; const isNew = active?.repository !== repository; const independent = document.querySelector<HTMLInputElement>('#independent-route')!.checked; const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="wait-for-route"]:checked')].map(input => Number(input.value)); const next = active?.repository === repository ? { ...addStage(active, source, target, independent, waitFor), name } : createWorkflow(repository, source, target, name); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.routeSaved', { source, target })); renderStepForm(repository); });
+  document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } if (active?.repository === repository && active.stages.some(stage => stage.source === source && stage.target === target)) { showToast(t('editor.error.duplicateRoute')); return; } const name = value('flow-name') || repository; const isNew = active?.repository !== repository; const independent = document.querySelector<HTMLInputElement>('#independent-route')!.checked; const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="wait-for-route"]:checked')].map(input => Number(input.value)); const next = active?.repository === repository ? { ...addStage(active, source, target, independent, waitFor), name } : createWorkflow(repository, source, target, name); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); bindDraftStepSorting(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.routeSaved', { source, target })); renderStepForm(repository); });
   document.querySelector<HTMLButtonElement>('#add-deployment')?.addEventListener('click', () => {
     if (!active) return;
     const healthCheckPath = value('deployment-health-path').trim();
@@ -746,9 +801,11 @@ function options(selected: string) { return branches.map(branch => `<option ${br
 function value(id: string) { return document.querySelector<HTMLSelectElement | HTMLInputElement>(`#${id}`)!.value; }
 function renderDraft() {
   if (!active) return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${t('draft.empty.title')}</h2><p class="meta">${t('draft.empty.desc')}</p>`;
-  return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${escape(active.name)}</h2><p class="meta">${escape(active.repository)}</p>${active.stages.map((stage, index) => {
+  const flow = active;
+  return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${escape(flow.name)}</h2><p class="meta">${escape(flow.repository)}</p>${flow.stages.map((stage, index) => {
     const badge = stage.waitFor?.length ? `<small>${t('draft.waitFor', { count: stage.waitFor.length })}</small>` : stage.independent ? `<small>${t('draft.independent')}</small>` : '';
-    return `<div class="draft-step"><span>${index + 1}</span><div class="draft-step-main"><b>${escape(stage.source)} → ${escape(stage.target)}</b>${badge}</div><button data-remove="${index}">${t('draft.remove')}</button></div>`;
+    const route = `${stage.source} → ${stage.target}`;
+    return `<div class="draft-step" data-draft-step="${index}"><button type="button" class="draft-step-drag-handle" draggable="true" data-draft-drag="${index}" aria-label="${escape(t('draft.drag', { name: route }))}" title="${escape(t('draft.drag', { name: route }))}"><svg viewBox="0 0 16 22" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><span>${index + 1}</span><div class="draft-step-main"><b>${escape(route)}</b>${badge}</div><div class="draft-step-move-buttons"><button type="button" data-draft-move="${index}" data-draft-direction="up" aria-label="${escape(t('draft.moveUp', { name: route }))}" title="${escape(t('draft.moveUp', { name: route }))}" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" data-draft-move="${index}" data-draft-direction="down" aria-label="${escape(t('draft.moveDown', { name: route }))}" title="${escape(t('draft.moveDown', { name: route }))}" ${index === flow.stages.length - 1 ? 'disabled' : ''}>↓</button></div><button data-remove="${index}">${t('draft.remove')}</button></div>`;
   }).join('')}<div class="draft-footer"><button id="view-flow" class="ghost">${t('draft.viewDetail')}</button><button id="delete-flow" class="draft-delete-flow" type="button">${t('workflowDelete.action')}</button></div>`;
 }
 

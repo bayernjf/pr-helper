@@ -70,6 +70,22 @@ export function removeStage(workflow: Workflow, index: number): Workflow {
   };
 }
 
+export function reorderStages(workflow: Workflow, fromIndex: number, toIndex: number): Workflow {
+  if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex) || fromIndex < 0 || toIndex < 0 || fromIndex >= workflow.stages.length || toIndex >= workflow.stages.length || fromIndex === toIndex) return workflow;
+  const originalIndexes = workflow.stages.map((_, index) => index);
+  const [movedIndex] = originalIndexes.splice(fromIndex, 1);
+  originalIndexes.splice(toIndex, 0, movedIndex);
+  const newIndexForOldIndex = new Map(originalIndexes.map((oldIndex, newIndex) => [oldIndex, newIndex]));
+  return {
+    ...workflow,
+    stages: originalIndexes.map(oldIndex => {
+      const stage = workflow.stages[oldIndex];
+      if (!stage.waitFor?.length) return stage;
+      return { ...stage, waitFor: stage.waitFor.map(dependency => newIndexForOldIndex.get(dependency) ?? dependency) };
+    }),
+  };
+}
+
 export function saveWorkflow(workflows: Workflow[], workflow: Workflow): Workflow[] {
   const index = workflows.findIndex(item => item.id === workflow.id);
   return index === -1 ? [...workflows, workflow] : workflows.map(item => item.id === workflow.id ? workflow : item);

@@ -233,6 +233,9 @@ const en: TranslationDict = {
   'draft.remove': 'Remove',
   'draft.independent': 'Independent',
   'draft.waitFor': 'Wait for {count} routes',
+  'draft.drag': 'Drag to reorder: {name}',
+  'draft.moveUp': 'Move step up: {name}',
+  'draft.moveDown': 'Move step down: {name}',
   'draft.viewDetail': 'View flow details',
 
   'workflowDelete.action': 'Delete flow',

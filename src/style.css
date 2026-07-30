@@ -608,22 +608,48 @@ button.text-link {
 
 .draft-step {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto;
+  grid-template-columns: 30px 24px minmax(0, 1fr) 23px auto;
   align-items: center;
   gap: 8px;
   border-top: 1px solid var(--border-light);
   padding: 14px 0;
   font-size: .82rem;
+  transition: opacity .16s ease, border-color .16s ease, box-shadow .16s ease;
 }
 
+.draft-step.is-dragging { opacity: .42; }
+.draft-step.is-drop-before { border-top-color: var(--border-accent); box-shadow: inset 0 3px var(--text-accent); }
+.draft-step.is-drop-after { border-bottom: 3px solid var(--text-accent); }
+
+.draft-step-drag-handle,
+.draft-step-move-buttons button {
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.draft-step-drag-handle { width: 30px; height: 36px; cursor: grab; }
+.draft-step > .draft-step-drag-handle { grid-column: 1; grid-row: 1; }
+.draft-step-drag-handle:active { cursor: grabbing; }
+.draft-step-drag-handle svg { width: 14px; height: 20px; fill: currentColor; }
+.draft-step-drag-handle:hover,
+.draft-step-drag-handle:focus-visible,
+.draft-step-move-buttons button:hover,
+.draft-step-move-buttons button:focus-visible { background: var(--bg-card-hover); color: var(--text-accent); outline: none; }
+.draft-step-drag-handle:focus-visible,
+.draft-step-move-buttons button:focus-visible { box-shadow: 0 0 0 2px var(--border-accent); }
+
 .draft-step > span {
-  grid-column: 1;
+  grid-column: 2;
   grid-row: 1;
   z-index: 1;
 }
 
 .draft-step-main {
-  grid-column: 2;
+  grid-column: 3;
   grid-row: 1;
   display: flex;
   min-width: 0;
@@ -657,8 +683,8 @@ button.text-link {
   font: 500 .7rem 'DM Mono';
 }
 
-.draft-step button {
-  grid-column: 3;
+.draft-step > button[data-remove] {
+  grid-column: 5;
   grid-row: 1;
   z-index: 1;
   border: 0;
@@ -667,6 +693,10 @@ button.text-link {
   font: 700 .72rem Manrope;
   cursor: pointer;
 }
+
+.draft-step-move-buttons { grid-column: 4; grid-row: 1; display: grid; gap: 1px; }
+.draft-step-move-buttons button { width: 23px; height: 18px; cursor: pointer; font: 700 .72rem Manrope; }
+.draft-step-move-buttons button:disabled { cursor: not-allowed; opacity: .28; }
 
 .draft-footer {
   display: flex;
