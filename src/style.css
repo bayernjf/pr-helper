@@ -668,6 +668,29 @@ button.text-link {
   cursor: pointer;
 }
 
+.draft-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.draft-delete-flow {
+  border: 0;
+  background: transparent;
+  color: var(--text-error);
+  padding: 8px 0;
+  font: 700 .76rem Manrope;
+  cursor: pointer;
+}
+
+.draft-delete-flow:hover,
+.draft-delete-flow:focus-visible {
+  text-decoration: underline;
+  outline: none;
+}
+
 .timeline article {
   display: flex;
   gap: 14px;

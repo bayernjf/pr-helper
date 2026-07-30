@@ -235,6 +235,15 @@ const en: TranslationDict = {
   'draft.waitFor': 'Wait for {count} routes',
   'draft.viewDetail': 'View flow details',
 
+  'workflowDelete.action': 'Delete flow',
+  'workflowDelete.eyebrow': 'Danger zone',
+  'workflowDelete.title': 'Delete this flow?',
+  'workflowDelete.desc': 'This will delete the “{name}” flow and its step configuration.',
+  'workflowDelete.warning': 'GitHub pull requests, branches, and deployments will not be deleted. This cannot be undone.',
+  'workflowDelete.cancel': 'Cancel',
+  'workflowDelete.confirm': 'Delete flow',
+  'workflowDelete.success': 'Flow deleted',
+
   // Detail
   'detail.eyebrow': 'FLOW DETAIL',
   'detail.timeline.eyebrow': 'EXECUTION TIMELINE',

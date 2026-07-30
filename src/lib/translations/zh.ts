@@ -235,6 +235,15 @@ const zh: TranslationDict = {
   'draft.waitFor': '等待 {count} 条路径',
   'draft.viewDetail': '查看流程详情',
 
+  'workflowDelete.action': '删除整个流程',
+  'workflowDelete.eyebrow': '危险操作',
+  'workflowDelete.title': '删除整个流程？',
+  'workflowDelete.desc': '将删除流程“{name}”及其步骤配置。',
+  'workflowDelete.warning': '不会删除 GitHub PR、分支或已部署内容。此操作无法撤销。',
+  'workflowDelete.cancel': '取消',
+  'workflowDelete.confirm': '确认删除',
+  'workflowDelete.success': '流程已删除',
+
   // Detail
   'detail.eyebrow': 'FLOW DETAIL',
   'detail.timeline.eyebrow': 'EXECUTION TIMELINE',

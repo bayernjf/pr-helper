@@ -226,6 +226,24 @@ function showDisconnectDialog() {
     connect();
   }, { once: true });
 }
+
+function showDeleteWorkflowDialog(workflow: Workflow) {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog confirm-dialog delete-workflow-dialog';
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('workflowDelete.eyebrow')}</p><h2>${t('workflowDelete.title')}</h2><p>${t('workflowDelete.desc', { name: escape(workflow.name) })}</p><p class="meta">${t('workflowDelete.warning')}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('workflowDelete.cancel')}</button><button value="confirm" class="danger-button">${t('workflowDelete.confirm')}</button></div></form>`;
+  document.body.append(dialog); dialog.showModal();
+  dialog.addEventListener('close', async () => {
+    const confirmed = dialog.returnValue === 'confirm';
+    dialog.remove();
+    if (!confirmed) return;
+    active = null;
+    screen = 'overview';
+    await removeWorkflowFromStorage(workflow.id);
+    await loadActionQueue();
+    render();
+    showToast(t('workflowDelete.success'));
+  }, { once: true });
+}
 async function syncLocalWorkflows() {
   if (!cloudWorkflowStorage || !workflows.length) return;
   try {
@@ -646,6 +664,7 @@ function editor() {
   content.innerHTML = `<section class="page-head"><button id="back-from-editor" class="ghost">${active ? t('editor.back.detail') : t('editor.back.overview')}</button><p class="eyebrow">${t('editor.eyebrow')}</p><h1>${active ? t('editor.title.edit') : t('editor.title.new')}</h1><p>${t('editor.subtitle')}</p></section><section class="editor-layout"><section class="panel editor-panel"><label>${t('editor.label.name')}<input id="flow-name" value="${escape(active?.name || '')}" placeholder="${t('editor.placeholder.name')}" /></label><label>${t('editor.label.repo')}<select id="repo"><option value="">${t('editor.repo.placeholder')}</option>${repos.map(repo => `<option value="${repo.full_name}" ${repo.full_name === selected ? 'selected' : ''}>${repo.full_name}${repo.private ? t('editor.repo.private') : ''}</option>`).join('')}</select></label><div id="step-form">${selected ? `<p class="meta">${t('editor.branch.loading')}</p>` : `<div class="editor-repository-help"><p class="meta">${t('editor.branch.hint')}</p>${repositoryManagementAction}</div>`}</div></section><aside id="draft" class="panel draft">${renderDraft()}</aside></section>`;
   document.querySelector('#back-from-editor')!.addEventListener('click', () => goTo('back'));
   document.querySelector('#editor-manage-repositories')?.addEventListener('click', openRepositoryManagement);
+  document.querySelector('#delete-flow')?.addEventListener('click', () => { if (active) showDeleteWorkflowDialog(active); });
   document.querySelector<HTMLSelectElement>('#repo')!.addEventListener('change', async event => { active = active?.repository === (event.target as HTMLSelectElement).value ? active : null; await loadBranches((event.target as HTMLSelectElement).value); });
   if (selected) loadBranches(selected);
 }
@@ -730,7 +749,7 @@ function renderDraft() {
   return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${escape(active.name)}</h2><p class="meta">${escape(active.repository)}</p>${active.stages.map((stage, index) => {
     const badge = stage.waitFor?.length ? `<small>${t('draft.waitFor', { count: stage.waitFor.length })}</small>` : stage.independent ? `<small>${t('draft.independent')}</small>` : '';
     return `<div class="draft-step"><span>${index + 1}</span><div class="draft-step-main"><b>${escape(stage.source)} → ${escape(stage.target)}</b>${badge}</div><button data-remove="${index}">${t('draft.remove')}</button></div>`;
-  }).join('')}<button id="view-flow" class="ghost">${t('draft.viewDetail')}</button>`;
+  }).join('')}<div class="draft-footer"><button id="view-flow" class="ghost">${t('draft.viewDetail')}</button><button id="delete-flow" class="draft-delete-flow" type="button">${t('workflowDelete.action')}</button></div>`;
 }
 
 function detail() {
