@@ -54,8 +54,8 @@ export function needsNewPullRequest(aheadBy: number, latestPullState: string) {
 }
 
 export function canMergeOpenPull(input: { checks?: string; approvalsMet: boolean; mergeable?: boolean | null; mergeableState?: string }) {
-  return input.checks === 'success'
+  return (!input.checks || input.checks === 'success')
     && input.approvalsMet
-    && input.mergeable !== false
-    && !['dirty', 'behind', 'blocked'].includes(input.mergeableState || '');
+    && input.mergeable === true
+    && input.mergeableState === 'clean';
 }
