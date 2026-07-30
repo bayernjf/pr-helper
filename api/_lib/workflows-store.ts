@@ -444,6 +444,12 @@ function deploymentConfigsForTarget(workflow: StoredWorkflow, target: string) {
   return deploymentConfigs(workflow).filter(deployment => deployment.target === target);
 }
 
+export function deploymentParentState(workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string) {
+  const stage = workflow.stages[stageIndex];
+  if (!stage) throw new Error('未找到部署所属的流程步骤');
+  return { repository: workflow.repository, source, target: stage.target, headSha };
+}
+
 function githubEnvironment(provider: DeploymentProvider, environment: 'preview' | 'production') {
   if (provider === 'vercel') return `${environment}-vercel`;
   return `${environment}-cloudflare-pages`;
@@ -452,6 +458,10 @@ function githubEnvironment(provider: DeploymentProvider, environment: 'preview' 
 async function reconcileStageDeployments(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, target: string, sha: string): Promise<DeploymentState[]> {
   const configurations = deploymentConfigsForTarget(workflow, target);
   if (!configurations.length || !row.github_installation_id) return [];
+  const parent = deploymentParentState(workflow, stageIndex, source, sha);
+  // Deployment rows are children of workflow_stage_states. Reconciliation discovers
+  // deployments before the final stage status is written, so establish the parent first.
+  await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, repository, source, target, pull_state, head_sha, checks_state, checks_passed, checks_total) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${parent.repository}, ${parent.source}, ${parent.target}, 'merged', ${parent.headSha}, 'pending', ${0}, ${0}) ON CONFLICT (user_id, workflow_id, stage_index, source) DO NOTHING`;
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
   const previousDeployments = await sql<{ provider: DeploymentProvider; state: DeploymentState; run_id: number | null }[]>`SELECT provider, state, run_id FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_index = ${stageIndex} AND source = ${source}`;
