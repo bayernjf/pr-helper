@@ -155,7 +155,7 @@ const zh: TranslationDict = {
   'editor.title.new': '新建流程',
   'editor.subtitle': '流程配置不会创建任何 GitHub PR。',
   'editor.label.name': '流程名称',
-  'editor.placeholder.name': '例如：支付功能上线',
+  'editor.placeholder.name': '不填则默认为仓库名',
   'editor.label.repo': '仓库',
   'editor.repo.placeholder': '选择 GitHub 仓库',
   'editor.repo.private': ' · private',

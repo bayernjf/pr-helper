@@ -155,7 +155,7 @@ const en: TranslationDict = {
   'editor.title.new': 'New Flow',
   'editor.subtitle': 'Configuring a flow does not create any GitHub PRs.',
   'editor.label.name': 'Flow name',
-  'editor.placeholder.name': 'e.g., Payment feature rollout',
+  'editor.placeholder.name': 'Defaults to the repository name if left blank',
   'editor.label.repo': 'Repository',
   'editor.repo.placeholder': 'Select a GitHub repository',
   'editor.repo.private': ' · private',
