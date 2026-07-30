@@ -607,13 +607,28 @@ button.text-link {
 }
 
 .draft-step {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
   border-top: 1px solid var(--border-light);
   padding: 14px 0;
   font-size: .82rem;
+}
+
+.draft-step > span {
+  grid-column: 1;
+  grid-row: 1;
+  z-index: 1;
+}
+
+.draft-step > b {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  justify-self: center;
+  max-width: calc(100% - 150px);
+  overflow-wrap: anywhere;
+  text-align: center;
 }
 
 .draft-step span, .timeline article>span {
@@ -628,13 +643,16 @@ button.text-link {
 }
 
 .draft-step button {
+  grid-column: 4;
+  grid-row: 1;
+  z-index: 1;
   border: 0;
   background: none;
   color: var(--text-error);
   font: 700 .72rem Manrope;
   cursor: pointer;
 }
-.draft-step small{margin-left:auto;color:var(--text-accent);font:700 .66rem 'DM Mono';text-transform:uppercase}
+.draft-step small{grid-column:3;grid-row:1;z-index:1;margin:0;color:var(--text-accent);font:700 .66rem 'DM Mono';text-transform:uppercase}
 
 .timeline article {
   display: flex;
