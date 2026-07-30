@@ -431,6 +431,20 @@ function stageRunPresentationText(run: ReturnType<typeof stageRunPresentation>) 
   return run.pullNumber ? t('overview.run.prStatus', { number: run.pullNumber, status }) : status;
 }
 function stageRunText(state?: WorkflowStageRunState) { return stageRunPresentationText(stageRunPresentation(state)); }
+function drawerStatusText(state?: WorkflowStageRunState, detailStatus?: StepStatus) {
+  if (!detailStatus) return stageRunText(state);
+  if (detailStatus.kind === 'error') return detailStatus.message || t('toast.unknownError');
+  if (detailStatus.kind === 'not-created') return `${t('status.waitingPr')} · ${t('status.noPr')}`;
+  if (detailStatus.kind === 'closed') return t('state.closed');
+  if (detailStatus.kind === 'merged') {
+    const verification = detailStatus.checks?.state === 'success' ? t('state.postMerge.passed') : detailStatus.checks?.state === 'failure' ? t('state.postMerge.failed') : detailStatus.checks ? t('state.postMerge.running') : t('state.merged');
+    return detailStatus.aheadBy ? `${verification} · ${t('status.newCommits', { count: detailStatus.aheadBy })}` : verification;
+  }
+  if (detailStatus.checks?.state === 'failure') return t('state.actionsFailed');
+  if (detailStatus.checks?.state === 'pending') return t('state.waitingActions');
+  if (detailStatus.requiredApprovals && (detailStatus.approvals || 0) < detailStatus.requiredApprovals) return t('state.waitingApprovals');
+  return t('state.waitingMerge');
+}
 function stageUpdatedAt(state?: WorkflowStageState) {
   if (!state?.updatedAt) return '';
   const date = new Date(state.updatedAt);
@@ -610,14 +624,23 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const deployments = deploymentCards(workflowId, stageIndex, routeSource);
   const deploymentHistory = deploymentRunHistory(flow, stageIndex, routeSource);
   const configurationWarnings = drawerConfigurationWarnings(flow, stageIndex, routeSource);
-  const createAction = queueItem?.kind === 'ready-to-create' ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
+  const detailStatus = active?.id === flow.id ? statuses?.[stageIndex] : undefined;
+  const canCreateFromDetail = Boolean(
+    detailStatus
+      && statuses
+      && !stage.source.includes('*')
+      && canCreateWorkflowStage(stageIndex, flow.stages, statuses)
+      && (detailStatus.kind === 'not-created' || detailStatus.kind === 'merged' && Boolean(detailStatus.aheadBy)),
+  );
+  const createAction = queueItem?.kind === 'ready-to-create' || canCreateFromDetail ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
+  const statusText = queueItem?.message || drawerStatusText(state, detailStatus);
   const mergeStatus = laneMergeStatus(state);
   const mergeAction = mergeStatus && canMergePull(mergeStatus) ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
   const recoveryActions = state?.checksState === 'failure' ? `<button class="ghost drawer-repair">${t('repair.codex')}</button><button class="ghost drawer-retry-actions">${t('recovery.retryActions')}</button>` : '';
   const actions = `<div class="dialog-actions drawer-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div>`;
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
-  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p>${actions}<div class="drawer-status ${tone}"><b>${escape(queueItem?.message || stageRunText(state))}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${configurationWarnings}${deployments}${deploymentHistory}${history}</section>`;
+  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p>${actions}<div class="drawer-status ${tone}"><b>${escape(statusText)}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${configurationWarnings}${deployments}${deploymentHistory}${history}</section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);
