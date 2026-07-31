@@ -53,6 +53,9 @@ const zh: TranslationDict = {
   'account.push.title': '浏览器通知已开启',
   'account.aiSettings': 'AI 设置',
   'account.disconnect': '断开 GitHub',
+  'account.deleteAccount': '删除账号',
+  'account.privacy': '隐私政策',
+  'account.permissions': 'GitHub 权限',
 
   // Overview
   'overview.eyebrow.queue': 'NEEDS YOUR ATTENTION',
@@ -212,6 +215,14 @@ const zh: TranslationDict = {
   'editor.deployments.warning.health-path-invalid': '健康检查路径“{value}”必须以 / 开头。',
   'editor.deployments.warning.rollback-workflow-not-found': '仓库中找不到回滚工作流“{value}”。',
 
+  // Recovery policy editor
+  'editor.recoveryPolicy.label': '失败恢复策略',
+  'editor.recoveryPolicy.desc': '配置 Actions 失败时的重试次数限制和冷却时间。超过限制后需要人工介入。',
+  'editor.recoveryPolicy.maxRetries': '最大重试次数',
+  'editor.recoveryPolicy.cooldownSeconds': '冷却时间（秒）',
+  'editor.recoveryPolicy.save': '保存恢复策略',
+  'editor.recoveryPolicy.saved': '恢复策略已保存。',
+
   // Deployment rollback
   'rollback.eyebrow': 'CONFIRM DEPLOYMENT ROLLBACK',
   'rollback.title': '确认回滚这个部署？',
@@ -332,6 +343,33 @@ const zh: TranslationDict = {
   'recovery.retryStarted': '已重新触发 {count} 个失败的 Actions。',
   'recovery.retryUnavailable': '未找到可重新触发的失败 Actions。',
   'recovery.retryFailed': '重新触发 Actions 失败。',
+  'recovery.retries': '已重试 {count}/{max} 次',
+  'recovery.cooldown': '冷却中，剩余 {seconds} 秒',
+  'recovery.exhausted': '已达最大重试次数 ({count})，建议人工介入',
+  'recovery.escalation': '⚠️ 需要人工介入',
+
+  // Cloud sync
+  'cloudSync.enable': '☁ 云同步',
+  'cloudSync.eyebrow': '加密云同步',
+  'cloudSync.title': '云同步',
+  'cloudSync.status.disabled': '未启用',
+  'cloudSync.status.unlocked': '已解锁',
+  'cloudSync.status.syncing': '同步中…',
+  'cloudSync.status.error': '错误',
+  'cloudSync.unlock.desc': '输入口令加密数据后上传，服务器不会看到明文。',
+  'cloudSync.passphrase': '口令',
+  'cloudSync.passphraseRequired': '请输入口令。',
+  'cloudSync.unlock': '解锁',
+  'cloudSync.lock': '锁定',
+  'cloudSync.close': '关闭',
+  'cloudSync.push': '上传',
+  'cloudSync.pull': '下载',
+  'cloudSync.lastSynced': '上次同步',
+  'cloudSync.pushSuccess': '数据已上传到云端。',
+  'cloudSync.pushFailed': '上传失败。',
+  'cloudSync.pullSuccess': '数据已从云端恢复。',
+  'cloudSync.pullEmpty': '云端没有数据。',
+  'cloudSync.pullFailed': '下载失败。',
 
   // AI settings
   'ai.eyebrow': 'AI MODEL SETTINGS',
@@ -457,6 +495,69 @@ const zh: TranslationDict = {
 
   // Native-only tooltip
   'nativeOnly.tooltip': '需到 GitHub 页面操作',
+
+  // Sync health
+  'syncHealth.never': '尚未执行过状态校准，数据可能已过时。',
+  'syncHealth.running': '正在校准流程状态…',
+  'syncHealth.failed': '上次校准失败，部分状态可能已过时。',
+  'syncHealth.degraded': '校准部分完成：{reconciled} 个步骤成功，{failed} 个步骤失败。',
+  'syncHealth.lastSync': '已同步 {stages} 个步骤 · {time}',
+  'syncHealth.secondsAgo': '{seconds} 秒前',
+  'syncHealth.minutesAgo': '{minutes} 分钟前',
+  'syncHealth.hoursAgo': '{hours} 小时前',
+  'syncHealth.duration': '耗时 {ms}ms',
+  'syncHealth.staleCount': '{count} 个步骤可能已过时',
+  'syncHealth.stale.minutes': '约 {minutes} 分钟前',
+  'syncHealth.stale.hours': '约 {hours} 小时前',
+  'syncHealth.stale.tooltip': '此步骤数据可能已过时，长时间未更新。',
+
+  // Workflow run history
+  'runHistory.state.active': '进行中',
+  'runHistory.state.completed': '已完成',
+  'runHistory.state.failed': '失败',
+
+  // Release timeline
+  'timeline.eyebrow': '发布时间线',
+  'timeline.step.eyebrow': '步骤时间线',
+
+  // Failure center
+  'failureCenter.eyebrow': '需要处理',
+  'failureCenter.count': '{count} 项',
+
+  // Account deletion
+  'accountDelete.eyebrow': '危险操作',
+  'accountDelete.title': '删除你的账号？',
+  'accountDelete.desc': '将永久删除你的账号及所有关联数据，包括流程配置、监控状态、事件、部署历史和加密同步数据。',
+  'accountDelete.warning': '不会删除 GitHub 上的 PR、分支和部署。此操作无法撤销。',
+  'accountDelete.confirmLabel': '输入 DELETE 确认',
+  'accountDelete.cancel': '取消',
+  'accountDelete.confirm': '删除我的账号',
+  'accountDelete.deleting': '正在删除…',
+  'accountDelete.failed': '账号删除失败',
+
+  // GitHub Permissions
+  'permissions.eyebrow': 'GITHUB APP 权限说明',
+  'permissions.title': '为什么需要这些权限',
+  'permissions.actions.label': 'Actions（读写）',
+  'permissions.actions.desc': '读取工作流运行状态、重新触发失败的 Actions、执行回滚工作流。',
+  'permissions.contents.label': 'Contents（只读）',
+  'permissions.contents.desc': '读取分支信息并比较分支间的变更。',
+  'permissions.pullRequests.label': 'Pull Requests（读写）',
+  'permissions.pullRequests.desc': '代你创建、读取和合并 Pull Request。',
+  'permissions.manage': '在 GitHub 管理权限 ↗',
+  'permissions.revoke': '你可以随时在 GitHub Settings → Applications 中撤销这些权限。',
+
+  // Connect page
+  'connect.permissionsLink': '我们需要哪些权限？',
+  'connect.privacyLink': '隐私政策',
+
+  // Preflight
+  'preflight.eyebrow': '流程预检',
+  'preflight.run': '运行预检',
+  'preflight.loading': '检查中…',
+  'preflight.pass': '全部通过',
+  'preflight.fail': '{errors} 项错误',
+  'preflight.error': '预检请求失败',
 };
 
 export default zh;

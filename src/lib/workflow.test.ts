@@ -15,23 +15,23 @@ describe('workflow configuration', () => {
   it('appends a later transition without creating a GitHub PR', () => {
     const workflow = createWorkflow('bayernjf/pr-helper', 'feature/20260722', 'dev');
     expect(addStage(workflow, 'dev', 'main').stages).toEqual([
-      { source: 'feature/20260722', target: 'dev' },
-      { source: 'dev', target: 'main' },
+      { source: 'feature/20260722', target: 'dev', stageId: expect.any(String) },
+      { source: 'dev', target: 'main', stageId: expect.any(String) },
     ]);
   });
 
   it('adds an independent merge route without changing legacy linear routes', () => {
     const workflow = addStage(createWorkflow('bayernjf/pr-helper', 'feature/login', 'dev'), 'fix/payment', 'dev', true);
     expect(workflow.stages).toEqual([
-      { source: 'feature/login', target: 'dev' },
-      { source: 'fix/payment', target: 'dev', independent: true },
+      { source: 'feature/login', target: 'dev', stageId: expect.any(String) },
+      { source: 'fix/payment', target: 'dev', independent: true, stageId: expect.any(String) },
     ]);
     expect(workflowSummary(workflow)).toEqual({ route: 'feature/login → dev · fix/payment → dev', stepCount: 2 });
   });
 
   it('removes one configured step without changing the other steps', () => {
     const workflow = addStage(createWorkflow('bayernjf/pr-helper', 'feature/20260722', 'dev'), 'dev', 'main');
-    expect(removeStage(workflow, 0).stages).toEqual([{ source: 'dev', target: 'main' }]);
+    expect(removeStage(workflow, 0).stages).toEqual([{ source: 'dev', target: 'main', stageId: expect.any(String) }]);
   });
 
   it('keeps selected release dependencies valid when a route is removed', () => {
