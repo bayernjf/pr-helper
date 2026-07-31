@@ -1,4 +1,4 @@
-import { type ApiRequest, type ApiResponse } from './_lib/http.js';
+import { requestErrorStatus, type ApiRequest, type ApiResponse } from './_lib/http.js';
 import { currentGitHubIdentity } from './_lib/session.js';
 import { isStoredWorkflow, listWorkflows, removeWorkflow, upsertWorkflow } from './_lib/workflows-store.js';
 
@@ -25,8 +25,8 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     }
     const payload = body(request) as { workflow?: unknown; id?: unknown } | undefined;
     if (request.method === 'PUT' && isStoredWorkflow(payload?.workflow)) {
-      await upsertWorkflow(process.env, identity, payload.workflow);
-      response.status(200).json({ ok: true });
+      const workflow = await upsertWorkflow(process.env, identity, payload.workflow);
+      response.status(200).json({ ok: true, workflow });
       return;
     }
     if (request.method === 'DELETE' && typeof payload?.id === 'string') {
@@ -37,7 +37,6 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     response.status(400).json({ message: '无效的流程请求' });
   } catch (error) {
     const message = responseMessage(error);
-    const code = message.includes('DATABASE_URL') ? 503 : message.includes('GitHub 会话') ? 401 : 500;
-    response.status(code).json({ message });
+    response.status(requestErrorStatus(error)).json({ message });
   }
 }

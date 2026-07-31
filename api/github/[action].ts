@@ -14,6 +14,25 @@ function requestedPath(request: ApiRequest) {
   return path;
 }
 
+export function isAllowedGithubRequest(path: string, method = 'GET') {
+  const normalizedMethod = method.toUpperCase();
+  if (path.startsWith('/user/repos')) return normalizedMethod === 'GET';
+  const repository = '/repos/[^/?]+/[^/?]+';
+  if (new RegExp(`^${repository}/branches/[^/?]+/protection(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
+  if (new RegExp(`^${repository}/branches(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
+  if (new RegExp(`^${repository}/actions/workflows(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
+  if (new RegExp(`^${repository}/environments(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
+  if (new RegExp(`^${repository}/actions/runs(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
+  if (new RegExp(`^${repository}/actions/runs/\\d+/rerun(?:\\?.*)?$`).test(path)) return normalizedMethod === 'POST';
+  if (new RegExp(`^${repository}/pulls(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET' || normalizedMethod === 'POST';
+  if (new RegExp(`^${repository}/pulls/\\d+(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
+  if (new RegExp(`^${repository}/pulls/\\d+/reviews(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
+  if (new RegExp(`^${repository}/pulls/\\d+/merge(?:\\?.*)?$`).test(path)) return normalizedMethod === 'PUT';
+  if (new RegExp(`^${repository}/compare/[^/?]+\\.\\.\\.[^/?]+(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
+  if (new RegExp(`^${repository}/commits/[^/?]+/(?:check-runs|status)(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
+  return false;
+}
+
 function sessionHandler(request: ApiRequest, response: ApiResponse) {
   if (!requestMustBeGet(request, response)) return;
   try {
@@ -34,6 +53,7 @@ async function requestHandler(request: ApiRequest, response: ApiResponse) {
   try {
     const { config, session } = currentGitHubSession(request);
     const path = requestedPath(request);
+    if (!isAllowedGithubRequest(path, request.method || 'GET')) throw new Error('不支持的 GitHub 请求');
     const target = path.startsWith('/user/repos') ? path.replace('/user/repos', '/installation/repositories') : path;
     const data = await installationRequest<unknown>(config, session.installationId!, target, {
       method: request.method,

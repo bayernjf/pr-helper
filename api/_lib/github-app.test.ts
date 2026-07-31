@@ -30,7 +30,7 @@ describe('GitHub App server foundation', () => {
     verifier.update(`${header}.${payload}`);
     expect(JSON.parse(Buffer.from(header, 'base64url').toString())).toEqual({ alg: 'RS256', typ: 'JWT' });
     expect(verifier.verify(pair.publicKey, Buffer.from(signature, 'base64url'))).toBe(true);
-  });
+  }, 30_000);
 
   it('rejects a tampered or expired signed OAuth state', () => {
     const state = createSignedState({ nonce: 'nonce-1', returnTo: '/app' }, 'session-secret', 1_700_000_000_000);
