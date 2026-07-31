@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canCheckDeploymentUrl, compactFailureDetails, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, repairCommitSha, rollbackDeploymentIsAvailable, sortStoredWorkflows, storedWorkflowFromPayload, workflowConfigurationWarnings, workflowStageStateMatchesDefinition } from './workflows-store';
+import { canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, ensureStageIds, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, reconciliationState, repairCommitSha, rollbackDeploymentIsAvailable, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('accepts a workflow with real branch stages', () => {
@@ -143,5 +143,92 @@ describe('stored workflow validation', () => {
     expect(rollbackDeploymentIsAvailable({ state: 'success', deploymentUrl: 'https://release.vercel.app' })).toBe(true);
     expect(rollbackDeploymentIsAvailable({ state: 'success', deploymentUrl: null })).toBe(false);
     expect(rollbackDeploymentIsAvailable({ state: 'failure', deploymentUrl: 'https://release.vercel.app' })).toBe(false);
+  });
+});
+
+describe('sync health threshold', () => {
+  it('marks stages as stale after 15 minutes', () => {
+    expect(STAGE_STALE_THRESHOLD_SECONDS).toBe(900);
+  });
+});
+
+describe('reconciliation state', () => {
+  it('distinguishes complete, partial, and total failures', () => {
+    expect(reconciliationState(0, 3)).toBe('success');
+    expect(reconciliationState(1, 2)).toBe('degraded');
+    expect(reconciliationState(3, 0)).toBe('failure');
+  });
+});
+
+describe('recovery policy validation', () => {
+  const baseWorkflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main' }] };
+
+  it('accepts a workflow without a recovery policy (uses defaults)', () => {
+    expect(isStoredWorkflow(baseWorkflow)).toBe(true);
+  });
+
+  it('accepts valid recovery policies within bounds', () => {
+    expect(isStoredWorkflow({ ...baseWorkflow, recoveryPolicy: { maxRetries: 0, cooldownSeconds: 0 } })).toBe(true);
+    expect(isStoredWorkflow({ ...baseWorkflow, recoveryPolicy: { maxRetries: 3, cooldownSeconds: 300 } })).toBe(true);
+    expect(isStoredWorkflow({ ...baseWorkflow, recoveryPolicy: { maxRetries: 20, cooldownSeconds: 86400 } })).toBe(true);
+  });
+
+  it('rejects recovery policies with out-of-range values', () => {
+    expect(isStoredWorkflow({ ...baseWorkflow, recoveryPolicy: { maxRetries: -1, cooldownSeconds: 300 } })).toBe(false);
+    expect(isStoredWorkflow({ ...baseWorkflow, recoveryPolicy: { maxRetries: 21, cooldownSeconds: 300 } })).toBe(false);
+    expect(isStoredWorkflow({ ...baseWorkflow, recoveryPolicy: { maxRetries: 3, cooldownSeconds: -1 } })).toBe(false);
+    expect(isStoredWorkflow({ ...baseWorkflow, recoveryPolicy: { maxRetries: 3, cooldownSeconds: 86401 } })).toBe(false);
+  });
+
+  it('rejects recovery policies with non-numeric or missing fields', () => {
+    expect(isStoredWorkflow({ ...baseWorkflow, recoveryPolicy: {} })).toBe(false);
+    expect(isStoredWorkflow({ ...baseWorkflow, recoveryPolicy: { maxRetries: '3', cooldownSeconds: 300 } })).toBe(false);
+    expect(isStoredWorkflow({ ...baseWorkflow, recoveryPolicy: { maxRetries: 3 } })).toBe(false);
+  });
+
+  it('exposes the default recovery policy constants', () => {
+    expect(DEFAULT_RECOVERY_POLICY).toEqual({ maxRetries: 3, cooldownSeconds: 300 });
+  });
+});
+
+describe('ensureStageIds', () => {
+  it('adds stage IDs to stages missing them', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main' }, { source: 'main', target: 'production' }] };
+    const result = ensureStageIds(workflow);
+    expect(result.stages[0].stageId).toBeTruthy();
+    expect(result.stages[1].stageId).toBeTruthy();
+    expect(result.stages[0].stageId).not.toBe(result.stages[1].stageId);
+  });
+
+  it('preserves existing stage IDs', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main', stageId: 'existing-id' }] };
+    const result = ensureStageIds(workflow);
+    expect(result.stages[0].stageId).toBe('existing-id');
+    expect(result).toBe(workflow);
+  });
+
+  it('returns the same reference when all stages already have IDs', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main', stageId: 's1' }, { source: 'main', target: 'prod', stageId: 's2' }] };
+    expect(ensureStageIds(workflow)).toBe(workflow);
+  });
+
+  it('returns a new reference when any stage is updated', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main', stageId: 's1' }, { source: 'main', target: 'prod' }] };
+    const result = ensureStageIds(workflow);
+    expect(result).not.toBe(workflow);
+    expect(result.stages[0].stageId).toBe('s1');
+    expect(result.stages[1].stageId).toBeTruthy();
+  });
+});
+
+describe('stable stage identity', () => {
+  it('resolves a stage identity independently from its array position', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main', stageId: 'stage-dev' }] };
+    expect(stageIdentity(workflow, 0)).toBe('stage-dev');
+  });
+
+  it('derives one actionable decision from the persisted stage state', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main', stageId: 'stage-dev' }] };
+    expect(deriveStageDecision(workflow, 0, { stage_id: 'stage-dev', pull_state: 'open', checks_state: 'success', approvals: 1, required_approvals: 1, mergeable: true, mergeable_state: 'clean', ahead_by: 0 }, [{ stage_index: 0, stage_id: 'stage-dev', pull_state: 'open', checks_state: 'success' }])).toMatchObject({ kind: 'ready-to-merge', actionable: true });
   });
 });
