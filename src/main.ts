@@ -875,14 +875,14 @@ function bindFailureCenter() {
 function laneRunHistory(flow: Workflow): string {
   const runs = workflowRuns.filter(run => run.workflowId === flow.id).slice(0, 5);
   if (!runs.length) return '';
-  return `<section class="lane-run-history"><p class="eyebrow">${t('overview.run.history')}</p><ol>${runs.map(run => {
+  return `<details class="lane-run-history"><summary class="eyebrow">${t('overview.run.history')}</summary><ol>${runs.map(run => {
     const stateClass = run.state === 'completed' ? 'completed' : run.state === 'failed' ? 'failed' : 'active';
     const stateLabel = t(`runHistory.state.${run.state}`);
     const prLink = run.pullNumber ? `<a href="${githubPullUrl(flow.repository, run.pullNumber)}" target="_blank" rel="noreferrer">#${run.pullNumber} ↗</a>` : '';
     const finishedAt = run.completedAt ? new Date(run.completedAt) : null;
     const time = finishedAt ? stageUpdatedAt({ updatedAt: finishedAt.toISOString() } as WorkflowStageState) : stageUpdatedAt({ updatedAt: run.startedAt } as WorkflowStageState);
     return `<li class="${stateClass}"><div><b>${escape(run.source)} → ${escape(run.target)}</b><small>v${run.version} · ${stateLabel}</small></div><time>${escape(time)}</time><span>${prLink}</span></li>`;
-  }).join('')}</ol></section>`;
+  }).join('')}</ol></details>`;
 }
 function timelineEntryIcon(kind: string): string {
   if (kind.startsWith('run-')) return '🚀';
