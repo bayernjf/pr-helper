@@ -819,10 +819,10 @@ function overview() {
   const failurePanel = failureCenterPanel();
   const preflight = preflightPanel();
   const failedCount = actionQueue.filter(item => item.kind === 'checks-failed').length;
-  const activeProjectCount = new Set(actionQueue.map(item => item.workflowId)).size;
+  const workflowCount = workflows.length;
   const visibleWorkflows = workflows.filter(flow => overviewFilter === 'all' || actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed')));
   const refreshLabel = actionQueueRefreshing ? t('overview.queue.refreshing') : t('overview.queue.refresh');
-  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div><button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${activeProjectCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button id="refresh-action-queue" class="board-refresh${actionQueueRefreshing ? ' is-loading' : ''}"${actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
+  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div><button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button id="refresh-action-queue" class="board-refresh${actionQueueRefreshing ? ' is-loading' : ''}"${actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
   document.querySelector('#new-flow')!.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
@@ -900,20 +900,20 @@ function timelineEntryIcon(kind: string): string {
 function workflowTimelineSection(flow: Workflow): string {
   const entries = timeline.filter(entry => entry.workflowId === flow.id).slice(0, 8);
   if (!entries.length) return '';
-  return `<section class="lane-timeline"><p class="eyebrow">${t('timeline.eyebrow')}</p><ol>${entries.map(entry => {
+  return `<details class="lane-timeline"><summary class="eyebrow">${t('timeline.eyebrow')}</summary><ol>${entries.map(entry => {
     const icon = timelineEntryIcon(entry.kind);
     const prLink = entry.pullNumber ? `<a href="${githubPullUrl(flow.repository, entry.pullNumber)}" target="_blank" rel="noreferrer">#${entry.pullNumber}</a>` : '';
     return `<li><span class="timeline-icon">${icon}</span><div><b>${escape(entry.message)}</b><small>${escape(entry.source)} → ${escape(entry.target)}${prLink ? ` · ${prLink}` : ''}</small></div><time>${escape(stageUpdatedAt({ updatedAt: entry.occurredAt } as WorkflowStageState))}</time></li>`;
-  }).join('')}</ol></section>`;
+  }).join('')}</ol></details>`;
 }
 function stepTimelineSection(flow: Workflow, stageIndex: number, source: string): string {
   const stageId = flow.stages[stageIndex]?.stageId;
   const entries = timeline.filter(entry => entry.workflowId === flow.id && (stageId ? entry.stageId === stageId : entry.stageIndex === stageIndex) && (entry.source === source || !entry.source)).slice(0, 12);
   if (!entries.length) return '';
-  return `<section class="drawer-timeline"><p class="eyebrow">${t('timeline.step.eyebrow')}</p><ol>${entries.map(entry => {
+  return `<details class="drawer-timeline"><summary class="eyebrow">${t('timeline.step.eyebrow')}</summary><ol>${entries.map(entry => {
     const icon = timelineEntryIcon(entry.kind);
     return `<li><span class="timeline-icon">${icon}</span><div><b>${escape(entry.message)}</b><time>${escape(stageUpdatedAt({ updatedAt: entry.occurredAt } as WorkflowStageState))}</time></div></li>`;
-  }).join('')}</ol></section>`;
+  }).join('')}</ol></details>`;
 }
 function projectLane(flow: Workflow) {
   const items = actionQueue.filter(item => item.workflowId === flow.id);
