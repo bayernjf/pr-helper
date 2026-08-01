@@ -53,6 +53,9 @@ const en: TranslationDict = {
   'account.push.title': 'Browser notifications are enabled',
   'account.aiSettings': 'AI Settings',
   'account.disconnect': 'Disconnect GitHub',
+  'account.deleteAccount': 'Delete Account',
+  'account.privacy': 'Privacy Policy',
+  'account.permissions': 'GitHub Permissions',
 
   // Overview
   'overview.eyebrow.queue': 'NEEDS YOUR ATTENTION',
@@ -210,7 +213,15 @@ const en: TranslationDict = {
   'editor.deployments.warning.environment-missing': 'No GitHub Environment is set, so PR Helper must use an inferred name.',
   'editor.deployments.warning.environment-not-found': 'GitHub Environment “{value}” was not found in this repository.',
   'editor.deployments.warning.health-path-invalid': 'Health check path “{value}” must start with /.',
-  'editor.deployments.warning.rollback-workflow-not-found': 'Rollback workflow “{value}” was not found in this repository.',
+  'editor.deployments.warning.rollback-workflow-not-found': 'Rollback workflow "{value}" was not found in this repository.',
+
+  // Recovery policy editor
+  'editor.recoveryPolicy.label': 'RECOVERY POLICY',
+  'editor.recoveryPolicy.desc': 'Configure retry limits and cooldown for failed Actions. Manual intervention is needed when limits are exceeded.',
+  'editor.recoveryPolicy.maxRetries': 'Max retries',
+  'editor.recoveryPolicy.cooldownSeconds': 'Cooldown (seconds)',
+  'editor.recoveryPolicy.save': 'Save recovery policy',
+  'editor.recoveryPolicy.saved': 'Recovery policy saved.',
 
   // Deployment rollback
   'rollback.eyebrow': 'CONFIRM DEPLOYMENT ROLLBACK',
@@ -332,6 +343,33 @@ const en: TranslationDict = {
   'recovery.retryStarted': 'Reran {count} failed Actions.',
   'recovery.retryUnavailable': 'No failed Actions can be rerun.',
   'recovery.retryFailed': 'Unable to rerun Actions.',
+  'recovery.retries': 'Retried {count}/{max}',
+  'recovery.cooldown': 'Cooldown: {seconds}s remaining',
+  'recovery.exhausted': 'Max retries reached ({count}), manual intervention needed',
+  'recovery.escalation': '⚠️ Manual intervention needed',
+
+  // Cloud sync
+  'cloudSync.enable': '☁ Cloud Sync',
+  'cloudSync.eyebrow': 'ENCRYPTED CLOUD SYNC',
+  'cloudSync.title': 'Cloud Sync',
+  'cloudSync.status.disabled': 'Disabled',
+  'cloudSync.status.unlocked': 'Unlocked',
+  'cloudSync.status.syncing': 'Syncing…',
+  'cloudSync.status.error': 'Error',
+  'cloudSync.unlock.desc': 'Enter a passphrase to encrypt your data before uploading. The server never sees plaintext.',
+  'cloudSync.passphrase': 'Passphrase',
+  'cloudSync.passphraseRequired': 'Please enter a passphrase.',
+  'cloudSync.unlock': 'Unlock',
+  'cloudSync.lock': 'Lock',
+  'cloudSync.close': 'Close',
+  'cloudSync.push': 'Upload',
+  'cloudSync.pull': 'Download',
+  'cloudSync.lastSynced': 'Last synced',
+  'cloudSync.pushSuccess': 'Data uploaded to cloud.',
+  'cloudSync.pushFailed': 'Upload failed.',
+  'cloudSync.pullSuccess': 'Data restored from cloud.',
+  'cloudSync.pullEmpty': 'No cloud data found.',
+  'cloudSync.pullFailed': 'Download failed.',
 
   // AI settings
   'ai.eyebrow': 'AI MODEL SETTINGS',
@@ -457,6 +495,69 @@ const en: TranslationDict = {
 
   // Native-only tooltip
   'nativeOnly.tooltip': 'Must be done on GitHub',
+
+  // Sync health
+  'syncHealth.never': 'No reconciliation has run yet. Data may be outdated.',
+  'syncHealth.running': 'Reconciling workflow status…',
+  'syncHealth.failed': 'Last reconciliation failed. Some status may be outdated.',
+  'syncHealth.degraded': 'Reconciliation partially completed: {reconciled} stages succeeded, {failed} failed.',
+  'syncHealth.lastSync': 'Synced {stages} stages · {time}',
+  'syncHealth.secondsAgo': '{seconds}s ago',
+  'syncHealth.minutesAgo': '{minutes}m ago',
+  'syncHealth.hoursAgo': '{hours}h ago',
+  'syncHealth.duration': 'took {ms}ms',
+  'syncHealth.staleCount': '{count} stages may be stale',
+  'syncHealth.stale.minutes': '~{minutes}m old',
+  'syncHealth.stale.hours': '~{hours}h old',
+  'syncHealth.stale.tooltip': 'This stage data may be outdated because it has not been updated for a long time.',
+
+  // Workflow run history
+  'runHistory.state.active': 'In progress',
+  'runHistory.state.completed': 'Completed',
+  'runHistory.state.failed': 'Failed',
+
+  // Release timeline
+  'timeline.eyebrow': 'RELEASE TIMELINE',
+  'timeline.step.eyebrow': 'STEP TIMELINE',
+
+  // Failure center
+  'failureCenter.eyebrow': 'NEEDS ATTENTION',
+  'failureCenter.count': '{count} items',
+
+  // Account deletion
+  'accountDelete.eyebrow': 'DANGER ZONE',
+  'accountDelete.title': 'Delete your account?',
+  'accountDelete.desc': 'This will permanently delete your account and all associated data, including workflows, monitoring state, events, deployment history, and encrypted sync data.',
+  'accountDelete.warning': 'GitHub PRs, branches, and deployments will not be deleted. This cannot be undone.',
+  'accountDelete.confirmLabel': 'Type DELETE to confirm',
+  'accountDelete.cancel': 'Cancel',
+  'accountDelete.confirm': 'Delete my account',
+  'accountDelete.deleting': 'Deleting…',
+  'accountDelete.failed': 'Account deletion failed',
+
+  // GitHub Permissions
+  'permissions.eyebrow': 'GITHUB APP PERMISSIONS',
+  'permissions.title': 'Why we need these permissions',
+  'permissions.actions.label': 'Actions (Read & Write)',
+  'permissions.actions.desc': 'Read workflow run status, rerun failed Actions, and trigger rollback workflows.',
+  'permissions.contents.label': 'Contents (Read-only)',
+  'permissions.contents.desc': 'Read branch information and compare changes between branches.',
+  'permissions.pullRequests.label': 'Pull Requests (Read & Write)',
+  'permissions.pullRequests.desc': 'Create, read, and merge pull requests on your behalf.',
+  'permissions.manage': 'Manage permissions on GitHub ↗',
+  'permissions.revoke': 'You can revoke these permissions anytime through GitHub Settings → Applications.',
+
+  // Connect page
+  'connect.permissionsLink': 'What permissions do we need?',
+  'connect.privacyLink': 'Privacy Policy',
+
+  // Preflight
+  'preflight.eyebrow': 'PREFLIGHT CHECKS',
+  'preflight.run': 'Run preflight',
+  'preflight.loading': 'Checking…',
+  'preflight.pass': 'All clear',
+  'preflight.fail': '{errors} errors',
+  'preflight.error': 'Preflight request failed',
 };
 
 export default en;

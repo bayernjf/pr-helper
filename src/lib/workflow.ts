@@ -1,7 +1,22 @@
-export type WorkflowStage = { source: string; target: string; independent?: boolean; waitFor?: number[] };
+export type WorkflowStage = { source: string; target: string; independent?: boolean; waitFor?: number[]; stageId?: string };
 export type DeploymentProvider = 'vercel' | 'cloudflare';
 export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string; healthCheckPath?: string; rollbackWorkflowName?: string };
-export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; deployments?: DeploymentConfig[]; position?: number };
+export type RecoveryPolicy = { maxRetries: number; cooldownSeconds: number };
+export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; deployments?: DeploymentConfig[]; position?: number; recoveryPolicy?: RecoveryPolicy; version?: number };
+
+export function generateStageId(): string {
+  return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+export function ensureStageIds(workflow: Workflow): Workflow {
+  let changed = false;
+  const stages = workflow.stages.map(stage => {
+    if (stage.stageId) return stage;
+    changed = true;
+    return { ...stage, stageId: generateStageId() };
+  });
+  return changed ? { ...workflow, stages } : workflow;
+}
 export type DeploymentConfigurationWarningCode = 'no-deployments' | 'actions-unavailable' | 'workflow-not-found' | 'environment-missing' | 'environment-not-found' | 'health-path-invalid' | 'rollback-workflow-not-found';
 export type DeploymentConfigurationWarning = { code: DeploymentConfigurationWarningCode; deploymentIndex?: number; value?: string };
 
@@ -54,11 +69,11 @@ export function removeDeployment(workflow: Workflow, index: number): Workflow {
 }
 
 export function createWorkflow(repository: string, source: string, target: string, name = repository): Workflow {
-  return { id: `${repository}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, repository, stages: [{ source, target }], deployments: defaultDeployments };
+  return { id: `${repository}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, repository, stages: [{ source, target, stageId: generateStageId() }], deployments: defaultDeployments };
 }
 
 export function addStage(workflow: Workflow, source: string, target: string, independent = false, waitFor: number[] = []): Workflow {
-  return { ...workflow, stages: [...workflow.stages, { source, target, ...(independent ? { independent: true } : {}), ...(waitFor.length ? { waitFor } : {}) }] };
+  return { ...workflow, stages: [...workflow.stages, { source, target, stageId: generateStageId(), ...(independent ? { independent: true } : {}), ...(waitFor.length ? { waitFor } : {}) }] };
 }
 
 export function removeStage(workflow: Workflow, index: number): Workflow {

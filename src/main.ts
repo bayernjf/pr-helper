@@ -6,8 +6,9 @@ import { canCreateWorkflowStage, canMergeOpenPull, githubCompareUrl, githubPullU
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, sortWorkflows, workflowSummary, type DeploymentConfig, type Workflow } from './lib/workflow';
+import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, sortWorkflows, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow } from './lib/workflow';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
+import { getCloudSyncStatus, unlockCloudSync, lockCloudSync, isCloudSyncUnlocked, encryptForCloud, decryptFromCloud, type CloudSyncStatus, type SyncableData } from './lib/encrypted-sync';
 import { t, getLocale, setLocale, detectLocale, registerTranslations, type Locale } from './lib/i18n';
 import en from './lib/translations/en';
 import zh from './lib/translations/zh';
@@ -25,11 +26,19 @@ type GitHubActionsWorkflow = { name: string; state: string; path: string };
 type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string };
 type MergeResult = { merged: boolean; message?: string; sha?: string };
 type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
-type WorkflowStageState = WorkflowStageRunState & { workflowId: string; stageIndex: number; repository: string; source: string; target: string; mergedAt: string | null; headSha: string | null; checksPassed: number; checksTotal: number; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string | null; aheadBy: number; lastEvent: string | null; updatedAt: string };
-type WorkflowStageEvent = { workflowId: string; stageIndex: number; source: string | null; kind: string; message: string; occurredAt: string };
-type WorkflowStageDeployment = { workflowId: string; stageIndex: number; source: string; provider: 'vercel' | 'cloudflare'; environment: 'preview' | 'production'; runId: number | null; runName: string; runUrl: string | null; deploymentUrl: string | null; state: 'pending' | 'success' | 'failure'; conclusion: string | null; failureSummary: string | null; failureJobUrl: string | null; healthState: 'pending' | 'success' | 'failure' | null; healthUrl: string | null; healthDetail: string | null; updatedAt: string };
+type WorkflowStageState = WorkflowStageRunState & { workflowId: string; stageIndex: number; stageId: string | null; repository: string; source: string; target: string; mergedAt: string | null; headSha: string | null; checksPassed: number; checksTotal: number; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string | null; aheadBy: number; lastEvent: string | null; updatedAt: string; decision?: { kind: string; actionable: boolean; message: string } };
+type WorkflowStageEvent = { workflowId: string; stageIndex: number; stageId: string | null; source: string | null; target: string | null; kind: string; message: string; occurredAt: string };
+type WorkflowStageDeployment = { workflowId: string; stageIndex: number; stageId: string | null; source: string; provider: 'vercel' | 'cloudflare'; environment: 'preview' | 'production'; runId: number | null; runName: string; runUrl: string | null; deploymentUrl: string | null; state: 'pending' | 'success' | 'failure'; conclusion: string | null; failureSummary: string | null; failureJobUrl: string | null; healthState: 'pending' | 'success' | 'failure' | null; healthUrl: string | null; healthDetail: string | null; updatedAt: string };
 type WorkflowStageDeploymentRun = WorkflowStageDeployment & { firstSeenAt: string };
 type WorkflowConfigurationWarning = { workflowId: string; code: 'no-deployments' | 'actions-unavailable' | 'workflow-not-found' | 'environment-missing' | 'environment-not-found' | 'rollback-workflow-not-found' | 'deployment-not-seen' | 'deployment-stuck'; target?: string; provider?: WorkflowStageDeployment['provider']; value?: string; stageIndex?: number; source?: string };
+type ReconciliationRun = { id: number; trigger: string; state: 'running' | 'success' | 'degraded' | 'failure'; stagesTotal: number; stagesReconciled: number; stagesFailed: number; durationMs: number | null; errorMessage: string | null; repository: string | null; startedAt: string; finishedAt: string | null };
+type StageSyncHealth = { workflowId: string; stageIndex: number; stageId: string | null; source: string; target: string; updatedAt: string; ageSeconds: number; stale: boolean };
+type SyncHealth = { lastReconciliation: ReconciliationRun | null; stages: StageSyncHealth[]; webhookDeliveriesLast24h: number };
+type WorkflowRun = { id: number; workflowId: string; version: number; stageIndex: number; stageId: string | null; source: string; target: string; stageSnapshot: { source: string; target: string; stageId?: string }; pullNumber: number | null; state: 'active' | 'completed' | 'failed'; startedAt: string; completedAt: string | null };
+type TimelineEntry = { workflowId: string; stageIndex: number; stageId: string | null; source: string; target: string; kind: string; message: string; occurredAt: string; pullNumber: number | null; runId: number | null };
+type PreflightCheck = { code: string; severity: 'error' | 'warning' | 'info'; title: string; detail: string; workflowId: string; stageIndex: number | null; source: string | null; fix?: string };
+type PreflightResult = { workflowId: string; workflowName: string; repository: string; checks: PreflightCheck[]; summary: { errors: number; warnings: number; info: number }; ok: boolean };
+type RecoveryStatus = { workflowId: string; stageIndex: number; source: string; retryCount: number; maxRetries: number; lastRetryAt: string | null; cooldownRemainingSeconds: number; exhausted: boolean; escalationNeeded: boolean };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
 const THEME_KEY = 'pr-helper-theme';
@@ -59,6 +68,13 @@ let workflowStageEvents: WorkflowStageEvent[] = [];
 let workflowStageDeployments: WorkflowStageDeployment[] = [];
 let workflowStageDeploymentRuns: WorkflowStageDeploymentRun[] = [];
 let workflowConfigurationWarnings: WorkflowConfigurationWarning[] = [];
+let syncHealth: SyncHealth | null = null;
+let workflowRuns: WorkflowRun[] = [];
+let timeline: TimelineEntry[] = [];
+let preflightResults: PreflightResult[] = [];
+let preflightLoading = false;
+let preflightError = '';
+let recoveryStatuses: RecoveryStatus[] = [];
 let actionQueueError = '';
 let overviewFilter: 'all' | 'attention' | 'failed' = 'all';
 let pushSubscribed = false;
@@ -73,10 +89,19 @@ let generationRules = loadGenerationRules(() => localStorage.getItem(GENERATION_
 let pullRequestDrafts = loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), Date.now());
 let draftStorageSynchronized = true;
 let currentTheme: Theme = (localStorage.getItem(THEME_KEY) as Theme) || 'light';
+let cloudSyncStatus: CloudSyncStatus = getCloudSyncStatus();
 
 const app = () => document.querySelector<HTMLDivElement>('#app')!;
 const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
-function loadWorkflows(): Workflow[] { try { const stored = JSON.parse(localStorage.getItem('pr-helper-workflows') || '[]') as unknown; return Array.isArray(stored) ? sortWorkflows(stored as Workflow[]) : []; } catch { return []; } }
+function loadWorkflows(): Workflow[] {
+  try {
+    const stored = JSON.parse(localStorage.getItem('pr-helper-workflows') || '[]') as unknown;
+    if (!Array.isArray(stored)) return [];
+    const normalized = sortWorkflows(stored as Workflow[]).map(ensureStageIds);
+    localStorage.setItem('pr-helper-workflows', JSON.stringify(normalized));
+    return normalized;
+  } catch { return []; }
+}
 function applyTheme(theme: Theme) {
   currentTheme = theme;
   localStorage.setItem(THEME_KEY, theme);
@@ -97,13 +122,19 @@ function updateThemeToggleButton() {
 }
 function persistGenerationRules(next: GenerationRule[]) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(next)); generationRules = next; }
 function persistWorkflowsLocally() { localStorage.setItem('pr-helper-workflows', JSON.stringify(workflows)); }
-async function persistWorkflowRemotely(workflow: Workflow) {
-  if (!cloudWorkflowStorage) return;
+async function persistWorkflowRemotely(workflow: Workflow): Promise<Workflow | null> {
+  if (!cloudWorkflowStorage) return workflow;
   try {
     const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflow }) });
     if (!response.ok) throw new Error(await workflowApiError(response));
+    const payload = await response.json().catch(() => ({})) as { workflow?: Workflow };
+    const normalized = payload.workflow && payload.workflow.id === workflow.id ? ensureStageIds(payload.workflow) : workflow;
+    workflows = saveWorkflow(workflows, normalized);
+    if (active?.id === normalized.id) active = normalized;
+    persistWorkflowsLocally();
     cloudWorkflowSyncError = '';
-  } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail'); showToast(t('toast.saved.local', { error: cloudWorkflowSyncError })); render(); }
+    return normalized;
+  } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail'); showToast(t('toast.saved.local', { error: cloudWorkflowSyncError })); render(); return null; }
 }
 async function persistWorkflowOrder(next: Workflow[]) {
   workflows = next;
@@ -122,7 +153,13 @@ async function persistWorkflowOrder(next: Workflow[]) {
     showToast(t('toast.order.local', { error: cloudWorkflowSyncError }));
   }
 }
-function save(next: Workflow) { active = next; workflows = saveWorkflow(workflows, next); persistWorkflowsLocally(); void persistWorkflowRemotely(next); }
+function save(next: Workflow) {
+  const normalized = ensureStageIds(next);
+  active = normalized;
+  workflows = saveWorkflow(workflows, normalized);
+  persistWorkflowsLocally();
+  void persistWorkflowRemotely(normalized);
+}
 async function removeWorkflowFromStorage(workflowId: string) {
   workflows = deleteWorkflow(workflows, workflowId); persistWorkflowsLocally();
   if (!cloudWorkflowStorage) return;
@@ -150,26 +187,30 @@ async function loadCloudWorkflows() {
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
 }
 async function loadActionQueue() {
-  if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = []; actionQueueError = ''; return false; }
+  if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = []; syncHealth = null; workflowRuns = []; timeline = []; recoveryStatuses = []; actionQueueError = ''; return false; }
   try {
     const response = await fetch(githubAppApiUrl('/api/inbox'));
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { message?: string };
-      actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = [];
+      actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = []; syncHealth = null; workflowRuns = []; timeline = []; recoveryStatuses = [];
       actionQueueError = payload.message || t('toast.queue.failed');
       return false;
     }
-    const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[]; events?: WorkflowStageEvent[]; deployments?: WorkflowStageDeployment[]; deploymentRuns?: WorkflowStageDeploymentRun[]; configurationWarnings?: WorkflowConfigurationWarning[] };
+    const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[]; events?: WorkflowStageEvent[]; deployments?: WorkflowStageDeployment[]; deploymentRuns?: WorkflowStageDeploymentRun[]; configurationWarnings?: WorkflowConfigurationWarning[]; syncHealth?: SyncHealth; runs?: WorkflowRun[]; timeline?: TimelineEntry[]; recoveryStatuses?: RecoveryStatus[] };
     actionQueue = Array.isArray(payload.items) ? payload.items : [];
     workflowStageStates = Array.isArray(payload.states) ? payload.states : [];
     workflowStageEvents = Array.isArray(payload.events) ? payload.events : [];
     workflowStageDeployments = Array.isArray(payload.deployments) ? payload.deployments : [];
     workflowStageDeploymentRuns = Array.isArray(payload.deploymentRuns) ? payload.deploymentRuns : [];
     workflowConfigurationWarnings = Array.isArray(payload.configurationWarnings) ? payload.configurationWarnings : [];
+    syncHealth = payload.syncHealth || null;
+    workflowRuns = Array.isArray(payload.runs) ? payload.runs : [];
+    timeline = Array.isArray(payload.timeline) ? payload.timeline : [];
+    recoveryStatuses = Array.isArray(payload.recoveryStatuses) ? payload.recoveryStatuses : [];
     actionQueueError = '';
     return true;
   } catch (error) {
-    actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = [];
+    actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = []; syncHealth = null; workflowRuns = []; timeline = []; recoveryStatuses = [];
     actionQueueError = error instanceof Error ? error.message : t('toast.queue.failed');
     return false;
   }
@@ -227,6 +268,42 @@ function showDisconnectDialog() {
   }, { once: true });
 }
 
+function showDeleteAccountDialog() {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog confirm-dialog';
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('accountDelete.eyebrow')}</p><h2>${t('accountDelete.title')}</h2><p>${t('accountDelete.desc')}</p><p class="meta">${t('accountDelete.warning')}</p><label>${t('accountDelete.confirmLabel')}<input id="delete-confirm-input" type="text" autocomplete="off" placeholder="DELETE" /></label><div class="dialog-actions"><button value="cancel" class="ghost">${t('accountDelete.cancel')}</button><button id="delete-account-confirm" type="button" class="danger-button" disabled>${t('accountDelete.confirm')}</button></div></form>`;
+  document.body.append(dialog); dialog.showModal();
+  const input = dialog.querySelector<HTMLInputElement>('#delete-confirm-input')!;
+  const confirmBtn = dialog.querySelector<HTMLButtonElement>('#delete-account-confirm')!;
+  input.addEventListener('input', () => { confirmBtn.disabled = input.value.trim() !== 'DELETE'; });
+  confirmBtn.addEventListener('click', async () => {
+    if (input.value.trim() !== 'DELETE') return;
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = t('accountDelete.deleting');
+    try {
+      const response = await fetch(githubAppApiUrl('/api/account'), { method: 'DELETE' });
+      if (!response.ok) throw new Error(await response.text());
+      sessionStorage.removeItem('github-token'); token = ''; githubInstallationSettingsUrl = ''; githubLogin = ''; cloudWorkflowStorage = false;
+      localStorage.removeItem('pr-helper-workflows'); localStorage.removeItem(GENERATION_RULES_KEY); localStorage.removeItem(PULL_REQUEST_DRAFTS_KEY);
+      dialog.close();
+      connect();
+    } catch (error) {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = t('accountDelete.confirm');
+      showToast(error instanceof Error ? error.message : t('accountDelete.failed'));
+    }
+  });
+  dialog.addEventListener('close', () => dialog.remove());
+}
+
+function showPermissionsDialog() {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog permissions-dialog';
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('permissions.eyebrow')}</p><h2>${t('permissions.title')}</h2><dl class="permissions-list"><dt>${t('permissions.actions.label')}</dt><dd>${t('permissions.actions.desc')}</dd><dt>${t('permissions.contents.label')}</dt><dd>${t('permissions.contents.desc')}</dd><dt>${t('permissions.pullRequests.label')}</dt><dd>${t('permissions.pullRequests.desc')}</dd></dl><p class="meta">${t('permissions.revoke')}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('rollback.cancel')}</button>${githubInstallationSettingsUrl ? `<a href="${githubInstallationSettingsUrl}" target="_blank" class="primary">${t('permissions.manage')}</a>` : ''}</div></form>`;
+  document.body.append(dialog); dialog.showModal();
+  dialog.addEventListener('close', () => dialog.remove());
+}
+
 function showDeleteWorkflowDialog(workflow: Workflow) {
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog confirm-dialog delete-workflow-dialog';
@@ -248,8 +325,8 @@ async function syncLocalWorkflows() {
   if (!cloudWorkflowStorage || !workflows.length) return;
   try {
     for (const workflow of workflows) {
-      const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflow }) });
-      if (!response.ok) throw new Error(t('sync.fail.short'));
+      const normalized = await persistWorkflowRemotely(workflow);
+      if (!normalized) throw new Error(t('sync.fail.short'));
     }
     pendingLocalWorkflowSync = false; render(); showToast(t('sync.success'));
   } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : t('sync.fail.short'); render(); showToast(t('sync.fail', { error: cloudWorkflowSyncError })); }
@@ -324,17 +401,85 @@ function showAiSettings() {
   dialog.addEventListener('close', () => dialog.remove());
 }
 
+function showCloudSyncDialog() {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog';
+  const unlocked = isCloudSyncUnlocked();
+  const status = cloudSyncStatus;
+  const statusText = status.state === 'disabled' ? t('cloudSync.status.disabled') : status.state === 'syncing' ? t('cloudSync.status.syncing') : status.state === 'error' ? t('cloudSync.status.error') : t('cloudSync.status.unlocked');
+  const lastSynced = status.lastSyncedAt ? `<p class="meta">${t('cloudSync.lastSynced')}: ${new Date(status.lastSyncedAt).toLocaleString()}</p>` : '';
+  const errorText = status.error ? `<p class="error">${escape(status.error)}</p>` : '';
+  if (unlocked) {
+    dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('cloudSync.eyebrow')}</p><h2>${t('cloudSync.title')}</h2><p class="meta">${statusText}</p>${lastSynced}${errorText}<div class="dialog-actions"><button id="cloud-sync-push" type="button" class="ghost">${t('cloudSync.push')}</button><button id="cloud-sync-pull" type="button" class="ghost">${t('cloudSync.pull')}</button><button id="cloud-sync-lock" type="button" class="ghost danger">${t('cloudSync.lock')}</button><button value="cancel" class="ghost">${t('cloudSync.close')}</button></div></form>`;
+    document.body.append(dialog); dialog.showModal();
+    dialog.querySelector('#cloud-sync-push')!.addEventListener('click', async () => { await cloudSyncPush(dialog); });
+    dialog.querySelector('#cloud-sync-pull')!.addEventListener('click', async () => { await cloudSyncPull(dialog); });
+    dialog.querySelector('#cloud-sync-lock')!.addEventListener('click', () => { lockCloudSync(); cloudSyncStatus = getCloudSyncStatus(); dialog.close(); render(); });
+  } else {
+    dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('cloudSync.eyebrow')}</p><h2>${t('cloudSync.title')}</h2><p>${t('cloudSync.unlock.desc')}</p><label>${t('cloudSync.passphrase')}<input id="cloud-passphrase" type="password" autocomplete="off" /></label><p id="cloud-sync-error" class="error" hidden></p><div class="dialog-actions"><button id="cloud-sync-unlock" type="button" class="primary">${t('cloudSync.unlock')}</button><button value="cancel" class="ghost">${t('cloudSync.close')}</button></div></form>`;
+    document.body.append(dialog); dialog.showModal();
+    dialog.querySelector('#cloud-sync-unlock')!.addEventListener('click', () => {
+      const passphrase = dialog.querySelector<HTMLInputElement>('#cloud-passphrase')!.value;
+      if (!passphrase) { const errorEl = dialog.querySelector<HTMLElement>('#cloud-sync-error')!; errorEl.hidden = false; errorEl.textContent = t('cloudSync.passphraseRequired'); return; }
+      unlockCloudSync(passphrase);
+      cloudSyncStatus = getCloudSyncStatus();
+      dialog.close();
+      showCloudSyncDialog();
+      render();
+    });
+  }
+  dialog.addEventListener('close', () => dialog.remove());
+}
+
+async function cloudSyncPush(dialog: HTMLDialogElement) {
+  try {
+    cloudSyncStatus = { ...cloudSyncStatus, state: 'syncing', error: null };
+    const data: SyncableData = { generationRules, prDrafts: pullRequestDrafts };
+    const blob = await encryptForCloud(data);
+    const response = await fetch(githubAppApiUrl('/api/encrypted-sync'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ciphertext: blob.ciphertext }) });
+    if (!response.ok) throw new Error('推送失败');
+    cloudSyncStatus = { ...cloudSyncStatus, state: 'unlocked', lastSyncedAt: new Date().toISOString(), error: null };
+    showToast(t('cloudSync.pushSuccess'));
+    dialog.close();
+    render();
+  } catch (error) {
+    cloudSyncStatus = { ...cloudSyncStatus, state: 'error', error: error instanceof Error ? error.message : '推送失败' };
+    showToast(t('cloudSync.pushFailed'));
+  }
+}
+
+async function cloudSyncPull(dialog: HTMLDialogElement) {
+  try {
+    cloudSyncStatus = { ...cloudSyncStatus, state: 'syncing', error: null };
+    const response = await fetch(githubAppApiUrl('/api/encrypted-sync'));
+    if (!response.ok) throw new Error('拉取失败');
+    const { record } = await response.json() as { record: { ciphertext: string; updatedAt: string } | null };
+    if (!record) { showToast(t('cloudSync.pullEmpty')); return; }
+    const data = await decryptFromCloud({ ciphertext: record.ciphertext, updatedAt: record.updatedAt });
+    if (data.generationRules) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(data.generationRules)); generationRules = loadGenerationRules(() => localStorage.getItem(GENERATION_RULES_KEY)); }
+    if (data.prDrafts) { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(data.prDrafts)); pullRequestDrafts = loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), Date.now()); }
+    cloudSyncStatus = { ...cloudSyncStatus, state: 'unlocked', lastSyncedAt: record.updatedAt, error: null };
+    showToast(t('cloudSync.pullSuccess'));
+    dialog.close();
+    render();
+  } catch (error) {
+    cloudSyncStatus = { ...cloudSyncStatus, state: 'error', error: error instanceof Error ? error.message : '拉取失败' };
+    showToast(t('cloudSync.pullFailed'));
+  }
+}
+
 function connect(error = '') {
   const requiresRemoteAuthOrigin = import.meta.env.DEV && !import.meta.env.VITE_AUTH_ORIGIN;
   const sunIcon = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
   const moonIcon = '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3a6 6 0 0 0 12 0V9a6 6 0 0 0-6-6z"/></svg>';
   const isDark = currentTheme === 'dark';
-  app().innerHTML = `<main class="connect connect-onboarding"><div class="connect-topbar"><button id="connect-theme-toggle" class="theme-toggle" aria-label="${isDark ? t('theme.toLight') : t('theme.toDark')}">${isDark ? sunIcon : moonIcon}<span>${isDark ? t('theme.light') : t('theme.dark')}</span></button><button id="connect-lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button></div><section class="connect-hero"><p class="eyebrow">${t('connect.eyebrow')}</p><h1>${t('connect.hero.title')}</h1><p class="sub">${t('connect.hero.sub')}</p></section><section class="panel connection-card"><p class="eyebrow">${t('connect.card.eyebrow')}</p><h2>${t('connect.card.title')}</h2><p class="connection-intro">${t('connect.card.intro')}</p>${error ? `<p class="error">${escape(error)}</p>` : ''}<a id="github-app-connect" class="primary github-connect" href="${githubAppApiUrl('/api/auth/github/start')}">${t('connect.card.button')} <span aria-hidden="true">${t('connect.card.arrow')}</span></a><p id="github-app-hint" class="connection-hint" hidden></p><ul class="connection-benefits"><li>${t('connect.benefit1')}</li><li>${t('connect.benefit2')}</li><li>${t('connect.benefit3')}</li></ul><details class="developer-connect"><summary>${t('connect.pat.summary')}</summary><label>${t('connect.pat.label')}<input id="token" type="password" placeholder="${t('connect.pat.placeholder')}" autocomplete="off" /></label><p class="meta">${t('connect.pat.meta')}</p><button id="connect" class="ghost">${t('connect.pat.button')}</button></details></section></main>`;
+  app().innerHTML = `<main class="connect connect-onboarding"><div class="connect-topbar"><button id="connect-theme-toggle" class="theme-toggle" aria-label="${isDark ? t('theme.toLight') : t('theme.toDark')}">${isDark ? sunIcon : moonIcon}<span>${isDark ? t('theme.light') : t('theme.dark')}</span></button><button id="connect-lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button></div><section class="connect-hero"><p class="eyebrow">${t('connect.eyebrow')}</p><h1>${t('connect.hero.title')}</h1><p class="sub">${t('connect.hero.sub')}</p></section><section class="panel connection-card"><p class="eyebrow">${t('connect.card.eyebrow')}</p><h2>${t('connect.card.title')}</h2><p class="connection-intro">${t('connect.card.intro')}</p>${error ? `<p class="error">${escape(error)}</p>` : ''}<a id="github-app-connect" class="primary github-connect" href="${githubAppApiUrl('/api/auth/github/start')}">${t('connect.card.button')} <span aria-hidden="true">${t('connect.card.arrow')}</span></a><p id="github-app-hint" class="connection-hint" hidden></p><ul class="connection-benefits"><li>${t('connect.benefit1')}</li><li>${t('connect.benefit2')}</li><li>${t('connect.benefit3')}</li></ul><div class="connect-footer-links"><button id="connect-permissions" class="link-button">${t('connect.permissionsLink')}</button><a href="/privacy.html" class="link-button">${t('connect.privacyLink')}</a></div><details class="developer-connect"><summary>${t('connect.pat.summary')}</summary><label>${t('connect.pat.label')}<input id="token" type="password" placeholder="${t('connect.pat.placeholder')}" autocomplete="off" /></label><p class="meta">${t('connect.pat.meta')}</p><button id="connect" class="ghost">${t('connect.pat.button')}</button></details></section></main>`;
   const themeToggle = document.querySelector('#connect-theme-toggle');
   themeToggle?.addEventListener('click', toggleTheme);
   document.querySelector('#connect-lang-toggle')?.addEventListener('click', () => { setLocale(getLocale() === 'zh' ? 'en' : 'zh'); connect(error); });
   if (requiresRemoteAuthOrigin) document.querySelector('#github-app-connect')!.addEventListener('click', event => { event.preventDefault(); const hint = document.querySelector<HTMLElement>('#github-app-hint')!; hint.hidden = false; hint.textContent = t('connect.hint.local'); });
   document.querySelector('#connect')!.addEventListener('click', async () => { const value = document.querySelector<HTMLInputElement>('#token')!.value.trim(); try { await githubFetch(value, '/user'); token = value; sessionStorage.setItem('github-token', value); await init(); } catch (err) { connect(err instanceof Error ? err.message : t('connect.error.generic')); } });
+  document.querySelector('#connect-permissions')?.addEventListener('click', showPermissionsDialog);
 }
 
 async function restoreConnection() {
@@ -390,7 +535,7 @@ function render() {
   const account = githubLogin ? `GitHub · @${escape(githubLogin)}` : t('account.label');
   const push = pushConfigured ? `<button id="push-settings" class="account-menu-item" ${pushSubscribed ? `disabled title="${t('account.push.title')}"` : ''}>${pushSubscribed ? t('account.push.on') : t('account.push.off')}</button>` : '';
   const themeIcon = currentTheme === 'dark' ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3a6 6 0 0 0 12 0V9a6 6 0 0 0-6-6z"/></svg>';
-  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">${t('brand.name')}<span>${t('brand.suffix')}</span></a><nav aria-label="${t('nav.label')}"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">${t('nav.overview')}</button></nav><div class="topbar-actions"><button id="theme-toggle" class="theme-toggle" aria-label="${currentTheme === 'dark' ? t('theme.toLight') : t('theme.toDark')}">${themeIcon}<span>${currentTheme === 'dark' ? t('theme.light') : t('theme.dark')}</span></button><button id="lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}<button id="ai-settings-top" class="account-menu-item">${t('account.aiSettings')}</button><button id="disconnect" class="account-menu-item danger">${t('account.disconnect')}</button></div></div></div></header><section id="content"></section></main>`;
+  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">${t('brand.name')}<span>${t('brand.suffix')}</span></a><nav aria-label="${t('nav.label')}"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">${t('nav.overview')}</button></nav><div class="topbar-actions"><button id="theme-toggle" class="theme-toggle" aria-label="${currentTheme === 'dark' ? t('theme.toLight') : t('theme.toDark')}">${themeIcon}<span>${currentTheme === 'dark' ? t('theme.light') : t('theme.dark')}</span></button><button id="lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}<button id="ai-settings-top" class="account-menu-item">${t('account.aiSettings')}</button><button id="cloud-sync-top" class="account-menu-item">${cloudSyncStatus.state === 'disabled' ? t('cloudSync.enable') : t('cloudSync.status.' + cloudSyncStatus.state)}</button><button id="disconnect" class="account-menu-item danger">${t('account.disconnect')}</button><button id="delete-account-top" class="account-menu-item danger">${t('account.deleteAccount')}</button><button id="permissions-top" class="account-menu-item">${t('account.permissions')}</button><a href="/privacy.html" class="account-menu-item" target="_blank">${t('account.privacy')}</a></div></div></div></header><section id="content"></section></main>`;
   const accountMenuToggle = document.querySelector<HTMLButtonElement>('#account-menu-toggle')!, accountMenuPanel = document.querySelector<HTMLElement>('#account-menu-panel')!;
   const accountMenu = accountMenuToggle.closest<HTMLElement>('.account-menu')!;
   const closeAccountMenu = () => { accountMenuPanel.hidden = true; accountMenuToggle.setAttribute('aria-expanded', 'false'); };
@@ -407,9 +552,12 @@ function render() {
   document.querySelector('#theme-toggle')!.addEventListener('click', toggleTheme);
   document.querySelector('#lang-toggle')!.addEventListener('click', () => { setLocale(getLocale() === 'zh' ? 'en' : 'zh'); render(); });
   document.querySelector('#ai-settings-top')!.addEventListener('click', showAiSettings);
+  document.querySelector('#cloud-sync-top')!.addEventListener('click', showCloudSyncDialog);
   document.querySelector('#manage-repositories')?.addEventListener('click', openRepositoryManagement);
   document.querySelector('#push-settings')?.addEventListener('click', () => void enablePushNotifications());
   document.querySelector('#disconnect')!.addEventListener('click', showDisconnectDialog);
+  document.querySelector('#delete-account-top')!.addEventListener('click', showDeleteAccountDialog);
+  document.querySelector('#permissions-top')!.addEventListener('click', showPermissionsDialog);
   renderContent();
 }
 
@@ -424,7 +572,8 @@ function goTo(target: Screen | 'back') {
 function renderContent() { if (screen === 'overview') overview(); else if (screen === 'editor') editor(); else detail(); }
 
 function stageState(workflowId: string, stageIndex: number, source?: string, target?: string) {
-  return workflowStageStates.find(state => state.workflowId === workflowId && state.stageIndex === stageIndex && (source === undefined || state.source === source) && (target === undefined || state.target === target));
+  const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
+  return workflowStageStates.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source) && (target === undefined || state.target === target));
 }
 function stageRunPresentationText(run: ReturnType<typeof stageRunPresentation>) {
   const status = t(`overview.run.${run.status}`);
@@ -457,8 +606,38 @@ function stageUpdatedAt(state?: WorkflowStageState) {
   if (Number.isNaN(date.getTime())) return '';
   return t('overview.run.updated', { time: new Intl.DateTimeFormat(getLocale() === 'zh' ? 'zh-CN' : 'en-US', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date) });
 }
-function stageEvents(workflowId: string, stageIndex: number, source?: string) { return workflowStageEvents.filter(event => event.workflowId === workflowId && event.stageIndex === stageIndex && (source === undefined || event.source === null || event.source === source)).slice(0, 4); }
-function stageDeployments(workflowId: string, stageIndex: number, source?: string) { return workflowStageDeployments.filter(deployment => deployment.workflowId === workflowId && deployment.stageIndex === stageIndex && (source === undefined || deployment.source === source)); }
+function stageAgeSeconds(workflowId: string, stageIndex: number, source?: string): number | null {
+  const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
+  const health = syncHealth?.stages.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source));
+  return health ? health.ageSeconds : null;
+}
+function stageStaleBadge(workflowId: string, stageIndex: number, source?: string): string {
+  const age = stageAgeSeconds(workflowId, stageIndex, source);
+  if (age === null) return '';
+  const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
+  const stale = syncHealth?.stages.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source))?.stale;
+  if (!stale) return '';
+  const minutes = Math.floor(age / 60);
+  const label = minutes >= 60 ? t('syncHealth.stale.hours', { hours: Math.floor(minutes / 60) }) : t('syncHealth.stale.minutes', { minutes });
+  return `<span class="sync-stale-badge" title="${escape(t('syncHealth.stale.tooltip'))}">${escape(label)}</span>`;
+}
+function syncHealthBanner(): string {
+  if (!syncHealth) return '';
+  const last = syncHealth.lastReconciliation;
+  if (!last) return `<div class="sync-health-banner unknown"><span class="sync-health-icon">⏳</span><span>${t('syncHealth.never')}</span></div>`;
+  if (last.state === 'failure') return `<div class="sync-health-banner failure"><span class="sync-health-icon">⚠️</span><span>${t('syncHealth.failed')}${last.errorMessage ? ` · ${escape(last.errorMessage.slice(0, 120))}` : ''}</span></div>`;
+  if (last.state === 'running') return `<div class="sync-health-banner running"><span class="sync-health-icon">🔄</span><span>${t('syncHealth.running')}</span></div>`;
+  const finishedAt = last.finishedAt ? new Date(last.finishedAt) : null;
+  const ageSeconds = finishedAt ? Math.max(0, Math.floor((Date.now() - finishedAt.getTime()) / 1000)) : null;
+  const staleCount = syncHealth.stages.filter(stage => stage.stale).length;
+  const timeAgo = ageSeconds === null ? '' : ageSeconds < 60 ? t('syncHealth.secondsAgo', { seconds: ageSeconds }) : ageSeconds < 3600 ? t('syncHealth.minutesAgo', { minutes: Math.floor(ageSeconds / 60) }) : t('syncHealth.hoursAgo', { hours: Math.floor(ageSeconds / 3600) });
+  const staleWarning = staleCount > 0 ? ` · ${t('syncHealth.staleCount', { count: staleCount })}` : '';
+  const duration = last.durationMs !== null ? ` · ${t('syncHealth.duration', { ms: last.durationMs })}` : '';
+  if (last.state === 'degraded') return `<div class="sync-health-banner degraded"><span class="sync-health-icon">⚠️</span><span>${t('syncHealth.degraded', { reconciled: last.stagesReconciled, failed: last.stagesFailed })} · ${timeAgo}${duration}${staleWarning}</span></div>`;
+  return `<div class="sync-health-banner success"><span class="sync-health-icon">✓</span><span>${t('syncHealth.lastSync', { time: timeAgo, stages: last.stagesReconciled })}${duration}${staleWarning}</span></div>`;
+}
+function stageEvents(workflowId: string, stageIndex: number, source?: string) { const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId; return workflowStageEvents.filter(event => event.workflowId === workflowId && (stageId ? event.stageId === stageId : event.stageIndex === stageIndex) && (source === undefined || event.source === null || event.source === source)).slice(0, 4); }
+function stageDeployments(workflowId: string, stageIndex: number, source?: string) { const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId; return workflowStageDeployments.filter(deployment => deployment.workflowId === workflowId && (stageId ? deployment.stageId === stageId : deployment.stageIndex === stageIndex) && (source === undefined || deployment.source === source)); }
 function deploymentProviderName(provider: WorkflowStageDeployment['provider']) { return provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages'; }
 function deploymentStateText(state: WorkflowStageDeployment['state']) { return t(`overview.deployment.${state}`); }
 function deploymentCards(workflowId: string, stageIndex: number, source?: string) {
@@ -476,7 +655,8 @@ function deploymentCards(workflowId: string, stageIndex: number, source?: string
   }).join('')}</div></section>`;
 }
 function deploymentRunHistory(flow: Workflow, stageIndex: number, source?: string) {
-  const runs = workflowStageDeploymentRuns.filter(run => run.workflowId === flow.id && run.stageIndex === stageIndex && (source === undefined || run.source === source));
+  const stageId = flow.stages[stageIndex]?.stageId;
+  const runs = workflowStageDeploymentRuns.filter(run => run.workflowId === flow.id && (stageId ? run.stageId === stageId : run.stageIndex === stageIndex) && (source === undefined || run.source === source));
   if (!runs.length) return '';
   const target = flow.stages[stageIndex]?.target;
   return `<section class="drawer-deployment-history"><p class="eyebrow">${t('overview.deployment.history')}</p><ol>${runs.map(run => {
@@ -491,7 +671,7 @@ function deploymentRuntimeWarnings(flow: Workflow): WorkflowConfigurationWarning
   const now = Date.now();
   workflowStageStates.filter(state => state.workflowId === flow.id && state.pullState === 'merged' && state.mergedAt).forEach(state => {
     deploymentConfigs(flow).filter(configuration => configuration.target === state.target).forEach(configuration => {
-      const matchingRuns = workflowStageDeploymentRuns.filter(run => run.workflowId === flow.id && run.stageIndex === state.stageIndex && run.source === state.source && run.provider === configuration.provider);
+      const matchingRuns = workflowStageDeploymentRuns.filter(run => run.workflowId === flow.id && (state.stageId ? run.stageId === state.stageId : run.stageIndex === state.stageIndex) && run.source === state.source && run.provider === configuration.provider);
       const configurationAlreadyExplainsMissingRun = workflowConfigurationWarnings.some(warning => warning.workflowId === flow.id && (warning.code === 'actions-unavailable' || warning.code === 'workflow-not-found' && warning.target === configuration.target && warning.provider === configuration.provider));
       if (!matchingRuns.length && !configurationAlreadyExplainsMissingRun && now - new Date(state.mergedAt!).getTime() > 10 * 60_000) {
         warnings.push({ workflowId: flow.id, stageIndex: state.stageIndex, source: state.source, target: state.target, provider: configuration.provider, value: configuration.workflowName, code: 'deployment-not-seen' });
@@ -517,24 +697,174 @@ function laneRunSummary(flow: Workflow) {
   const summary = workflowRunSummary(flow.stages.map((stage, index) => stageState(flow.id, index, undefined, stage.target)));
   return { ...summary, text: t('overview.run.current', { step: summary.stageIndex + 1, status: stageRunPresentationText(summary) }) };
 }
+async function loadPreflight(workflowId?: string) {
+  if (!cloudWorkflowStorage) { preflightResults = []; preflightError = ''; return; }
+  preflightLoading = true;
+  try {
+    const url = workflowId ? `/api?action=preflight&workflowId=${encodeURIComponent(workflowId)}` : '/api?action=preflight';
+    const response = await fetch(githubAppApiUrl(url));
+    if (!response.ok) { const payload = await response.json().catch(() => ({})) as { message?: string }; preflightError = payload.message || t('preflight.error'); preflightResults = []; return; }
+    const payload = await response.json() as { results?: PreflightResult[] };
+    preflightResults = Array.isArray(payload.results) ? payload.results : [];
+    preflightError = '';
+  } catch (error) { preflightError = error instanceof Error ? error.message : t('preflight.error'); preflightResults = []; }
+  finally { preflightLoading = false; }
+}
+function preflightPanel(): string {
+  if (!preflightResults.length && !preflightLoading && !preflightError) return '';
+  const totalErrors = preflightResults.reduce((sum, r) => sum + r.summary.errors, 0);
+  const totalWarnings = preflightResults.reduce((sum, r) => sum + r.summary.warnings, 0);
+  const totalInfo = preflightResults.reduce((sum, r) => sum + r.summary.info, 0);
+  const badgeClass = totalErrors > 0 ? 'pf-fail' : totalWarnings > 0 ? 'pf-warn' : 'pf-pass';
+  const badge = preflightLoading ? `<span class="pf-badge pf-loading">${t('preflight.loading')}</span>` : preflightError ? `<span class="pf-badge pf-fail">${escape(preflightError)}</span>` : `<span class="pf-badge ${badgeClass}">${totalErrors ? t('preflight.fail', { errors: totalErrors }) : t('preflight.pass')}</span>`;
+  const checksHtml = preflightResults.flatMap(result => result.checks.map(check => {
+    const severityIcon = check.severity === 'error' ? '❌' : check.severity === 'warning' ? '⚠️' : 'ℹ️';
+    const flow = workflows.find(w => w.id === result.workflowId);
+    const stageLabel = check.stageIndex !== null && flow ? `${flow.stages[check.stageIndex]?.source || ''} → ${flow.stages[check.stageIndex]?.target || ''}` : '';
+    const fixHtml = check.fix ? `<small class="pf-fix">💡 ${escape(check.fix)}</small>` : '';
+    return `<li class="pf-${check.severity}"><span class="pf-sev">${severityIcon}</span><div><b>${escape(check.title)}</b><small>${escape(check.detail)}${stageLabel ? ` · ${escape(stageLabel)}` : ''}</small>${fixHtml}</div></li>`;
+  })).join('');
+  return `<section class="preflight-panel"><div class="pf-head"><p class="eyebrow">${t('preflight.eyebrow')}</p><div class="pf-summary">${badge}<button id="run-preflight" class="ghost"${preflightLoading ? ' disabled' : ''}>${t('preflight.run')}</button></div></div>${preflightResults.length ? `<ul class="pf-checks">${checksHtml}</ul>` : ''}</section>`;
+}
+function recoveryStatusFor(workflowId: string, stageIndex: number, source: string): RecoveryStatus | undefined {
+  return recoveryStatuses.find(s => s.workflowId === workflowId && s.stageIndex === stageIndex && s.source === source);
+}
+function recoveryStatusBadge(status: RecoveryStatus | undefined): string {
+  if (!status) return '';
+  if (status.escalationNeeded) return `<span class="fc-recovery-badge fc-escalation">${t('recovery.escalation')}</span>`;
+  if (status.exhausted) return `<span class="fc-recovery-badge fc-exhausted">${t('recovery.exhausted', { count: status.maxRetries })}</span>`;
+  if (status.cooldownRemainingSeconds > 0) return `<span class="fc-recovery-badge fc-cooldown">${t('recovery.cooldown', { seconds: status.cooldownRemainingSeconds })}</span>`;
+  if (status.retryCount > 0) return `<span class="fc-recovery-badge fc-retries">${t('recovery.retries', { count: status.retryCount, max: status.maxRetries })}</span>`;
+  return '';
+}
+function failureCenterPanel(): string {
+  const failures = actionQueue.filter(item => item.kind === 'checks-failed' || item.kind === 'needs-approval');
+  const deploymentFailures = workflowStageStates.filter(state => state.checksState === 'failure' && state.pullState === 'merged');
+  if (!failures.length && !deploymentFailures.length) return '';
+  const items = failures.map(item => {
+    const flow = workflows.find(w => w.id === item.workflowId);
+    const icon = item.kind === 'checks-failed' ? '✗' : '⏳';
+    const tone = item.kind === 'checks-failed' ? 'failed' : 'attention';
+    const prLink = item.pullNumber && flow ? `<a href="${githubPullUrl(flow.repository, item.pullNumber)}" target="_blank" rel="noreferrer">#${item.pullNumber}</a>` : '';
+    const recovery = item.kind === 'checks-failed' ? recoveryStatusFor(item.workflowId, item.stageIndex, item.source) : undefined;
+    const retryDisabled = recovery ? (recovery.exhausted || recovery.cooldownRemainingSeconds > 0) : false;
+    const actions = item.kind === 'checks-failed'
+      ? `<button class="ghost fc-retry" data-fc-workflow="${escape(item.workflowId)}" data-fc-stage="${item.stageIndex}" data-fc-source="${escape(item.source)}"${retryDisabled ? ' disabled' : ''}>${t('recovery.retryActions')}</button><button class="ghost fc-repair" data-fc-workflow="${escape(item.workflowId)}" data-fc-stage="${item.stageIndex}" data-fc-source="${escape(item.source)}">${t('repair.codex')}</button>`
+      : '';
+    const badge = recoveryStatusBadge(recovery);
+    return `<li class="${tone}"><span class="fc-icon">${icon}</span><div><b>${escape(item.workflowName)}</b><small>${escape(item.source)} → ${escape(item.target)}${prLink ? ` · ${prLink}` : ''}</small><p>${escape(item.message)}</p>${badge}</div><div class="fc-actions">${actions}<button class="link-button fc-open" data-fc-workflow="${escape(item.workflowId)}" data-fc-stage="${item.stageIndex}" data-fc-source="${escape(item.source)}">${t('overview.board.stepDetail')}</button></div></li>`;
+  }).join('');
+  const deployItems = deploymentFailures.map(state => {
+    const flow = workflows.find(w => w.id === state.workflowId);
+    if (!flow) return '';
+    return `<li class="failed"><span class="fc-icon">🔴</span><div><b>${escape(flow.name)}</b><small>${escape(state.source)} → ${escape(state.target)} · ${t('overview.deployment.failure')}</small></div><div class="fc-actions"><button class="link-button fc-open" data-fc-workflow="${escape(state.workflowId)}" data-fc-stage="${state.stageIndex}" data-fc-source="${escape(state.source)}">${t('overview.board.stepDetail')}</button></div></li>`;
+  }).join('');
+  const total = failures.length + deploymentFailures.length;
+  return `<section class="failure-center"><div class="fc-head"><p class="eyebrow">${t('failureCenter.eyebrow')}</p><span class="fc-count">${t('failureCenter.count', { count: total })}</span></div><ul>${items}${deployItems}</ul></section>`;
+}
 function overview() {
   const content = document.querySelector('#content')!;
   const storageWarning = cloudWorkflowSyncError ? `<details class="compact-notice is-error"><summary><span><b>${t('sync.warning.title')}</b><span>${t('sync.warning.desc')}</span></span><small>${t('sync.warning.detail')}</small></summary><p>${escape(cloudWorkflowSyncError)}</p></details>` : '';
   const queueWarning = actionQueueError ? `<details class="compact-notice is-error"><summary><span><b>${t('overview.queue.error.title')}</b></span><small>${t('sync.warning.detail')}</small></summary><p>${escape(actionQueueError)}</p></details>` : '';
   const syncPrompt = pendingLocalWorkflowSync ? `<section class="local-sync-notice"><div><b>${t('sync.prompt.title', { count: workflows.length })}</b><p>${t('sync.prompt.desc', { login: githubLogin || '' })}</p></div><button id="sync-local-workflows" class="ghost">${t('sync.prompt.button')}</button></section>` : '';
+  const syncBanner = cloudWorkflowStorage ? syncHealthBanner() : '';
+  const failurePanel = failureCenterPanel();
+  const preflight = preflightPanel();
   const failedCount = actionQueue.filter(item => item.kind === 'checks-failed').length;
   const activeProjectCount = new Set(actionQueue.map(item => item.workflowId)).size;
   const visibleWorkflows = workflows.filter(flow => overviewFilter === 'all' || actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed')));
-  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div><button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${storageWarning}${queueWarning}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${activeProjectCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button id="refresh-action-queue" class="board-refresh">${t('overview.queue.refresh')}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
+  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div><button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${activeProjectCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button id="refresh-action-queue" class="board-refresh">${t('overview.queue.refresh')}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
   document.querySelector('#new-flow')!.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
   document.querySelector('#refresh-action-queue')?.addEventListener('click', async () => { const loaded = await loadActionQueue(); render(); showToast(loaded ? t('toast.queue.refreshed') : t('toast.queue.failed')); });
+  document.querySelector('#run-preflight')?.addEventListener('click', async () => { await loadPreflight(); render(); });
   document.querySelectorAll<HTMLButtonElement>('[data-board-filter]').forEach(button => button.addEventListener('click', () => { overviewFilter = button.dataset.boardFilter as typeof overviewFilter; render(); }));
   document.querySelectorAll<HTMLButtonElement>('[data-lane-step]').forEach(button => button.addEventListener('click', () => showProjectStepDrawer(button.dataset.workflowId || '', Number(button.dataset.laneStep), button.dataset.laneSource)));
   document.querySelectorAll<HTMLButtonElement>('[data-edit-project]').forEach(button => button.addEventListener('click', () => { active = workflows.find(item => item.id === button.dataset.editProject) || null; screen = 'editor'; render(); }));
   bindLaneSorting();
   bindFlowCards();
+  bindFailureCenter();
+}
+function bindFailureCenter() {
+  document.querySelectorAll<HTMLButtonElement>('.fc-open').forEach(button => button.addEventListener('click', () => {
+    const workflowId = button.dataset.fcWorkflow;
+    const stageIndex = Number(button.dataset.fcStage);
+    const source = button.dataset.fcSource;
+    if (workflowId) showProjectStepDrawer(workflowId, stageIndex, source);
+  }));
+  document.querySelectorAll<HTMLButtonElement>('.fc-retry').forEach(button => button.addEventListener('click', async () => {
+    const workflowId = button.dataset.fcWorkflow;
+    const stageIndex = Number(button.dataset.fcStage);
+    const source = button.dataset.fcSource;
+    if (!workflowId || !source) return;
+    const flow = workflows.find(w => w.id === workflowId);
+    const state = workflowStageStates.find(s => s.workflowId === workflowId && s.stageIndex === stageIndex && s.source === source);
+    if (!flow || !state) return;
+    const recovery = recoveryStatusFor(workflowId, stageIndex, source);
+    if (recovery?.exhausted) { showToast(t('recovery.exhausted', { count: recovery.maxRetries })); return; }
+    if (recovery && recovery.cooldownRemainingSeconds > 0) { showToast(t('recovery.cooldown', { seconds: recovery.cooldownRemainingSeconds })); return; }
+    button.disabled = true;
+    try {
+      const response = await fetch(githubAppApiUrl('/api/rerun-actions'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId, stageIndex, source }) });
+      const payload = await response.json().catch(() => ({})) as { count?: number; message?: string };
+      if (!response.ok) throw new Error(payload.message || t('recovery.retryFailed'));
+      showToast(t('recovery.retryStarted', { count: payload.count || 0 }));
+      void loadActionQueue().finally(render);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : t('recovery.retryFailed'));
+      button.disabled = false;
+    }
+  }));
+  document.querySelectorAll<HTMLButtonElement>('.fc-repair').forEach(button => button.addEventListener('click', () => {
+    const workflowId = button.dataset.fcWorkflow;
+    const stageIndex = Number(button.dataset.fcStage);
+    const source = button.dataset.fcSource;
+    if (workflowId) void showCodexRepairDialog(stageIndex, source);
+  }));
+}
+function laneRunHistory(flow: Workflow): string {
+  const runs = workflowRuns.filter(run => run.workflowId === flow.id).slice(0, 5);
+  if (!runs.length) return '';
+  return `<section class="lane-run-history"><p class="eyebrow">${t('overview.run.history')}</p><ol>${runs.map(run => {
+    const stateClass = run.state === 'completed' ? 'completed' : run.state === 'failed' ? 'failed' : 'active';
+    const stateLabel = t(`runHistory.state.${run.state}`);
+    const prLink = run.pullNumber ? `<a href="${githubPullUrl(flow.repository, run.pullNumber)}" target="_blank" rel="noreferrer">#${run.pullNumber} ↗</a>` : '';
+    const finishedAt = run.completedAt ? new Date(run.completedAt) : null;
+    const time = finishedAt ? stageUpdatedAt({ updatedAt: finishedAt.toISOString() } as WorkflowStageState) : stageUpdatedAt({ updatedAt: run.startedAt } as WorkflowStageState);
+    return `<li class="${stateClass}"><div><b>${escape(run.source)} → ${escape(run.target)}</b><small>v${run.version} · ${stateLabel}</small></div><time>${escape(time)}</time><span>${prLink}</span></li>`;
+  }).join('')}</ol></section>`;
+}
+function timelineEntryIcon(kind: string): string {
+  if (kind.startsWith('run-')) return '🚀';
+  if (kind === 'pull-merged') return '✅';
+  if (kind === 'pull-detected') return '📝';
+  if (kind === 'checks-success') return '✓';
+  if (kind === 'checks-failure') return '✗';
+  if (kind === 'deployment-success') return '🟢';
+  if (kind === 'deployment-failure') return '🔴';
+  if (kind === 'deployment-rollback') return '↩️';
+  if (kind === 'actions-rerun') return '🔄';
+  if (kind === 'pull-cleared') return '🔁';
+  return '•';
+}
+function workflowTimelineSection(flow: Workflow): string {
+  const entries = timeline.filter(entry => entry.workflowId === flow.id).slice(0, 8);
+  if (!entries.length) return '';
+  return `<section class="lane-timeline"><p class="eyebrow">${t('timeline.eyebrow')}</p><ol>${entries.map(entry => {
+    const icon = timelineEntryIcon(entry.kind);
+    const prLink = entry.pullNumber ? `<a href="${githubPullUrl(flow.repository, entry.pullNumber)}" target="_blank" rel="noreferrer">#${entry.pullNumber}</a>` : '';
+    return `<li><span class="timeline-icon">${icon}</span><div><b>${escape(entry.message)}</b><small>${escape(entry.source)} → ${escape(entry.target)}${prLink ? ` · ${prLink}` : ''}</small></div><time>${escape(stageUpdatedAt({ updatedAt: entry.occurredAt } as WorkflowStageState))}</time></li>`;
+  }).join('')}</ol></section>`;
+}
+function stepTimelineSection(flow: Workflow, stageIndex: number, source: string): string {
+  const stageId = flow.stages[stageIndex]?.stageId;
+  const entries = timeline.filter(entry => entry.workflowId === flow.id && (stageId ? entry.stageId === stageId : entry.stageIndex === stageIndex) && (entry.source === source || !entry.source)).slice(0, 12);
+  if (!entries.length) return '';
+  return `<section class="drawer-timeline"><p class="eyebrow">${t('timeline.step.eyebrow')}</p><ol>${entries.map(entry => {
+    const icon = timelineEntryIcon(entry.kind);
+    return `<li><span class="timeline-icon">${icon}</span><div><b>${escape(entry.message)}</b><time>${escape(stageUpdatedAt({ updatedAt: entry.occurredAt } as WorkflowStageState))}</time></div></li>`;
+  }).join('')}</ol></section>`;
 }
 function projectLane(flow: Workflow) {
   const items = actionQueue.filter(item => item.workflowId === flow.id);
@@ -545,13 +875,14 @@ function projectLane(flow: Workflow) {
     const tone = item?.kind === 'checks-failed' ? 'failed' : item ? 'attention' : run.tone;
     const label = item?.message || stageRunText(state);
     const updatedAt = stageUpdatedAt(state);
-    return `<button class="lane-step ${tone}" data-lane-step="${index}" data-lane-source="${escape(source)}" data-workflow-id="${escape(flow.id)}"><span class="lane-step-index">${index + 1}</span><b>${escape(source)} → ${escape(stage.target)}</b><small>${escape(label)}${updatedAt ? ` · ${escape(updatedAt)}` : ''}</small></button>`;
+    const staleBadge = stageStaleBadge(flow.id, index, state?.source);
+    return `<button class="lane-step ${tone}" data-lane-step="${index}" data-lane-source="${escape(source)}" data-workflow-id="${escape(flow.id)}"><span class="lane-step-index">${index + 1}</span><b>${escape(source)} → ${escape(stage.target)}</b><small>${escape(label)}${updatedAt ? ` · ${escape(updatedAt)}` : ''}${staleBadge}</small></button>`;
   };
   const targets = new Map<string, Array<{ stage: Workflow['stages'][number]; index: number }>>();
   flow.stages.forEach((stage, index) => targets.set(stage.target, [...(targets.get(stage.target) || []), { stage, index }]));
   const hasFanIn = [...targets.values()].some(routes => routes.length > 1);
   const routeCards = (stage: Workflow['stages'][number], index: number) => {
-    const states = workflowStageStates.filter(state => state.workflowId === flow.id && state.stageIndex === index && state.target === stage.target && (stage.source.endsWith('*') ? state.source.startsWith(stage.source.slice(0, -1)) : state.source === stage.source));
+    const states = workflowStageStates.filter(state => state.workflowId === flow.id && (stage.stageId ? state.stageId === stage.stageId : state.stageIndex === index) && state.target === stage.target && (stage.source.endsWith('*') ? state.source.startsWith(stage.source.slice(0, -1)) : state.source === stage.source));
     return states.length ? states.map(state => laneStep(stage, index, state)).join('') : laneStep(stage, index);
   };
   const steps = hasFanIn
@@ -563,7 +894,9 @@ function projectLane(flow: Workflow) {
   const runSummary = laneRunSummary(flow);
   const warnings = laneConfigurationWarnings(flow);
   const warning = warnings.length ? `<div class="lane-config-warning"><b>${t('overview.configWarning.count', { count: warnings.length })}</b><span>${escape(configurationWarningText(warnings[0]))}</span></div>` : '';
-  return `<article class="project-lane" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 22" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div></div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${escape(flow.name)}</h2><p class="lane-run-summary ${runSummary.tone}">${escape(runSummary.text)}</p></div></div><div class="lane-actions"><button data-edit-project="${escape(flow.id)}" class="link-button">${t('overview.board.edit')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button></div></header>${warning}<div class="lane-track${hasFanIn ? ' has-fan-in' : ''}">${steps}</div></article>`;
+  const runHistory = laneRunHistory(flow);
+  const timelineSection = workflowTimelineSection(flow);
+  return `<article class="project-lane" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 22" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div></div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${escape(flow.name)}</h2><p class="lane-run-summary ${runSummary.tone}">${escape(runSummary.text)}</p></div></div><div class="lane-actions"><button data-edit-project="${escape(flow.id)}" class="link-button">${t('overview.board.edit')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button></div></header>${warning}<div class="lane-track${hasFanIn ? ' has-fan-in' : ''}">${steps}</div>${timelineSection}${runHistory}</article>`;
 }
 function bindLaneSorting() {
   const lanes = [...document.querySelectorAll<HTMLElement>('[data-project-lane]')];
@@ -635,6 +968,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const deployments = deploymentCards(workflowId, stageIndex, routeSource);
   const deploymentHistory = deploymentRunHistory(flow, stageIndex, routeSource);
   const configurationWarnings = drawerConfigurationWarnings(flow, stageIndex, routeSource);
+  const stepTimeline = stepTimelineSection(flow, stageIndex, routeSource);
   const canCreateFromDetail = Boolean(
     detailStatus
       && statuses
@@ -642,7 +976,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
       && canCreateWorkflowStage(stageIndex, flow.stages, statuses)
       && (detailStatus.kind === 'not-created' || detailStatus.kind === 'merged' && Boolean(detailStatus.aheadBy)),
   );
-  const createAction = queueItem?.kind === 'ready-to-create' || canCreateFromDetail ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
+  const createAction = queueItem?.kind === 'ready-to-create' || state?.decision?.kind === 'ready-to-create' || canCreateFromDetail ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
   const statusText = detailStatus ? drawerStatusText(state, detailStatus) : queueItem?.message || drawerStatusText(state);
   // `detailStatus` is freshly read from GitHub (or optimistically set after creating a PR),
   // so it must win over a possibly delayed reconciliation record.
@@ -652,7 +986,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const actions = `<div class="dialog-actions drawer-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div>`;
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
-  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p>${actions}<div class="drawer-status ${tone}"><b>${escape(statusText)}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${configurationWarnings}${deployments}${deploymentHistory}${history}</section>`;
+  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p>${actions}<div class="drawer-status ${tone}"><b>${escape(statusText)}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${configurationWarnings}${deployments}${deploymentHistory}${stepTimeline}${history}</section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);
@@ -800,8 +1134,9 @@ function renderStepForm(repository: string) {
     ? `<fieldset class="route-dependencies"><legend>${t('editor.dependencies.label')}</legend><small>${t('editor.dependencies.desc')}</small><div>${active.stages.map((stage, index) => `<label><input type="checkbox" name="wait-for-route" value="${index}" /><span>${escape(stage.source)} → ${escape(stage.target)}</span></label>`).join('')}</div></fieldset>`
     : '';
   const deploymentSettings = active?.repository === repository ? renderDeploymentSettings() : '';
+  const recoveryPolicySection = active?.repository === repository ? renderRecoveryPolicySettings() : '';
   const sourceBranches = branches.map(branch => `<button type="button" role="option" data-source-branch="${escape(branch)}">${escape(branch)}</button>`).join('');
-  document.querySelector('#step-form')!.innerHTML = `<div class="two"><div class="source-field"><label for="source">${t('editor.label.source')}</label><div class="branch-picker"><input id="source" value="${escape(source)}" placeholder="feature/*" role="combobox" aria-autocomplete="list" aria-controls="source-branches" aria-expanded="false" /><button id="source-branch-toggle" type="button" class="source-branch-toggle" aria-label="${t('editor.label.source')}" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button><div id="source-branches" class="source-branch-options" role="listbox" hidden>${sourceBranches}</div></div><small>${t('editor.sourceRuleHint')}</small></div><label>${t('editor.label.target')}<select id="target">${options(target)}</select></label></div><label class="route-mode"><input id="independent-route" type="checkbox" ${active?.repository === repository ? 'checked' : ''} /><span><b>${t('editor.independent.label')}</b><small>${t('editor.independent.desc')}</small></span></label>${dependencyOptions}<div class="actions"><a id="compare" target="_blank" class="text-link">${t('editor.compare')}</a><button id="add-step" class="primary">${active?.repository === repository ? t('editor.addRoute') : t('editor.saveFlow')}</button></div>${deploymentSettings}`;
+  document.querySelector('#step-form')!.innerHTML = `<div class="two"><div class="source-field"><label for="source">${t('editor.label.source')}</label><div class="branch-picker"><input id="source" value="${escape(source)}" placeholder="feature/*" role="combobox" aria-autocomplete="list" aria-controls="source-branches" aria-expanded="false" /><button id="source-branch-toggle" type="button" class="source-branch-toggle" aria-label="${t('editor.label.source')}" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button><div id="source-branches" class="source-branch-options" role="listbox" hidden>${sourceBranches}</div></div><small>${t('editor.sourceRuleHint')}</small></div><label>${t('editor.label.target')}<select id="target">${options(target)}</select></label></div><label class="route-mode"><input id="independent-route" type="checkbox" ${active?.repository === repository ? 'checked' : ''} /><span><b>${t('editor.independent.label')}</b><small>${t('editor.independent.desc')}</small></span></label>${dependencyOptions}<div class="actions"><a id="compare" target="_blank" class="text-link">${t('editor.compare')}</a><button id="add-step" class="primary">${active?.repository === repository ? t('editor.addRoute') : t('editor.saveFlow')}</button></div>${deploymentSettings}${recoveryPolicySection}`;
   const sync = () => document.querySelector<HTMLAnchorElement>('#compare')!.href = githubCompareUrl(repository, value('source'), value('target'));
   const sourceInput = document.querySelector<HTMLInputElement>('#source')!;
   const sourcePicker = document.querySelector<HTMLElement>('.branch-picker')!;
@@ -837,6 +1172,15 @@ function renderStepForm(repository: string) {
     showToast(t('editor.deployments.removed'));
     renderStepForm(repository);
   }));
+  document.querySelector<HTMLButtonElement>('#save-recovery-policy')?.addEventListener('click', () => {
+    if (!active) return;
+    const maxRetries = Math.max(0, Math.min(20, Number(value('recovery-max-retries')) || 0));
+    const cooldownSeconds = Math.max(0, Math.min(86400, Number(value('recovery-cooldown-seconds')) || 0));
+    const policy: RecoveryPolicy = { maxRetries, cooldownSeconds };
+    save({ ...active, recoveryPolicy: policy });
+    showToast(t('editor.recoveryPolicy.saved'));
+    renderStepForm(repository);
+  });
 }
 function renderDeploymentSettings() {
   if (!active) return '';
@@ -847,6 +1191,13 @@ function renderDeploymentSettings() {
   const workflows = repositoryActionWorkflows.map(workflow => `<option value="${escape(workflow.name)}">${escape(workflow.path)}</option>`).join('');
   const workflowHint = repositoryActionWorkflows.length ? t('editor.deployments.workflowHint') : t('editor.deployments.workflowUnavailable');
   return `<fieldset class="deployment-settings"><legend>${t('editor.deployments.label')}</legend><small>${t('editor.deployments.desc')}</small>${warnings}<div class="deployment-config-list">${configured.length ? configured.map((deployment, index) => `<div><b>${escape(deployment.target)} · ${deployment.provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages'}</b><small>${escape(deployment.workflowName)} · ${t(`editor.deployments.${deployment.environment}`)}${deployment.githubEnvironment ? ` · ${escape(deployment.githubEnvironment)}` : ''}${deployment.healthCheckPath ? ` · ${escape(deployment.healthCheckPath)}` : ''}${deployment.rollbackWorkflowName ? ` · ${t('editor.deployments.rollbackSummary', { workflow: escape(deployment.rollbackWorkflowName) })}` : ''}</small><button class="ghost" type="button" data-remove-deployment="${index}">${t('editor.deployments.remove')}</button></div>`).join('') : `<p class="meta">${t('editor.deployments.empty')}</p>`}</div><div class="two"><label>${t('editor.deployments.target')}<select id="deployment-target">${options(target)}</select></label><label>${t('editor.deployments.provider')}<select id="deployment-provider"><option value="vercel">Vercel</option><option value="cloudflare">Cloudflare Pages</option></select></label></div><label>${t('editor.deployments.workflow')}<input id="deployment-workflow" list="deployment-workflows" placeholder="Deploy frontend to Vercel" /><datalist id="deployment-workflows">${workflows}</datalist><small>${workflowHint}</small></label><div class="two"><label>${t('editor.deployments.environment')}<select id="deployment-environment"><option value="preview">${t('editor.deployments.preview')}</option><option value="production">${t('editor.deployments.production')}</option></select></label><label>${t('editor.deployments.githubEnvironment')}<input id="deployment-github-environment" placeholder="preview-vercel" /></label></div><label>${t('editor.deployments.healthPath')}<input id="deployment-health-path" placeholder="/health" /><small>${t('editor.deployments.healthPathHint')}</small></label><label>${t('editor.deployments.rollbackWorkflow')}<input id="deployment-rollback-workflow" list="deployment-workflows" placeholder="Rollback production" /><small>${t('editor.deployments.rollbackWorkflowHint')}</small></label><button id="add-deployment" type="button" class="ghost">${t('editor.deployments.add')}</button></fieldset>`;
+}
+function renderRecoveryPolicySettings() {
+  if (!active) return '';
+  const policy = active.recoveryPolicy;
+  const maxRetries = policy?.maxRetries ?? 3;
+  const cooldownSeconds = policy?.cooldownSeconds ?? 300;
+  return `<fieldset class="recovery-policy-settings"><legend>${t('editor.recoveryPolicy.label')}</legend><small>${t('editor.recoveryPolicy.desc')}</small><div class="two"><label>${t('editor.recoveryPolicy.maxRetries')}<input id="recovery-max-retries" type="number" min="0" max="20" value="${maxRetries}" /></label><label>${t('editor.recoveryPolicy.cooldownSeconds')}<input id="recovery-cooldown-seconds" type="number" min="0" max="86400" value="${cooldownSeconds}" /></label></div><button id="save-recovery-policy" type="button" class="ghost">${t('editor.recoveryPolicy.save')}</button></fieldset>`;
 }
 function options(selected: string) { return branches.map(branch => `<option ${branch === selected ? 'selected' : ''}>${escape(branch)}</option>`).join(''); }
 function value(id: string) { return document.querySelector<HTMLSelectElement | HTMLInputElement>(`#${id}`)!.value; }
@@ -953,7 +1304,6 @@ async function showCodexRepairDialog(index: number, source?: string) {
   }
   dialog.addEventListener('close', () => dialog.remove());
 }
-type WorkflowRun = { id: number; conclusion: string | null };
 function showDeploymentRollbackDialog(flow: Workflow, stageIndex: number, source: string, run: WorkflowStageDeploymentRun) {
   const stage = flow.stages[stageIndex];
   const deployment = deploymentConfigs(flow).find(configuration => configuration.target === stage?.target && configuration.provider === run.provider);
@@ -1002,13 +1352,10 @@ async function retryFailedActions(flow: Workflow, state: WorkflowStageState, but
   if (!state.headSha) { showToast(t('recovery.retryUnavailable')); return; }
   button.disabled = true; button.textContent = t('recovery.retrying');
   try {
-    const { owner, name } = parseRepository(flow.repository);
-    const runs = await githubFetch<{ workflow_runs: WorkflowRun[] }>(token, `/repos/${owner}/${name}/actions/runs?head_sha=${encodeURIComponent(state.headSha)}&per_page=100`);
-    const failed = runs.workflow_runs.filter(run => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(run.conclusion || ''));
-    if (!failed.length) throw new Error(t('recovery.retryUnavailable'));
-    await Promise.all(failed.map(run => githubFetch<Record<string, never>>(token, `/repos/${owner}/${name}/actions/runs/${run.id}/rerun`, { method: 'POST' })));
-    await fetch(githubAppApiUrl('/api/recovery-event'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: flow.id, stageIndex: state.stageIndex, source: state.source }) }).catch(() => undefined);
-    showToast(t('recovery.retryStarted', { count: failed.length }));
+    const response = await fetch(githubAppApiUrl('/api/rerun-actions'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: flow.id, stageIndex: state.stageIndex, source: state.source }) });
+    const payload = await response.json().catch(() => ({})) as { count?: number; message?: string };
+    if (!response.ok) throw new Error(payload.message || t('recovery.retryFailed'));
+    showToast(t('recovery.retryStarted', { count: payload.count || 0 }));
     void loadActionQueue().finally(render);
     window.setTimeout(() => void loadActionQueue().finally(render), 1_500);
   } catch (error) {
@@ -1482,6 +1829,8 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
     confirmButton.textContent = t('createPr.creatingShort');
     try {
       const { owner, name } = parseRepository(identity.repository);
+      const existingPulls = await githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(`${owner}:${source}`)}&base=${encodeURIComponent(stage.target)}&per_page=10`, { signal: controller.signal });
+      if (existingPulls[0]) throw new Error(`该分支已存在 PR #${existingPulls[0].number}，请先处理现有 PR。`);
       const createdPull = await githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify(pullRequestPayload(title, source, stage.target, body)), signal: controller.signal });
       if (!isDialogOpen() || controller.signal.aborted) return;
       if (draftSaveTimer !== undefined) { window.clearTimeout(draftSaveTimer); draftSaveTimer = undefined; }
