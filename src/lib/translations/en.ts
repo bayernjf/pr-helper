@@ -149,6 +149,8 @@ const en: TranslationDict = {
   'sync.warning.title': 'Cloud flow sync failed',
   'sync.warning.desc': 'Current flows are only saved in this browser.',
   'sync.warning.detail': 'View details',
+  'sync.loading.title': 'Syncing cloud status',
+  'sync.loading.desc': 'The board is ready to use while saved flows and queue snapshots load in the background.',
   'sync.prompt.title': 'Found {count} flows stored only on this device',
   'sync.prompt.desc': 'Syncing to your GitHub account @{login} makes them available on other devices.',
   'sync.prompt.button': 'Sync to account',
