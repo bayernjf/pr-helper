@@ -87,7 +87,7 @@ const zh: TranslationDict = {
   'overview.board.addProject': '+ 添加项目',
   'overview.board.summary': '项目状态筛选',
   'overview.board.attention': '需要处理',
-  'overview.board.active': '活跃项目',
+  'overview.board.active': '全部流程',
   'overview.board.failed': '失败',
   'overview.board.filterEmpty': '没有符合当前筛选的项目',
   'overview.board.showAll': '查看全部项目',
