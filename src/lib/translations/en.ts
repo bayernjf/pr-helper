@@ -45,6 +45,11 @@ const en: TranslationDict = {
   'connect.error.repos': 'Unable to load repositories',
   'connect.draft.saveError': 'Draft save failed',
 
+  // Local Vite mode
+  'localMode.title': 'Local Vite mode',
+  'localMode.desc': 'The local development server does not run cloud APIs. Flows are stored only in this browser. Use vercel dev to test cloud sync, queues, and notifications.',
+  'localMode.apiUnavailable': 'Local Vite is not running cloud APIs. Use vercel dev to test this feature.',
+
   // Topbar / Account
   'account.label': 'Account & Settings',
   'account.manageRepos': 'Manage repositories ↗',
@@ -71,6 +76,7 @@ const en: TranslationDict = {
   'overview.empty.button': 'Create your first flow',
   'overview.queue.title': 'Needs your attention · {count}',
   'overview.queue.refresh': 'Refresh queue',
+  'overview.queue.refreshing': 'Refreshing…',
   'overview.flowCard.view': 'View flow →',
   'overview.flowCard.steps': '{count} steps · Not started',
   'overview.queue.step': 'Step {index}',
@@ -143,6 +149,8 @@ const en: TranslationDict = {
   'sync.warning.title': 'Cloud flow sync failed',
   'sync.warning.desc': 'Current flows are only saved in this browser.',
   'sync.warning.detail': 'View details',
+  'sync.loading.title': 'Syncing cloud status',
+  'sync.loading.desc': 'The board is ready to use while saved flows and queue snapshots load in the background.',
   'sync.prompt.title': 'Found {count} flows stored only on this device',
   'sync.prompt.desc': 'Syncing to your GitHub account @{login} makes them available on other devices.',
   'sync.prompt.button': 'Sync to account',
@@ -467,7 +475,7 @@ const en: TranslationDict = {
   'toast.repos.syncedCount': 'Synced {count} authorized repositories. Returned to the previous page.',
   'toast.repos.error': 'Unable to sync authorized repositories',
   'toast.repos.hint': 'After saving on GitHub, close the authorization page to return here and sync repositories.',
-  'toast.queue.refreshed': 'Action queue refreshed.',
+  'toast.queue.refreshed': 'Action queue refreshed. {count} item(s) need attention.',
   'toast.unknownError': 'Unknown error',
 
   // Notification (system)
@@ -478,6 +486,7 @@ const en: TranslationDict = {
   'notif.actionsPassed': 'All Actions passed',
   'notif.newPullReady': 'New commits are ready for a new PR',
   'toast.queue.failed': 'Failed to refresh the to-do queue',
+  'toast.queue.unavailable': 'Connect GitHub before refreshing the to-do queue.',
 
   // Next action titles
   'nextAction.notStarted': 'Not started yet',

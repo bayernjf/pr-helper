@@ -45,6 +45,11 @@ const zh: TranslationDict = {
   'connect.error.repos': '无法读取仓库',
   'connect.draft.saveError': '草稿保存失败',
 
+  // Local Vite mode
+  'localMode.title': '本地 Vite 模式',
+  'localMode.desc': '本地开发服务器不会运行云端 API；流程仅保存在当前浏览器。要测试云端同步、队列和通知，请使用 vercel dev。',
+  'localMode.apiUnavailable': '本地 Vite 未运行云端 API。请使用 vercel dev 测试该功能。',
+
   // Topbar / Account
   'account.label': '账户与设置',
   'account.manageRepos': '管理授权仓库 ↗',
@@ -71,6 +76,7 @@ const zh: TranslationDict = {
   'overview.empty.button': '创建第一个流程',
   'overview.queue.title': '需要你处理 · {count}',
   'overview.queue.refresh': '刷新队列',
+  'overview.queue.refreshing': '正在刷新…',
   'overview.flowCard.view': '查看流程 →',
   'overview.flowCard.steps': '{count} 个步骤 · 尚未执行',
   'overview.queue.step': '第 {index} 步',
@@ -143,6 +149,8 @@ const zh: TranslationDict = {
   'sync.warning.title': '云端流程同步失败',
   'sync.warning.desc': '当前流程只保存在这台设备的浏览器中。',
   'sync.warning.detail': '查看详情',
+  'sync.loading.title': '正在同步云端状态',
+  'sync.loading.desc': '看板已可使用；后台正在读取已保存的流程和待办快照。',
   'sync.prompt.title': '发现 {count} 个仅保存在这台设备上的流程',
   'sync.prompt.desc': '确认后会同步到 GitHub 账号 @{login}，以后可在其他设备继续使用。',
   'sync.prompt.button': '同步到账号',
@@ -467,7 +475,7 @@ const zh: TranslationDict = {
   'toast.repos.syncedCount': '已同步 {count} 个授权仓库，已回到原页面。',
   'toast.repos.error': '无法同步授权仓库',
   'toast.repos.hint': '在 GitHub 保存后关闭授权页，将自动回到这里并同步仓库。',
-  'toast.queue.refreshed': '待办队列已刷新。',
+  'toast.queue.refreshed': '待办队列已刷新，当前 {count} 项待处理。',
   'toast.unknownError': '未知错误',
 
   // Notification (system)
@@ -478,6 +486,7 @@ const zh: TranslationDict = {
   'notif.actionsPassed': 'Actions 全绿',
   'notif.newPullReady': '有新提交，可以创建新 PR',
   'toast.queue.failed': '待办队列刷新失败',
+  'toast.queue.unavailable': '请先连接 GitHub 后再刷新待办队列。',
 
   // Next action titles
   'nextAction.notStarted': '尚未开始监控',
