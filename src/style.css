@@ -1879,13 +1879,40 @@ a.account-menu-item {
   padding-top: 8px;
   border-top: 1px solid var(--border, #e2e8f0);
 }
-.lane-timeline > p,
-.drawer-timeline > p {
+.lane-timeline summary,
+.drawer-timeline summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--muted-text, #64748b);
-  margin: 0 0 6px;
+  cursor: pointer;
+  list-style: none;
+}
+.lane-timeline summary::-webkit-details-marker,
+.drawer-timeline summary::-webkit-details-marker {
+  display: none;
+}
+.lane-timeline summary::after,
+.drawer-timeline summary::after {
+  content: '▸';
+  font-size: 0.8rem;
+  transition: transform 160ms ease;
+}
+.lane-timeline[open] summary,
+.drawer-timeline[open] summary {
+  margin-bottom: 6px;
+}
+.lane-timeline[open] summary::after,
+.drawer-timeline[open] summary::after {
+  transform: rotate(90deg);
+}
+.lane-timeline summary:focus-visible,
+.drawer-timeline summary:focus-visible {
+  outline: 2px solid var(--accent, #2563eb);
+  outline-offset: 3px;
 }
 .lane-timeline ol,
 .drawer-timeline ol {

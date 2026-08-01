@@ -900,20 +900,20 @@ function timelineEntryIcon(kind: string): string {
 function workflowTimelineSection(flow: Workflow): string {
   const entries = timeline.filter(entry => entry.workflowId === flow.id).slice(0, 8);
   if (!entries.length) return '';
-  return `<section class="lane-timeline"><p class="eyebrow">${t('timeline.eyebrow')}</p><ol>${entries.map(entry => {
+  return `<details class="lane-timeline"><summary class="eyebrow">${t('timeline.eyebrow')}</summary><ol>${entries.map(entry => {
     const icon = timelineEntryIcon(entry.kind);
     const prLink = entry.pullNumber ? `<a href="${githubPullUrl(flow.repository, entry.pullNumber)}" target="_blank" rel="noreferrer">#${entry.pullNumber}</a>` : '';
     return `<li><span class="timeline-icon">${icon}</span><div><b>${escape(entry.message)}</b><small>${escape(entry.source)} → ${escape(entry.target)}${prLink ? ` · ${prLink}` : ''}</small></div><time>${escape(stageUpdatedAt({ updatedAt: entry.occurredAt } as WorkflowStageState))}</time></li>`;
-  }).join('')}</ol></section>`;
+  }).join('')}</ol></details>`;
 }
 function stepTimelineSection(flow: Workflow, stageIndex: number, source: string): string {
   const stageId = flow.stages[stageIndex]?.stageId;
   const entries = timeline.filter(entry => entry.workflowId === flow.id && (stageId ? entry.stageId === stageId : entry.stageIndex === stageIndex) && (entry.source === source || !entry.source)).slice(0, 12);
   if (!entries.length) return '';
-  return `<section class="drawer-timeline"><p class="eyebrow">${t('timeline.step.eyebrow')}</p><ol>${entries.map(entry => {
+  return `<details class="drawer-timeline"><summary class="eyebrow">${t('timeline.step.eyebrow')}</summary><ol>${entries.map(entry => {
     const icon = timelineEntryIcon(entry.kind);
     return `<li><span class="timeline-icon">${icon}</span><div><b>${escape(entry.message)}</b><time>${escape(stageUpdatedAt({ updatedAt: entry.occurredAt } as WorkflowStageState))}</time></div></li>`;
-  }).join('')}</ol></section>`;
+  }).join('')}</ol></details>`;
 }
 function projectLane(flow: Workflow) {
   const items = actionQueue.filter(item => item.workflowId === flow.id);
