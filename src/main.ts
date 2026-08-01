@@ -57,6 +57,9 @@ let repositoryEnvironmentsLoaded = false;
 let statuses: StepStatus[] | null = null;
 let refreshOnNextDetail = false;
 let pollTimer: number | undefined;
+let overviewPollTimer: number | undefined;
+let overviewSnapshotRefreshing = false;
+let overviewRefreshOnFocusBound = false;
 let refreshOnFocusBound = false;
 let githubInstallationSettingsUrl = '';
 let githubLogin = '';
@@ -242,6 +245,28 @@ async function refreshActionQueue() {
     showToast(cloudWorkflowStorage ? actionQueueError || t('toast.queue.failed') : t('toast.queue.unavailable'));
   }
   render();
+}
+async function refreshOverviewSnapshot() {
+  if (overviewSnapshotRefreshing || actionQueueRefreshing || !cloudWorkflowStorage || screen !== 'overview' || document.visibilityState !== 'visible') return;
+  overviewSnapshotRefreshing = true;
+  const loaded = await loadActionQueue(false);
+  overviewSnapshotRefreshing = false;
+  if (loaded && screen === 'overview') render();
+}
+function stopOverviewSnapshotPolling() {
+  if (overviewPollTimer === undefined) return;
+  window.clearInterval(overviewPollTimer);
+  overviewPollTimer = undefined;
+}
+function startOverviewSnapshotPolling() {
+  if (overviewPollTimer === undefined) {
+    overviewPollTimer = window.setInterval(() => { void refreshOverviewSnapshot(); }, 30_000);
+    void refreshOverviewSnapshot();
+  }
+  if (overviewRefreshOnFocusBound) return;
+  overviewRefreshOnFocusBound = true;
+  window.addEventListener('focus', () => { if (screen === 'overview') void refreshOverviewSnapshot(); });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && screen === 'overview') void refreshOverviewSnapshot(); });
 }
 async function loadPushState() {
   if (!('serviceWorker' in navigator) || !('PushManager' in window) || !cloudWorkflowStorage) return;
@@ -615,7 +640,11 @@ function goTo(target: Screen | 'back') {
   render();
 }
 
-function renderContent() { if (screen === 'overview') overview(); else if (screen === 'editor') editor(); else detail(); }
+function renderContent() {
+  if (screen === 'overview') { overview(); return; }
+  stopOverviewSnapshotPolling();
+  if (screen === 'editor') editor(); else detail();
+}
 
 function stageState(workflowId: string, stageIndex: number, source?: string, target?: string) {
   const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
@@ -834,6 +863,7 @@ function overview() {
   bindLaneSorting();
   bindFlowCards();
   bindFailureCenter();
+  startOverviewSnapshotPolling();
 }
 function bindFailureCenter() {
   document.querySelectorAll<HTMLButtonElement>('.fc-open').forEach(button => button.addEventListener('click', () => {
@@ -1013,7 +1043,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
       : '';
   const pull = pullNumber ? `<a class="drawer-pr-link" href="${githubPullUrl(flow.repository, pullNumber)}" target="_blank" rel="noreferrer">PR #${pullNumber} ↗</a>` : `<p>${t('overview.board.noPull')}</p>`;
   const events = stageEvents(workflowId, stageIndex, routeSource);
-  const history = events.length ? `<section class="drawer-events"><p class="eyebrow">${t('overview.run.history')}</p><ol>${events.map(event => `<li><b>${escape(event.message)}</b><time>${escape(stageUpdatedAt({ updatedAt: event.occurredAt } as WorkflowStageState))}</time></li>`).join('')}</ol></section>` : '';
+  const history = events.length ? `<details class="drawer-events"><summary class="eyebrow">${t('overview.run.history')}</summary><ol>${events.map(event => `<li><b>${escape(event.message)}</b><time>${escape(stageUpdatedAt({ updatedAt: event.occurredAt } as WorkflowStageState))}</time></li>`).join('')}</ol></details>` : '';
   const deployments = deploymentCards(workflowId, stageIndex, routeSource);
   const deploymentHistory = deploymentRunHistory(flow, stageIndex, routeSource);
   const configurationWarnings = drawerConfigurationWarnings(flow, stageIndex, routeSource);
