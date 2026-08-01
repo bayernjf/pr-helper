@@ -45,6 +45,11 @@ const en: TranslationDict = {
   'connect.error.repos': 'Unable to load repositories',
   'connect.draft.saveError': 'Draft save failed',
 
+  // Local Vite mode
+  'localMode.title': 'Local Vite mode',
+  'localMode.desc': 'The local development server does not run cloud APIs. Flows are stored only in this browser. Use vercel dev to test cloud sync, queues, and notifications.',
+  'localMode.apiUnavailable': 'Local Vite is not running cloud APIs. Use vercel dev to test this feature.',
+
   // Topbar / Account
   'account.label': 'Account & Settings',
   'account.manageRepos': 'Manage repositories ↗',

@@ -45,6 +45,11 @@ const zh: TranslationDict = {
   'connect.error.repos': '无法读取仓库',
   'connect.draft.saveError': '草稿保存失败',
 
+  // Local Vite mode
+  'localMode.title': '本地 Vite 模式',
+  'localMode.desc': '本地开发服务器不会运行云端 API；流程仅保存在当前浏览器。要测试云端同步、队列和通知，请使用 vercel dev。',
+  'localMode.apiUnavailable': '本地 Vite 未运行云端 API。请使用 vercel dev 测试该功能。',
+
   // Topbar / Account
   'account.label': '账户与设置',
   'account.manageRepos': '管理授权仓库 ↗',
