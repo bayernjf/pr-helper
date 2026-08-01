@@ -22,7 +22,7 @@ npm ci
 npm run dev
 ```
 
-The local Vite server does not host the Vercel API functions. Set `VITE_AUTH_ORIGIN` to the canonical Vercel deployment to exercise GitHub App flows locally, or use the collapsed PAT development fallback. A PAT is not the production authentication path.
+`npm run dev` starts only the Vite browser app. Without `VITE_AUTH_ORIGIN`, it runs in explicit local mode: use the PAT fallback and expect workflows to remain in this browser; cloud sync, queues, Push, and account operations are unavailable. To test the full API-backed flow locally, run `vercel dev` with the required Vercel environment variables. If `VITE_AUTH_ORIGIN` targets an existing API origin, that origin must explicitly allow the local browser origin and session cookies.
 
 Useful checks:
 

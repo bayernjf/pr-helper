@@ -42,6 +42,7 @@ type RecoveryStatus = { workflowId: string; stageIndex: number; source: string; 
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
 const THEME_KEY = 'pr-helper-theme';
+const localViteWithoutApi = import.meta.env.DEV && !import.meta.env.VITE_AUTH_ORIGIN;
 type Theme = 'light' | 'dark';
 let token = sessionStorage.getItem('github-token') || '';
 let repos: Repo[] = [];
@@ -62,6 +63,7 @@ let githubLogin = '';
 let cloudWorkflowStorage = false;
 let pendingLocalWorkflowSync = false;
 let cloudWorkflowSyncError = '';
+let cloudWorkspaceLoading = false;
 let actionQueue: ActionQueueItem[] = [];
 let workflowStageStates: WorkflowStageState[] = [];
 let workflowStageEvents: WorkflowStageEvent[] = [];
@@ -76,6 +78,7 @@ let preflightLoading = false;
 let preflightError = '';
 let recoveryStatuses: RecoveryStatus[] = [];
 let actionQueueError = '';
+let actionQueueRefreshing = false;
 let overviewFilter: 'all' | 'attention' | 'failed' = 'all';
 let pushSubscribed = false;
 let pushConfigured = false;
@@ -174,6 +177,12 @@ async function workflowApiError(response: Response) {
   return payload.message || t('toast.cloudFail.status', { status: response.status });
 }
 async function loadCloudWorkflows() {
+  if (localViteWithoutApi) {
+    cloudWorkflowStorage = false;
+    cloudWorkflowSyncError = '';
+    pendingLocalWorkflowSync = false;
+    return;
+  }
   try {
     const response = await fetch(githubAppApiUrl('/api/workflows'));
     if (response.status === 401) return;
@@ -186,10 +195,10 @@ async function loadCloudWorkflows() {
     else pendingLocalWorkflowSync = workflows.length > 0;
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
 }
-async function loadActionQueue() {
+async function loadActionQueue(reconcile = true) {
   if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = []; syncHealth = null; workflowRuns = []; timeline = []; recoveryStatuses = []; actionQueueError = ''; return false; }
   try {
-    const response = await fetch(githubAppApiUrl('/api/inbox'));
+    const response = await fetch(githubAppApiUrl(reconcile ? '/api/inbox?refresh=1' : '/api/inbox'));
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { message?: string };
       actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = []; syncHealth = null; workflowRuns = []; timeline = []; recoveryStatuses = [];
@@ -215,6 +224,25 @@ async function loadActionQueue() {
     return false;
   }
 }
+async function refreshActionQueue() {
+  if (actionQueueRefreshing) return;
+  actionQueueRefreshing = true;
+  render();
+
+  // Give the browser a frame to paint the pressed/loading state before a fast local response completes.
+  const startedAt = Date.now();
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+  const loaded = await loadActionQueue(true);
+  const remainingFeedbackTime = 450 - (Date.now() - startedAt);
+  if (remainingFeedbackTime > 0) await new Promise<void>(resolve => window.setTimeout(resolve, remainingFeedbackTime));
+  actionQueueRefreshing = false;
+  if (loaded) {
+    showToast(t('toast.queue.refreshed', { count: actionQueue.length }));
+  } else {
+    showToast(cloudWorkflowStorage ? actionQueueError || t('toast.queue.failed') : t('toast.queue.unavailable'));
+  }
+  render();
+}
 async function loadPushState() {
   if (!('serviceWorker' in navigator) || !('PushManager' in window) || !cloudWorkflowStorage) return;
   try {
@@ -231,6 +259,7 @@ function vapidKey(value: string) {
   return Uint8Array.from(bytes, character => character.charCodeAt(0));
 }
 async function enablePushNotifications() {
+  if (localViteWithoutApi) { showToast(t('localMode.apiUnavailable')); return; }
   if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) { showToast(t('toast.push.unsupported')); return; }
   if (Notification.permission === 'denied') { showNotificationPermissionHelp(); return; }
   try {
@@ -263,12 +292,13 @@ function showDisconnectDialog() {
     dialog.remove();
     if (!confirmed) return;
     sessionStorage.removeItem('github-token'); token = ''; githubInstallationSettingsUrl = ''; githubLogin = ''; cloudWorkflowStorage = false;
-    await fetch(githubAppApiUrl('/api/auth/github/logout'), { method: 'POST' }).catch(() => undefined);
+    if (!localViteWithoutApi) await fetch(githubAppApiUrl('/api/auth/github/logout'), { method: 'POST' }).catch(() => undefined);
     connect();
   }, { once: true });
 }
 
 function showDeleteAccountDialog() {
+  if (localViteWithoutApi) { showToast(t('localMode.apiUnavailable')); return; }
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog confirm-dialog';
   dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('accountDelete.eyebrow')}</p><h2>${t('accountDelete.title')}</h2><p>${t('accountDelete.desc')}</p><p class="meta">${t('accountDelete.warning')}</p><label>${t('accountDelete.confirmLabel')}<input id="delete-confirm-input" type="text" autocomplete="off" placeholder="DELETE" /></label><div class="dialog-actions"><button value="cancel" class="ghost">${t('accountDelete.cancel')}</button><button id="delete-account-confirm" type="button" class="danger-button" disabled>${t('accountDelete.confirm')}</button></div></form>`;
@@ -402,6 +432,7 @@ function showAiSettings() {
 }
 
 function showCloudSyncDialog() {
+  if (localViteWithoutApi) { showToast(t('localMode.apiUnavailable')); return; }
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
   const unlocked = isCloudSyncUnlocked();
@@ -484,6 +515,7 @@ function connect(error = '') {
 
 async function restoreConnection() {
   if (token) return init();
+  if (localViteWithoutApi) { connect(); return; }
   try {
     const response = await fetch(githubAppApiUrl('/api/github/session'));
     const session = await response.json() as { connected?: boolean; login?: string; installationSettingsUrl?: string };
@@ -498,7 +530,21 @@ async function restoreConnection() {
 
 async function init() {
   app().innerHTML = `<main class="connect"><p class="eyebrow">${t('connect.eyebrow.github')}</p><h1>${t('connect.loading')}</h1></main>`;
-  try { repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated'); await loadCloudWorkflows(); await Promise.all([loadActionQueue(), loadPushState()]); render(); } catch (err) { connect(err instanceof Error ? err.message : t('connect.error.repos')); }
+  try {
+    repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated');
+    cloudWorkspaceLoading = !localViteWithoutApi;
+    render();
+    if (cloudWorkspaceLoading) void hydrateCloudWorkspace();
+  } catch (err) { connect(err instanceof Error ? err.message : t('connect.error.repos')); }
+}
+async function hydrateCloudWorkspace() {
+  try {
+    await loadCloudWorkflows();
+    if (cloudWorkflowStorage) await Promise.all([loadActionQueue(false), loadPushState()]);
+  } finally {
+    cloudWorkspaceLoading = false;
+    render();
+  }
 }
 
 async function refreshAuthorizedRepositories() {
@@ -764,6 +810,8 @@ function failureCenterPanel(): string {
 }
 function overview() {
   const content = document.querySelector('#content')!;
+  const localModeNotice = localViteWithoutApi ? `<section class="local-sync-notice local-mode-notice"><div><b>${t('localMode.title')}</b><p>${t('localMode.desc')}</p></div></section>` : '';
+  const cloudWorkspaceNotice = cloudWorkspaceLoading ? `<section class="local-sync-notice"><div><b>${t('sync.loading.title')}</b><p>${t('sync.loading.desc')}</p></div></section>` : '';
   const storageWarning = cloudWorkflowSyncError ? `<details class="compact-notice is-error"><summary><span><b>${t('sync.warning.title')}</b><span>${t('sync.warning.desc')}</span></span><small>${t('sync.warning.detail')}</small></summary><p>${escape(cloudWorkflowSyncError)}</p></details>` : '';
   const queueWarning = actionQueueError ? `<details class="compact-notice is-error"><summary><span><b>${t('overview.queue.error.title')}</b></span><small>${t('sync.warning.detail')}</small></summary><p>${escape(actionQueueError)}</p></details>` : '';
   const syncPrompt = pendingLocalWorkflowSync ? `<section class="local-sync-notice"><div><b>${t('sync.prompt.title', { count: workflows.length })}</b><p>${t('sync.prompt.desc', { login: githubLogin || '' })}</p></div><button id="sync-local-workflows" class="ghost">${t('sync.prompt.button')}</button></section>` : '';
@@ -773,11 +821,12 @@ function overview() {
   const failedCount = actionQueue.filter(item => item.kind === 'checks-failed').length;
   const activeProjectCount = new Set(actionQueue.map(item => item.workflowId)).size;
   const visibleWorkflows = workflows.filter(flow => overviewFilter === 'all' || actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed')));
-  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div><button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${activeProjectCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button id="refresh-action-queue" class="board-refresh">${t('overview.queue.refresh')}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
+  const refreshLabel = actionQueueRefreshing ? t('overview.queue.refreshing') : t('overview.queue.refresh');
+  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div><button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${activeProjectCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button id="refresh-action-queue" class="board-refresh${actionQueueRefreshing ? ' is-loading' : ''}"${actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
   document.querySelector('#new-flow')!.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
-  document.querySelector('#refresh-action-queue')?.addEventListener('click', async () => { const loaded = await loadActionQueue(); render(); showToast(loaded ? t('toast.queue.refreshed') : t('toast.queue.failed')); });
+  document.querySelector('#refresh-action-queue')?.addEventListener('click', () => void refreshActionQueue());
   document.querySelector('#run-preflight')?.addEventListener('click', async () => { await loadPreflight(); render(); });
   document.querySelectorAll<HTMLButtonElement>('[data-board-filter]').forEach(button => button.addEventListener('click', () => { overviewFilter = button.dataset.boardFilter as typeof overviewFilter; render(); }));
   document.querySelectorAll<HTMLButtonElement>('[data-lane-step]').forEach(button => button.addEventListener('click', () => showProjectStepDrawer(button.dataset.workflowId || '', Number(button.dataset.laneStep), button.dataset.laneSource)));

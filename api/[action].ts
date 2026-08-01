@@ -8,6 +8,11 @@ function action(request: ApiRequest) {
   return Array.isArray(value) ? value[0] : value;
 }
 
+export function shouldReconcileInbox(request: ApiRequest) {
+  const value = request.query?.refresh;
+  return (Array.isArray(value) ? value[0] : value) === '1';
+}
+
 function body(request: ApiRequest) {
   if (typeof request.body === 'string') { try { return JSON.parse(request.body) as unknown; } catch { throw new Error('请求内容不是有效 JSON'); } }
   return request.body;
@@ -17,9 +22,9 @@ async function inbox(request: ApiRequest, response: ApiResponse) {
   if (request.method && request.method !== 'GET') { response.status(405).json({ message: 'Method not allowed' }); return; }
   try {
     const { session } = currentGitHubIdentity(request);
-    // Webhooks are the fast path. Reconcile here as well so workflows created before
-    // webhook monitoring was enabled cannot leave a stale, non-actionable queue item.
-    if (session.installationId) await reconcileWorkflowStages(process.env, { installationId: session.installationId, eventName: 'inbox_refresh' }, 'inbox_refresh');
+    // Page loads return the persisted projection immediately. A full GitHub reconciliation
+    // is reserved for an explicit queue refresh; Webhooks and cron keep the snapshot fresh.
+    if (session.installationId && shouldReconcileInbox(request)) await reconcileWorkflowStages(process.env, { installationId: session.installationId, eventName: 'inbox_refresh' }, 'inbox_refresh');
     const identity = { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId };
     const [items, states, events, deployments, deploymentRuns, configurationWarnings, syncHealth, runs, timeline, recoveryStatuses] = await Promise.all([listActionableStages(process.env, identity), listWorkflowStageStates(process.env, identity), listRecentWorkflowStageEvents(process.env, identity), listWorkflowStageDeployments(process.env, identity), listWorkflowStageDeploymentRuns(process.env, identity), listWorkflowConfigurationWarnings(process.env, identity), listSyncHealth(process.env, identity), listWorkflowRuns(process.env, identity), listWorkflowTimeline(process.env, identity), listRecoveryStatuses(process.env, identity)]);
     response.status(200).json({ items, states, events, deployments, deploymentRuns, configurationWarnings, syncHealth, runs, timeline, recoveryStatuses });
