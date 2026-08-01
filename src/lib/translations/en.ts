@@ -71,6 +71,8 @@ const en: TranslationDict = {
   'overview.empty.button': 'Create your first flow',
   'overview.queue.title': 'Needs your attention · {count}',
   'overview.queue.refresh': 'Refresh queue',
+  'overview.queue.refreshing': 'Refreshing…',
+  'overview.queue.refreshedNow': 'Updated just now',
   'overview.flowCard.view': 'View flow →',
   'overview.flowCard.steps': '{count} steps · Not started',
   'overview.queue.step': 'Step {index}',
@@ -467,7 +469,7 @@ const en: TranslationDict = {
   'toast.repos.syncedCount': 'Synced {count} authorized repositories. Returned to the previous page.',
   'toast.repos.error': 'Unable to sync authorized repositories',
   'toast.repos.hint': 'After saving on GitHub, close the authorization page to return here and sync repositories.',
-  'toast.queue.refreshed': 'Action queue refreshed.',
+  'toast.queue.refreshed': 'Action queue refreshed. {count} item(s) need attention.',
   'toast.unknownError': 'Unknown error',
 
   // Notification (system)
@@ -478,6 +480,7 @@ const en: TranslationDict = {
   'notif.actionsPassed': 'All Actions passed',
   'notif.newPullReady': 'New commits are ready for a new PR',
   'toast.queue.failed': 'Failed to refresh the to-do queue',
+  'toast.queue.unavailable': 'Connect GitHub before refreshing the to-do queue.',
 
   // Next action titles
   'nextAction.notStarted': 'Not started yet',

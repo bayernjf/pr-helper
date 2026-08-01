@@ -71,6 +71,8 @@ const zh: TranslationDict = {
   'overview.empty.button': '创建第一个流程',
   'overview.queue.title': '需要你处理 · {count}',
   'overview.queue.refresh': '刷新队列',
+  'overview.queue.refreshing': '正在刷新…',
+  'overview.queue.refreshedNow': '刚刚更新',
   'overview.flowCard.view': '查看流程 →',
   'overview.flowCard.steps': '{count} 个步骤 · 尚未执行',
   'overview.queue.step': '第 {index} 步',
@@ -467,7 +469,7 @@ const zh: TranslationDict = {
   'toast.repos.syncedCount': '已同步 {count} 个授权仓库，已回到原页面。',
   'toast.repos.error': '无法同步授权仓库',
   'toast.repos.hint': '在 GitHub 保存后关闭授权页，将自动回到这里并同步仓库。',
-  'toast.queue.refreshed': '待办队列已刷新。',
+  'toast.queue.refreshed': '待办队列已刷新，当前 {count} 项待处理。',
   'toast.unknownError': '未知错误',
 
   // Notification (system)
@@ -478,6 +480,7 @@ const zh: TranslationDict = {
   'notif.actionsPassed': 'Actions 全绿',
   'notif.newPullReady': '有新提交，可以创建新 PR',
   'toast.queue.failed': '待办队列刷新失败',
+  'toast.queue.unavailable': '请先连接 GitHub 后再刷新待办队列。',
 
   // Next action titles
   'nextAction.notStarted': '尚未开始监控',
