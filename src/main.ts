@@ -77,7 +77,6 @@ let preflightError = '';
 let recoveryStatuses: RecoveryStatus[] = [];
 let actionQueueError = '';
 let actionQueueRefreshing = false;
-let actionQueueLastRefreshedAt: number | null = null;
 let overviewFilter: 'all' | 'attention' | 'failed' = 'all';
 let pushSubscribed = false;
 let pushConfigured = false;
@@ -222,10 +221,14 @@ async function refreshActionQueue() {
   actionQueueRefreshing = true;
   render();
 
+  // Give the browser a frame to paint the pressed/loading state before a fast local response completes.
+  const startedAt = Date.now();
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
   const loaded = await loadActionQueue();
+  const remainingFeedbackTime = 450 - (Date.now() - startedAt);
+  if (remainingFeedbackTime > 0) await new Promise<void>(resolve => window.setTimeout(resolve, remainingFeedbackTime));
   actionQueueRefreshing = false;
   if (loaded) {
-    actionQueueLastRefreshedAt = Date.now();
     showToast(t('toast.queue.refreshed', { count: actionQueue.length }));
   } else {
     showToast(cloudWorkflowStorage ? actionQueueError || t('toast.queue.failed') : t('toast.queue.unavailable'));
@@ -791,10 +794,7 @@ function overview() {
   const activeProjectCount = new Set(actionQueue.map(item => item.workflowId)).size;
   const visibleWorkflows = workflows.filter(flow => overviewFilter === 'all' || actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed')));
   const refreshLabel = actionQueueRefreshing ? t('overview.queue.refreshing') : t('overview.queue.refresh');
-  const refreshStatus = actionQueueRefreshing
-    ? t('overview.queue.refreshing')
-    : actionQueueLastRefreshedAt ? t('overview.queue.refreshedNow') : '';
-  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div><button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${activeProjectCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><div class="board-refresh-wrap"><button id="refresh-action-queue" class="board-refresh${actionQueueRefreshing ? ' is-loading' : ''}"${actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button><span class="board-refresh-status" role="status" aria-live="polite">${refreshStatus}</span></div></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
+  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div><button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${activeProjectCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button id="refresh-action-queue" class="board-refresh${actionQueueRefreshing ? ' is-loading' : ''}"${actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
   document.querySelector('#new-flow')!.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());

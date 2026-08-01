@@ -72,7 +72,6 @@ const zh: TranslationDict = {
   'overview.queue.title': '需要你处理 · {count}',
   'overview.queue.refresh': '刷新队列',
   'overview.queue.refreshing': '正在刷新…',
-  'overview.queue.refreshedNow': '刚刚更新',
   'overview.flowCard.view': '查看流程 →',
   'overview.flowCard.steps': '{count} 个步骤 · 尚未执行',
   'overview.queue.step': '第 {index} 步',

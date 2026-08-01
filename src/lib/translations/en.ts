@@ -72,7 +72,6 @@ const en: TranslationDict = {
   'overview.queue.title': 'Needs your attention · {count}',
   'overview.queue.refresh': 'Refresh queue',
   'overview.queue.refreshing': 'Refreshing…',
-  'overview.queue.refreshedNow': 'Updated just now',
   'overview.flowCard.view': 'View flow →',
   'overview.flowCard.steps': '{count} steps · Not started',
   'overview.queue.step': 'Step {index}',
