@@ -87,7 +87,7 @@ const en: TranslationDict = {
   'overview.board.addProject': '+ Add project',
   'overview.board.summary': 'Project status filters',
   'overview.board.attention': 'Needs attention',
-  'overview.board.active': 'Active projects',
+  'overview.board.active': 'All projects',
   'overview.board.failed': 'Failed',
   'overview.board.filterEmpty': 'No projects match this filter',
   'overview.board.showAll': 'Show all projects',
