@@ -32,10 +32,13 @@ npx tsc --noEmit # browser TypeScript check
 - `src/lib/domain.ts`: PR gate decisions and native GitHub URL builders.
 - `src/lib/workflow.ts` / `workflow-run.ts`: workflow configuration, Lane ordering, deployment configuration, and run presentation.
 - `src/lib/ai*.ts`, `pr-drafts.ts`, `generation-rules.ts`: AI streaming, 24-hour drafts, and Markdown generation rules.
+- `src/lib/encrypted-sync.ts`: AES-GCM encrypted cloud sync for local-only data (skeleton).
 - `api/_lib/github-*.ts`: GitHub App, installation-token API, Webhook, and installation boundaries.
 - `api/_lib/workflows-store.ts`: Supabase persistence, reconciliation, action queue, deployment tracking, audit events, and rollback dispatch.
 - `api/*.ts`: Vercel API entry points.
-- `db/migrations/`: the only source of truth for database schema; the current baseline is `001`–`013`.
+- `api/account.ts`: account deletion endpoint (`DELETE /api/account`).
+- `public/privacy.html`: static Privacy Policy page.
+- `db/migrations/`: the only source of truth for database schema; the current baseline is `001`–`018`.
 - `.github/workflows/`: CI, Vercel/Cloudflare deployment, reconciliation, and confirmed Production rollback.
 - `docs/current-state.md`: current architecture, capabilities, boundaries, and backlog.
 - `docs/superpowers/specs/` and `docs/superpowers/plans/`: historical design and execution records.

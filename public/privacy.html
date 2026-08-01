@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PR Helper — Privacy Policy</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.7; color: #1e293b; max-width: 720px; margin: 0 auto; padding: 40px 20px; }
+    h1 { font-size: 1.8rem; margin-bottom: 8px; }
+    h2 { font-size: 1.2rem; margin-top: 32px; margin-bottom: 8px; color: #334155; }
+    p, li { font-size: 0.95rem; color: #475569; }
+    ul { padding-left: 20px; margin: 8px 0; }
+    .meta { font-size: 0.85rem; color: #94a3b8; margin-bottom: 32px; }
+    a { color: #2563eb; }
+    .back { display: inline-block; margin-bottom: 24px; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <a class="back" href="/">&larr; Back to PR Helper</a>
+  <h1>Privacy Policy</h1>
+  <p class="meta">Last updated: July 31, 2026</p>
+
+  <p>PR Helper ("we", "our", or "us") is a GitHub-first PR and Release Control Tower. This Privacy Policy explains what data we collect, how we use it, and your rights.</p>
+
+  <h2>1. Data We Collect</h2>
+  <ul>
+    <li><strong>GitHub Account Information:</strong> Your GitHub login name, user ID, and avatar URL, obtained through GitHub App OAuth authorization.</li>
+    <li><strong>Workflow Configuration:</strong> Repository names, branch names, stage configurations, and deployment settings you create within the application.</li>
+    <li><strong>Monitoring Data:</strong> Pull request status, GitHub Actions run results, deployment states, webhook events, and reconciliation telemetry.</li>
+    <li><strong>Local-Only Data:</strong> PR drafts and Markdown generation rules are stored in your browser's <code>localStorage</code> and are not uploaded to our servers by default.</li>
+  </ul>
+
+  <h2>2. How We Store Your Data</h2>
+  <ul>
+    <li><strong>Server-Side Data:</strong> Workflow configurations and monitoring state are stored in Supabase (PostgreSQL), hosted on AWS infrastructure.</li>
+    <li><strong>Encrypted Cloud Sync (Optional):</strong> If you enable cloud sync, your local data is encrypted with AES-GCM 256-bit encryption using a passphrase you provide. We store only the encrypted ciphertext; we cannot decrypt your data.</li>
+    <li><strong>Session Data:</strong> Authentication sessions are stored in signed, HTTP-only, secure cookies.</li>
+  </ul>
+
+  <h2>3. What We Do NOT Collect</h2>
+  <ul>
+    <li>We do not collect or store your GitHub App private keys or installation tokens on the server beyond short-lived runtime generation.</li>
+    <li>We do not store your AI API keys on the server; they are kept only in your browser session.</li>
+    <li>We do not use analytics, tracking cookies, or third-party data collection SDKs.</li>
+    <li>We do not collect your IP address or browsing history beyond standard hosting infrastructure logs.</li>
+  </ul>
+
+  <h2>4. Third-Party Services</h2>
+  <ul>
+    <li><strong>GitHub:</strong> We interact with GitHub's API using GitHub App installation tokens. GitHub's privacy practices apply to your GitHub data.</li>
+    <li><strong>Vercel:</strong> Our API and frontend are hosted on Vercel. Vercel's data processing agreement applies.</li>
+    <li><strong>Cloudflare Pages:</strong> A static mirror of the frontend is served via Cloudflare Pages. Cloudflare's privacy policy applies.</li>
+    <li><strong>Supabase:</strong> Database storage is provided by Supabase (AWS-hosted). Supabase's security and compliance practices apply.</li>
+  </ul>
+
+  <h2>5. GitHub App Permissions</h2>
+  <p>Our GitHub App requests the following permissions:</p>
+  <ul>
+    <li><strong>Actions (Read &amp; Write):</strong> To read workflow run status, rerun failed Actions, and trigger rollback workflows.</li>
+    <li><strong>Contents (Read-only):</strong> To read branch information and compare changes.</li>
+    <li><strong>Pull Requests (Read &amp; Write):</strong> To create, read, and merge pull requests on your behalf.</li>
+  </ul>
+  <p>You can review and revoke these permissions at any time through your GitHub Settings → Applications.</p>
+
+  <h2>6. Data Retention and Deletion</h2>
+  <p>You can delete your account and all associated data at any time by clicking "Delete Account" in the application's account menu. This will permanently remove:</p>
+  <ul>
+    <li>Your user record</li>
+    <li>All workflow configurations</li>
+    <li>All monitoring state, events, and deployment history</li>
+    <li>All encrypted sync data</li>
+    <li>All push notification subscriptions</li>
+  </ul>
+
+  <h2>7. Your Rights</h2>
+  <p>You have the right to:</p>
+  <ul>
+    <li>Access your data through the application interface</li>
+    <li>Export your workflow configurations</li>
+    <li>Delete your account and all data at any time</li>
+    <li>Revoke GitHub App access through GitHub Settings</li>
+  </ul>
+
+  <h2>8. Contact</h2>
+  <p>For privacy concerns or questions, please open an issue on the project's GitHub repository.</p>
+</body>
+</html>
