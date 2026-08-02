@@ -8,6 +8,7 @@ import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsN
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
 import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, sortWorkflows, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
+import { ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
 import { getCloudSyncStatus, unlockCloudSync, lockCloudSync, isCloudSyncUnlocked, encryptForCloud, decryptFromCloud, type CloudSyncStatus, type SyncableData } from './lib/encrypted-sync';
 import { t, getLocale, setLocale, detectLocale, registerTranslations, type Locale } from './lib/i18n';
@@ -83,6 +84,7 @@ let preflightError = '';
 let recoveryStatuses: RecoveryStatus[] = [];
 let actionQueueError = '';
 let actionQueueRefreshing = false;
+const actionQueueRequestQueue = new ActionQueueRequestQueue();
 let overviewFilter: 'all' | 'attention' | 'failed' = 'all';
 let pushSubscribed = false;
 let pushConfigured = false;
@@ -222,11 +224,13 @@ async function loadCloudWorkflows() {
 }
 async function loadActionQueue(reconcile = true) {
   if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = []; syncHealth = null; workflowRuns = []; timeline = []; recoveryStatuses = []; actionQueueError = ''; return false; }
+  return actionQueueRequestQueue.run(reconcile, loadActionQueueOnce);
+}
+async function loadActionQueueOnce(reconcile: boolean) {
   try {
     const response = await fetch(githubAppApiUrl(reconcile ? '/api/inbox?refresh=1' : '/api/inbox'), reconcile ? { signal: AbortSignal.timeout(60_000) } : undefined);
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { message?: string };
-      actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = []; syncHealth = null; workflowRuns = []; timeline = []; recoveryStatuses = [];
       actionQueueError = payload.message || t('toast.queue.failed');
       return false;
     }
@@ -244,7 +248,6 @@ async function loadActionQueue(reconcile = true) {
     actionQueueError = '';
     return true;
   } catch (error) {
-    actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = []; syncHealth = null; workflowRuns = []; timeline = []; recoveryStatuses = [];
     actionQueueError = error instanceof DOMException && error.name === 'TimeoutError' ? t('toast.queue.timeout') : error instanceof Error ? error.message : t('toast.queue.failed');
     return false;
   }
