@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-03（014–023 已执行；021–023 对应代码待部署；操作审计 Production 验收已通过）
+> 最后更新：2026-08-03（014–023 已执行；021–023 对应代码已部署 Production；操作审计 Production 验收已通过）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -46,7 +46,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - 动态分支规则（如 `feature/*`、`fix/*`）、独立路径与多路径汇聚。
 - 流程配置保存在 Supabase，并保留 `localStorage` 回退和显式本地迁移提示。
 - 每次保存流程自动生成版本快照；PR 合并时记录运行实例，Overview 看板显示最近运行历史。
-- 团队协作（本地待部署）：团队 Owner 可创建团队、维护成员角色并共享个人流程；共享成员在 Lane、待办、阶段状态、部署、运行历史和时间线中看到同一份流程投影。
+- 团队协作：团队 Owner 可创建团队、维护成员角色并共享个人流程；共享成员在 Lane、待办、阶段状态、部署、运行历史和时间线中看到同一份流程投影。已部署，待多账号 Production 验收。
 - 共享流程写操作由服务端角色强制执行：Viewer 只读，Operator 可创建 PR/重跑 Actions，Editor 可编辑流程，只有 Owner 可以删除流程、合并 PR 或发起部署回滚。
 
 ### AI 与本地草稿
@@ -98,7 +98,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 | PR 草稿、Markdown 生成规则 | 浏览器 `localStorage`；可通过加密云同步上传服务端（原型） |
 | 加密云同步密文 | Supabase Postgres（`pr_helper_encrypted_sync`） |
 
-数据库迁移的线上基线是 `001`–`023`。`021_encrypted_sync_hardening.sql`、`022_data_retention.sql` 和 `023_team_permissions.sql` 已执行，分别提供版本化密文同步、受限批量历史清理和团队共享权限模型；对应代码仍待部署。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`。
+数据库迁移的线上基线是 `001`–`023`。`021_encrypted_sync_hardening.sql`、`022_data_retention.sql` 和 `023_team_permissions.sql` 已执行，对应加密同步加固、受限批量历史清理和团队共享权限代码均已部署 Production；它们仍需分别完成线上回归与多账号验收。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`。
 
 ## 最新验证结论
 
@@ -153,9 +153,9 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 | 5 | `db/migrations/018_stage_identity_compatibility.sql` | 阶段状态、事件、部署和运行记录字段 | 已完成 |
 | 6 | `db/migrations/019_stage_identity_primary_keys.sql` | `stage_id` 正式主键、外键和非空约束 | 已完成 |
 | 7 | `db/migrations/020_operation_audit_log.sql` | 操作审计记录 | 已完成 |
-| 8 | `db/migrations/021_encrypted_sync_hardening.sql` | 密文版本、设备与历史记录 | 已完成，代码待部署 |
-| 9 | `db/migrations/022_data_retention.sql` | 数据保留策略配置 | 已完成，代码待部署 |
-| 10 | `db/migrations/023_team_permissions.sql` | 团队、成员与流程共享模型 | 已完成，代码待部署 |
+| 8 | `db/migrations/021_encrypted_sync_hardening.sql` | 密文版本、设备与历史记录 | 已完成，代码已部署，待线上回归 |
+| 9 | `db/migrations/022_data_retention.sql` | 数据保留策略配置 | 已完成，代码已部署，待 Cron 运行观察 |
+| 10 | `db/migrations/023_team_permissions.sql` | 团队、成员与流程共享模型 | 已完成，代码已部署，待多账号验收 |
 
 已确认 4 个相关表存在，并确认 `reconciliation_runs.user_id`、`github_webhook_deliveries.installation_id`、外键和 `degraded` 状态约束已生效。018 新增的 5 个稳定身份索引均已存在，5 张相关表的 `stage_id` 空值数量均为 0。
 
@@ -229,9 +229,9 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - **并发与幂等保护**：为流程版本保存增加并发控制，并为创建 PR、合并、Actions 重试和回滚补充幂等键、CSRF 防护和限流。
 - **完整操作审计**：`020` 已执行；创建/合并 PR、流程保存/删除、Actions 重跑和部署回滚的成功/失败结果记录已实现。Production 已显示真实流程更新、创建/合并 PR 记录，CSV 导出按钮可用。✅
 - **浏览器 E2E**：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影仍必须以真实 GitHub delivery 验收。
-- **加密同步加固**：本地已实现 v2 密文格式、v1 兼容读取、口令轮换、设备标识和乐观版本冲突拒绝；`021` 已执行，代码待部署。
-- **数据保留与清理**：本地已为 Webhook、密文历史、reconciliation、事件、部署运行和审计日志定义 30/90/180/365 天保留策略；现有 Cron 每次受限清理 2,000 条，`022` 已执行，代码待部署。
-- **团队协作闭环**：本地已实现团队管理界面、成员角色更新/移除、流程共享、共享流程投影和服务端角色强制执行；`023` 已执行，代码待部署。实际多账号协作与 GitHub App 安装边界仍需 Production 验收。
+- **加密同步加固**：已部署 v2 密文格式、v1 兼容读取、口令轮换、设备标识和乐观版本冲突拒绝；`021` 已执行，待线上回归。
+- **数据保留与清理**：已部署 Webhook、密文历史、reconciliation、事件、部署运行和审计日志的 30/90/180/365 天保留策略；现有 Cron 每次受限清理 2,000 条，`022` 已执行，待运行观察。
+- **团队协作闭环**：已部署团队管理界面、成员角色更新/移除、流程共享、共享流程投影和服务端角色强制执行；`023` 已执行。实际多账号协作与 GitHub App 安装边界仍需 Production 验收。
 
 ## 变更日志
 
