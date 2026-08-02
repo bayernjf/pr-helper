@@ -16,7 +16,7 @@
 
 | 范围 | 证据 | 结果 |
 | --- | --- | --- |
-| 本地单元测试 | `npm test` | 21 个测试文件、168 项测试全部通过 |
+| 本地单元测试 | `npm test` | 22 个测试文件、171 项测试全部通过 |
 | 类型检查 | `npx tsc --noEmit` | 通过 |
 | 浏览器生产构建 | `npm run lint`（Vite production build） | 通过 |
 | 变更格式 | `git diff --check` | 通过 |
@@ -29,6 +29,9 @@
 | 合并后 Actions 跟踪 | #1、#2、#3 合并后的 `Post-merge verification` 成功，界面显示“合并后验证通过” | 通过 |
 | 失败门禁的 GitHub 原生状态 | [PR #4](https://github.com/bayernjf/pr-helper-e2e-sandbox/pull/4) 为开放状态，`PR gate=FAILURE`，`mergeStateStatus=BLOCKED` | 通过 |
 | 动态来源投影与失败中心 | Production 的 `fix/* → dev` 已列出 `fix/failure-e2e`，失败处理中心显示 PR #4 并提供修复、重跑入口 | 通过 |
+| 队列手动刷新 | Production 点击“刷新队列”后在 41.236 秒内完成，15 个阶段投影由旧快照更新为当前状态 | 通过 |
+| 动态步骤抽屉 | `fix/failure-e2e → dev` 抽屉显示 PR #4、`0/1` 门禁和“第 1 步 Actions 失败” | 通过 |
+| 产品内 Actions 重跑与冷却 | 从抽屉重跑 PR #4；GitHub Checks 显示 `PR gate` 第 2 次运行，产品随后的队列快照显示“冷却中”并禁用重跑按钮 | 通过 |
 
 ## 发现的问题与结论
 
@@ -48,18 +51,21 @@ Production 编辑器的每次变更都会并发发送 `PUT /api/workflows`。多
 
 服务端 reconciliation 能枚举 `fix/*` 命中的仓库分支，但详情页的即时刷新对任意包含 `*` 的 Source 直接返回“未创建”，不会请求 GitHub。Production 中的 `E2E Failure and Dynamic Rule` 流程因此没有显示 `fix/failure-e2e → dev` 的 #4 失败状态。
 
-动态规则到失败中心和恢复抽屉的 Production 投影已通过。详情抽屉的具体分支状态曾被通配符占位状态覆盖为“等待创建 PR”，本地修复已让它优先显示该分支的 Actions 失败；该一个文案修复仍待部署复验。
+动态规则到失败中心和恢复抽屉的 Production 投影已通过。详情抽屉的具体分支状态已显示该分支的 Actions 失败。
 
-### P1：待办队列生产刷新曾超时
+### P1：并发待办刷新可造成抽屉读到空快照
 
-此前 Production 的 `GET /api/inbox?refresh=1` 在 Vercel 超过 300 秒并返回 `504`。本地已加入 GitHub installation token 缓存、15 秒 GitHub API 超时和前端 60 秒超时提示；这些变更尚未部署，不能标记为线上通过。
+单次 Production 手动刷新已在 41.236 秒内完成，不再复现此前 300 秒 `504`。但在失败 Actions 重跑后立刻从抽屉再次同步时，后台快照和手动 reconciliation 会并发；其中一轮超时会清空浏览器已加载的阶段状态，导致新抽屉短暂显示“当前步骤尚无 PR”，而 Lane 仍显示 PR #4 失败。
+
+本地已新增请求串行器和回归测试：并发快照读取会合并，随后只执行一次 reconciliation；失败请求保留上一次可靠快照。该修复尚未部署，故抽屉“重新同步”后的最终一致性仍需 Production 复验。
 
 ### 未取得通过证据的集成项
 
 | 项目 | 当前状态 | 原因 |
 | --- | --- | --- |
 | GitHub Webhook 自动投影 | 待验证 | 未取得 webhook delivery 与数据库投影的对应证据；手动刷新不等于 webhook 通过 |
-| 失败 Actions 的产品内重跑、Codex 修复包 | 待验证 | 动态 #4 尚未进入产品状态投影 |
+| 连续流程保存 | 待验证 | 保存队列修复已上线，但还未在 Production 连续编辑步骤、部署门禁和恢复策略后整页刷新复验 |
+| Codex 修复包 | 待验证 | 已验证失败态与 Actions 重跑；尚未实际提交或应用修复包 |
 | 审批门禁 | 待验证 | 需要第二个可审批账户；单账号无法审批自己的 PR |
 | Vercel / Cloudflare 部署门禁、健康检查、确认式回滚 | 待验证 | E2E 沙箱未配置真实部署工作流和 Environment |
 | Web Push（关闭页面投递） | 待验证 | 需 VAPID、订阅、Service Worker 与关闭页面场景 |
@@ -67,9 +73,9 @@ Production 编辑器的每次变更都会并发发送 `PUT /api/workflows`。多
 
 ## 建议的复验顺序
 
-1. 部署当前本地修复后，在 Production 连续添加/删除步骤、部署门禁和恢复策略，确认无 `409` 且刷新后流程完整保留。
-2. 点击“刷新队列”，确认在 60 秒内得到成功或清晰的超时结果，不能再由 Vercel 运行到 300 秒超时。
-3. 对 PR #4 验证动态 `fix/*` 流程显示 Actions 失败、禁止合并、生成 Codex 修复包，并在冷却策略内测试一次 Actions 重跑。
+1. 部署当前本地待办请求串行修复，在 Production 从动态步骤抽屉重复“重新同步”，确认始终保留 PR #4 的失败状态。
+2. 在 Production 连续添加/删除步骤、部署门禁和恢复策略，确认无 `409` 且刷新后流程完整保留。
+3. 验证 Codex 修复包仅生成诊断信息、不提交代码或修改 PR。
 4. 用第二个账户配置至少 1 个 required approval，验证 `needs-approval` 到 `ready-to-merge` 的状态迁移。
 5. 单独安排低风险窗口，配置真实 Vercel/Cloudflare 部署后验证部署门禁、健康检查与确认式回滚；不要把 Production 回滚作为常规回归测试。
 
