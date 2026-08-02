@@ -21,6 +21,7 @@
 | 类型检查 | `npx tsc --noEmit` | 通过 |
 | 浏览器生产构建 | `npm run lint`（Vite production build） | 通过 |
 | 变更格式 | `git diff --check` | 通过 |
+| 审计日志数据库迁移 | 用户已执行 `020_operation_audit_logs.sql` | 通过；审计代码部署与真实读写仍待验收 |
 | GitHub App 授权与仓库读取 | Production 可列出 E2E 沙箱并创建流程 | 通过 |
 | 流程单次云端保存 | Production 创建 `E2E Persistence Regression`，切回总览后整页刷新仍存在 | 通过 |
 | 创建 PR、PR Actions、应用内合并 | [PR #1](https://github.com/bayernjf/pr-helper-e2e-sandbox/pull/1) `feature/test → dev` | 通过 |
