@@ -38,6 +38,7 @@ type StageSyncHealth = { workflowId: string; stageIndex: number; stageId: string
 type SyncHealth = { lastReconciliation: ReconciliationRun | null; stages: StageSyncHealth[]; webhookDeliveriesLast24h: number };
 type WorkflowRun = { id: number; workflowId: string; version: number; stageIndex: number; stageId: string | null; source: string; target: string; stageSnapshot: { source: string; target: string; stageId?: string }; pullNumber: number | null; state: 'active' | 'completed' | 'failed'; startedAt: string; completedAt: string | null };
 type TimelineEntry = { workflowId: string; stageIndex: number; stageId: string | null; source: string; target: string; kind: string; message: string; occurredAt: string; pullNumber: number | null; runId: number | null };
+type OperationAuditEntry = { id: number; action: string; outcome: 'success' | 'failure'; repository: string | null; workflowId: string | null; stageId: string | null; source: string | null; target: string | null; pullNumber: number | null; runId: number | null; metadata: Record<string, unknown>; failureReason: string | null; occurredAt: string };
 type PreflightCheck = { code: string; severity: 'error' | 'warning' | 'info'; title: string; detail: string; workflowId: string; stageIndex: number | null; source: string | null; fix?: string };
 type PreflightResult = { workflowId: string; workflowName: string; repository: string; checks: PreflightCheck[]; summary: { errors: number; warnings: number; info: number }; ok: boolean };
 type RecoveryStatus = { workflowId: string; stageIndex: number; source: string; retryCount: number; maxRetries: number; lastRetryAt: string | null; cooldownRemainingSeconds: number; exhausted: boolean; escalationNeeded: boolean };
@@ -384,6 +385,48 @@ function showPermissionsDialog() {
   dialog.addEventListener('close', () => dialog.remove());
 }
 
+function auditActionLabel(action: string) { return t(`audit.action.${action}`); }
+function auditTimestamp(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(getLocale() === 'zh' ? 'zh-CN' : 'en-US', { dateStyle: 'medium', timeStyle: 'medium' }).format(date);
+}
+function csvValue(value: unknown) {
+  const text = value === null || value === undefined ? '' : typeof value === 'string' ? value : String(value);
+  return `"${text.replaceAll('"', '""')}"`;
+}
+function downloadAuditCsv(entries: readonly OperationAuditEntry[]) {
+  const header = ['id', 'occurred_at', 'action', 'outcome', 'repository', 'workflow_id', 'stage_id', 'source', 'target', 'pull_number', 'run_id', 'failure_reason'];
+  const rows = entries.map(entry => [entry.id, entry.occurredAt, entry.action, entry.outcome, entry.repository, entry.workflowId, entry.stageId, entry.source, entry.target, entry.pullNumber, entry.runId, entry.failureReason]);
+  const blob = new Blob([[header, ...rows].map(row => row.map(csvValue).join(',')).join('\n')], { type: 'text/csv;charset=utf-8' });
+  const link = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `pr-helper-operation-audit-${new Date().toISOString().slice(0, 10)}.csv` });
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(link.href), 0);
+}
+function showOperationAuditDialog() {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog operation-audit-dialog';
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('audit.eyebrow')}</p><h2>${t('audit.title')}</h2><p class="meta">${t('audit.desc')}</p><div id="operation-audit-content" class="operation-audit-content"><p class="meta">${t('audit.loading')}</p></div><div class="dialog-actions"><button id="operation-audit-export" type="button" class="ghost" disabled>${t('audit.export')}</button><button value="cancel" class="ghost">${t('audit.close')}</button></div></form>`;
+  document.body.append(dialog);
+  dialog.showModal();
+  const content = dialog.querySelector<HTMLElement>('#operation-audit-content')!;
+  const exportButton = dialog.querySelector<HTMLButtonElement>('#operation-audit-export')!;
+  void (async () => {
+    try {
+      const response = await fetch(githubAppApiUrl('/api/inbox?action=operation-audit&limit=200'));
+      const payload = await response.json().catch(() => ({})) as { entries?: OperationAuditEntry[]; message?: string };
+      if (!response.ok) throw new Error(payload.message || t('audit.error'));
+      const entries = Array.isArray(payload.entries) ? payload.entries : [];
+      if (!entries.length) { content.innerHTML = `<p class="meta">${t('audit.empty')}</p>`; return; }
+      content.innerHTML = `<ol class="operation-audit-list">${entries.map(entry => `<li class="${escape(entry.outcome)}"><div><b>${escape(auditActionLabel(entry.action))}</b><small>${escape(entry.repository || t('audit.unknown'))}${entry.source && entry.target ? ` · ${escape(entry.source)} → ${escape(entry.target)}` : ''}${entry.pullNumber ? ` · PR #${entry.pullNumber}` : ''}${entry.runId ? ` · #${entry.runId}` : ''}</small>${entry.failureReason ? `<p class="error">${escape(entry.failureReason)}</p>` : ''}</div><span><b>${escape(t(`audit.outcome.${entry.outcome}`))}</b><time>${escape(auditTimestamp(entry.occurredAt))}</time></span></li>`).join('')}</ol>`;
+      exportButton.disabled = false;
+      exportButton.addEventListener('click', () => downloadAuditCsv(entries), { once: true });
+    } catch (error) {
+      content.innerHTML = `<p class="error">${escape(error instanceof Error ? error.message : t('audit.error'))}</p>`;
+    }
+  })();
+  dialog.addEventListener('close', () => dialog.remove());
+}
+
 function showDeleteWorkflowDialog(workflow: Workflow) {
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog confirm-dialog delete-workflow-dialog';
@@ -628,10 +671,11 @@ function openRepositoryManagement() {
 
 function render() {
   const manageRepositories = githubInstallationSettingsUrl ? `<button id="manage-repositories" class="account-menu-item">${t('account.manageRepos')}</button>` : '';
+  const operationAudit = `<button id="operation-audit" class="account-menu-item" ${cloudWorkflowStorage ? '' : 'disabled'}>${t('account.operationAudit')}</button>`;
   const account = githubLogin ? `GitHub · @${escape(githubLogin)}` : t('account.label');
   const push = pushConfigured ? `<button id="push-settings" class="account-menu-item" ${pushSubscribed ? `disabled title="${t('account.push.title')}"` : ''}>${pushSubscribed ? t('account.push.on') : t('account.push.off')}</button>` : '';
   const themeIcon = currentTheme === 'dark' ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3a6 6 0 0 0 12 0V9a6 6 0 0 0-6-6z"/></svg>';
-  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">${t('brand.name')}<span>${t('brand.suffix')}</span></a><nav aria-label="${t('nav.label')}"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">${t('nav.overview')}</button></nav><div class="topbar-actions"><button id="theme-toggle" class="theme-toggle" aria-label="${currentTheme === 'dark' ? t('theme.toLight') : t('theme.toDark')}">${themeIcon}<span>${currentTheme === 'dark' ? t('theme.light') : t('theme.dark')}</span></button><button id="lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}<button id="ai-settings-top" class="account-menu-item">${t('account.aiSettings')}</button><button id="cloud-sync-top" class="account-menu-item">${cloudSyncStatus.state === 'disabled' ? t('cloudSync.enable') : t('cloudSync.status.' + cloudSyncStatus.state)}</button><button id="disconnect" class="account-menu-item danger">${t('account.disconnect')}</button><button id="delete-account-top" class="account-menu-item danger">${t('account.deleteAccount')}</button><button id="permissions-top" class="account-menu-item">${t('account.permissions')}</button><a href="/privacy.html" class="account-menu-item" target="_blank">${t('account.privacy')}</a></div></div></div></header><section id="content"></section></main>`;
+  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">${t('brand.name')}<span>${t('brand.suffix')}</span></a><nav aria-label="${t('nav.label')}"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">${t('nav.overview')}</button></nav><div class="topbar-actions"><button id="theme-toggle" class="theme-toggle" aria-label="${currentTheme === 'dark' ? t('theme.toLight') : t('theme.toDark')}">${themeIcon}<span>${currentTheme === 'dark' ? t('theme.light') : t('theme.dark')}</span></button><button id="lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}${operationAudit}<button id="ai-settings-top" class="account-menu-item">${t('account.aiSettings')}</button><button id="cloud-sync-top" class="account-menu-item">${cloudSyncStatus.state === 'disabled' ? t('cloudSync.enable') : t('cloudSync.status.' + cloudSyncStatus.state)}</button><button id="disconnect" class="account-menu-item danger">${t('account.disconnect')}</button><button id="delete-account-top" class="account-menu-item danger">${t('account.deleteAccount')}</button><button id="permissions-top" class="account-menu-item">${t('account.permissions')}</button><a href="/privacy.html" class="account-menu-item" target="_blank">${t('account.privacy')}</a></div></div></div></header><section id="content"></section></main>`;
   const accountMenuToggle = document.querySelector<HTMLButtonElement>('#account-menu-toggle')!, accountMenuPanel = document.querySelector<HTMLElement>('#account-menu-panel')!;
   const accountMenu = accountMenuToggle.closest<HTMLElement>('.account-menu')!;
   const closeAccountMenu = () => { accountMenuPanel.hidden = true; accountMenuToggle.setAttribute('aria-expanded', 'false'); };
@@ -649,6 +693,7 @@ function render() {
   document.querySelector('#lang-toggle')!.addEventListener('click', () => { setLocale(getLocale() === 'zh' ? 'en' : 'zh'); render(); });
   document.querySelector('#ai-settings-top')!.addEventListener('click', showAiSettings);
   document.querySelector('#cloud-sync-top')!.addEventListener('click', showCloudSyncDialog);
+  document.querySelector('#operation-audit')!.addEventListener('click', showOperationAuditDialog);
   document.querySelector('#manage-repositories')?.addEventListener('click', openRepositoryManagement);
   document.querySelector('#push-settings')?.addEventListener('click', () => void enablePushNotifications());
   document.querySelector('#disconnect')!.addEventListener('click', showDisconnectDialog);

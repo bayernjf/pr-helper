@@ -61,6 +61,28 @@ const en: TranslationDict = {
   'account.deleteAccount': 'Delete Account',
   'account.privacy': 'Privacy Policy',
   'account.permissions': 'GitHub Permissions',
+  'account.operationAudit': 'Operation audit',
+
+  // Operation audit
+  'audit.eyebrow': 'OPERATION AUDIT',
+  'audit.title': 'Operation audit',
+  'audit.desc': 'Records key workflow operations initiated by this account and their result. Access tokens, PR bodies, and AI drafts are never included.',
+  'audit.loading': 'Loading operation records…',
+  'audit.empty': 'No operation records to show yet.',
+  'audit.error': 'Unable to load the operation audit.',
+  'audit.export': 'Export CSV',
+  'audit.close': 'Close',
+  'audit.unknown': 'No repository',
+  'audit.outcome.success': 'Succeeded',
+  'audit.outcome.failure': 'Failed',
+  'audit.action.workflow-created': 'Created workflow',
+  'audit.action.workflow-updated': 'Updated workflow',
+  'audit.action.workflow-deleted': 'Deleted workflow',
+  'audit.action.pull-created': 'Created PR',
+  'audit.action.pull-merged': 'Merged PR',
+  'audit.action.actions-rerun': 'Reran Actions',
+  'audit.action.deployment-rerun': 'Reran deployment',
+  'audit.action.deployment-rollback': 'Triggered deployment rollback',
 
   // Overview
   'overview.eyebrow.queue': 'NEEDS YOUR ATTENTION',

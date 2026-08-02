@@ -61,6 +61,28 @@ const zh: TranslationDict = {
   'account.deleteAccount': '删除账号',
   'account.privacy': '隐私政策',
   'account.permissions': 'GitHub 权限',
+  'account.operationAudit': '操作审计',
+
+  // Operation audit
+  'audit.eyebrow': 'OPERATION AUDIT',
+  'audit.title': '操作审计',
+  'audit.desc': '记录当前账户发起的关键流程操作及其结果。不会包含访问令牌、PR 正文或 AI 草稿。',
+  'audit.loading': '正在读取操作记录…',
+  'audit.empty': '还没有可显示的操作记录。',
+  'audit.error': '无法读取操作审计。',
+  'audit.export': '导出 CSV',
+  'audit.close': '关闭',
+  'audit.unknown': '未关联仓库',
+  'audit.outcome.success': '成功',
+  'audit.outcome.failure': '失败',
+  'audit.action.workflow-created': '创建流程',
+  'audit.action.workflow-updated': '更新流程',
+  'audit.action.workflow-deleted': '删除流程',
+  'audit.action.pull-created': '创建 PR',
+  'audit.action.pull-merged': '合并 PR',
+  'audit.action.actions-rerun': '重跑 Actions',
+  'audit.action.deployment-rerun': '重跑部署',
+  'audit.action.deployment-rollback': '触发部署回滚',
 
   // Overview
   'overview.eyebrow.queue': 'NEEDS YOUR ATTENTION',
