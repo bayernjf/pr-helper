@@ -2,6 +2,7 @@ import postgres from 'postgres';
 import { installationRequest } from './github-api.js';
 import { parseGithubAppConfig } from './github-app.js';
 import { sendPushNotifications, type BrowserPushSubscription } from './push.js';
+import { assertTeamOperation, type TeamOperation, type TeamRole } from '../../src/lib/team-permissions.js';
 
 export type StoredWorkflow = {
   id: string;
@@ -12,11 +13,13 @@ export type StoredWorkflow = {
   position?: number;
   recoveryPolicy?: RecoveryPolicy;
   version?: number;
+  team?: { id: string; name: string; role: TeamRole };
 };
 
 type DatabaseUser = { id: string };
 type WorkflowRow = { payload: unknown; version?: number };
 type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string; github_installation_id?: string | null };
+type WorkflowAccess = { ownerUserId: string; workflow: StoredWorkflow; team?: { id: string; name: string; role: TeamRole } };
 
 type WebhookDelivery = { deliveryId: string; eventName: string; action?: string; repository?: string; installationId?: string };
 export type PullRequestWebhook = { repository: string; source: string; target: string; number: number; state: string; mergedAt?: string | null };
@@ -299,11 +302,11 @@ export async function recordRecoveryEvent(environment: Record<string, string | u
   if (!input.workflowId || !input.source || !Number.isInteger(input.stageIndex) || input.stageIndex < 0) throw new Error('无效的失败恢复记录');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${input.workflowId}`;
-  const workflow = storedWorkflowFromPayload(rows[0]?.payload);
+  const access = await requireWorkflowOperation(sql, user.id, input.workflowId, 'actions-rerun');
+  const workflow = access.workflow;
   const stage = workflow ? stageForIndex(workflow, input.stageIndex) : undefined;
   if (!workflow || !stage || !branchRuleMatches(stage.source, input.source)) throw new Error('未找到对应流程步骤');
-  await recordWorkflowStageEvent(sql, user.id, input.workflowId, input.stageIndex, input.source, `${input.workflowId}:${stage.stageId}:${input.source}:actions-rerun:manual:${Date.now()}`, 'actions-rerun', '已重新触发失败的 GitHub Actions', stage.stageId, stage.target);
+  await recordWorkflowStageEvent(sql, access.ownerUserId, input.workflowId, input.stageIndex, input.source, `${input.workflowId}:${stage.stageId}:${input.source}:actions-rerun:manual:${Date.now()}`, 'actions-rerun', '已重新触发失败的 GitHub Actions', stage.stageId, stage.target);
 }
 
 export async function rerunFailedActions(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, input: { workflowId: string; stageIndex: number; source: string }) {
@@ -311,17 +314,17 @@ export async function rerunFailedActions(environment: Record<string, string | un
   if (!identity.installationId) throw new Error('尚未选择 GitHub App 可访问的仓库');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${input.workflowId}`;
-  const workflow = storedWorkflowFromPayload(rows[0]?.payload);
+  const access = await requireWorkflowOperation(sql, user.id, input.workflowId, 'actions-rerun');
+  const workflow = access.workflow;
   const stage = workflow ? stageForIndex(workflow, input.stageIndex) : undefined;
   if (!workflow || !stage || !branchRuleMatches(stage.source, input.source)) throw new Error('未找到对应流程步骤');
   const policy = workflow.recoveryPolicy || DEFAULT_RECOVERY_POLICY;
-  const retryRows = await sql<{ occurred_at: string }[]>`SELECT occurred_at FROM workflow_stage_events WHERE user_id = ${user.id} AND workflow_id = ${input.workflowId} AND stage_id = ${stage.stageId} AND source = ${input.source} AND kind = 'actions-rerun' ORDER BY occurred_at DESC LIMIT 100`;
+  const retryRows = await sql<{ occurred_at: string }[]>`SELECT occurred_at FROM workflow_stage_events WHERE user_id = ${access.ownerUserId} AND workflow_id = ${input.workflowId} AND stage_id = ${stage.stageId} AND source = ${input.source} AND kind = 'actions-rerun' ORDER BY occurred_at DESC LIMIT 100`;
   if (retryRows.length >= policy.maxRetries) throw new Error(`已达到最大重试次数（${policy.maxRetries} 次），请人工处理后再继续。`);
   const lastRetryAt = retryRows[0]?.occurred_at ? new Date(retryRows[0].occurred_at).getTime() : 0;
   const cooldownRemaining = lastRetryAt ? policy.cooldownSeconds * 1000 - (Date.now() - lastRetryAt) : 0;
   if (cooldownRemaining > 0) throw new Error(`请等待 ${Math.ceil(cooldownRemaining / 1000)} 秒后再重试。`);
-  const stateRows = await sql<{ head_sha: string | null }[]>`SELECT head_sha FROM workflow_stage_states WHERE user_id = ${user.id} AND workflow_id = ${input.workflowId} AND stage_id = ${stage.stageId} AND source = ${input.source} LIMIT 1`;
+  const stateRows = await sql<{ head_sha: string | null }[]>`SELECT head_sha FROM workflow_stage_states WHERE user_id = ${access.ownerUserId} AND workflow_id = ${input.workflowId} AND stage_id = ${stage.stageId} AND source = ${input.source} LIMIT 1`;
   const headSha = stateRows[0]?.head_sha;
   if (!headSha) throw new Error('当前步骤没有可重试的提交状态');
   const { owner, name } = ownerAndName(workflow.repository);
@@ -330,8 +333,8 @@ export async function rerunFailedActions(environment: Record<string, string | un
   const failed = runs.workflow_runs.filter(run => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(run.conclusion || ''));
   if (!failed.length) throw new Error('没有找到可重试的失败 Actions');
   await Promise.all(failed.map(run => installationRequest<Record<string, never>>(config, identity.installationId!, `/repos/${owner}/${name}/actions/runs/${run.id}/rerun`, { method: 'POST' })));
-  await recordWorkflowStageEvent(sql, user.id, input.workflowId, input.stageIndex, input.source, `${input.workflowId}:${stage.stageId}:${input.source}:actions-rerun:${headSha}:${retryRows.length + 1}`, 'actions-rerun', '已重新触发失败的 GitHub Actions', stage.stageId, stage.target);
-  await recordOperationAuditForUser(sql, user.id, identity.installationId, {
+  await recordWorkflowStageEvent(sql, access.ownerUserId, input.workflowId, input.stageIndex, input.source, `${input.workflowId}:${stage.stageId}:${input.source}:actions-rerun:${headSha}:${retryRows.length + 1}`, 'actions-rerun', '已重新触发失败的 GitHub Actions', stage.stageId, stage.target);
+  await recordOperationAuditForUser(sql, access.ownerUserId, identity.installationId, {
     action: 'actions-rerun', outcome: 'success', repository: workflow.repository, workflowId: input.workflowId,
     stageId: stage.stageId, source: input.source, target: stage.target, pullNumber: null, runId: null,
     metadata: { headSha, runs: failed.map(run => run.id), retry: retryRows.length + 1 }, failureReason: null,
@@ -344,13 +347,14 @@ export async function requestDeploymentRollback(environment: Record<string, stri
   if (!identity.installationId) throw new Error('尚未选择 GitHub App 可访问的仓库');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${input.workflowId}`;
-  const workflow = storedWorkflowFromPayload(rows[0]?.payload);
+  const access = await requireWorkflowOperation(sql, user.id, input.workflowId, 'deployment-rollback');
+  const workflow = access.workflow;
   const stage = workflow ? stageForIndex(workflow, input.stageIndex) : undefined;
   if (!workflow || !stage) throw new Error('未找到对应流程步骤');
   const deployment = deploymentConfigsForTarget(workflow, stage.target).find(candidate => candidate.provider === input.provider);
   if (!deployment?.rollbackWorkflowName) throw new Error('该部署门禁未配置回滚工作流');
-  const runs = await sql<{ deployment_url: string | null; state: string }[]>`SELECT deployment_url, state FROM workflow_stage_deployment_runs WHERE user_id = ${user.id} AND workflow_id = ${input.workflowId} AND stage_id = ${stage.stageId} AND source = ${input.source} AND provider = ${input.provider} AND run_id = ${input.runId} LIMIT 1`;
+  if (access.team) assertTeamOperation(access.team.role, 'deployment-rollback', deployment.environment);
+  const runs = await sql<{ deployment_url: string | null; state: string }[]>`SELECT deployment_url, state FROM workflow_stage_deployment_runs WHERE user_id = ${access.ownerUserId} AND workflow_id = ${input.workflowId} AND stage_id = ${stage.stageId} AND source = ${input.source} AND provider = ${input.provider} AND run_id = ${input.runId} LIMIT 1`;
   if (!runs.length || !rollbackDeploymentIsAvailable({ state: runs[0].state, deploymentUrl: runs[0].deployment_url })) throw new Error('只能回滚到已成功且带有部署地址的历史版本');
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
@@ -358,7 +362,7 @@ export async function requestDeploymentRollback(environment: Record<string, stri
   const rollbackWorkflow = available.workflows.find(candidate => candidate.state === 'active' && (candidate.name === deployment.rollbackWorkflowName || candidate.path === deployment.rollbackWorkflowName));
   if (!rollbackWorkflow) throw new Error(`未找到可用的回滚工作流：${deployment.rollbackWorkflowName}`);
   const rollbackEventKey = `${input.workflowId}:${stage.stageId}:${input.source}:rollback:${input.provider}:${input.runId}`;
-  const alreadyTriggered = await sql<{ id: number }[]>`SELECT id FROM workflow_stage_events WHERE user_id = ${user.id} AND event_key = ${rollbackEventKey} LIMIT 1`;
+  const alreadyTriggered = await sql<{ id: number }[]>`SELECT id FROM workflow_stage_events WHERE user_id = ${access.ownerUserId} AND event_key = ${rollbackEventKey} LIMIT 1`;
   if (alreadyTriggered.length) throw new Error('该部署回滚已触发，请等待 GitHub Actions 返回结果。');
   await installationRequest<Record<string, never>>(config, identity.installationId, `/repos/${owner}/${name}/actions/workflows/${encodeURIComponent(String(rollbackWorkflow.id))}/dispatches`, {
     method: 'POST',
@@ -374,8 +378,8 @@ export async function requestDeploymentRollback(environment: Record<string, stri
     }),
   });
   const providerName = input.provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages';
-  await recordWorkflowStageEvent(sql, user.id, input.workflowId, input.stageIndex, input.source, rollbackEventKey, 'deployment-rollback', `已确认触发 ${providerName} 回滚到部署 #${input.runId}`, stage.stageId, stage.target);
-  await recordOperationAuditForUser(sql, user.id, identity.installationId, {
+  await recordWorkflowStageEvent(sql, access.ownerUserId, input.workflowId, input.stageIndex, input.source, rollbackEventKey, 'deployment-rollback', `已确认触发 ${providerName} 回滚到部署 #${input.runId}`, stage.stageId, stage.target);
+  await recordOperationAuditForUser(sql, access.ownerUserId, identity.installationId, {
     action: 'deployment-rollback', outcome: 'success', repository: workflow.repository, workflowId: input.workflowId,
     stageId: stage.stageId, source: input.source, target: stage.target, pullNumber: null, runId: input.runId,
     metadata: { provider: input.provider, environment: deployment.environment, rollbackWorkflow: rollbackWorkflow.name }, failureReason: null,
@@ -388,13 +392,13 @@ export async function codexRepairContext(environment: Record<string, string | un
   if (!identity.installationId) throw new Error('尚未选择 GitHub App 可访问的仓库');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId}`;
-  const workflow = storedWorkflowFromPayload(rows[0]?.payload);
+  const access = await requireWorkflowOperation(sql, user.id, workflowId, 'workflow-view');
+  const workflow = access.workflow;
   const stage = workflow ? stageForIndex(workflow, stageIndex) : undefined;
   if (!workflow || !stage) throw new Error('未找到对应流程步骤');
   const states = source
-    ? await sql<{ pull_number: number | null }[]>`SELECT pull_number FROM workflow_stage_states WHERE user_id = ${user.id} AND workflow_id = ${workflowId} AND stage_id = ${stage.stageId} AND source = ${source}`
-    : await sql<{ pull_number: number | null }[]>`SELECT pull_number FROM workflow_stage_states WHERE user_id = ${user.id} AND workflow_id = ${workflowId} AND stage_id = ${stage.stageId}`;
+    ? await sql<{ pull_number: number | null }[]>`SELECT pull_number FROM workflow_stage_states WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId} AND stage_id = ${stage.stageId} AND source = ${source}`
+    : await sql<{ pull_number: number | null }[]>`SELECT pull_number FROM workflow_stage_states WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId} AND stage_id = ${stage.stageId}`;
   const pullNumber = states[0]?.pull_number;
   if (!pullNumber) throw new Error('该步骤没有可用于修复的 PR');
   const { owner, name } = ownerAndName(workflow.repository);
@@ -478,6 +482,60 @@ export function branchRuleMatches(rule: string, branch: string) {
   return isBranchRule(rule) ? branch.startsWith(rule.slice(0, -1)) : rule === branch;
 }
 
+function withoutTeamAccess(workflow: StoredWorkflow): StoredWorkflow {
+  const { team: _team, ...stored } = workflow;
+  return stored;
+}
+
+async function workflowAccessForUser(sql: ReturnType<typeof query>, userId: string, workflowId: string): Promise<WorkflowAccess | null> {
+  const owned = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${userId} AND id = ${workflowId} LIMIT 1`;
+  const ownedWorkflow = storedWorkflowFromPayload(owned[0]?.payload);
+  if (ownedWorkflow) return { ownerUserId: userId, workflow: ensureStageIds(ownedWorkflow) };
+
+  const shared = await sql<{ owner_user_id: string; payload: unknown; team_id: string; team_name: string; role: TeamRole }[]>`
+    SELECT shared.owner_user_id, workflows.payload, teams.id AS team_id, teams.name AS team_name, members.role
+    FROM pr_helper_team_workflows shared
+    JOIN pr_helper_team_members members ON members.team_id = shared.team_id
+    JOIN pr_helper_teams teams ON teams.id = shared.team_id
+    JOIN pr_helper_workflows workflows ON workflows.user_id = shared.owner_user_id AND workflows.id = shared.workflow_id
+    WHERE members.user_id = ${userId} AND shared.workflow_id = ${workflowId}
+    ORDER BY CASE members.role WHEN 'owner' THEN 4 WHEN 'editor' THEN 3 WHEN 'operator' THEN 2 ELSE 1 END DESC
+    LIMIT 1`;
+  const row = shared[0];
+  const workflow = storedWorkflowFromPayload(row?.payload);
+  return row && workflow ? {
+    ownerUserId: row.owner_user_id,
+    workflow: { ...ensureStageIds(workflow), team: { id: row.team_id, name: row.team_name, role: row.role } },
+    team: { id: row.team_id, name: row.team_name, role: row.role },
+  } : null;
+}
+
+async function requireWorkflowOperation(sql: ReturnType<typeof query>, userId: string, workflowId: string, operation: TeamOperation, environment: 'preview' | 'production' = 'preview') {
+  const access = await workflowAccessForUser(sql, userId, workflowId);
+  if (!access) throw new Error('未找到流程或未获得共享流程访问权限');
+  if (access.team) assertTeamOperation(access.team.role, operation, environment);
+  return access;
+}
+
+function visibleWorkflowPredicate(sql: ReturnType<typeof query>, userId: string, ownerColumn: string, workflowColumn: string) {
+  // Call sites use only static, local SQL identifiers. Values remain parameterized.
+  const owner = sql.unsafe(ownerColumn);
+  const workflow = sql.unsafe(workflowColumn);
+  return sql`${owner} = ${userId} OR EXISTS (
+    SELECT 1 FROM pr_helper_team_workflows shared
+    JOIN pr_helper_team_members members ON members.team_id = shared.team_id
+    WHERE shared.owner_user_id = ${owner} AND shared.workflow_id = ${workflow} AND members.user_id = ${userId}
+  )`;
+}
+
+export async function authorizeWorkflowOperation(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, input: { workflowId: string; repository: string; operation: TeamOperation; source?: string; target?: string; environment?: 'preview' | 'production' }) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const access = await requireWorkflowOperation(query(environment), user.id, input.workflowId, input.operation, input.environment);
+  if (access.workflow.repository !== input.repository) throw new Error('流程与 GitHub 仓库不匹配');
+  if (input.source && input.target && !access.workflow.stages.some(stage => branchRuleMatches(stage.source, input.source!) && stage.target === input.target)) throw new Error('流程中不存在对应的 Source 和 Target 路径');
+  return access;
+}
+
 export function workflowStageStateMatchesDefinition(workflow: StoredWorkflow, state: { stageIndex: number; stageId?: string; source: string; target: string }) {
   const stage = state.stageId ? workflow.stages.find(candidate => candidate.stageId === state.stageId) : workflow.stages[state.stageIndex];
   return Boolean(stage && stage.target === state.target && branchRuleMatches(stage.source, state.source));
@@ -525,55 +583,80 @@ export function initialWebhookChecksState(mergedAt?: string | null) {
 export async function listWorkflows(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }) {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<(WorkflowRow & { version: number })[]>`SELECT workflows.payload, COALESCE((SELECT MAX(version) FROM workflow_versions versions WHERE versions.user_id = workflows.user_id AND versions.workflow_id = workflows.id), 0)::int AS version FROM pr_helper_workflows workflows WHERE workflows.user_id = ${user.id} ORDER BY workflows.updated_at DESC`;
-  return sortStoredWorkflows(rows.map(row => {
+  const [ownedRows, sharedRows] = await Promise.all([
+    sql<(WorkflowRow & { version: number })[]>`SELECT workflows.payload, COALESCE((SELECT MAX(version) FROM workflow_versions versions WHERE versions.user_id = workflows.user_id AND versions.workflow_id = workflows.id), 0)::int AS version FROM pr_helper_workflows workflows WHERE workflows.user_id = ${user.id} ORDER BY workflows.updated_at DESC`,
+    sql<(WorkflowRow & { owner_user_id: string; version: number; team_id: string; team_name: string; role: TeamRole })[]>`
+      SELECT workflows.payload, shared.owner_user_id, COALESCE((SELECT MAX(version) FROM workflow_versions versions WHERE versions.user_id = workflows.user_id AND versions.workflow_id = workflows.id), 0)::int AS version, teams.id AS team_id, teams.name AS team_name, members.role
+      FROM pr_helper_team_workflows shared
+      JOIN pr_helper_team_members members ON members.team_id = shared.team_id
+      JOIN pr_helper_teams teams ON teams.id = shared.team_id
+      JOIN pr_helper_workflows workflows ON workflows.user_id = shared.owner_user_id AND workflows.id = shared.workflow_id
+      WHERE members.user_id = ${user.id}
+      ORDER BY workflows.updated_at DESC`,
+  ]);
+  const owned = ownedRows.map(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
     if (!workflow) return undefined;
     const normalized = ensureStageIds(workflow);
     return row.version > 0 ? { ...normalized, version: row.version } : normalized;
-  }).filter((workflow): workflow is StoredWorkflow => Boolean(workflow)));
+  }).filter((workflow): workflow is StoredWorkflow => Boolean(workflow));
+  const sharedByWorkflow = new Map<string, StoredWorkflow>();
+  for (const row of sharedRows) {
+    const workflow = storedWorkflowFromPayload(row.payload);
+    if (!workflow || sharedByWorkflow.has(workflow.id)) continue;
+    const normalized = ensureStageIds(workflow);
+    sharedByWorkflow.set(workflow.id, {
+      ...(row.version > 0 ? { ...normalized, version: row.version } : normalized),
+      team: { id: row.team_id, name: row.team_name, role: row.role },
+    });
+  }
+  return sortStoredWorkflows([...owned, ...sharedByWorkflow.values()]);
 }
 
 export async function upsertWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflow: StoredWorkflow) {
   if (!isStoredWorkflow(workflow)) throw new Error('流程数据无效');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const previousRows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflow.id}`;
+  const existingAccess = await workflowAccessForUser(sql, user.id, workflow.id);
+  if (existingAccess?.team) assertTeamOperation(existingAccess.team.role, 'workflow-edit');
+  const ownerUserId = existingAccess?.ownerUserId || user.id;
+  const previousRows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${ownerUserId} AND id = ${workflow.id}`;
   const previous = storedWorkflowFromPayload(previousRows[0]?.payload);
-  const withIds = ensureStageIds(workflow);
+  const withIds = ensureStageIds(withoutTeamAccess(workflow));
   let savedWorkflow = withIds;
   await sql.begin(async transaction => {
-    await transaction`SELECT pg_advisory_xact_lock(hashtext(${`${user.id}:${withIds.id}`}))`;
-    const latestRows = await transaction<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${user.id} AND workflow_id = ${withIds.id}`;
+    await transaction`SELECT pg_advisory_xact_lock(hashtext(${`${ownerUserId}:${withIds.id}`}))`;
+    const latestRows = await transaction<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${ownerUserId} AND workflow_id = ${withIds.id}`;
     const latestVersion = latestRows[0]?.version || 0;
     if (previous && (typeof workflow.version !== 'number' || workflow.version !== latestVersion)) throw new Error('流程已被其他窗口更新，请刷新后再保存。');
     savedWorkflow = { ...withIds, version: latestVersion + 1 };
-    await transaction`INSERT INTO pr_helper_workflows (id, user_id, payload) VALUES (${savedWorkflow.id}, ${user.id}, ${transaction.json(savedWorkflow)}) ON CONFLICT (user_id, id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`;
+    await transaction`INSERT INTO pr_helper_workflows (id, user_id, payload) VALUES (${savedWorkflow.id}, ${ownerUserId}, ${transaction.json(savedWorkflow)}) ON CONFLICT (user_id, id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`;
     if (previous) {
       const changedStageIds = previous.stages.flatMap((stage, index) => {
         const next = withIds.stages[index];
         return !next || stage.stageId !== next.stageId || stage.source !== next.source || stage.target !== next.target ? [stage.stageId].filter((value): value is string => Boolean(value)) : [];
       });
-      for (const stageId of changedStageIds) await transaction`DELETE FROM workflow_stage_events WHERE user_id = ${user.id} AND workflow_id = ${savedWorkflow.id} AND stage_id = ${stageId}`;
+      for (const stageId of changedStageIds) await transaction`DELETE FROM workflow_stage_events WHERE user_id = ${ownerUserId} AND workflow_id = ${savedWorkflow.id} AND stage_id = ${stageId}`;
     }
-    await pruneStaleWorkflowStageData(transaction, user.id, savedWorkflow);
-    await saveWorkflowVersion(transaction, user.id, savedWorkflow);
-    await recordOperationAuditForUser(transaction, user.id, identity.installationId, {
+    await pruneStaleWorkflowStageData(transaction, ownerUserId, savedWorkflow);
+    await saveWorkflowVersion(transaction, ownerUserId, savedWorkflow);
+    await recordOperationAuditForUser(transaction, ownerUserId, identity.installationId, {
       action: previous ? 'workflow-updated' : 'workflow-created', outcome: 'success', repository: savedWorkflow.repository,
       workflowId: savedWorkflow.id, stageId: null, source: null, target: null, pullNumber: null, runId: null,
       metadata: { version: savedWorkflow.version, stageCount: savedWorkflow.stages.length }, failureReason: null,
     });
   });
-  return savedWorkflow;
+  return existingAccess?.team ? { ...savedWorkflow, team: existingAccess.team } : savedWorkflow;
 }
 
 export async function removeWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string) {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId}`;
+  const access = await requireWorkflowOperation(sql, user.id, workflowId, 'workflow-delete');
+  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${access.ownerUserId} AND id = ${workflowId}`;
   const workflow = storedWorkflowFromPayload(rows[0]?.payload);
-  const deleted = await sql<{ id: string }[]>`DELETE FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId} RETURNING id`;
-  if (deleted.length) await recordOperationAuditForUser(sql, user.id, identity.installationId, {
+  const deleted = await sql<{ id: string }[]>`DELETE FROM pr_helper_workflows WHERE user_id = ${access.ownerUserId} AND id = ${workflowId} RETURNING id`;
+  if (deleted.length) await recordOperationAuditForUser(sql, access.ownerUserId, identity.installationId, {
     action: 'workflow-deleted', outcome: 'success', repository: workflow?.repository || null,
     workflowId, stageId: null, source: null, target: null, pullNumber: null, runId: null,
     metadata: { name: workflow?.name || null }, failureReason: null,
@@ -831,8 +914,8 @@ export async function listWorkflowStageStates(environment: Record<string, string
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
   const [rows, workflowRows] = await Promise.all([
-    sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${user.id} ORDER BY workflow_id, stage_index`,
-    sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id}`,
+    sql<StageStateRow[]>`SELECT states.workflow_id, states.stage_index, states.stage_id, states.repository, states.source, states.target, states.pull_number, states.pull_state, states.merged_at, states.head_sha, states.checks_state, states.checks_passed, states.checks_total, states.approvals, states.required_approvals, states.mergeable, states.mergeable_state, states.ahead_by, states.last_event, states.updated_at FROM workflow_stage_states states WHERE ${visibleWorkflowPredicate(sql, user.id, 'states.user_id', 'states.workflow_id')} ORDER BY states.workflow_id, states.stage_index`,
+    sql<WorkflowRow[]>`SELECT workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, user.id, 'workflows.user_id', 'workflows.id')}`,
   ]);
   const workflowById = new Map(workflowRows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
@@ -868,21 +951,21 @@ export async function listWorkflowStageStates(environment: Record<string, string
 export async function listWorkflowStageDeployments(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageDeployment[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<StageDeploymentRow[]>`SELECT workflow_id, stage_index, stage_id, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, health_state, health_url, health_detail, updated_at FROM workflow_stage_deployments WHERE user_id = ${user.id} ORDER BY workflow_id, stage_id, provider`;
+  const rows = await sql<StageDeploymentRow[]>`SELECT deployments.workflow_id, deployments.stage_index, deployments.stage_id, deployments.source, deployments.provider, deployments.environment, deployments.run_id, deployments.run_name, deployments.run_url, deployments.deployment_url, deployments.state, deployments.conclusion, deployments.failure_summary, deployments.failure_job_url, deployments.health_state, deployments.health_url, deployments.health_detail, deployments.updated_at FROM workflow_stage_deployments deployments WHERE ${visibleWorkflowPredicate(sql, user.id, 'deployments.user_id', 'deployments.workflow_id')} ORDER BY deployments.workflow_id, deployments.stage_id, deployments.provider`;
   return rows.map(row => ({ workflowId: row.workflow_id, stageIndex: row.stage_index, stageId: row.stage_id, source: row.source, provider: row.provider, environment: row.environment, runId: row.run_id, runName: row.run_name, runUrl: row.run_url, deploymentUrl: row.deployment_url, state: row.state, conclusion: row.conclusion, failureSummary: row.failure_summary, failureJobUrl: row.failure_job_url, healthState: row.health_state, healthUrl: row.health_url, healthDetail: row.health_detail, updatedAt: row.updated_at }));
 }
 
 export async function listWorkflowStageDeploymentRuns(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageDeploymentRun[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<StageDeploymentRunRow[]>`SELECT workflow_id, stage_index, stage_id, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, NULL::text AS failure_summary, NULL::text AS failure_job_url, health_state, health_url, health_detail, first_seen_at, updated_at FROM (SELECT runs.*, row_number() OVER (PARTITION BY workflow_id, stage_id, source ORDER BY updated_at DESC) AS position FROM workflow_stage_deployment_runs runs WHERE user_id = ${user.id}) recent WHERE position <= 8 ORDER BY workflow_id, stage_id, source, updated_at DESC`;
+  const rows = await sql<StageDeploymentRunRow[]>`SELECT workflow_id, stage_index, stage_id, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, NULL::text AS failure_summary, NULL::text AS failure_job_url, health_state, health_url, health_detail, first_seen_at, updated_at FROM (SELECT runs.*, row_number() OVER (PARTITION BY workflow_id, stage_id, source ORDER BY updated_at DESC) AS position FROM workflow_stage_deployment_runs runs WHERE ${visibleWorkflowPredicate(sql, user.id, 'runs.user_id', 'runs.workflow_id')}) recent WHERE position <= 8 ORDER BY workflow_id, stage_id, source, updated_at DESC`;
   return rows.map(row => ({ workflowId: row.workflow_id, stageIndex: row.stage_index, stageId: row.stage_id, source: row.source, provider: row.provider, environment: row.environment, runId: row.run_id, runName: row.run_name, runUrl: row.run_url, deploymentUrl: row.deployment_url, state: row.state, conclusion: row.conclusion, failureSummary: null, failureJobUrl: null, healthState: row.health_state, healthUrl: row.health_url, healthDetail: row.health_detail, firstSeenAt: row.first_seen_at, updatedAt: row.updated_at }));
 }
 
 export async function listWorkflowConfigurationWarnings(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowConfigurationWarning[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id}`;
+  const rows = await sql<WorkflowRow[]>`SELECT workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, user.id, 'workflows.user_id', 'workflows.id')}`;
   const stored = rows.map(row => storedWorkflowFromPayload(row.payload)).filter((workflow): workflow is StoredWorkflow => Boolean(workflow));
   if (!identity.installationId) return stored.flatMap(workflow => workflowConfigurationWarnings(workflow, { actionsAvailable: false, workflows: [], environmentsAvailable: false, environments: [] }));
   const config = parseGithubAppConfig(environment);
@@ -901,15 +984,15 @@ export async function listWorkflowConfigurationWarnings(environment: Record<stri
 export async function listRecentWorkflowStageEvents(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageEvent[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<{ workflow_id: string; stage_index: number; stage_id: string | null; source: string | null; target: string | null; kind: string; message: string; occurred_at: string }[]>`SELECT workflow_id, stage_index, stage_id, source, target, kind, message, occurred_at FROM workflow_stage_events WHERE user_id = ${user.id} ORDER BY occurred_at DESC LIMIT 100`;
+  const rows = await sql<{ workflow_id: string; stage_index: number; stage_id: string | null; source: string | null; target: string | null; kind: string; message: string; occurred_at: string }[]>`SELECT events.workflow_id, events.stage_index, events.stage_id, events.source, events.target, events.kind, events.message, events.occurred_at FROM workflow_stage_events events WHERE ${visibleWorkflowPredicate(sql, user.id, 'events.user_id', 'events.workflow_id')} ORDER BY events.occurred_at DESC LIMIT 100`;
   return rows.map(row => ({ workflowId: row.workflow_id, stageIndex: row.stage_index, stageId: row.stage_id, source: row.source, target: row.target, kind: row.kind, message: row.message, occurredAt: row.occurred_at }));
 }
 
 export async function listActionableStages(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<ActionableStage[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const workflows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id}`;
-  const states = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${user.id}`;
+  const workflows = await sql<WorkflowRow[]>`SELECT workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, user.id, 'workflows.user_id', 'workflows.id')}`;
+  const states = await sql<StageStateRow[]>`SELECT states.workflow_id, states.stage_index, states.stage_id, states.repository, states.source, states.target, states.pull_number, states.pull_state, states.merged_at, states.head_sha, states.checks_state, states.checks_passed, states.checks_total, states.approvals, states.required_approvals, states.mergeable, states.mergeable_state, states.ahead_by, states.last_event, states.updated_at FROM workflow_stage_states states WHERE ${visibleWorkflowPredicate(sql, user.id, 'states.user_id', 'states.workflow_id')}`;
   return workflows.flatMap(row => {
     const stored = storedWorkflowFromPayload(row.payload);
     const workflow = stored ? ensureStageIds(stored) : undefined;
@@ -930,7 +1013,7 @@ export async function listActionableStages(environment: Record<string, string | 
 export async function listRecoveryStatuses(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<RecoveryStatus[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const workflowRows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id}`;
+  const workflowRows = await sql<WorkflowRow[]>`SELECT workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, user.id, 'workflows.user_id', 'workflows.id')}`;
   const policyByWorkflow = new Map<string, RecoveryPolicy>();
   const stageIndexByIdentity = new Map<string, number>();
   for (const row of workflowRows) {
@@ -941,7 +1024,7 @@ export async function listRecoveryStatuses(environment: Record<string, string | 
     normalized.stages.forEach((stage, index) => { if (stage.stageId) stageIndexByIdentity.set(`${normalized.id}:${stage.stageId}`, index); });
   }
   const now = Date.now();
-  const rows = await sql<{ workflow_id: string; stage_id: string; source: string; kind: string; occurred_at: string }[]>`SELECT workflow_id, stage_id, source, kind, occurred_at FROM workflow_stage_events WHERE user_id = ${user.id} AND kind = 'actions-rerun' ORDER BY occurred_at DESC LIMIT 500`;
+  const rows = await sql<{ workflow_id: string; stage_id: string; source: string; kind: string; occurred_at: string }[]>`SELECT events.workflow_id, events.stage_id, events.source, events.kind, events.occurred_at FROM workflow_stage_events events WHERE ${visibleWorkflowPredicate(sql, user.id, 'events.user_id', 'events.workflow_id')} AND events.kind = 'actions-rerun' ORDER BY events.occurred_at DESC LIMIT 500`;
   const grouped = new Map<string, { workflowId: string; stageId: string; source: string; retries: string[] }>();
   for (const row of rows) {
     const key = `${row.workflow_id}:${row.stage_id}:${row.source}`;
@@ -994,7 +1077,7 @@ type WorkflowRunRow = { id: number; workflow_id: string; version: number; stage_
 export async function listWorkflowRuns(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowRun[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRunRow[]>`SELECT id, workflow_id, version, stage_index, stage_id, source, target, stage_snapshot, pull_number, state, started_at, completed_at FROM workflow_runs WHERE user_id = ${user.id} ORDER BY started_at DESC LIMIT 50`;
+  const rows = await sql<WorkflowRunRow[]>`SELECT runs.id, runs.workflow_id, runs.version, runs.stage_index, runs.stage_id, runs.source, runs.target, runs.stage_snapshot, runs.pull_number, runs.state, runs.started_at, runs.completed_at FROM workflow_runs runs WHERE ${visibleWorkflowPredicate(sql, user.id, 'runs.user_id', 'runs.workflow_id')} ORDER BY runs.started_at DESC LIMIT 50`;
   return rows.map(row => ({
     id: row.id,
     workflowId: row.workflow_id,
@@ -1018,7 +1101,7 @@ export async function listSyncHealth(environment: Record<string, string | undefi
   const sql = query(environment);
   const [runs, stageStates, webhookCount] = await Promise.all([
     sql<ReconciliationRunRow[]>`SELECT id, trigger, state, stages_total, stages_reconciled, stages_failed, duration_ms, error_message, repository, started_at, finished_at FROM reconciliation_runs WHERE user_id = ${user.id} ORDER BY finished_at DESC NULLS LAST, started_at DESC LIMIT 1`,
-    sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, updated_at FROM workflow_stage_states WHERE user_id = ${user.id}`,
+    sql<StageStateRow[]>`SELECT states.workflow_id, states.stage_index, states.stage_id, states.repository, states.source, states.target, states.updated_at FROM workflow_stage_states states WHERE ${visibleWorkflowPredicate(sql, user.id, 'states.user_id', 'states.workflow_id')}`,
     sql<{ count: number }[]>`SELECT count(*)::int AS count FROM github_webhook_deliveries WHERE installation_id = ${identity.installationId || null} AND received_at > now() - interval '24 hours'`,
   ]);
   const now = Date.now();
@@ -1048,10 +1131,10 @@ export async function listWorkflowTimeline(environment: Record<string, string | 
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
   const [events, runs] = await Promise.all([
-    sql<{ workflow_id: string; stage_index: number; stage_id: string | null; source: string | null; target: string | null; kind: string; message: string; occurred_at: string }[]>`SELECT workflow_id, stage_index, stage_id, source, target, kind, message, occurred_at FROM workflow_stage_events WHERE user_id = ${user.id} ORDER BY occurred_at DESC LIMIT 200`,
-    sql<{ workflow_id: string; stage_index: number; stage_id: string | null; source: string; target: string; pull_number: number | null; id: number; state: string; started_at: string; completed_at: string | null }[]>`SELECT workflow_id, stage_index, stage_id, source, target, pull_number, id, state, started_at, completed_at FROM workflow_runs WHERE user_id = ${user.id} ORDER BY started_at DESC LIMIT 100`,
+    sql<{ workflow_id: string; stage_index: number; stage_id: string | null; source: string | null; target: string | null; kind: string; message: string; occurred_at: string }[]>`SELECT events.workflow_id, events.stage_index, events.stage_id, events.source, events.target, events.kind, events.message, events.occurred_at FROM workflow_stage_events events WHERE ${visibleWorkflowPredicate(sql, user.id, 'events.user_id', 'events.workflow_id')} ORDER BY events.occurred_at DESC LIMIT 200`,
+    sql<{ workflow_id: string; stage_index: number; stage_id: string | null; source: string; target: string; pull_number: number | null; id: number; state: string; started_at: string; completed_at: string | null }[]>`SELECT runs.workflow_id, runs.stage_index, runs.stage_id, runs.source, runs.target, runs.pull_number, runs.id, runs.state, runs.started_at, runs.completed_at FROM workflow_runs runs WHERE ${visibleWorkflowPredicate(sql, user.id, 'runs.user_id', 'runs.workflow_id')} ORDER BY runs.started_at DESC LIMIT 100`,
   ]);
-  const workflows = await sql<WorkflowRow[]>`SELECT id, payload FROM pr_helper_workflows WHERE user_id = ${user.id}`;
+  const workflows = await sql<WorkflowRow[]>`SELECT workflows.id, workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, user.id, 'workflows.user_id', 'workflows.id')}`;
   const workflowMap = new Map(workflows.map(row => {
     const wf = storedWorkflowFromPayload(row.payload);
     return [row.id, wf] as const;
@@ -1094,22 +1177,150 @@ export async function listWorkflowTimeline(environment: Record<string, string | 
 
 /* ── Encrypted cloud sync storage ──────────────────── */
 
-export type EncryptedSyncRecord = { ciphertext: string; updatedAt: string };
+export type EncryptedSyncRecord = { ciphertext: string; updatedAt: string; revision: number; keyId: string; deviceId: string | null };
+export type EncryptedSyncSaveResult = { ok: true; record: EncryptedSyncRecord } | { ok: false; conflict: true; record: EncryptedSyncRecord };
 
-export async function saveEncryptedSync(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, ciphertext: string, scope = 'default') {
-  if (!ciphertext) throw new Error('加密数据不能为空');
+function encryptedSyncScope(scope: string) {
+  if (!/^[a-zA-Z0-9_-]{1,80}$/.test(scope)) throw new Error('同步范围无效');
+  return scope;
+}
+
+function encryptedSyncMetadata(keyId: string, deviceId?: string | null) {
+  if (!/^[a-zA-Z0-9_-]{1,80}$/.test(keyId)) throw new Error('密钥标识无效');
+  if (deviceId !== undefined && deviceId !== null && !/^[a-zA-Z0-9_-]{1,120}$/.test(deviceId)) throw new Error('设备标识无效');
+  return { keyId, deviceId: deviceId || null };
+}
+
+export async function saveEncryptedSync(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, ciphertext: string, scope = 'default', expectedRevision?: number | null, keyId = 'legacy', deviceId?: string | null): Promise<EncryptedSyncSaveResult> {
+  if (!ciphertext || ciphertext.length > 2_000_000) throw new Error('加密数据无效');
+  const safeScope = encryptedSyncScope(scope);
+  const metadata = encryptedSyncMetadata(keyId, deviceId);
+  if (expectedRevision !== undefined && expectedRevision !== null && (!Number.isInteger(expectedRevision) || expectedRevision < 1)) throw new Error('同步版本无效');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  await sql`INSERT INTO pr_helper_encrypted_sync (user_id, scope, ciphertext) VALUES (${user.id}, ${scope}, ${ciphertext}) ON CONFLICT (user_id, scope) DO UPDATE SET ciphertext = EXCLUDED.ciphertext, updated_at = now()`;
-  return { ok: true };
+  return sql.begin(async transaction => {
+    const rows = await transaction<{ ciphertext: string; updated_at: string; revision: number; key_id: string; device_id: string | null }[]>`SELECT ciphertext, updated_at, revision, key_id, device_id FROM pr_helper_encrypted_sync WHERE user_id = ${user.id} AND scope = ${safeScope} FOR UPDATE`;
+    const current = rows[0] ? { ciphertext: rows[0].ciphertext, updatedAt: rows[0].updated_at, revision: Number(rows[0].revision), keyId: rows[0].key_id, deviceId: rows[0].device_id } : null;
+    if (current && expectedRevision !== current.revision) return { ok: false as const, conflict: true as const, record: current };
+    if (current) await transaction`INSERT INTO pr_helper_encrypted_sync_history (user_id, scope, revision, ciphertext, key_id, device_id) VALUES (${user.id}, ${safeScope}, ${current.revision}, ${current.ciphertext}, ${current.keyId}, ${current.deviceId}) ON CONFLICT (user_id, scope, revision) DO NOTHING`;
+    const nextRevision = current ? current.revision + 1 : 1;
+    const saved = await transaction<{ ciphertext: string; updated_at: string; revision: number; key_id: string; device_id: string | null }[]>`INSERT INTO pr_helper_encrypted_sync (user_id, scope, ciphertext, revision, key_id, device_id) VALUES (${user.id}, ${safeScope}, ${ciphertext}, ${nextRevision}, ${metadata.keyId}, ${metadata.deviceId}) ON CONFLICT (user_id, scope) DO UPDATE SET ciphertext = EXCLUDED.ciphertext, revision = EXCLUDED.revision, key_id = EXCLUDED.key_id, device_id = EXCLUDED.device_id, updated_at = now() RETURNING ciphertext, updated_at, revision, key_id, device_id`;
+    const row = saved[0];
+    return { ok: true as const, record: { ciphertext: row.ciphertext, updatedAt: row.updated_at, revision: Number(row.revision), keyId: row.key_id, deviceId: row.device_id } };
+  });
 }
 
 export async function loadEncryptedSync(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, scope = 'default'): Promise<EncryptedSyncRecord | null> {
+  const safeScope = encryptedSyncScope(scope);
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<{ ciphertext: string; updated_at: string }[]>`SELECT ciphertext, updated_at FROM pr_helper_encrypted_sync WHERE user_id = ${user.id} AND scope = ${scope} LIMIT 1`;
+  const rows = await sql<{ ciphertext: string; updated_at: string; revision: number; key_id: string; device_id: string | null }[]>`SELECT ciphertext, updated_at, revision, key_id, device_id FROM pr_helper_encrypted_sync WHERE user_id = ${user.id} AND scope = ${safeScope} LIMIT 1`;
   if (!rows.length) return null;
-  return { ciphertext: rows[0].ciphertext, updatedAt: rows[0].updated_at };
+  return { ciphertext: rows[0].ciphertext, updatedAt: rows[0].updated_at, revision: Number(rows[0].revision), keyId: rows[0].key_id, deviceId: rows[0].device_id };
+}
+
+/* ── Data retention ────────────────────────────────── */
+
+export const RETENTION_DAYS = { webhookDeliveries: 30, encryptedSyncHistory: 30, reconciliationRuns: 90, stageEvents: 180, deploymentRuns: 180, operationAudit: 365 } as const;
+const RETENTION_BATCH_SIZE = 2_000;
+
+export function retentionCutoffs(now = new Date()) {
+  const cutoff = (days: number) => new Date(now.getTime() - days * 86_400_000).toISOString();
+  return Object.fromEntries(Object.entries(RETENTION_DAYS).map(([key, days]) => [key, cutoff(days)])) as { [K in keyof typeof RETENTION_DAYS]: string };
+}
+
+export async function cleanupRetainedData(environment: Record<string, string | undefined>) {
+  const sql = query(environment);
+  const cutoffs = retentionCutoffs();
+  const started = await sql<{ id: number }[]>`INSERT INTO data_retention_runs DEFAULT VALUES RETURNING id`;
+  const runId = started[0].id;
+  try {
+    const [webhooks, history, reconciliation, events, deployments, audit] = await Promise.all([
+      sql`WITH stale AS (SELECT ctid FROM github_webhook_deliveries WHERE received_at < ${cutoffs.webhookDeliveries} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM github_webhook_deliveries USING stale WHERE github_webhook_deliveries.ctid = stale.ctid RETURNING 1`,
+      sql`WITH stale AS (SELECT ctid FROM pr_helper_encrypted_sync_history WHERE replaced_at < ${cutoffs.encryptedSyncHistory} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM pr_helper_encrypted_sync_history USING stale WHERE pr_helper_encrypted_sync_history.ctid = stale.ctid RETURNING 1`,
+      sql`WITH stale AS (SELECT ctid FROM reconciliation_runs WHERE finished_at < ${cutoffs.reconciliationRuns} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM reconciliation_runs USING stale WHERE reconciliation_runs.ctid = stale.ctid RETURNING 1`,
+      sql`WITH stale AS (SELECT ctid FROM workflow_stage_events WHERE occurred_at < ${cutoffs.stageEvents} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM workflow_stage_events USING stale WHERE workflow_stage_events.ctid = stale.ctid RETURNING 1`,
+      sql`WITH stale AS (SELECT ctid FROM workflow_stage_deployment_runs WHERE updated_at < ${cutoffs.deploymentRuns} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM workflow_stage_deployment_runs USING stale WHERE workflow_stage_deployment_runs.ctid = stale.ctid RETURNING 1`,
+      sql`WITH stale AS (SELECT ctid FROM workflow_operation_audit_logs WHERE occurred_at < ${cutoffs.operationAudit} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM workflow_operation_audit_logs USING stale WHERE workflow_operation_audit_logs.ctid = stale.ctid RETURNING 1`,
+    ]);
+    const deleted = { webhooks: webhooks.length, encryptedSyncHistory: history.length, reconciliationRuns: reconciliation.length, stageEvents: events.length, deploymentRuns: deployments.length, operationAudit: audit.length };
+    await sql`UPDATE data_retention_runs SET state = 'success', finished_at = now(), deleted_counts = ${sql.json(deleted)} WHERE id = ${runId}`;
+    return deleted;
+  } catch (error) {
+    await sql`UPDATE data_retention_runs SET state = 'failure', finished_at = now(), error_message = ${error instanceof Error ? error.message.slice(0, 800) : '保留清理失败'} WHERE id = ${runId}`.catch(() => undefined);
+    throw error;
+  }
+}
+
+/* ── Team access ───────────────────────────────────── */
+
+export type TeamRole = 'owner' | 'editor' | 'operator' | 'viewer';
+export type StoredTeam = { id: string; name: string; role: TeamRole; createdAt: string };
+
+async function requireTeamOwner(sql: ReturnType<typeof query>, teamId: string, userId: string) {
+  const rows = await sql<{ role: TeamRole }[]>`SELECT role FROM pr_helper_team_members WHERE team_id = ${teamId} AND user_id = ${userId} LIMIT 1`;
+  if (rows[0]?.role !== 'owner') throw new Error('只有团队 Owner 可以管理成员和共享流程');
+}
+
+export async function listTeams(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<StoredTeam[]> {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const rows = await query(environment)<{ id: string; name: string; role: TeamRole; created_at: string }[]>`SELECT teams.id, teams.name, members.role, teams.created_at FROM pr_helper_teams teams JOIN pr_helper_team_members members ON members.team_id = teams.id WHERE members.user_id = ${user.id} ORDER BY teams.created_at ASC`;
+  return rows.map(row => ({ id: row.id, name: row.name, role: row.role, createdAt: row.created_at }));
+}
+
+export async function createTeam(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, name: string): Promise<StoredTeam> {
+  const normalized = name.trim();
+  if (!normalized || normalized.length > 120) throw new Error('团队名称应为 1 至 120 个字符');
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  return sql.begin(async transaction => {
+    const teams = await transaction<{ id: string; name: string; created_at: string }[]>`INSERT INTO pr_helper_teams (name, created_by) VALUES (${normalized}, ${user.id}) RETURNING id, name, created_at`;
+    const team = teams[0];
+    await transaction`INSERT INTO pr_helper_team_members (team_id, user_id, role) VALUES (${team.id}, ${user.id}, 'owner')`;
+    return { id: team.id, name: team.name, role: 'owner' as const, createdAt: team.created_at };
+  });
+}
+
+export async function addTeamMember(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, teamId: string, githubLogin: string, role: TeamRole) {
+  if (!['owner', 'editor', 'operator', 'viewer'].includes(role)) throw new Error('团队角色无效');
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  await requireTeamOwner(sql, teamId, user.id);
+  const members = await sql<{ id: string }[]>`SELECT id FROM pr_helper_users WHERE github_login = ${githubLogin.trim()} LIMIT 1`;
+  if (!members[0]) throw new Error('该 GitHub 用户尚未登录 PR Helper，暂时无法加入团队');
+  await sql`INSERT INTO pr_helper_team_members (team_id, user_id, role) VALUES (${teamId}, ${members[0].id}, ${role}) ON CONFLICT (team_id, user_id) DO UPDATE SET role = EXCLUDED.role`;
+}
+
+export async function listTeamMembers(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, teamId: string) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  const access = await sql<{ role: TeamRole }[]>`SELECT role FROM pr_helper_team_members WHERE team_id = ${teamId} AND user_id = ${user.id} LIMIT 1`;
+  if (!access.length) throw new Error('未获得团队访问权限');
+  const rows = await sql<{ github_login: string; role: TeamRole }[]>`SELECT users.github_login, members.role FROM pr_helper_team_members members JOIN pr_helper_users users ON users.id = members.user_id WHERE members.team_id = ${teamId} ORDER BY CASE members.role WHEN 'owner' THEN 4 WHEN 'editor' THEN 3 WHEN 'operator' THEN 2 ELSE 1 END DESC, users.github_login ASC`;
+  return rows.map(row => ({ githubLogin: row.github_login, role: row.role }));
+}
+
+export async function removeTeamMember(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, teamId: string, githubLogin: string) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  await requireTeamOwner(sql, teamId, user.id);
+  const members = await sql<{ id: string; role: TeamRole }[]>`SELECT users.id, members.role FROM pr_helper_team_members members JOIN pr_helper_users users ON users.id = members.user_id WHERE members.team_id = ${teamId} AND users.github_login = ${githubLogin.trim()} LIMIT 1`;
+  const member = members[0];
+  if (!member) throw new Error('团队成员不存在');
+  if (member.role === 'owner') {
+    const owners = await sql<{ count: number }[]>`SELECT count(*)::int AS count FROM pr_helper_team_members WHERE team_id = ${teamId} AND role = 'owner'`;
+    if ((owners[0]?.count || 0) <= 1) throw new Error('团队至少需要保留一位 Owner');
+  }
+  await sql`DELETE FROM pr_helper_team_members WHERE team_id = ${teamId} AND user_id = ${member.id}`;
+}
+
+export async function shareWorkflowWithTeam(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, teamId: string, workflowId: string) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  await requireTeamOwner(sql, teamId, user.id);
+  const workflows = await sql<{ id: string }[]>`SELECT id FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId} LIMIT 1`;
+  if (!workflows[0]) throw new Error('只能共享自己拥有的流程');
+  await sql`INSERT INTO pr_helper_team_workflows (team_id, owner_user_id, workflow_id, shared_by) VALUES (${teamId}, ${user.id}, ${workflowId}, ${user.id}) ON CONFLICT DO NOTHING`;
 }
 
 /* ── Account deletion ──────────────────────────────── */

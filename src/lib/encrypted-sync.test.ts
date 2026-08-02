@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { encryptPayload, decryptPayload, encryptForCloud, decryptFromCloud, unlockCloudSync, lockCloudSync, getCloudSyncStatus, isCloudSyncUnlocked } from './encrypted-sync';
+import { decryptFromCloud, decryptPayload, encryptForCloud, encryptPayload, getCloudSyncKeyId, getCloudSyncStatus, isCloudSyncUnlocked, lockCloudSync, rotateCloudSyncKey, unlockCloudSync } from './encrypted-sync';
 
 const passphrase = 'test-passphrase-2026';
 const plaintext = 'Hello, encrypted world! 你好世界 🌍';
@@ -13,14 +13,21 @@ describe('encrypted-sync', () => {
       expect(decrypted).toBe(plaintext);
     });
 
-    it('produces a v1-prefixed colon-separated blob', async () => {
+    it('produces a versioned v2 blob with a non-secret key id', async () => {
       const blob = await encryptPayload(passphrase, plaintext, testEncryptionOptions);
       const parts = blob.split(':');
-      expect(parts).toHaveLength(4);
-      expect(parts[0]).toBe('v1');
+      expect(parts).toHaveLength(5);
+      expect(parts[0]).toBe('v2');
       expect(parts[1].length).toBeGreaterThan(0);
       expect(parts[2].length).toBeGreaterThan(0);
       expect(parts[3].length).toBeGreaterThan(0);
+      expect(parts[4].length).toBeGreaterThan(0);
+    });
+
+    it('continues to decrypt the legacy v1 blob format', async () => {
+      const legacy = await encryptPayload(passphrase, plaintext, { ...testEncryptionOptions, formatVersion: 'v1' });
+      expect(legacy.startsWith('v1:')).toBe(true);
+      await expect(decryptPayload(passphrase, legacy, testEncryptionOptions)).resolves.toBe(plaintext);
     });
 
     it('generates a different ciphertext each time (random salt + IV)', async () => {
@@ -35,7 +42,7 @@ describe('encrypted-sync', () => {
     });
 
     it('rejects a blob with an unsupported version prefix', async () => {
-      await expect(decryptPayload(passphrase, 'v2:abc:def:ghi')).rejects.toThrow('加密数据格式无效');
+      await expect(decryptPayload(passphrase, 'v3:abc:def:ghi')).rejects.toThrow('加密数据格式无效');
     });
 
     it('rejects a malformed blob (wrong number of parts)', async () => {
@@ -64,9 +71,10 @@ describe('encrypted-sync', () => {
 
     it('transitions to unlocked after providing a passphrase', () => {
       lockCloudSync();
-      unlockCloudSync('my-passphrase');
+      unlockCloudSync('my-passphrase', 'key-device-a');
       expect(isCloudSyncUnlocked()).toBe(true);
       expect(getCloudSyncStatus().state).toBe('unlocked');
+      expect(getCloudSyncKeyId()).toBe('key-device-a');
     });
 
     it('returns to disabled after locking', () => {
@@ -74,6 +82,16 @@ describe('encrypted-sync', () => {
       lockCloudSync();
       expect(isCloudSyncUnlocked()).toBe(false);
       expect(getCloudSyncStatus().state).toBe('disabled');
+      expect(getCloudSyncKeyId()).toBeNull();
+    });
+
+    it('rotates the in-memory passphrase and changes the key id', async () => {
+      unlockCloudSync('old-passphrase', 'key-old');
+      await rotateCloudSyncKey('new-passphrase', 'key-new');
+      expect(getCloudSyncKeyId()).toBe('key-new');
+      const encrypted = await encryptForCloud({ generationRules: [{ id: 'rotated' }] }, testEncryptionOptions);
+      expect(encrypted.keyId).toBe('key-new');
+      await expect(decryptFromCloud(encrypted, testEncryptionOptions)).resolves.toEqual({ generationRules: [{ id: 'rotated' }] });
     });
   });
 
