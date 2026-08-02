@@ -682,6 +682,7 @@ function stageRunPresentationText(run: ReturnType<typeof stageRunPresentation>) 
 function stageRunText(state?: WorkflowStageRunState) { return stageRunPresentationText(stageRunPresentation(state)); }
 function drawerStatusText(state?: WorkflowStageState, detailStatus?: StepStatus) {
   if (!detailStatus) {
+    if (state?.checksState === 'failure') return state.pullState === 'merged' ? t('state.postMerge.failed') : t('state.actionsFailed');
     if (state?.pullState === 'open' && (state.mergeable === false || ['dirty', 'behind', 'blocked'].includes(state.mergeableState || ''))) return t('state.mergeBlocked');
     if (state?.pullState === 'open' && (state.mergeable !== true || state.mergeableState !== 'clean')) return t('state.mergeChecking');
     return stageRunText(state);
@@ -1057,7 +1058,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const queueItem = actionQueue.find(item => item.workflowId === workflowId && item.stageIndex === stageIndex && (!source || item.source === source));
   const state = stageState(workflowId, stageIndex, source, stage.target);
   const routeSource = state?.source || source || stage.source;
-  const detailStatus = active?.id === flow.id ? statuses?.[stageIndex] : undefined;
+  const detailStatus = active?.id === flow.id && !stage.source.includes('*') ? statuses?.[stageIndex] : undefined;
   const run = stageRunPresentation(state);
   const tone = queueItem?.kind === 'checks-failed' ? 'failed' : queueItem ? 'attention' : run.tone;
   const pullNumber = detailStatus?.pr?.number || queueItem?.pullNumber || state?.pullNumber || null;
