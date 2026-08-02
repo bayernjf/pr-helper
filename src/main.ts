@@ -1628,7 +1628,7 @@ function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: 
     if (!onMerged) detail();
     try {
       const { owner, name } = parseRepository(active!.repository);
-      const result = await githubFetch<MergeResult>(token, `/repos/${owner}/${name}/pulls/${pull.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) });
+      const result = await githubFetch<MergeResult>(token, `/repos/${owner}/${name}/pulls/${pull.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) }, active!.id);
       if (!result.merged) throw new Error(result.message || t('merge.error.incomplete'));
       const pendingChecks = { state: 'pending' as const, passed: 0, total: 0 };
       statuses = statuses?.map((item, statusIndex) => statusIndex === index ? { ...item, kind: 'merged', pr: { ...pull, state: 'closed', merged_at: new Date().toISOString(), merge_commit_sha: result.sha }, checks: pendingChecks } : item) || null;
@@ -2031,7 +2031,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
       const { owner, name } = parseRepository(identity.repository);
       const existingPulls = await githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(`${owner}:${source}`)}&base=${encodeURIComponent(stage.target)}&per_page=10`, { signal: controller.signal });
       if (existingPulls[0]) throw new Error(`该分支已存在 PR #${existingPulls[0].number}，请先处理现有 PR。`);
-      const createdPull = await githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify(pullRequestPayload(title, source, stage.target, body)), signal: controller.signal });
+      const createdPull = await githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify(pullRequestPayload(title, source, stage.target, body)), signal: controller.signal }, active!.id);
       if (!isDialogOpen() || controller.signal.aborted) return;
       if (draftSaveTimer !== undefined) { window.clearTimeout(draftSaveTimer); draftSaveTimer = undefined; }
       draftDirty = false;

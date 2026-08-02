@@ -27,9 +27,10 @@ export function selectCurrentPull<T extends { state: string }>(pulls: T[]) {
   return pulls.find(pull => pull.state === 'open') || pulls[0];
 }
 
-export async function githubFetch<T>(token: string, path: string, init?: RequestInit): Promise<T> {
+export async function githubFetch<T>(token: string, path: string, init?: RequestInit, workflowId?: string): Promise<T> {
   const useGitHubApp = !token;
-  const response = await fetch(useGitHubApp ? githubAppApiUrl(`/api/github/request?path=${encodeURIComponent(path)}`) : `${apiBase}${path}`, {
+  const workflowQuery = workflowId ? `&workflowId=${encodeURIComponent(workflowId)}` : '';
+  const response = await fetch(useGitHubApp ? githubAppApiUrl(`/api/github/request?path=${encodeURIComponent(path)}${workflowQuery}`) : `${apiBase}${path}`, {
     ...init,
     cache: 'no-store',
     headers: useGitHubApp

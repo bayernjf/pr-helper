@@ -2,6 +2,7 @@ import postgres from 'postgres';
 import { installationRequest } from './github-api.js';
 import { parseGithubAppConfig } from './github-app.js';
 import { sendPushNotifications, type BrowserPushSubscription } from './push.js';
+import { assertTeamOperation, type TeamOperation, type TeamRole } from '../../src/lib/team-permissions.js';
 
 export type StoredWorkflow = {
   id: string;
@@ -12,11 +13,13 @@ export type StoredWorkflow = {
   position?: number;
   recoveryPolicy?: RecoveryPolicy;
   version?: number;
+  team?: { id: string; name: string; role: TeamRole };
 };
 
 type DatabaseUser = { id: string };
 type WorkflowRow = { payload: unknown; version?: number };
 type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string; github_installation_id?: string | null };
+type WorkflowAccess = { ownerUserId: string; workflow: StoredWorkflow; team?: { id: string; name: string; role: TeamRole } };
 
 type WebhookDelivery = { deliveryId: string; eventName: string; action?: string; repository?: string; installationId?: string };
 export type PullRequestWebhook = { repository: string; source: string; target: string; number: number; state: string; mergedAt?: string | null };
@@ -299,11 +302,11 @@ export async function recordRecoveryEvent(environment: Record<string, string | u
   if (!input.workflowId || !input.source || !Number.isInteger(input.stageIndex) || input.stageIndex < 0) throw new Error('无效的失败恢复记录');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${input.workflowId}`;
-  const workflow = storedWorkflowFromPayload(rows[0]?.payload);
+  const access = await requireWorkflowOperation(sql, user.id, input.workflowId, 'actions-rerun');
+  const workflow = access.workflow;
   const stage = workflow ? stageForIndex(workflow, input.stageIndex) : undefined;
   if (!workflow || !stage || !branchRuleMatches(stage.source, input.source)) throw new Error('未找到对应流程步骤');
-  await recordWorkflowStageEvent(sql, user.id, input.workflowId, input.stageIndex, input.source, `${input.workflowId}:${stage.stageId}:${input.source}:actions-rerun:manual:${Date.now()}`, 'actions-rerun', '已重新触发失败的 GitHub Actions', stage.stageId, stage.target);
+  await recordWorkflowStageEvent(sql, access.ownerUserId, input.workflowId, input.stageIndex, input.source, `${input.workflowId}:${stage.stageId}:${input.source}:actions-rerun:manual:${Date.now()}`, 'actions-rerun', '已重新触发失败的 GitHub Actions', stage.stageId, stage.target);
 }
 
 export async function rerunFailedActions(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, input: { workflowId: string; stageIndex: number; source: string }) {
@@ -311,17 +314,17 @@ export async function rerunFailedActions(environment: Record<string, string | un
   if (!identity.installationId) throw new Error('尚未选择 GitHub App 可访问的仓库');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${input.workflowId}`;
-  const workflow = storedWorkflowFromPayload(rows[0]?.payload);
+  const access = await requireWorkflowOperation(sql, user.id, input.workflowId, 'actions-rerun');
+  const workflow = access.workflow;
   const stage = workflow ? stageForIndex(workflow, input.stageIndex) : undefined;
   if (!workflow || !stage || !branchRuleMatches(stage.source, input.source)) throw new Error('未找到对应流程步骤');
   const policy = workflow.recoveryPolicy || DEFAULT_RECOVERY_POLICY;
-  const retryRows = await sql<{ occurred_at: string }[]>`SELECT occurred_at FROM workflow_stage_events WHERE user_id = ${user.id} AND workflow_id = ${input.workflowId} AND stage_id = ${stage.stageId} AND source = ${input.source} AND kind = 'actions-rerun' ORDER BY occurred_at DESC LIMIT 100`;
+  const retryRows = await sql<{ occurred_at: string }[]>`SELECT occurred_at FROM workflow_stage_events WHERE user_id = ${access.ownerUserId} AND workflow_id = ${input.workflowId} AND stage_id = ${stage.stageId} AND source = ${input.source} AND kind = 'actions-rerun' ORDER BY occurred_at DESC LIMIT 100`;
   if (retryRows.length >= policy.maxRetries) throw new Error(`已达到最大重试次数（${policy.maxRetries} 次），请人工处理后再继续。`);
   const lastRetryAt = retryRows[0]?.occurred_at ? new Date(retryRows[0].occurred_at).getTime() : 0;
   const cooldownRemaining = lastRetryAt ? policy.cooldownSeconds * 1000 - (Date.now() - lastRetryAt) : 0;
   if (cooldownRemaining > 0) throw new Error(`请等待 ${Math.ceil(cooldownRemaining / 1000)} 秒后再重试。`);
-  const stateRows = await sql<{ head_sha: string | null }[]>`SELECT head_sha FROM workflow_stage_states WHERE user_id = ${user.id} AND workflow_id = ${input.workflowId} AND stage_id = ${stage.stageId} AND source = ${input.source} LIMIT 1`;
+  const stateRows = await sql<{ head_sha: string | null }[]>`SELECT head_sha FROM workflow_stage_states WHERE user_id = ${access.ownerUserId} AND workflow_id = ${input.workflowId} AND stage_id = ${stage.stageId} AND source = ${input.source} LIMIT 1`;
   const headSha = stateRows[0]?.head_sha;
   if (!headSha) throw new Error('当前步骤没有可重试的提交状态');
   const { owner, name } = ownerAndName(workflow.repository);
@@ -330,8 +333,8 @@ export async function rerunFailedActions(environment: Record<string, string | un
   const failed = runs.workflow_runs.filter(run => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(run.conclusion || ''));
   if (!failed.length) throw new Error('没有找到可重试的失败 Actions');
   await Promise.all(failed.map(run => installationRequest<Record<string, never>>(config, identity.installationId!, `/repos/${owner}/${name}/actions/runs/${run.id}/rerun`, { method: 'POST' })));
-  await recordWorkflowStageEvent(sql, user.id, input.workflowId, input.stageIndex, input.source, `${input.workflowId}:${stage.stageId}:${input.source}:actions-rerun:${headSha}:${retryRows.length + 1}`, 'actions-rerun', '已重新触发失败的 GitHub Actions', stage.stageId, stage.target);
-  await recordOperationAuditForUser(sql, user.id, identity.installationId, {
+  await recordWorkflowStageEvent(sql, access.ownerUserId, input.workflowId, input.stageIndex, input.source, `${input.workflowId}:${stage.stageId}:${input.source}:actions-rerun:${headSha}:${retryRows.length + 1}`, 'actions-rerun', '已重新触发失败的 GitHub Actions', stage.stageId, stage.target);
+  await recordOperationAuditForUser(sql, access.ownerUserId, identity.installationId, {
     action: 'actions-rerun', outcome: 'success', repository: workflow.repository, workflowId: input.workflowId,
     stageId: stage.stageId, source: input.source, target: stage.target, pullNumber: null, runId: null,
     metadata: { headSha, runs: failed.map(run => run.id), retry: retryRows.length + 1 }, failureReason: null,
@@ -344,13 +347,14 @@ export async function requestDeploymentRollback(environment: Record<string, stri
   if (!identity.installationId) throw new Error('尚未选择 GitHub App 可访问的仓库');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${input.workflowId}`;
-  const workflow = storedWorkflowFromPayload(rows[0]?.payload);
+  const access = await requireWorkflowOperation(sql, user.id, input.workflowId, 'deployment-rollback');
+  const workflow = access.workflow;
   const stage = workflow ? stageForIndex(workflow, input.stageIndex) : undefined;
   if (!workflow || !stage) throw new Error('未找到对应流程步骤');
   const deployment = deploymentConfigsForTarget(workflow, stage.target).find(candidate => candidate.provider === input.provider);
   if (!deployment?.rollbackWorkflowName) throw new Error('该部署门禁未配置回滚工作流');
-  const runs = await sql<{ deployment_url: string | null; state: string }[]>`SELECT deployment_url, state FROM workflow_stage_deployment_runs WHERE user_id = ${user.id} AND workflow_id = ${input.workflowId} AND stage_id = ${stage.stageId} AND source = ${input.source} AND provider = ${input.provider} AND run_id = ${input.runId} LIMIT 1`;
+  if (access.team) assertTeamOperation(access.team.role, 'deployment-rollback', deployment.environment);
+  const runs = await sql<{ deployment_url: string | null; state: string }[]>`SELECT deployment_url, state FROM workflow_stage_deployment_runs WHERE user_id = ${access.ownerUserId} AND workflow_id = ${input.workflowId} AND stage_id = ${stage.stageId} AND source = ${input.source} AND provider = ${input.provider} AND run_id = ${input.runId} LIMIT 1`;
   if (!runs.length || !rollbackDeploymentIsAvailable({ state: runs[0].state, deploymentUrl: runs[0].deployment_url })) throw new Error('只能回滚到已成功且带有部署地址的历史版本');
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
@@ -358,7 +362,7 @@ export async function requestDeploymentRollback(environment: Record<string, stri
   const rollbackWorkflow = available.workflows.find(candidate => candidate.state === 'active' && (candidate.name === deployment.rollbackWorkflowName || candidate.path === deployment.rollbackWorkflowName));
   if (!rollbackWorkflow) throw new Error(`未找到可用的回滚工作流：${deployment.rollbackWorkflowName}`);
   const rollbackEventKey = `${input.workflowId}:${stage.stageId}:${input.source}:rollback:${input.provider}:${input.runId}`;
-  const alreadyTriggered = await sql<{ id: number }[]>`SELECT id FROM workflow_stage_events WHERE user_id = ${user.id} AND event_key = ${rollbackEventKey} LIMIT 1`;
+  const alreadyTriggered = await sql<{ id: number }[]>`SELECT id FROM workflow_stage_events WHERE user_id = ${access.ownerUserId} AND event_key = ${rollbackEventKey} LIMIT 1`;
   if (alreadyTriggered.length) throw new Error('该部署回滚已触发，请等待 GitHub Actions 返回结果。');
   await installationRequest<Record<string, never>>(config, identity.installationId, `/repos/${owner}/${name}/actions/workflows/${encodeURIComponent(String(rollbackWorkflow.id))}/dispatches`, {
     method: 'POST',
@@ -374,8 +378,8 @@ export async function requestDeploymentRollback(environment: Record<string, stri
     }),
   });
   const providerName = input.provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages';
-  await recordWorkflowStageEvent(sql, user.id, input.workflowId, input.stageIndex, input.source, rollbackEventKey, 'deployment-rollback', `已确认触发 ${providerName} 回滚到部署 #${input.runId}`, stage.stageId, stage.target);
-  await recordOperationAuditForUser(sql, user.id, identity.installationId, {
+  await recordWorkflowStageEvent(sql, access.ownerUserId, input.workflowId, input.stageIndex, input.source, rollbackEventKey, 'deployment-rollback', `已确认触发 ${providerName} 回滚到部署 #${input.runId}`, stage.stageId, stage.target);
+  await recordOperationAuditForUser(sql, access.ownerUserId, identity.installationId, {
     action: 'deployment-rollback', outcome: 'success', repository: workflow.repository, workflowId: input.workflowId,
     stageId: stage.stageId, source: input.source, target: stage.target, pullNumber: null, runId: input.runId,
     metadata: { provider: input.provider, environment: deployment.environment, rollbackWorkflow: rollbackWorkflow.name }, failureReason: null,
@@ -388,13 +392,13 @@ export async function codexRepairContext(environment: Record<string, string | un
   if (!identity.installationId) throw new Error('尚未选择 GitHub App 可访问的仓库');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId}`;
-  const workflow = storedWorkflowFromPayload(rows[0]?.payload);
+  const access = await requireWorkflowOperation(sql, user.id, workflowId, 'workflow-view');
+  const workflow = access.workflow;
   const stage = workflow ? stageForIndex(workflow, stageIndex) : undefined;
   if (!workflow || !stage) throw new Error('未找到对应流程步骤');
   const states = source
-    ? await sql<{ pull_number: number | null }[]>`SELECT pull_number FROM workflow_stage_states WHERE user_id = ${user.id} AND workflow_id = ${workflowId} AND stage_id = ${stage.stageId} AND source = ${source}`
-    : await sql<{ pull_number: number | null }[]>`SELECT pull_number FROM workflow_stage_states WHERE user_id = ${user.id} AND workflow_id = ${workflowId} AND stage_id = ${stage.stageId}`;
+    ? await sql<{ pull_number: number | null }[]>`SELECT pull_number FROM workflow_stage_states WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId} AND stage_id = ${stage.stageId} AND source = ${source}`
+    : await sql<{ pull_number: number | null }[]>`SELECT pull_number FROM workflow_stage_states WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId} AND stage_id = ${stage.stageId}`;
   const pullNumber = states[0]?.pull_number;
   if (!pullNumber) throw new Error('该步骤没有可用于修复的 PR');
   const { owner, name } = ownerAndName(workflow.repository);
@@ -478,6 +482,49 @@ export function branchRuleMatches(rule: string, branch: string) {
   return isBranchRule(rule) ? branch.startsWith(rule.slice(0, -1)) : rule === branch;
 }
 
+function withoutTeamAccess(workflow: StoredWorkflow): StoredWorkflow {
+  const { team: _team, ...stored } = workflow;
+  return stored;
+}
+
+async function workflowAccessForUser(sql: ReturnType<typeof query>, userId: string, workflowId: string): Promise<WorkflowAccess | null> {
+  const owned = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${userId} AND id = ${workflowId} LIMIT 1`;
+  const ownedWorkflow = storedWorkflowFromPayload(owned[0]?.payload);
+  if (ownedWorkflow) return { ownerUserId: userId, workflow: ensureStageIds(ownedWorkflow) };
+
+  const shared = await sql<{ owner_user_id: string; payload: unknown; team_id: string; team_name: string; role: TeamRole }[]>`
+    SELECT shared.owner_user_id, workflows.payload, teams.id AS team_id, teams.name AS team_name, members.role
+    FROM pr_helper_team_workflows shared
+    JOIN pr_helper_team_members members ON members.team_id = shared.team_id
+    JOIN pr_helper_teams teams ON teams.id = shared.team_id
+    JOIN pr_helper_workflows workflows ON workflows.user_id = shared.owner_user_id AND workflows.id = shared.workflow_id
+    WHERE members.user_id = ${userId} AND shared.workflow_id = ${workflowId}
+    ORDER BY CASE members.role WHEN 'owner' THEN 4 WHEN 'editor' THEN 3 WHEN 'operator' THEN 2 ELSE 1 END DESC
+    LIMIT 1`;
+  const row = shared[0];
+  const workflow = storedWorkflowFromPayload(row?.payload);
+  return row && workflow ? {
+    ownerUserId: row.owner_user_id,
+    workflow: { ...ensureStageIds(workflow), team: { id: row.team_id, name: row.team_name, role: row.role } },
+    team: { id: row.team_id, name: row.team_name, role: row.role },
+  } : null;
+}
+
+async function requireWorkflowOperation(sql: ReturnType<typeof query>, userId: string, workflowId: string, operation: TeamOperation, environment: 'preview' | 'production' = 'preview') {
+  const access = await workflowAccessForUser(sql, userId, workflowId);
+  if (!access) throw new Error('未找到流程或未获得共享流程访问权限');
+  if (access.team) assertTeamOperation(access.team.role, operation, environment);
+  return access;
+}
+
+export async function authorizeWorkflowOperation(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, input: { workflowId: string; repository: string; operation: TeamOperation; source?: string; target?: string; environment?: 'preview' | 'production' }) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const access = await requireWorkflowOperation(query(environment), user.id, input.workflowId, input.operation, input.environment);
+  if (access.workflow.repository !== input.repository) throw new Error('流程与 GitHub 仓库不匹配');
+  if (input.source && input.target && !access.workflow.stages.some(stage => branchRuleMatches(stage.source, input.source!) && stage.target === input.target)) throw new Error('流程中不存在对应的 Source 和 Target 路径');
+  return access;
+}
+
 export function workflowStageStateMatchesDefinition(workflow: StoredWorkflow, state: { stageIndex: number; stageId?: string; source: string; target: string }) {
   const stage = state.stageId ? workflow.stages.find(candidate => candidate.stageId === state.stageId) : workflow.stages[state.stageIndex];
   return Boolean(stage && stage.target === state.target && branchRuleMatches(stage.source, state.source));
@@ -525,55 +572,80 @@ export function initialWebhookChecksState(mergedAt?: string | null) {
 export async function listWorkflows(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }) {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<(WorkflowRow & { version: number })[]>`SELECT workflows.payload, COALESCE((SELECT MAX(version) FROM workflow_versions versions WHERE versions.user_id = workflows.user_id AND versions.workflow_id = workflows.id), 0)::int AS version FROM pr_helper_workflows workflows WHERE workflows.user_id = ${user.id} ORDER BY workflows.updated_at DESC`;
-  return sortStoredWorkflows(rows.map(row => {
+  const [ownedRows, sharedRows] = await Promise.all([
+    sql<(WorkflowRow & { version: number })[]>`SELECT workflows.payload, COALESCE((SELECT MAX(version) FROM workflow_versions versions WHERE versions.user_id = workflows.user_id AND versions.workflow_id = workflows.id), 0)::int AS version FROM pr_helper_workflows workflows WHERE workflows.user_id = ${user.id} ORDER BY workflows.updated_at DESC`,
+    sql<(WorkflowRow & { owner_user_id: string; version: number; team_id: string; team_name: string; role: TeamRole })[]>`
+      SELECT workflows.payload, shared.owner_user_id, COALESCE((SELECT MAX(version) FROM workflow_versions versions WHERE versions.user_id = workflows.user_id AND versions.workflow_id = workflows.id), 0)::int AS version, teams.id AS team_id, teams.name AS team_name, members.role
+      FROM pr_helper_team_workflows shared
+      JOIN pr_helper_team_members members ON members.team_id = shared.team_id
+      JOIN pr_helper_teams teams ON teams.id = shared.team_id
+      JOIN pr_helper_workflows workflows ON workflows.user_id = shared.owner_user_id AND workflows.id = shared.workflow_id
+      WHERE members.user_id = ${user.id}
+      ORDER BY workflows.updated_at DESC`,
+  ]);
+  const owned = ownedRows.map(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
     if (!workflow) return undefined;
     const normalized = ensureStageIds(workflow);
     return row.version > 0 ? { ...normalized, version: row.version } : normalized;
-  }).filter((workflow): workflow is StoredWorkflow => Boolean(workflow)));
+  }).filter((workflow): workflow is StoredWorkflow => Boolean(workflow));
+  const sharedByWorkflow = new Map<string, StoredWorkflow>();
+  for (const row of sharedRows) {
+    const workflow = storedWorkflowFromPayload(row.payload);
+    if (!workflow || sharedByWorkflow.has(workflow.id)) continue;
+    const normalized = ensureStageIds(workflow);
+    sharedByWorkflow.set(workflow.id, {
+      ...(row.version > 0 ? { ...normalized, version: row.version } : normalized),
+      team: { id: row.team_id, name: row.team_name, role: row.role },
+    });
+  }
+  return sortStoredWorkflows([...owned, ...sharedByWorkflow.values()]);
 }
 
 export async function upsertWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflow: StoredWorkflow) {
   if (!isStoredWorkflow(workflow)) throw new Error('流程数据无效');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const previousRows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflow.id}`;
+  const existingAccess = await workflowAccessForUser(sql, user.id, workflow.id);
+  if (existingAccess?.team) assertTeamOperation(existingAccess.team.role, 'workflow-edit');
+  const ownerUserId = existingAccess?.ownerUserId || user.id;
+  const previousRows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${ownerUserId} AND id = ${workflow.id}`;
   const previous = storedWorkflowFromPayload(previousRows[0]?.payload);
-  const withIds = ensureStageIds(workflow);
+  const withIds = ensureStageIds(withoutTeamAccess(workflow));
   let savedWorkflow = withIds;
   await sql.begin(async transaction => {
-    await transaction`SELECT pg_advisory_xact_lock(hashtext(${`${user.id}:${withIds.id}`}))`;
-    const latestRows = await transaction<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${user.id} AND workflow_id = ${withIds.id}`;
+    await transaction`SELECT pg_advisory_xact_lock(hashtext(${`${ownerUserId}:${withIds.id}`}))`;
+    const latestRows = await transaction<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${ownerUserId} AND workflow_id = ${withIds.id}`;
     const latestVersion = latestRows[0]?.version || 0;
     if (previous && (typeof workflow.version !== 'number' || workflow.version !== latestVersion)) throw new Error('流程已被其他窗口更新，请刷新后再保存。');
     savedWorkflow = { ...withIds, version: latestVersion + 1 };
-    await transaction`INSERT INTO pr_helper_workflows (id, user_id, payload) VALUES (${savedWorkflow.id}, ${user.id}, ${transaction.json(savedWorkflow)}) ON CONFLICT (user_id, id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`;
+    await transaction`INSERT INTO pr_helper_workflows (id, user_id, payload) VALUES (${savedWorkflow.id}, ${ownerUserId}, ${transaction.json(savedWorkflow)}) ON CONFLICT (user_id, id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`;
     if (previous) {
       const changedStageIds = previous.stages.flatMap((stage, index) => {
         const next = withIds.stages[index];
         return !next || stage.stageId !== next.stageId || stage.source !== next.source || stage.target !== next.target ? [stage.stageId].filter((value): value is string => Boolean(value)) : [];
       });
-      for (const stageId of changedStageIds) await transaction`DELETE FROM workflow_stage_events WHERE user_id = ${user.id} AND workflow_id = ${savedWorkflow.id} AND stage_id = ${stageId}`;
+      for (const stageId of changedStageIds) await transaction`DELETE FROM workflow_stage_events WHERE user_id = ${ownerUserId} AND workflow_id = ${savedWorkflow.id} AND stage_id = ${stageId}`;
     }
-    await pruneStaleWorkflowStageData(transaction, user.id, savedWorkflow);
-    await saveWorkflowVersion(transaction, user.id, savedWorkflow);
-    await recordOperationAuditForUser(transaction, user.id, identity.installationId, {
+    await pruneStaleWorkflowStageData(transaction, ownerUserId, savedWorkflow);
+    await saveWorkflowVersion(transaction, ownerUserId, savedWorkflow);
+    await recordOperationAuditForUser(transaction, ownerUserId, identity.installationId, {
       action: previous ? 'workflow-updated' : 'workflow-created', outcome: 'success', repository: savedWorkflow.repository,
       workflowId: savedWorkflow.id, stageId: null, source: null, target: null, pullNumber: null, runId: null,
       metadata: { version: savedWorkflow.version, stageCount: savedWorkflow.stages.length }, failureReason: null,
     });
   });
-  return savedWorkflow;
+  return existingAccess?.team ? { ...savedWorkflow, team: existingAccess.team } : savedWorkflow;
 }
 
 export async function removeWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string) {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId}`;
+  const access = await requireWorkflowOperation(sql, user.id, workflowId, 'workflow-delete');
+  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${access.ownerUserId} AND id = ${workflowId}`;
   const workflow = storedWorkflowFromPayload(rows[0]?.payload);
-  const deleted = await sql<{ id: string }[]>`DELETE FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId} RETURNING id`;
-  if (deleted.length) await recordOperationAuditForUser(sql, user.id, identity.installationId, {
+  const deleted = await sql<{ id: string }[]>`DELETE FROM pr_helper_workflows WHERE user_id = ${access.ownerUserId} AND id = ${workflowId} RETURNING id`;
+  if (deleted.length) await recordOperationAuditForUser(sql, access.ownerUserId, identity.installationId, {
     action: 'workflow-deleted', outcome: 'success', repository: workflow?.repository || null,
     workflowId, stageId: null, source: null, target: null, pullNumber: null, runId: null,
     metadata: { name: workflow?.name || null }, failureReason: null,
