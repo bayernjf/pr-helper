@@ -1094,22 +1094,46 @@ export async function listWorkflowTimeline(environment: Record<string, string | 
 
 /* ── Encrypted cloud sync storage ──────────────────── */
 
-export type EncryptedSyncRecord = { ciphertext: string; updatedAt: string };
+export type EncryptedSyncRecord = { ciphertext: string; updatedAt: string; revision: number; keyId: string; deviceId: string | null };
+export type EncryptedSyncSaveResult = { ok: true; record: EncryptedSyncRecord } | { ok: false; conflict: true; record: EncryptedSyncRecord };
 
-export async function saveEncryptedSync(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, ciphertext: string, scope = 'default') {
-  if (!ciphertext) throw new Error('加密数据不能为空');
+function encryptedSyncScope(scope: string) {
+  if (!/^[a-zA-Z0-9_-]{1,80}$/.test(scope)) throw new Error('同步范围无效');
+  return scope;
+}
+
+function encryptedSyncMetadata(keyId: string, deviceId?: string | null) {
+  if (!/^[a-zA-Z0-9_-]{1,80}$/.test(keyId)) throw new Error('密钥标识无效');
+  if (deviceId !== undefined && deviceId !== null && !/^[a-zA-Z0-9_-]{1,120}$/.test(deviceId)) throw new Error('设备标识无效');
+  return { keyId, deviceId: deviceId || null };
+}
+
+export async function saveEncryptedSync(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, ciphertext: string, scope = 'default', expectedRevision?: number | null, keyId = 'legacy', deviceId?: string | null): Promise<EncryptedSyncSaveResult> {
+  if (!ciphertext || ciphertext.length > 2_000_000) throw new Error('加密数据无效');
+  const safeScope = encryptedSyncScope(scope);
+  const metadata = encryptedSyncMetadata(keyId, deviceId);
+  if (expectedRevision !== undefined && expectedRevision !== null && (!Number.isInteger(expectedRevision) || expectedRevision < 1)) throw new Error('同步版本无效');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  await sql`INSERT INTO pr_helper_encrypted_sync (user_id, scope, ciphertext) VALUES (${user.id}, ${scope}, ${ciphertext}) ON CONFLICT (user_id, scope) DO UPDATE SET ciphertext = EXCLUDED.ciphertext, updated_at = now()`;
-  return { ok: true };
+  return sql.begin(async transaction => {
+    const rows = await transaction<{ ciphertext: string; updated_at: string; revision: number; key_id: string; device_id: string | null }[]>`SELECT ciphertext, updated_at, revision, key_id, device_id FROM pr_helper_encrypted_sync WHERE user_id = ${user.id} AND scope = ${safeScope} FOR UPDATE`;
+    const current = rows[0] ? { ciphertext: rows[0].ciphertext, updatedAt: rows[0].updated_at, revision: Number(rows[0].revision), keyId: rows[0].key_id, deviceId: rows[0].device_id } : null;
+    if (current && expectedRevision !== current.revision) return { ok: false as const, conflict: true as const, record: current };
+    if (current) await transaction`INSERT INTO pr_helper_encrypted_sync_history (user_id, scope, revision, ciphertext, key_id, device_id) VALUES (${user.id}, ${safeScope}, ${current.revision}, ${current.ciphertext}, ${current.keyId}, ${current.deviceId}) ON CONFLICT (user_id, scope, revision) DO NOTHING`;
+    const nextRevision = current ? current.revision + 1 : 1;
+    const saved = await transaction<{ ciphertext: string; updated_at: string; revision: number; key_id: string; device_id: string | null }[]>`INSERT INTO pr_helper_encrypted_sync (user_id, scope, ciphertext, revision, key_id, device_id) VALUES (${user.id}, ${safeScope}, ${ciphertext}, ${nextRevision}, ${metadata.keyId}, ${metadata.deviceId}) ON CONFLICT (user_id, scope) DO UPDATE SET ciphertext = EXCLUDED.ciphertext, revision = EXCLUDED.revision, key_id = EXCLUDED.key_id, device_id = EXCLUDED.device_id, updated_at = now() RETURNING ciphertext, updated_at, revision, key_id, device_id`;
+    const row = saved[0];
+    return { ok: true as const, record: { ciphertext: row.ciphertext, updatedAt: row.updated_at, revision: Number(row.revision), keyId: row.key_id, deviceId: row.device_id } };
+  });
 }
 
 export async function loadEncryptedSync(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, scope = 'default'): Promise<EncryptedSyncRecord | null> {
+  const safeScope = encryptedSyncScope(scope);
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<{ ciphertext: string; updated_at: string }[]>`SELECT ciphertext, updated_at FROM pr_helper_encrypted_sync WHERE user_id = ${user.id} AND scope = ${scope} LIMIT 1`;
+  const rows = await sql<{ ciphertext: string; updated_at: string; revision: number; key_id: string; device_id: string | null }[]>`SELECT ciphertext, updated_at, revision, key_id, device_id FROM pr_helper_encrypted_sync WHERE user_id = ${user.id} AND scope = ${safeScope} LIMIT 1`;
   if (!rows.length) return null;
-  return { ciphertext: rows[0].ciphertext, updatedAt: rows[0].updated_at };
+  return { ciphertext: rows[0].ciphertext, updatedAt: rows[0].updated_at, revision: Number(rows[0].revision), keyId: rows[0].key_id, deviceId: rows[0].device_id };
 }
 
 /* ── Account deletion ──────────────────────────────── */

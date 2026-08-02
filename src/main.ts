@@ -10,7 +10,7 @@ import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarning
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
-import { getCloudSyncStatus, unlockCloudSync, lockCloudSync, isCloudSyncUnlocked, encryptForCloud, decryptFromCloud, type CloudSyncStatus, type SyncableData } from './lib/encrypted-sync';
+import { getCloudSyncStatus, unlockCloudSync, lockCloudSync, isCloudSyncUnlocked, encryptForCloud, decryptFromCloud, rotateCloudSyncKey, type CloudSyncStatus, type SyncableData } from './lib/encrypted-sync';
 import { t, getLocale, setLocale, detectLocale, registerTranslations, type Locale } from './lib/i18n';
 import en from './lib/translations/en';
 import zh from './lib/translations/zh';
@@ -44,6 +44,7 @@ type PreflightResult = { workflowId: string; workflowName: string; repository: s
 type RecoveryStatus = { workflowId: string; stageIndex: number; source: string; retryCount: number; maxRetries: number; lastRetryAt: string | null; cooldownRemainingSeconds: number; exhausted: boolean; escalationNeeded: boolean };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
+const CLOUD_SYNC_DEVICE_ID_KEY = 'pr-helper-cloud-sync-device-id';
 const THEME_KEY = 'pr-helper-theme';
 const localViteWithoutApi = import.meta.env.DEV && !import.meta.env.VITE_AUTH_ORIGIN;
 type Theme = 'light' | 'dark';
@@ -131,6 +132,13 @@ function updateThemeToggleButton() {
   button.setAttribute('aria-label', isDark ? t('theme.toLight') : t('theme.toDark'));
 }
 function persistGenerationRules(next: GenerationRule[]) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(next)); generationRules = next; }
+function cloudSyncDeviceId() {
+  const existing = localStorage.getItem(CLOUD_SYNC_DEVICE_ID_KEY);
+  if (existing && /^[a-zA-Z0-9_-]{1,120}$/.test(existing)) return existing;
+  const next = `device-${crypto.randomUUID().replaceAll('-', '')}`;
+  localStorage.setItem(CLOUD_SYNC_DEVICE_ID_KEY, next);
+  return next;
+}
 function persistWorkflowsLocally() { localStorage.setItem('pr-helper-workflows', JSON.stringify(workflows)); }
 async function saveWorkflowToCloud(workflow: Workflow): Promise<Workflow> {
   if (!cloudWorkflowStorage) return workflow;
@@ -534,10 +542,11 @@ function showCloudSyncDialog() {
   const lastSynced = status.lastSyncedAt ? `<p class="meta">${t('cloudSync.lastSynced')}: ${new Date(status.lastSyncedAt).toLocaleString()}</p>` : '';
   const errorText = status.error ? `<p class="error">${escape(status.error)}</p>` : '';
   if (unlocked) {
-    dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('cloudSync.eyebrow')}</p><h2>${t('cloudSync.title')}</h2><p class="meta">${statusText}</p>${lastSynced}${errorText}<div class="dialog-actions"><button id="cloud-sync-push" type="button" class="ghost">${t('cloudSync.push')}</button><button id="cloud-sync-pull" type="button" class="ghost">${t('cloudSync.pull')}</button><button id="cloud-sync-lock" type="button" class="ghost danger">${t('cloudSync.lock')}</button><button value="cancel" class="ghost">${t('cloudSync.close')}</button></div></form>`;
+    dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('cloudSync.eyebrow')}</p><h2>${t('cloudSync.title')}</h2><p class="meta">${statusText}</p>${lastSynced}${errorText}<p class="meta">${t('cloudSync.deviceHint')}</p><div class="dialog-actions"><button id="cloud-sync-push" type="button" class="ghost">${t('cloudSync.push')}</button><button id="cloud-sync-pull" type="button" class="ghost">${t('cloudSync.pull')}</button><button id="cloud-sync-rotate" type="button" class="ghost">${t('cloudSync.rotate')}</button><button id="cloud-sync-lock" type="button" class="ghost danger">${t('cloudSync.lock')}</button><button value="cancel" class="ghost">${t('cloudSync.close')}</button></div></form>`;
     document.body.append(dialog); dialog.showModal();
     dialog.querySelector('#cloud-sync-push')!.addEventListener('click', async () => { await cloudSyncPush(dialog); });
     dialog.querySelector('#cloud-sync-pull')!.addEventListener('click', async () => { await cloudSyncPull(dialog); });
+    dialog.querySelector('#cloud-sync-rotate')!.addEventListener('click', () => showCloudSyncRotationDialog(dialog));
     dialog.querySelector('#cloud-sync-lock')!.addEventListener('click', () => { lockCloudSync(); cloudSyncStatus = getCloudSyncStatus(); dialog.close(); render(); });
   } else {
     dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('cloudSync.eyebrow')}</p><h2>${t('cloudSync.title')}</h2><p>${t('cloudSync.unlock.desc')}</p><label>${t('cloudSync.passphrase')}<input id="cloud-passphrase" type="password" autocomplete="off" /></label><p id="cloud-sync-error" class="error" hidden></p><div class="dialog-actions"><button id="cloud-sync-unlock" type="button" class="primary">${t('cloudSync.unlock')}</button><button value="cancel" class="ghost">${t('cloudSync.close')}</button></div></form>`;
@@ -560,9 +569,11 @@ async function cloudSyncPush(dialog: HTMLDialogElement) {
     cloudSyncStatus = { ...cloudSyncStatus, state: 'syncing', error: null };
     const data: SyncableData = { generationRules, prDrafts: pullRequestDrafts };
     const blob = await encryptForCloud(data);
-    const response = await fetch(githubAppApiUrl('/api/encrypted-sync'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ciphertext: blob.ciphertext }) });
-    if (!response.ok) throw new Error('推送失败');
-    cloudSyncStatus = { ...cloudSyncStatus, state: 'unlocked', lastSyncedAt: new Date().toISOString(), error: null };
+    const response = await fetch(githubAppApiUrl('/api/encrypted-sync'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ciphertext: blob.ciphertext, keyId: blob.keyId, deviceId: cloudSyncDeviceId(), expectedRevision: cloudSyncStatus.revision }) });
+    const payload = await response.json().catch(() => ({})) as { record?: { updatedAt: string; revision: number; deviceId: string | null }; conflict?: boolean; message?: string };
+    if (response.status === 409 && payload.conflict) throw new Error(t('cloudSync.conflict'));
+    if (!response.ok || !payload.record) throw new Error(payload.message || '推送失败');
+    cloudSyncStatus = { ...cloudSyncStatus, state: 'unlocked', lastSyncedAt: payload.record.updatedAt, revision: payload.record.revision, deviceId: payload.record.deviceId, error: null };
     showToast(t('cloudSync.pushSuccess'));
     dialog.close();
     render();
@@ -577,12 +588,12 @@ async function cloudSyncPull(dialog: HTMLDialogElement) {
     cloudSyncStatus = { ...cloudSyncStatus, state: 'syncing', error: null };
     const response = await fetch(githubAppApiUrl('/api/encrypted-sync'));
     if (!response.ok) throw new Error('拉取失败');
-    const { record } = await response.json() as { record: { ciphertext: string; updatedAt: string } | null };
+    const { record } = await response.json() as { record: { ciphertext: string; updatedAt: string; revision: number; keyId?: string; deviceId?: string | null } | null };
     if (!record) { showToast(t('cloudSync.pullEmpty')); return; }
     const data = await decryptFromCloud({ ciphertext: record.ciphertext, updatedAt: record.updatedAt });
     if (data.generationRules) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(data.generationRules)); generationRules = loadGenerationRules(() => localStorage.getItem(GENERATION_RULES_KEY)); }
     if (data.prDrafts) { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(data.prDrafts)); pullRequestDrafts = loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), Date.now()); }
-    cloudSyncStatus = { ...cloudSyncStatus, state: 'unlocked', lastSyncedAt: record.updatedAt, error: null };
+    cloudSyncStatus = { ...cloudSyncStatus, state: 'unlocked', lastSyncedAt: record.updatedAt, revision: record.revision, deviceId: record.deviceId || null, error: null };
     showToast(t('cloudSync.pullSuccess'));
     dialog.close();
     render();
@@ -590,6 +601,22 @@ async function cloudSyncPull(dialog: HTMLDialogElement) {
     cloudSyncStatus = { ...cloudSyncStatus, state: 'error', error: error instanceof Error ? error.message : '拉取失败' };
     showToast(t('cloudSync.pullFailed'));
   }
+}
+
+function showCloudSyncRotationDialog(parent: HTMLDialogElement) {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog confirm-dialog';
+  dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('cloudSync.eyebrow')}</p><h2>${t('cloudSync.rotate')}</h2><p class="meta">${t('cloudSync.rotateDesc')}</p><label>${t('cloudSync.passphrase')}<input id="cloud-rotate-passphrase" type="password" autocomplete="new-password" /></label><div class="dialog-actions"><button id="cloud-rotate-confirm" type="button" class="primary">${t('cloudSync.rotate')}</button><button value="cancel" class="ghost">${t('cloudSync.close')}</button></div></form>`;
+  document.body.append(dialog); dialog.showModal();
+  dialog.querySelector('#cloud-rotate-confirm')!.addEventListener('click', async () => {
+    const passphrase = dialog.querySelector<HTMLInputElement>('#cloud-rotate-passphrase')!.value;
+    if (!passphrase) return;
+    await rotateCloudSyncKey(passphrase);
+    cloudSyncStatus = { ...cloudSyncStatus, state: 'unlocked', error: null };
+    dialog.close();
+    await cloudSyncPush(parent);
+  });
+  dialog.addEventListener('close', () => dialog.remove());
 }
 
 function connect(error = '') {

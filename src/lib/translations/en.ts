@@ -400,6 +400,10 @@ const en: TranslationDict = {
   'cloudSync.pullSuccess': 'Data restored from cloud.',
   'cloudSync.pullEmpty': 'No cloud data found.',
   'cloudSync.pullFailed': 'Download failed.',
+  'cloudSync.deviceHint': 'This device uses its own identifier. On a new device, unlock first and then download the encrypted cloud data.',
+  'cloudSync.rotate': 'Rotate passphrase',
+  'cloudSync.rotateDesc': 'Re-encrypt current local data with a new passphrase and upload it. A conflict never overwrites cloud data.',
+  'cloudSync.conflict': 'Cloud data was updated by another device. Download the latest ciphertext before deciding whether to upload local data again.',
 
   // AI settings
   'ai.eyebrow': 'AI MODEL SETTINGS',

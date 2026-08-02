@@ -400,6 +400,10 @@ const zh: TranslationDict = {
   'cloudSync.pullSuccess': '数据已从云端恢复。',
   'cloudSync.pullEmpty': '云端没有数据。',
   'cloudSync.pullFailed': '下载失败。',
+  'cloudSync.deviceHint': '本设备使用独立标识；恢复到新设备时，先解锁再下载云端密文。',
+  'cloudSync.rotate': '轮换口令',
+  'cloudSync.rotateDesc': '将当前本地数据使用新口令重新加密并上传。发生冲突时不会覆盖云端数据。',
+  'cloudSync.conflict': '云端数据已由另一设备更新。请先下载最新密文，再决定是否重新上传本地数据。',
 
   // AI settings
   'ai.eyebrow': 'AI MODEL SETTINGS',
