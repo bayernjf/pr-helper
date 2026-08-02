@@ -1169,6 +1169,54 @@ export async function cleanupRetainedData(environment: Record<string, string | u
   }
 }
 
+/* ── Team access ───────────────────────────────────── */
+
+export type TeamRole = 'owner' | 'editor' | 'operator' | 'viewer';
+export type StoredTeam = { id: string; name: string; role: TeamRole; createdAt: string };
+
+async function requireTeamOwner(sql: ReturnType<typeof query>, teamId: string, userId: string) {
+  const rows = await sql<{ role: TeamRole }[]>`SELECT role FROM pr_helper_team_members WHERE team_id = ${teamId} AND user_id = ${userId} LIMIT 1`;
+  if (rows[0]?.role !== 'owner') throw new Error('只有团队 Owner 可以管理成员和共享流程');
+}
+
+export async function listTeams(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<StoredTeam[]> {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const rows = await query(environment)<{ id: string; name: string; role: TeamRole; created_at: string }[]>`SELECT teams.id, teams.name, members.role, teams.created_at FROM pr_helper_teams teams JOIN pr_helper_team_members members ON members.team_id = teams.id WHERE members.user_id = ${user.id} ORDER BY teams.created_at ASC`;
+  return rows.map(row => ({ id: row.id, name: row.name, role: row.role, createdAt: row.created_at }));
+}
+
+export async function createTeam(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, name: string): Promise<StoredTeam> {
+  const normalized = name.trim();
+  if (!normalized || normalized.length > 120) throw new Error('团队名称应为 1 至 120 个字符');
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  return sql.begin(async transaction => {
+    const teams = await transaction<{ id: string; name: string; created_at: string }[]>`INSERT INTO pr_helper_teams (name, created_by) VALUES (${normalized}, ${user.id}) RETURNING id, name, created_at`;
+    const team = teams[0];
+    await transaction`INSERT INTO pr_helper_team_members (team_id, user_id, role) VALUES (${team.id}, ${user.id}, 'owner')`;
+    return { id: team.id, name: team.name, role: 'owner' as const, createdAt: team.created_at };
+  });
+}
+
+export async function addTeamMember(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, teamId: string, githubLogin: string, role: TeamRole) {
+  if (!['owner', 'editor', 'operator', 'viewer'].includes(role)) throw new Error('团队角色无效');
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  await requireTeamOwner(sql, teamId, user.id);
+  const members = await sql<{ id: string }[]>`SELECT id FROM pr_helper_users WHERE github_login = ${githubLogin.trim()} LIMIT 1`;
+  if (!members[0]) throw new Error('该 GitHub 用户尚未登录 PR Helper，暂时无法加入团队');
+  await sql`INSERT INTO pr_helper_team_members (team_id, user_id, role) VALUES (${teamId}, ${members[0].id}, ${role}) ON CONFLICT (team_id, user_id) DO UPDATE SET role = EXCLUDED.role`;
+}
+
+export async function shareWorkflowWithTeam(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, teamId: string, workflowId: string) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  await requireTeamOwner(sql, teamId, user.id);
+  const workflows = await sql<{ id: string }[]>`SELECT id FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId} LIMIT 1`;
+  if (!workflows[0]) throw new Error('只能共享自己拥有的流程');
+  await sql`INSERT INTO pr_helper_team_workflows (team_id, owner_user_id, workflow_id, shared_by) VALUES (${teamId}, ${user.id}, ${workflowId}, ${user.id}) ON CONFLICT DO NOTHING`;
+}
+
 /* ── Account deletion ──────────────────────────────── */
 
 export async function deleteAccount(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<{ deleted: boolean }> {

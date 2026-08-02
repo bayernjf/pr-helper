@@ -1,6 +1,6 @@
 import { requestErrorStatus, type ApiRequest, type ApiResponse } from './_lib/http.js';
 import { currentGitHubIdentity } from './_lib/session.js';
-import { isStoredWorkflow, listWorkflows, recordOperationAudit, removeWorkflow, upsertWorkflow } from './_lib/workflows-store.js';
+import { addTeamMember, createTeam, isStoredWorkflow, listTeams, recordOperationAudit, removeWorkflow, shareWorkflowWithTeam, upsertWorkflow, type TeamRole } from './_lib/workflows-store.js';
 
 function body(request: ApiRequest) {
   if (typeof request.body === 'string') {
@@ -21,6 +21,14 @@ export default async function handler(request: ApiRequest, response: ApiResponse
   try {
     const { session } = currentGitHubIdentity(request);
     identity = { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId };
+    if (request.query?.resource === 'teams') {
+      if (!request.method || request.method === 'GET') { response.status(200).json({ teams: await listTeams(process.env, identity) }); return; }
+      const teamPayload = body(request) as { action?: unknown; name?: unknown; teamId?: unknown; githubLogin?: unknown; role?: unknown; workflowId?: unknown };
+      if (request.method === 'POST' && teamPayload.action === 'create' && typeof teamPayload.name === 'string') { response.status(201).json({ team: await createTeam(process.env, identity, teamPayload.name) }); return; }
+      if (request.method === 'POST' && teamPayload.action === 'member' && typeof teamPayload.teamId === 'string' && typeof teamPayload.githubLogin === 'string' && typeof teamPayload.role === 'string') { await addTeamMember(process.env, identity, teamPayload.teamId, teamPayload.githubLogin, teamPayload.role as TeamRole); response.status(200).json({ ok: true }); return; }
+      if (request.method === 'POST' && teamPayload.action === 'share-workflow' && typeof teamPayload.teamId === 'string' && typeof teamPayload.workflowId === 'string') { await shareWorkflowWithTeam(process.env, identity, teamPayload.teamId, teamPayload.workflowId); response.status(200).json({ ok: true }); return; }
+      response.status(400).json({ message: '无效的团队请求' }); return;
+    }
     if (!request.method || request.method === 'GET') {
       response.status(200).json({ workflows: await listWorkflows(process.env, identity) });
       return;
