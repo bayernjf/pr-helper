@@ -8,7 +8,7 @@
 - 当前分支：`feature/20260722`。
 - 用户已确认本批代码已上线 Production。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地静态验证已通过：`npm test`（22 个文件 / 171 项）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。
+- 当前本地验证已通过：`npm test`（22 个文件 / 171 项）、`npm run test:e2e`（Playwright Chromium 4 项，API mock）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。
 - Supabase 迁移 `001`–`019` 已执行；`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
 
@@ -77,7 +77,7 @@ Production 已验证行为：
 
 在上述生产验收通过后，建议顺序为：
 
-1. 浏览器 E2E：覆盖授权返回、新建/编辑流程、步骤排序、抽屉 PR 操作和失败恢复。
+1. 浏览器 E2E：首批已覆盖授权返回、新建/编辑流程、步骤排序和失败恢复；后续补充抽屉创建/合并 PR、删除流程、部署回滚与 Webhook 自动投影。
 2. 完整操作审计：记录操作人、前后状态、GitHub 响应和失败原因。
 3. 加密云同步加固：密钥轮换、设备恢复、多设备冲突和保留策略。
 4. 历史数据保留与清理。
@@ -89,6 +89,7 @@ Production 已验证行为：
 
 ```bash
 npm test
+npm run test:e2e
 npx tsc --noEmit
 npm run lint
 npm run dev

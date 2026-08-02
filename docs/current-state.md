@@ -116,12 +116,13 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 ## 测试覆盖
 
-- 本地当前工作区：22 个测试文件 / 171 个测试，全部通过；`npx tsc --noEmit`、`npm run lint` 和 `git diff --check` 同时通过。
+- 本地单元/服务端测试：`npm test` 运行 22 个文件 / 171 个测试；`npx tsc --noEmit`、`npm run lint` 和 `git diff --check` 同时通过。
+- 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉及服务端 Actions 重跑请求。它验证真实 DOM 和浏览器交互，不替代真实 GitHub 写入、门禁和部署验收。
 - 已新增流程保存队列回归：连续编辑会串行使用服务端返回的新版本，且不会由旧响应覆盖最新编辑；真实跨窗口乐观锁冲突仍会明确报错。
 - Production E2E 通过项目与尚未通过的集成项目均以 [验证报告](verification-report.md) 为准。
 - `src/lib/` 核心业务逻辑覆盖率 81%+，包括 domain、workflow、generation-rules、pr-drafts、encrypted-sync、navigation 等。
 - 新增测试：加密模块加解密往返/错误处理（13 个）、恢复策略验证（5 个）、ensureStageIds（4 个）。
-- `main.ts`（UI 层）和多数 API 端点无浏览器 E2E 测试，属已知缺口。`preflight.ts` 依赖 GitHub API，目前仍需集成测试。
+- `main.ts` 的高频看板路径已有首批浏览器 E2E；创建/合并真实 PR、抽屉内创建 PR、部署回滚、Webhook 自动投影仍需分别以真实外部条件验收。`preflight.ts` 依赖 GitHub API，目前仍需集成测试。
 
 ## 当前运维边界
 
@@ -218,7 +219,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - **正式切换稳定阶段身份**：`019` 已将核心主键、外键和查询条件从 `stage_index` 切换到 `stage_id`；待 Preview 回归。
 - **并发与幂等保护**：为流程版本保存增加并发控制，并为创建 PR、合并、Actions 重试和回滚补充幂等键、CSRF 防护和限流。
 - **完整操作审计**：统一记录操作人、操作前后状态、GitHub 请求结果和失败原因，支持查询和导出。
-- **浏览器 E2E**：覆盖新建/编辑流程、步骤排序、抽屉操作、授权返回、创建 PR 和失败恢复等高风险路径。
+- **浏览器 E2E**：首批已覆盖授权返回、新建/编辑流程、步骤排序和失败恢复；后续补充抽屉创建/合并 PR、删除流程、部署回滚与 Webhook 自动投影的可重复场景。
 - **加密同步加固**：补充密钥轮换、设备恢复、冲突处理和数据保留策略，再决定是否扩大使用范围。
 - **数据保留与清理**：为事件、部署历史、运行记录、Webhook delivery 和审计日志定义保留周期与清理任务。
 - **团队权限模型**：增加团队、角色、项目和流程级权限，避免个人账户模型直接扩展到多人协作。
