@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-03（014–020 已执行；操作审计代码待部署和真实验收；最近一批代码已上线 Production；最新验收和本地待部署修复见下文）
+> 最后更新：2026-08-03（014–020 已执行；操作审计写入已部署但读取路由修复待部署；最新验收和本地待部署修复见下文）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -102,6 +102,8 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 2026-08-03 已在 Vercel Production 与公开 GitHub E2E 沙箱完成一轮可追溯验证，完整结果见 [验证报告](verification-report.md)。真实通过的链路包括 GitHub App 授权、PR 创建、严格分支保护、应用内合并、合并后 Actions 跟踪和多路径汇聚。失败 Actions 的 GitHub 原生阻塞状态也已确认。
 
 本轮发现的连续编辑版本 `409` 已通过 Production 连续新增/删除和整页刷新复验。动态来源规则（如 `fix/*`）已在 Production 通过服务端投影逐条展示实际分支，PR #4 在失败中心、Lane 和抽屉均显示失败；产品内 Actions 重跑、冷却和 Codex 修复包边界也已通过。并发待办刷新导致抽屉短暂读取空快照的问题，已在请求串行修复上线后通过 Production 复验。Webhook 自动投影仍不得标记为已验收。
+
+操作审计的 Production 首次验收已确认流程保存成功返回，但账户菜单读取的是动态 `/api/inbox` 路由，查询参数与路径参数同名，导致页面收到待办队列并误显示为空。现有 `inbox` 函数已改用不冲突的 `resource=operation-audit` 分流，回归测试已在本地完成，待部署后用既有“更新流程”记录复验列表与 CSV 导出。
 
 ## 依赖外部条件的待办
 
@@ -218,7 +220,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 - **正式切换稳定阶段身份**：`019` 已将核心主键、外键和查询条件从 `stage_index` 切换到 `stage_id`；待 Preview 回归。
 - **并发与幂等保护**：为流程版本保存增加并发控制，并为创建 PR、合并、Actions 重试和回滚补充幂等键、CSRF 防护和限流。
-- **完整操作审计**：`020` 已执行；本地代码已实现创建/合并 PR、流程保存/删除、Actions 重跑和部署回滚的成功/失败结果记录，账户菜单可查询最近记录并导出 CSV。待部署后以真实操作验收。
+- **完整操作审计**：`020` 已执行；创建/合并 PR、流程保存/删除、Actions 重跑和部署回滚的成功/失败结果记录已实现。Production 首次验收发现读取路由冲突，现有 `inbox` 函数的 `resource=operation-audit` 分流修复待部署；部署后复验列表与 CSV 导出。
 - **浏览器 E2E**：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影仍必须以真实 GitHub delivery 验收。
 - **加密同步加固**：补充密钥轮换、设备恢复、冲突处理和数据保留策略，再决定是否扩大使用范围。
 - **数据保留与清理**：为事件、部署历史、运行记录、Webhook delivery 和审计日志定义保留周期与清理任务。

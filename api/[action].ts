@@ -22,6 +22,13 @@ async function inbox(request: ApiRequest, response: ApiResponse) {
   if (request.method && request.method !== 'GET') { response.status(405).json({ message: 'Method not allowed' }); return; }
   try {
     const { session } = currentGitHubIdentity(request);
+    if (request.query?.resource === 'operation-audit') {
+      const value = request.query?.limit;
+      const limit = Math.max(1, Math.min(500, Number(Array.isArray(value) ? value[0] : value) || 100));
+      const entries = await listOperationAuditLogs(process.env, { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId }, limit);
+      response.status(200).json({ entries });
+      return;
+    }
     // Page loads return the persisted projection immediately. A full GitHub reconciliation
     // is reserved for an explicit queue refresh; Webhooks and cron keep the snapshot fresh.
     if (session.installationId && shouldReconcileInbox(request)) await reconcileWorkflowStages(process.env, { installationId: session.installationId, eventName: 'inbox_refresh' }, 'inbox_refresh');
@@ -96,19 +103,6 @@ async function preflight(request: ApiRequest, response: ApiResponse) {
   }
 }
 
-async function operationAudit(request: ApiRequest, response: ApiResponse) {
-  if (request.method && request.method !== 'GET') { response.status(405).json({ message: 'Method not allowed' }); return; }
-  try {
-    const { session } = currentGitHubIdentity(request);
-    const value = request.query?.limit;
-    const limit = Math.max(1, Math.min(500, Number(Array.isArray(value) ? value[0] : value) || 100));
-    const entries = await listOperationAuditLogs(process.env, { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId }, limit);
-    response.status(200).json({ entries });
-  } catch (error) {
-    response.status(requestErrorStatus(error)).json({ message: error instanceof Error ? error.message : '无法读取操作审计' });
-  }
-}
-
 async function repairContext(request: ApiRequest, response: ApiResponse) {
   if (request.method !== 'POST') { response.status(405).json({ message: 'Method not allowed' }); return; }
   try {
@@ -128,7 +122,6 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     case 'deployment-rollback': await deploymentRollback(request, response); return;
     case 'repair-context': await repairContext(request, response); return;
     case 'preflight': await preflight(request, response); return;
-    case 'operation-audit': await operationAudit(request, response); return;
     default: response.status(404).json({ message: 'Not found' });
   }
 }
