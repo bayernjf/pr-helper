@@ -8,23 +8,23 @@
 - 当前分支：`feature/20260722`。
 - 用户已确认本批代码已上线 Production。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地静态验证已通过：`npm test`（22 个文件 / 171 项）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。
-- Supabase 迁移 `001`–`019` 已执行；`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
+- 当前本地验证已通过：`npm test`（22 个文件 / 172 项）、`npm run test:e2e`（Playwright Chromium 9 项，API mock）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。
+- Supabase 迁移 `001`–`020` 已执行；`020_operation_audit_logs.sql` 的审计表和索引已就绪，代码部署与真实操作验收仍待完成。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
 
-## 本地待部署修复
+## 已部署修复
 
-以下改动已提交到本地 `feature/20260722`，尚未推送或合并：
+以下修复已部署 Production 并完成回归：
 
 - 待办请求串行器：合并并发后台快照，手动 reconciliation 在快照结束后只执行一次；失败或超时保留最后一个有效的阶段快照。新增 `src/lib/action-queue-request-queue.test.ts`。
 
-本地待部署提交：`c458da48 fix(inbox): serialize concurrent refreshes`。
+对应提交：`c458da48 fix(inbox): serialize concurrent refreshes`。
 
-Production 已复现而待部署复验的风险：
+Production 已验证行为：
 
-1. 快速连续保存同一流程的 `409` 已有上线修复，但未完成 Production 连续编辑复验。
-2. 动态 PR #4、失败恢复入口和产品内 Actions 重跑/冷却已通过；重跑后立即从抽屉“重新同步”会发生并发请求，可能令抽屉短暂显示空状态。本地修复待部署。
-3. 单次 `GET /api/inbox?refresh=1` 已在 Production 约 41 秒完成；重复并发刷新仍需在本地修复部署后复验。
+1. 快速连续保存同一流程的 `409` 已在 Production 连续新增/删除与整页刷新中通过复验。
+2. 动态 PR #4、失败恢复入口和产品内 Actions 重跑/冷却已通过；重跑后重新同步的并发状态也已通过复验，抽屉不会丢失 PR 状态。
+3. 单次 `GET /api/inbox?refresh=1` 已在 Production 约 37–41 秒完成；未再复现 300 秒 `504`。
 
 ## 部署与会话边界
 
@@ -62,13 +62,14 @@ Production 已复现而待部署复验的风险：
 
 ## 剩余生产验收
 
-优先完成下列项目，不要立即追加复杂流程能力：
+以下为唯一的外部条件待办。它们并非未实现，而是尚无足以产生真实验收证据的账户、仓库或部署环境：
 
-1. 部署本地待办请求串行修复，在 `E2E Failure and Dynamic Rule` 的 PR #4 中重复“重新同步”，确认抽屉始终保留失败状态。
-2. 连续添加/删除流程步骤、部署门禁和恢复策略，确认不再出现 `409`，刷新后配置完整保留。
-3. 验证 Codex 修复包不修改 PR 或仓库，仅生成诊断信息。
-4. 用第二个账户验证 required approval；再分别验证 private、organization 仓库安装边界。
-5. 在单独低风险窗口配置真实部署后，验证 Vercel/Cloudflare 门禁、健康检查与确认式回滚。
+| 待办 | 需要准备 | 验收结论 |
+| --- | --- | --- |
+| Required approval | 第二个可审批 GitHub 账号，并在 E2E 分支保护中要求 1 个审批 | `needs-approval` → `ready-to-merge` |
+| Vercel / Cloudflare 部署与回滚 | 低风险仓库、真实工作流/Environment/密钥、单独回滚窗口 | 双平台门禁、健康检查和确认式 Production 回滚可追溯 |
+| GitHub Webhook 自动投影 | 可触发的 GitHub delivery 与 Vercel/Supabase 观察证据 | 无手动刷新时自动更新看板和时间线 |
+| private / organization 安装边界 | 已授权 private 仓库和 organization 仓库，配置 GitHub App 仓库选择范围 | 授权范围正确生效，范围外访问被拒绝 |
 
 不要为了验收立即触发 Production 回滚；该操作会真实改变线上版本，应仅在单独安排的低风险窗口执行。
 
@@ -76,8 +77,8 @@ Production 已复现而待部署复验的风险：
 
 在上述生产验收通过后，建议顺序为：
 
-1. 浏览器 E2E：覆盖授权返回、新建/编辑流程、步骤排序、抽屉 PR 操作和失败恢复。
-2. 完整操作审计：记录操作人、前后状态、GitHub 响应和失败原因。
+1. 浏览器 E2E：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影仍需真实 GitHub delivery 验收。
+2. 操作审计：`020` 已执行；本地已实现操作结果留存、账户查询和 CSV 导出。部署后，使用一次低风险操作验证真实记录。
 3. 加密云同步加固：密钥轮换、设备恢复、多设备冲突和保留策略。
 4. 历史数据保留与清理。
 5. 团队权限模型：Owner、Editor、Operator、Viewer，Production 合并/回滚单独授权。
@@ -88,6 +89,7 @@ Production 已复现而待部署复验的风险：
 
 ```bash
 npm test
+npm run test:e2e
 npx tsc --noEmit
 npm run lint
 npm run dev

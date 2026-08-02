@@ -16,10 +16,12 @@
 
 | 范围 | 证据 | 结果 |
 | --- | --- | --- |
-| 本地单元测试 | `npm test` | 22 个测试文件、171 项测试全部通过 |
+| 本地单元测试 | `npm test` | 22 个测试文件、172 项测试全部通过 |
+| 本地浏览器回归 | `npm run test:e2e` | Playwright Chromium 9 项：授权返回、流程创建与刷新恢复、步骤排序、失败重跑、抽屉创建/合并 PR、流程删除、确认式部署回滚、操作审计查询 | 通过（API mock） |
 | 类型检查 | `npx tsc --noEmit` | 通过 |
 | 浏览器生产构建 | `npm run lint`（Vite production build） | 通过 |
 | 变更格式 | `git diff --check` | 通过 |
+| 审计日志数据库迁移 | 用户已执行 `020_operation_audit_logs.sql` | 通过；审计代码部署与真实读写仍待验收 |
 | GitHub App 授权与仓库读取 | Production 可列出 E2E 沙箱并创建流程 | 通过 |
 | 流程单次云端保存 | Production 创建 `E2E Persistence Regression`，切回总览后整页刷新仍存在 | 通过 |
 | 创建 PR、PR Actions、应用内合并 | [PR #1](https://github.com/bayernjf/pr-helper-e2e-sandbox/pull/1) `feature/test → dev` | 通过 |
@@ -32,20 +34,27 @@
 | 队列手动刷新 | Production 点击“刷新队列”后在 41.236 秒内完成，15 个阶段投影由旧快照更新为当前状态 | 通过 |
 | 动态步骤抽屉 | `fix/failure-e2e → dev` 抽屉显示 PR #4、`0/1` 门禁和“第 1 步 Actions 失败” | 通过 |
 | 产品内 Actions 重跑与冷却 | 从抽屉重跑 PR #4；GitHub Checks 显示 `PR gate` 第 2 次运行，产品随后的队列快照显示“冷却中”并禁用重跑按钮 | 通过 |
+| 并发刷新后的抽屉状态 | 部署请求串行修复后，从动态抽屉重新同步耗时 37.474 秒；抽屉刷新后仍保留 PR #4、`0/1` 门禁和 Actions 失败状态 | 通过 |
+| 连续流程保存 | 在 `E2E Persistence Regression` 连续新增再删除合并路径，整页刷新后远端仅保留原 `feature/test → dev` 步骤，未出现 `409` | 通过 |
+| Codex 修复包边界 | PR #4 生成包仅包含诊断文本、GitHub 链接和本地修复要求，明确禁止 push、创建 PR 与合并 | 通过 |
 
 ## 发现的问题与结论
+
+### 浏览器 E2E 边界
+
+新增的 Playwright 用例启动本地 Vite，并在浏览器网络层 mock GitHub App / 工作流 / 队列 API。它验证真实 DOM、事件绑定、表单、抽屉、二次确认和请求负载，适合防止前端交互回归；不使用 GitHub token、不创建或合并真实 PR，也不能替代下方需要真实第三方状态的验收项目。
 
 ### P0：连续保存会触发流程版本自冲突
 
 Production 编辑器的每次变更都会并发发送 `PUT /api/workflows`。多个请求带着同一个版本号到达服务端后，乐观锁会正确拒绝后续请求并返回 `409`，页面显示“云端流程同步失败”。这不是 GitHub App 或数据库随机故障。
 
-已在本地加入按 `workflow.id` 串行且合并连续修改的保存队列，并新增 2 项回归测试：
+已上线按 `workflow.id` 串行且合并连续修改的保存队列，并新增 2 项回归测试：
 
 - 第一次保存返回新版本后，后续保存携带该新版本；
 - 本地最新编辑内容不被旧响应覆盖；
 - 真正的跨窗口乐观锁冲突仍停止并明确提示，绝不自动覆盖远端数据。
 
-此修复尚未部署，故其 Production 状态为 **待复验**。
+Production 已通过连续新增/删除与整页刷新复验，未再出现 `409`。
 
 ### P1：动态来源规则在详情即时刷新中不可观测
 
@@ -53,31 +62,36 @@ Production 编辑器的每次变更都会并发发送 `PUT /api/workflows`。多
 
 动态规则到失败中心和恢复抽屉的 Production 投影已通过。详情抽屉的具体分支状态已显示该分支的 Actions 失败。
 
-### P1：并发待办刷新可造成抽屉读到空快照
+### P1：并发待办刷新曾造成抽屉读到空快照
 
 单次 Production 手动刷新已在 41.236 秒内完成，不再复现此前 300 秒 `504`。但在失败 Actions 重跑后立刻从抽屉再次同步时，后台快照和手动 reconciliation 会并发；其中一轮超时会清空浏览器已加载的阶段状态，导致新抽屉短暂显示“当前步骤尚无 PR”，而 Lane 仍显示 PR #4 失败。
 
-本地已新增请求串行器和回归测试：并发快照读取会合并，随后只执行一次 reconciliation；失败请求保留上一次可靠快照。该修复尚未部署，故抽屉“重新同步”后的最终一致性仍需 Production 复验。
+已上线请求串行器和回归测试：并发快照读取会合并，随后只执行一次 reconciliation；失败请求保留上一次可靠快照。Production 从动态抽屉重新同步耗时 37.474 秒，抽屉刷新后仍保留 PR #4 的失败状态，问题已关闭。
 
 ### 未取得通过证据的集成项
 
 | 项目 | 当前状态 | 原因 |
 | --- | --- | --- |
 | GitHub Webhook 自动投影 | 待验证 | 未取得 webhook delivery 与数据库投影的对应证据；手动刷新不等于 webhook 通过 |
-| 连续流程保存 | 待验证 | 保存队列修复已上线，但还未在 Production 连续编辑步骤、部署门禁和恢复策略后整页刷新复验 |
-| Codex 修复包 | 待验证 | 已验证失败态与 Actions 重跑；尚未实际提交或应用修复包 |
 | 审批门禁 | 待验证 | 需要第二个可审批账户；单账号无法审批自己的 PR |
 | Vercel / Cloudflare 部署门禁、健康检查、确认式回滚 | 待验证 | E2E 沙箱未配置真实部署工作流和 Environment |
 | Web Push（关闭页面投递） | 待验证 | 需 VAPID、订阅、Service Worker 与关闭页面场景 |
 | private / organization 仓库授权边界 | 待验证 | 本轮只使用公开仓库 |
 
+### 外部条件待办
+
+下列验收不能通过模拟数据或手动刷新完成，保留为项目待办，直到真实条件可用：
+
+| 待办 | 外部条件 | 验收证据 |
+| --- | --- | --- |
+| Required approval | 第二个可审批 GitHub 账号与至少 1 个 required approval | `needs-approval` 在有效审批后迁移为 `ready-to-merge` |
+| Vercel / Cloudflare 部署与回滚 | 低风险仓库的实际工作流、Environment 和部署密钥 | 双平台门禁、健康检查、失败追踪及确认式 Production 回滚 |
+| Webhook 自动投影 | GitHub delivery 与服务端数据库投影的对应证据 | 无手动刷新时 Lane、抽屉和时间线自动更新 |
+| private / organization 边界 | 已授权 private 和 organization 测试仓库 | 授权范围内成功操作，范围外仓库不可访问 |
+
 ## 建议的复验顺序
 
-1. 部署当前本地待办请求串行修复，在 Production 从动态步骤抽屉重复“重新同步”，确认始终保留 PR #4 的失败状态。
-2. 在 Production 连续添加/删除步骤、部署门禁和恢复策略，确认无 `409` 且刷新后流程完整保留。
-3. 验证 Codex 修复包仅生成诊断信息、不提交代码或修改 PR。
-4. 用第二个账户配置至少 1 个 required approval，验证 `needs-approval` 到 `ready-to-merge` 的状态迁移。
-5. 单独安排低风险窗口，配置真实 Vercel/Cloudflare 部署后验证部署门禁、健康检查与确认式回滚；不要把 Production 回滚作为常规回归测试。
+1. 满足「外部条件待办」的条件后，按表中顺序完成四项验收；Production 回滚仅在单独低风险窗口执行。
 
 ## 沙箱保留状态
 
