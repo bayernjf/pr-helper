@@ -3,6 +3,7 @@ import { parseGithubAppConfig, readSignedSession } from '../_lib/github-app.js';
 import { type ApiRequest, type ApiResponse, queryValue, readCookie, requestMustBeGet } from '../_lib/http.js';
 import { githubInstallationSettingsUrl } from '../_lib/installations.js';
 import { currentGitHubSession } from '../_lib/session.js';
+import { recordOperationAudit, type OperationAuditAction } from '../_lib/workflows-store.js';
 
 function action(request: ApiRequest) {
   return queryValue(request, 'action');
@@ -12,6 +13,19 @@ function requestedPath(request: ApiRequest) {
   const path = queryValue(request, 'path');
   if (!path?.startsWith('/') || path.startsWith('//') || !path.startsWith('/repos/') && !path.startsWith('/user/repos')) throw new Error('不支持的 GitHub 请求');
   return path;
+}
+
+export function operationForGithubMutation(path: string, method: string | undefined): OperationAuditAction | null {
+  const normalizedMethod = method?.toUpperCase();
+  const repository = '/repos/[^/?]+/[^/?]+';
+  if (normalizedMethod === 'POST' && new RegExp(`^${repository}/pulls(?:\\?.*)?$`).test(path)) return 'pull-created';
+  if (normalizedMethod === 'PUT' && new RegExp(`^${repository}/pulls/\\d+/merge(?:\\?.*)?$`).test(path)) return 'pull-merged';
+  if (normalizedMethod === 'POST' && new RegExp(`^${repository}/actions/runs/\\d+/rerun(?:\\?.*)?$`).test(path)) return 'deployment-rerun';
+  return null;
+}
+
+function repositoryForPath(path: string) {
+  return path.match(/^\/repos\/([^/?]+\/[^/?]+)/)?.[1] || null;
 }
 
 export function isAllowedGithubRequest(path: string, method = 'GET') {
@@ -50,18 +64,29 @@ function sessionHandler(request: ApiRequest, response: ApiResponse) {
 }
 
 async function requestHandler(request: ApiRequest, response: ApiResponse) {
+  let audit: { login: string; githubUserId?: number; installationId?: string; action: OperationAuditAction; repository: string | null; path: string } | null = null;
   try {
     const { config, session } = currentGitHubSession(request);
     const path = requestedPath(request);
     if (!isAllowedGithubRequest(path, request.method || 'GET')) throw new Error('不支持的 GitHub 请求');
+    const operation = operationForGithubMutation(path, request.method);
+    if (operation) audit = { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId, action: operation, repository: repositoryForPath(path), path };
     const target = path.startsWith('/user/repos') ? path.replace('/user/repos', '/installation/repositories') : path;
     const data = await installationRequest<unknown>(config, session.installationId!, target, {
       method: request.method,
       body: request.method && !['GET', 'HEAD'].includes(request.method) && request.body ? typeof request.body === 'string' ? request.body : JSON.stringify(request.body) : undefined,
       headers: request.method && !['GET', 'HEAD'].includes(request.method) ? { 'Content-Type': 'application/json' } : undefined,
     });
+    if (audit) await recordOperationAudit(process.env, audit, {
+      action: audit.action, outcome: 'success', repository: audit.repository, workflowId: null, stageId: null,
+      source: null, target: null, pullNumber: null, runId: null, metadata: { method: request.method || 'GET', path: audit.path }, failureReason: null,
+    }).catch(() => undefined);
     response.status(200).json(path.startsWith('/user/repos') && !Array.isArray(data) ? (data as { repositories?: unknown[] }).repositories || [] : data);
   } catch (error) {
+    if (audit) await recordOperationAudit(process.env, audit, {
+      action: audit.action, outcome: 'failure', repository: audit.repository, workflowId: null, stageId: null,
+      source: null, target: null, pullNumber: null, runId: null, metadata: { method: request.method || 'GET', path: audit.path }, failureReason: error instanceof Error ? error.message : 'GitHub 请求失败',
+    }).catch(() => undefined);
     response.status(401).json({ message: error instanceof Error ? error.message : 'GitHub 请求失败' });
   }
 }

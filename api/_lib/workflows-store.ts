@@ -213,6 +213,24 @@ export type WorkflowStageDeployment = {
 };
 export type WorkflowStageDeploymentRun = WorkflowStageDeployment & { firstSeenAt: string };
 export type CodexRepairContext = { markdown: string; pullNumber: number; pullUrl: string };
+export type OperationAuditAction = 'workflow-created' | 'workflow-updated' | 'workflow-deleted' | 'pull-created' | 'pull-merged' | 'actions-rerun' | 'deployment-rerun' | 'deployment-rollback';
+export type OperationAuditOutcome = 'success' | 'failure';
+export type OperationAuditEntry = {
+  id: number;
+  action: OperationAuditAction;
+  outcome: OperationAuditOutcome;
+  repository: string | null;
+  workflowId: string | null;
+  stageId: string | null;
+  source: string | null;
+  target: string | null;
+  pullNumber: number | null;
+  runId: number | null;
+  metadata: Record<string, unknown>;
+  failureReason: string | null;
+  occurredAt: string;
+};
+type OperationAuditInput = Omit<OperationAuditEntry, 'id' | 'occurredAt'>;
 
 function databaseUrl(environment: Record<string, string | undefined>) {
   const value = environment.DATABASE_URL?.trim();
@@ -234,6 +252,22 @@ function query(environment: Record<string, string | undefined>) {
 
 async function recordWorkflowStageEvent(sql: ReturnType<typeof query>, userId: string, workflowId: string, stageIndex: number, source: string, eventKey: string, kind: string, message: string, stageId: string, target: string | null = null) {
   await sql`INSERT INTO workflow_stage_events (user_id, workflow_id, stage_index, stage_id, source, target, event_key, kind, message) VALUES (${userId}, ${workflowId}, ${stageIndex}, ${stageId}, ${source}, ${target}, ${eventKey}, ${kind}, ${message}) ON CONFLICT (user_id, event_key) DO NOTHING`;
+}
+
+async function recordOperationAuditForUser(sql: ReturnType<typeof query>, userId: string, installationId: string | undefined, entry: OperationAuditInput) {
+  await sql`INSERT INTO workflow_operation_audit_logs (user_id, installation_id, action, outcome, repository, workflow_id, stage_id, source, target, pull_number, run_id, metadata, failure_reason) VALUES (${userId}, ${installationId || null}, ${entry.action}, ${entry.outcome}, ${entry.repository}, ${entry.workflowId}, ${entry.stageId}, ${entry.source}, ${entry.target}, ${entry.pullNumber}, ${entry.runId}, ${sql.json(entry.metadata)}, ${entry.failureReason?.slice(0, 800) || null})`;
+}
+
+export async function recordOperationAudit(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, entry: OperationAuditInput) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  await recordOperationAuditForUser(query(environment), user.id, identity.installationId, entry);
+}
+
+export async function listOperationAuditLogs(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, limit = 100): Promise<OperationAuditEntry[]> {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const safeLimit = Math.max(1, Math.min(500, Number.isInteger(limit) ? limit : 100));
+  const rows = await query(environment)<{ id: number; action: OperationAuditAction; outcome: OperationAuditOutcome; repository: string | null; workflow_id: string | null; stage_id: string | null; source: string | null; target: string | null; pull_number: number | null; run_id: number | null; metadata: Record<string, unknown> | null; failure_reason: string | null; occurred_at: string }[]>`SELECT id, action, outcome, repository, workflow_id, stage_id, source, target, pull_number, run_id, metadata, failure_reason, occurred_at FROM workflow_operation_audit_logs WHERE user_id = ${user.id} ORDER BY occurred_at DESC, id DESC LIMIT ${safeLimit}`;
+  return rows.map(row => ({ id: row.id, action: row.action, outcome: row.outcome, repository: row.repository, workflowId: row.workflow_id, stageId: row.stage_id, source: row.source, target: row.target, pullNumber: row.pull_number, runId: row.run_id === null ? null : Number(row.run_id), metadata: row.metadata || {}, failureReason: row.failure_reason, occurredAt: row.occurred_at }));
 }
 
 async function userForLogin(environment: Record<string, string | undefined>, login: string, githubUserId?: number, installationId?: string) {
@@ -297,6 +331,11 @@ export async function rerunFailedActions(environment: Record<string, string | un
   if (!failed.length) throw new Error('没有找到可重试的失败 Actions');
   await Promise.all(failed.map(run => installationRequest<Record<string, never>>(config, identity.installationId!, `/repos/${owner}/${name}/actions/runs/${run.id}/rerun`, { method: 'POST' })));
   await recordWorkflowStageEvent(sql, user.id, input.workflowId, input.stageIndex, input.source, `${input.workflowId}:${stage.stageId}:${input.source}:actions-rerun:${headSha}:${retryRows.length + 1}`, 'actions-rerun', '已重新触发失败的 GitHub Actions', stage.stageId, stage.target);
+  await recordOperationAuditForUser(sql, user.id, identity.installationId, {
+    action: 'actions-rerun', outcome: 'success', repository: workflow.repository, workflowId: input.workflowId,
+    stageId: stage.stageId, source: input.source, target: stage.target, pullNumber: null, runId: null,
+    metadata: { headSha, runs: failed.map(run => run.id), retry: retryRows.length + 1 }, failureReason: null,
+  });
   return { count: failed.length };
 }
 
@@ -336,6 +375,11 @@ export async function requestDeploymentRollback(environment: Record<string, stri
   });
   const providerName = input.provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages';
   await recordWorkflowStageEvent(sql, user.id, input.workflowId, input.stageIndex, input.source, rollbackEventKey, 'deployment-rollback', `已确认触发 ${providerName} 回滚到部署 #${input.runId}`, stage.stageId, stage.target);
+  await recordOperationAuditForUser(sql, user.id, identity.installationId, {
+    action: 'deployment-rollback', outcome: 'success', repository: workflow.repository, workflowId: input.workflowId,
+    stageId: stage.stageId, source: input.source, target: stage.target, pullNumber: null, runId: input.runId,
+    metadata: { provider: input.provider, environment: deployment.environment, rollbackWorkflow: rollbackWorkflow.name }, failureReason: null,
+  });
   return { workflowName: rollbackWorkflow.name };
 }
 
@@ -514,6 +558,11 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
     }
     await pruneStaleWorkflowStageData(transaction, user.id, savedWorkflow);
     await saveWorkflowVersion(transaction, user.id, savedWorkflow);
+    await recordOperationAuditForUser(transaction, user.id, identity.installationId, {
+      action: previous ? 'workflow-updated' : 'workflow-created', outcome: 'success', repository: savedWorkflow.repository,
+      workflowId: savedWorkflow.id, stageId: null, source: null, target: null, pullNumber: null, runId: null,
+      metadata: { version: savedWorkflow.version, stageCount: savedWorkflow.stages.length }, failureReason: null,
+    });
   });
   return savedWorkflow;
 }
@@ -521,7 +570,14 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
 export async function removeWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string) {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  await sql`DELETE FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId}`;
+  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId}`;
+  const workflow = storedWorkflowFromPayload(rows[0]?.payload);
+  const deleted = await sql<{ id: string }[]>`DELETE FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId} RETURNING id`;
+  if (deleted.length) await recordOperationAuditForUser(sql, user.id, identity.installationId, {
+    action: 'workflow-deleted', outcome: 'success', repository: workflow?.repository || null,
+    workflowId, stageId: null, source: null, target: null, pullNumber: null, runId: null,
+    metadata: { name: workflow?.name || null }, failureReason: null,
+  });
 }
 
 export async function recordWebhookDelivery(environment: Record<string, string | undefined>, delivery: WebhookDelivery) {

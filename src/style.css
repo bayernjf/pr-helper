@@ -974,6 +974,60 @@ a.account-menu-item {
   color: inherit;
 }
 
+.operation-audit-dialog {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.operation-audit-content {
+  max-height: min(56vh, 560px);
+  overflow: auto;
+  margin: 18px 0;
+}
+
+.operation-audit-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.operation-audit-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 11px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: 7px;
+  background: var(--bg-card-hover);
+}
+
+.operation-audit-list li.failure {
+  border-color: color-mix(in srgb, var(--text-error) 45%, var(--border-default));
+}
+
+.operation-audit-list div,
+.operation-audit-list span {
+  display: grid;
+  gap: 3px;
+}
+
+.operation-audit-list span {
+  min-width: 126px;
+  text-align: right;
+  color: var(--text-secondary);
+  font-size: .72rem;
+}
+
+.operation-audit-list time {
+  color: var(--text-muted);
+}
+
+@media (max-width: 620px) {
+  .operation-audit-list li { display: grid; gap: 8px; }
+  .operation-audit-list span { text-align: left; }
+}
+
 .create-pr {
   display: inline-block;
   margin-top: 7px;

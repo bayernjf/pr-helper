@@ -1,6 +1,6 @@
 import { requestErrorStatus, type ApiRequest, type ApiResponse } from './_lib/http.js';
 import { currentGitHubIdentity } from './_lib/session.js';
-import { codexRepairContext, listActionableStages, listRecentWorkflowStageEvents, listRecoveryStatuses, listSyncHealth, listWorkflowConfigurationWarnings, listWorkflowStageDeploymentRuns, listWorkflowStageDeployments, listWorkflowStageStates, listWorkflowRuns, listWorkflowTimeline, reconcileWorkflowStages, recordRecoveryEvent, rerunFailedActions, requestDeploymentRollback, type DeploymentProvider } from './_lib/workflows-store.js';
+import { codexRepairContext, listActionableStages, listOperationAuditLogs, listRecentWorkflowStageEvents, listRecoveryStatuses, listSyncHealth, listWorkflowConfigurationWarnings, listWorkflowStageDeploymentRuns, listWorkflowStageDeployments, listWorkflowStageStates, listWorkflowRuns, listWorkflowTimeline, reconcileWorkflowStages, recordOperationAudit, recordRecoveryEvent, rerunFailedActions, requestDeploymentRollback, type DeploymentProvider } from './_lib/workflows-store.js';
 import { runPreflightChecks } from './_lib/preflight.js';
 
 function action(request: ApiRequest) {
@@ -45,25 +45,43 @@ async function recoveryEvent(request: ApiRequest, response: ApiResponse) {
 }
 
 async function rerunActions(request: ApiRequest, response: ApiResponse) {
+  let identity: { login: string; githubUserId?: number; installationId?: string } | null = null;
+  let input: { workflowId?: unknown; stageIndex?: unknown; source?: unknown } = {};
   if (request.method !== 'POST') { response.status(405).json({ message: 'Method not allowed' }); return; }
   try {
     const { session } = currentGitHubIdentity(request);
-    const payload = body(request) as { workflowId?: unknown; stageIndex?: unknown; source?: unknown };
-    if (typeof payload.workflowId !== 'string' || typeof payload.stageIndex !== 'number' || typeof payload.source !== 'string') throw new Error('无效的失败恢复请求');
-    const result = await rerunFailedActions(process.env, { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId }, { workflowId: payload.workflowId, stageIndex: payload.stageIndex, source: payload.source });
+    identity = { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId };
+    input = body(request) as typeof input;
+    if (typeof input.workflowId !== 'string' || typeof input.stageIndex !== 'number' || typeof input.source !== 'string') throw new Error('无效的失败恢复请求');
+    const result = await rerunFailedActions(process.env, identity, { workflowId: input.workflowId, stageIndex: input.stageIndex, source: input.source });
     response.status(200).json({ ok: true, ...result });
-  } catch (error) { response.status(400).json({ message: error instanceof Error ? error.message : '无法重新触发 Actions' }); }
+  } catch (error) {
+    if (identity) await recordOperationAudit(process.env, identity, {
+      action: 'actions-rerun', outcome: 'failure', repository: null, workflowId: typeof input.workflowId === 'string' ? input.workflowId : null,
+      stageId: null, source: typeof input.source === 'string' ? input.source : null, target: null, pullNumber: null, runId: null, metadata: {}, failureReason: error instanceof Error ? error.message : '无法重新触发 Actions',
+    }).catch(() => undefined);
+    response.status(400).json({ message: error instanceof Error ? error.message : '无法重新触发 Actions' });
+  }
 }
 
 async function deploymentRollback(request: ApiRequest, response: ApiResponse) {
+  let identity: { login: string; githubUserId?: number; installationId?: string } | null = null;
+  let input: { workflowId?: unknown; stageIndex?: unknown; source?: unknown; provider?: unknown; runId?: unknown } = {};
   if (request.method !== 'POST') { response.status(405).json({ message: 'Method not allowed' }); return; }
   try {
     const { session } = currentGitHubIdentity(request);
-    const payload = body(request) as { workflowId?: unknown; stageIndex?: unknown; source?: unknown; provider?: unknown; runId?: unknown };
-    if (typeof payload.workflowId !== 'string' || typeof payload.stageIndex !== 'number' || typeof payload.source !== 'string' || !['vercel', 'cloudflare'].includes(String(payload.provider)) || typeof payload.runId !== 'number') throw new Error('无效的部署回滚请求');
-    const result = await requestDeploymentRollback(process.env, { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId }, { workflowId: payload.workflowId, stageIndex: payload.stageIndex, source: payload.source, provider: payload.provider as DeploymentProvider, runId: payload.runId });
+    identity = { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId };
+    input = body(request) as typeof input;
+    if (typeof input.workflowId !== 'string' || typeof input.stageIndex !== 'number' || typeof input.source !== 'string' || !['vercel', 'cloudflare'].includes(String(input.provider)) || typeof input.runId !== 'number') throw new Error('无效的部署回滚请求');
+    const result = await requestDeploymentRollback(process.env, identity, { workflowId: input.workflowId, stageIndex: input.stageIndex, source: input.source, provider: input.provider as DeploymentProvider, runId: input.runId });
     response.status(200).json({ ok: true, ...result });
-  } catch (error) { response.status(400).json({ message: error instanceof Error ? error.message : '无法触发部署回滚' }); }
+  } catch (error) {
+    if (identity) await recordOperationAudit(process.env, identity, {
+      action: 'deployment-rollback', outcome: 'failure', repository: null, workflowId: typeof input.workflowId === 'string' ? input.workflowId : null,
+      stageId: null, source: typeof input.source === 'string' ? input.source : null, target: null, pullNumber: null, runId: typeof input.runId === 'number' ? input.runId : null, metadata: { provider: input.provider || null }, failureReason: error instanceof Error ? error.message : '无法触发部署回滚',
+    }).catch(() => undefined);
+    response.status(400).json({ message: error instanceof Error ? error.message : '无法触发部署回滚' });
+  }
 }
 
 async function preflight(request: ApiRequest, response: ApiResponse) {
@@ -75,6 +93,19 @@ async function preflight(request: ApiRequest, response: ApiResponse) {
     response.status(200).json({ results });
   } catch (error) {
     response.status(500).json({ message: error instanceof Error ? error.message : '无法执行流程预检' });
+  }
+}
+
+async function operationAudit(request: ApiRequest, response: ApiResponse) {
+  if (request.method && request.method !== 'GET') { response.status(405).json({ message: 'Method not allowed' }); return; }
+  try {
+    const { session } = currentGitHubIdentity(request);
+    const value = request.query?.limit;
+    const limit = Math.max(1, Math.min(500, Number(Array.isArray(value) ? value[0] : value) || 100));
+    const entries = await listOperationAuditLogs(process.env, { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId }, limit);
+    response.status(200).json({ entries });
+  } catch (error) {
+    response.status(requestErrorStatus(error)).json({ message: error instanceof Error ? error.message : '无法读取操作审计' });
   }
 }
 
@@ -97,6 +128,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     case 'deployment-rollback': await deploymentRollback(request, response); return;
     case 'repair-context': await repairContext(request, response); return;
     case 'preflight': await preflight(request, response); return;
+    case 'operation-audit': await operationAudit(request, response); return;
     default: response.status(404).json({ message: 'Not found' });
   }
 }

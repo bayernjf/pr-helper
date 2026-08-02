@@ -16,8 +16,8 @@
 
 | 范围 | 证据 | 结果 |
 | --- | --- | --- |
-| 本地单元测试 | `npm test` | 22 个测试文件、171 项测试全部通过 |
-| 本地浏览器回归 | `npm run test:e2e` | Playwright Chromium 8 项：授权返回、流程创建与刷新恢复、步骤排序、失败重跑、抽屉创建/合并 PR、流程删除、确认式部署回滚 | 通过（API mock） |
+| 本地单元测试 | `npm test` | 22 个测试文件、172 项测试全部通过 |
+| 本地浏览器回归 | `npm run test:e2e` | Playwright Chromium 9 项：授权返回、流程创建与刷新恢复、步骤排序、失败重跑、抽屉创建/合并 PR、流程删除、确认式部署回滚、操作审计查询 | 通过（API mock） |
 | 类型检查 | `npx tsc --noEmit` | 通过 |
 | 浏览器生产构建 | `npm run lint`（Vite production build） | 通过 |
 | 变更格式 | `git diff --check` | 通过 |

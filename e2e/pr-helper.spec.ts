@@ -8,6 +8,7 @@ type ApiFixture = {
   recoveryStatuses?: unknown[];
   deployments?: unknown[];
   deploymentRuns?: unknown[];
+  auditEntries?: unknown[];
 };
 
 type MockApi = {
@@ -30,7 +31,7 @@ async function mockApi(page: Page, fixture: ApiFixture = {}): Promise<MockApi> {
     requests: [],
   };
 
-  await page.route('http://127.0.0.1:4174/api/**', async route => {
+  await page.route('http://127.0.0.1:4174/api**', async route => {
     const request = route.request();
     const url = new URL(request.url());
     const pathname = url.pathname;
@@ -75,6 +76,8 @@ async function mockApi(page: Page, fixture: ApiFixture = {}): Promise<MockApi> {
       return json(route, 200, { ok: true });
     }
 
+    if (pathname === '/api/inbox' && url.searchParams.get('action') === 'operation-audit') return json(route, 200, { entries: fixture.auditEntries || [] });
+
     if (pathname === '/api/inbox') return json(route, 200, {
       items: fixture.items || [],
       states: fixture.states || [],
@@ -117,6 +120,20 @@ test('GitHub App 授权返回后载入工作台并显示仓库管理入口', asy
   await expect(accountMenu).toBeVisible();
   await accountMenu.click();
   await expect(page.getByRole('button', { name: '管理授权仓库 ↗' })).toBeVisible();
+});
+
+test('账户菜单可查询最近操作审计记录', async ({ page }) => {
+  await openWorkspace(page, {
+    auditEntries: [{ id: 9, action: 'pull-merged', outcome: 'success', repository, workflowId: 'flow-merge', stageId: 'stage-main', source: 'dev', target: 'main', pullNumber: 42, runId: null, metadata: { method: 'PUT' }, failureReason: null, occurredAt: '2026-08-03T00:00:00.000Z' }],
+  });
+
+  await page.getByRole('button', { name: 'GitHub · @e2e-user' }).click();
+  await page.getByRole('button', { name: '操作审计' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('heading', { name: '操作审计' })).toBeVisible();
+  await expect(dialog).toContainText('合并 PR');
+  await expect(dialog).toContainText('成功');
+  await expect(dialog).toContainText('PR #42');
 });
 
 test('新建流程会保存到云端并在整页刷新后恢复', async ({ page }) => {

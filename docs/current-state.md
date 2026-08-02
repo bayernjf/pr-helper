@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-03（014–019 已执行；最近一批代码已上线 Production；最新验收和本地待部署修复见下文）
+> 最后更新：2026-08-03（014–019 已执行；`020_operation_audit_logs.sql` 已在本地准备、尚未执行；最近一批代码已上线 Production；最新验收和本地待部署修复见下文）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -95,7 +95,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 | PR 草稿、Markdown 生成规则 | 浏览器 `localStorage`；可通过加密云同步上传服务端（原型） |
 | 加密云同步密文 | Supabase Postgres（`pr_helper_encrypted_sync`） |
 
-数据库迁移的当前线上基线是 `001`–`019`；`018` 完成稳定阶段身份回填和索引创建，`019` 已将 `stage_id` 切换为正式主键/外键身份。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，后续部署与线上验证见下方「待执行与待验证清单」。
+数据库迁移的当前线上基线是 `001`–`019`；`020_operation_audit_logs.sql` 已随本地代码准备，待执行后才启用操作审计。`018` 完成稳定阶段身份回填和索引创建，`019` 已将 `stage_id` 切换为正式主键/外键身份。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，后续部署与线上验证见下方「待执行与待验证清单」。
 
 ## 最新验证结论
 
@@ -116,8 +116,8 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 ## 测试覆盖
 
-- 本地单元/服务端测试：`npm test` 运行 22 个文件 / 171 个测试；`npx tsc --noEmit`、`npm run lint` 和 `git diff --check` 同时通过。
-- 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉、创建/合并 PR、删除流程和确认式部署回滚。它验证真实 DOM、二次确认和浏览器请求负载，不替代真实 GitHub 写入、门禁和部署验收。
+- 本地单元/服务端测试：`npm test` 运行 22 个文件 / 172 个测试；`npx tsc --noEmit`、`npm run lint` 和 `git diff --check` 同时通过。
+- 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉、创建/合并 PR、删除流程、确认式部署回滚和操作审计查询。它验证真实 DOM、二次确认和浏览器请求负载，不替代真实 GitHub 写入、门禁和部署验收。
 - 已新增流程保存队列回归：连续编辑会串行使用服务端返回的新版本，且不会由旧响应覆盖最新编辑；真实跨窗口乐观锁冲突仍会明确报错。
 - Production E2E 通过项目与尚未通过的集成项目均以 [验证报告](verification-report.md) 为准。
 - `src/lib/` 核心业务逻辑覆盖率 81%+，包括 domain、workflow、generation-rules、pr-drafts、encrypted-sync、navigation 等。
@@ -218,7 +218,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 - **正式切换稳定阶段身份**：`019` 已将核心主键、外键和查询条件从 `stage_index` 切换到 `stage_id`；待 Preview 回归。
 - **并发与幂等保护**：为流程版本保存增加并发控制，并为创建 PR、合并、Actions 重试和回滚补充幂等键、CSRF 防护和限流。
-- **完整操作审计**：统一记录操作人、操作前后状态、GitHub 请求结果和失败原因，支持查询和导出。
+- **完整操作审计**：本地已实现 `020` 迁移、创建/合并 PR、流程保存/删除、Actions 重跑和部署回滚的成功/失败结果记录；账户菜单可查询最近记录并导出 CSV。待执行 `020`、部署后以真实操作验收。
 - **浏览器 E2E**：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影仍必须以真实 GitHub delivery 验收。
 - **加密同步加固**：补充密钥轮换、设备恢复、冲突处理和数据保留策略，再决定是否扩大使用范围。
 - **数据保留与清理**：为事件、部署历史、运行记录、Webhook delivery 和审计日志定义保留周期与清理任务。

@@ -8,8 +8,8 @@
 - 当前分支：`feature/20260722`。
 - 用户已确认本批代码已上线 Production。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地验证已通过：`npm test`（22 个文件 / 171 项）、`npm run test:e2e`（Playwright Chromium 8 项，API mock）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。
-- Supabase 迁移 `001`–`019` 已执行；`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
+- 当前本地验证已通过：`npm test`（22 个文件 / 172 项）、`npm run test:e2e`（Playwright Chromium 9 项，API mock）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。
+- Supabase 迁移 `001`–`019` 已执行；`020_operation_audit_logs.sql` 已在本地准备、尚未执行。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
 
 ## 已部署修复
@@ -78,7 +78,7 @@ Production 已验证行为：
 在上述生产验收通过后，建议顺序为：
 
 1. 浏览器 E2E：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影仍需真实 GitHub delivery 验收。
-2. 完整操作审计：记录操作人、前后状态、GitHub 响应和失败原因。
+2. 操作审计：本地已实现操作结果留存、账户查询和 CSV 导出；执行 `020` 并部署后，使用一次低风险操作验证真实记录。
 3. 加密云同步加固：密钥轮换、设备恢复、多设备冲突和保留策略。
 4. 历史数据保留与清理。
 5. 团队权限模型：Owner、Editor、Operator、Viewer，Production 合并/回滚单独授权。
