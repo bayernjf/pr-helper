@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-01（014–019 已执行，CSRF_ALLOWED_ORIGINS 已配置，等待代码部署与 Preview 回归）
+> 最后更新：2026-08-03（014–019 已执行；最近一批代码已上线 Production；最新验收和本地待部署修复见下文）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -101,11 +101,11 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 2026-08-03 已在 Vercel Production 与公开 GitHub E2E 沙箱完成一轮可追溯验证，完整结果见 [验证报告](verification-report.md)。真实通过的链路包括 GitHub App 授权、PR 创建、严格分支保护、应用内合并、合并后 Actions 跟踪和多路径汇聚。失败 Actions 的 GitHub 原生阻塞状态也已确认。
 
-本轮发现的连续编辑版本 `409` 已有本地串行保存修复，仍待 Production 连续保存复验。动态来源规则（如 `fix/*`）已在 Production 通过服务端投影逐条展示实际分支，PR #4 进入失败中心并可打开恢复抽屉；抽屉状态文案的一个小修复待下一次部署复验。Webhook 自动投影和失败 Actions 的实际重跑结果仍不得标记为已验收。
+本轮发现的连续编辑版本 `409` 已有上线串行保存修复，仍待 Production 连续保存复验。动态来源规则（如 `fix/*`）已在 Production 通过服务端投影逐条展示实际分支，PR #4 在失败中心、Lane 和抽屉均显示失败；产品内 Actions 重跑与冷却策略也已通过。随后发现并发待办刷新可令抽屉暂时读取空快照，本地请求串行修复待部署复验。Webhook 自动投影仍不得标记为已验收。
 
 ## 测试覆盖
 
-- 本地当前工作区：21 个测试文件 / 170 个测试，全部通过；`npx tsc --noEmit`、`npm run lint` 和 `git diff --check` 同时通过。
+- 本地当前工作区：22 个测试文件 / 171 个测试，全部通过；`npx tsc --noEmit`、`npm run lint` 和 `git diff --check` 同时通过。
 - 已新增流程保存队列回归：连续编辑会串行使用服务端返回的新版本，且不会由旧响应覆盖最新编辑；真实跨窗口乐观锁冲突仍会明确报错。
 - Production E2E 通过项目与尚未通过的集成项目均以 [验证报告](verification-report.md) 为准。
 - `src/lib/` 核心业务逻辑覆盖率 81%+，包括 domain、workflow、generation-rules、pr-drafts、encrypted-sync、navigation 等。
