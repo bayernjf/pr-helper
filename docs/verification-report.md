@@ -72,12 +72,20 @@ Production 已通过连续新增/删除与整页刷新复验，未再出现 `409
 | Web Push（关闭页面投递） | 待验证 | 需 VAPID、订阅、Service Worker 与关闭页面场景 |
 | private / organization 仓库授权边界 | 待验证 | 本轮只使用公开仓库 |
 
+### 外部条件待办
+
+下列验收不能通过模拟数据或手动刷新完成，保留为项目待办，直到真实条件可用：
+
+| 待办 | 外部条件 | 验收证据 |
+| --- | --- | --- |
+| Required approval | 第二个可审批 GitHub 账号与至少 1 个 required approval | `needs-approval` 在有效审批后迁移为 `ready-to-merge` |
+| Vercel / Cloudflare 部署与回滚 | 低风险仓库的实际工作流、Environment 和部署密钥 | 双平台门禁、健康检查、失败追踪及确认式 Production 回滚 |
+| Webhook 自动投影 | GitHub delivery 与服务端数据库投影的对应证据 | 无手动刷新时 Lane、抽屉和时间线自动更新 |
+| private / organization 边界 | 已授权 private 和 organization 测试仓库 | 授权范围内成功操作，范围外仓库不可访问 |
+
 ## 建议的复验顺序
 
-1. 用第二个账户配置至少 1 个 required approval，验证 `needs-approval` 到 `ready-to-merge` 的状态迁移。
-2. 单独安排低风险窗口，配置真实 Vercel/Cloudflare 部署后验证部署门禁、健康检查与确认式回滚；不要把 Production 回滚作为常规回归测试。
-3. 验证 GitHub Webhook delivery 与数据库投影的自动对应关系，不以手动刷新替代。
-4. 对 private、organization 仓库执行 GitHub App 安装边界回归。
+1. 满足「外部条件待办」的条件后，按表中顺序完成四项验收；Production 回滚仅在单独低风险窗口执行。
 
 ## 沙箱保留状态
 

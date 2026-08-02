@@ -103,6 +103,17 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 本轮发现的连续编辑版本 `409` 已通过 Production 连续新增/删除和整页刷新复验。动态来源规则（如 `fix/*`）已在 Production 通过服务端投影逐条展示实际分支，PR #4 在失败中心、Lane 和抽屉均显示失败；产品内 Actions 重跑、冷却和 Codex 修复包边界也已通过。并发待办刷新导致抽屉短暂读取空快照的问题，已在请求串行修复上线后通过 Production 复验。Webhook 自动投影仍不得标记为已验收。
 
+## 依赖外部条件的待办
+
+以下四项均已实现对应产品能力，但缺少可控的真实外部条件，不能以本地或手动刷新替代验收。它们是当前仅剩的生产验收待办。
+
+| 待办 | 所需外部条件 | 完成标准 |
+| --- | --- | --- |
+| Required approval | 第二个可访问 E2E 仓库的 GitHub 账号，以及目标分支至少 1 个 required approval 规则 | PR 在审批前显示 `needs-approval`，有效审批后自动变为 `ready-to-merge` |
+| Vercel / Cloudflare 部署与回滚 | 低风险仓库中真实的双平台 GitHub Actions、Environment 和部署密钥；Production 回滚需单独低风险窗口 | Preview/Production 门禁、健康检查、部署失败和一次确认式 Production 回滚均可追溯 |
+| GitHub Webhook 自动投影 | 可触发的 PR 或 Actions 事件，以及 GitHub delivery 与 Vercel/Supabase 投影的观察证据 | 不点击手动刷新时，delivery 自动更新对应 Lane、抽屉和时间线 |
+| private / organization 安装边界 | 已授权的 private 仓库和 organization 仓库（含 GitHub App 仓库选择范围） | 仓库列表、PR/Actions 读取和写操作均遵守安装边界，未授权仓库不可访问 |
+
 ## 测试覆盖
 
 - 本地当前工作区：22 个测试文件 / 171 个测试，全部通过；`npx tsc --noEmit`、`npm run lint` 和 `git diff --check` 同时通过。
@@ -140,13 +151,10 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 `018` 已执行并完成结构校验，`019` 已执行；下一步部署代码到 Preview，验证稳定 `stage_id` 查询和历史时间线。
 
-### 二、代码部署
+### 二、代码部署状态
 
-- [ ] 提交当前所有变更并推送到 `dev` 分支
-- [ ] 确认 Vercel Preview 部署成功
-- [ ] 确认 Cloudflare Pages 镜像同步成功
-- [ ] 合并 `dev` → `main`，确认 Vercel Production 部署成功
-- [ ] 确认 Cloudflare Pages Production 部署成功
+- [x] 当前验收批次已部署至 Vercel Production，并以 Production 浏览器回归为准。
+- [ ] Cloudflare Pages 镜像的独立部署状态仍需在双平台部署验收中确认。
 
 ### 三、发布流程回归测试
 
@@ -159,7 +167,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 ### 四、GitHub App 权限回归
 
-- [ ] public 仓库：授权、仓库列表、PR 操作、Actions 读取
+- [x] public 仓库：授权、仓库列表、PR 操作、Actions 读取
 - [ ] private 仓库：同上
 - [ ] organization 仓库：同上，并验证组织级安装边界
 
@@ -196,12 +204,12 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 > 详细待执行/待验证清单见上方「待执行与待验证清单」章节，包含数据库迁移、代码部署、发布回归、权限回归和新功能验证的具体步骤。
 
-1. 部署流程保存队列与队列超时修复，复验连续保存、动态来源规则和刷新队列。 ⏳ 待部署验证
+1. Required approval、双平台部署与回滚、Webhook 自动投影、private / organization 安装边界：详见上方「依赖外部条件的待办」。
 2. 完整发布回归：已通过 `feature → dev → main`、PR Actions 与应用内合并；双平台部署和 Production 回滚仍待实测。 ⏳ 部分完成
 3. 对 public、private、organization 仓库执行一轮 GitHub App 权限回归。 🟡 public 通过 / ⏳ private、organization 待验证
 4. 失败恢复已由服务端校验重试次数、冷却时间、当前提交和失败 Actions；仍不自动修改代码或合并生产。
 5. 加密云同步已接通密文上传/下载原型，仍需补齐密钥轮换、冲突处理和线上回归后再扩大使用范围。 🟡 待加固
-6. 将阶段状态、事件和部署历史从 `stage_index` 切换到稳定 `stage_id`。 ✅ 019 已执行，待部署并回归
+6. 阶段状态、事件和部署历史已切换到稳定 `stage_id`。 ✅ 019 已执行，并已通过当前 Production 流程回归。
 
 ### 八、非验收类后续开发
 

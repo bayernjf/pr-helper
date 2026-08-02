@@ -62,11 +62,14 @@ Production 已验证行为：
 
 ## 剩余生产验收
 
-优先完成下列项目，不要立即追加复杂流程能力：
+以下为唯一的外部条件待办。它们并非未实现，而是尚无足以产生真实验收证据的账户、仓库或部署环境：
 
-1. 用第二个账户验证 required approval；再分别验证 private、organization 仓库安装边界。
-2. 在单独低风险窗口配置真实部署后，验证 Vercel/Cloudflare 门禁、健康检查与确认式回滚。
-3. 验证 GitHub Webhook delivery 能自动投影到数据库和看板，不以手动刷新替代。
+| 待办 | 需要准备 | 验收结论 |
+| --- | --- | --- |
+| Required approval | 第二个可审批 GitHub 账号，并在 E2E 分支保护中要求 1 个审批 | `needs-approval` → `ready-to-merge` |
+| Vercel / Cloudflare 部署与回滚 | 低风险仓库、真实工作流/Environment/密钥、单独回滚窗口 | 双平台门禁、健康检查和确认式 Production 回滚可追溯 |
+| GitHub Webhook 自动投影 | 可触发的 GitHub delivery 与 Vercel/Supabase 观察证据 | 无手动刷新时自动更新看板和时间线 |
+| private / organization 安装边界 | 已授权 private 仓库和 organization 仓库，配置 GitHub App 仓库选择范围 | 授权范围正确生效，范围外访问被拒绝 |
 
 不要为了验收立即触发 Production 回滚；该操作会真实改变线上版本，应仅在单独安排的低风险窗口执行。
 
