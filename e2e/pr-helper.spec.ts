@@ -6,11 +6,13 @@ type ApiFixture = {
   states?: unknown[];
   items?: unknown[];
   recoveryStatuses?: unknown[];
+  deployments?: unknown[];
+  deploymentRuns?: unknown[];
 };
 
 type MockApi = {
   workflows: Workflow[];
-  requests: { method: string; pathname: string; body: unknown }[];
+  requests: { method: string; pathname: string; search: string; body: unknown }[];
 };
 
 const repository = 'acme/demo';
@@ -33,7 +35,7 @@ async function mockApi(page: Page, fixture: ApiFixture = {}): Promise<MockApi> {
     const url = new URL(request.url());
     const pathname = url.pathname;
     const body = request.postDataJSON?.() ?? null;
-    api.requests.push({ method: request.method(), pathname, body });
+    api.requests.push({ method: request.method(), pathname, search: url.search, body });
 
     if (pathname === '/api/github/session') return json(route, 200, {
       connected: true,
@@ -47,6 +49,15 @@ async function mockApi(page: Page, fixture: ApiFixture = {}): Promise<MockApi> {
       if (path.startsWith('/repos/acme/demo/branches')) return json(route, 200, branches.map(name => ({ name })));
       if (path.startsWith('/repos/acme/demo/actions/workflows')) return json(route, 200, { workflows: [{ name: 'PR gate', state: 'active', path: '.github/workflows/pr-gate.yml' }] });
       if (path.startsWith('/repos/acme/demo/environments')) return json(route, 200, { environments: [{ name: 'preview-vercel' }, { name: 'production-vercel' }] });
+      if (path.startsWith('/repos/acme/demo/pulls?state=open')) return json(route, 200, []);
+      if (path === '/repos/acme/demo/pulls' && request.method() === 'POST') return json(route, 201, {
+        number: 43,
+        state: 'open',
+        merged_at: null,
+        html_url: 'https://github.com/acme/demo/pull/43',
+        head: { sha: 'created-head' },
+      });
+      if (path === '/repos/acme/demo/pulls/42/merge' && request.method() === 'PUT') return json(route, 200, { merged: true, sha: 'merged-sha' });
       return json(route, 404, { message: `Unexpected GitHub request: ${path}` });
     }
 
@@ -58,13 +69,18 @@ async function mockApi(page: Page, fixture: ApiFixture = {}): Promise<MockApi> {
       if (index === -1) api.workflows.push(saved); else api.workflows[index] = saved;
       return json(route, 200, { workflow: saved });
     }
+    if (pathname === '/api/workflows' && request.method() === 'DELETE') {
+      const id = (body as { id: string }).id;
+      api.workflows = api.workflows.filter(workflow => workflow.id !== id);
+      return json(route, 200, { ok: true });
+    }
 
     if (pathname === '/api/inbox') return json(route, 200, {
       items: fixture.items || [],
       states: fixture.states || [],
       events: [],
-      deployments: [],
-      deploymentRuns: [],
+      deployments: fixture.deployments || [],
+      deploymentRuns: fixture.deploymentRuns || [],
       configurationWarnings: [],
       syncHealth: null,
       runs: [],
@@ -74,6 +90,7 @@ async function mockApi(page: Page, fixture: ApiFixture = {}): Promise<MockApi> {
 
     if (pathname === '/api/notifications/subscription') return json(route, 200, { subscription: null });
     if (pathname === '/api/rerun-actions' && request.method() === 'POST') return json(route, 200, { ok: true, count: 1 });
+    if (pathname === '/api/deployment-rollback' && request.method() === 'POST') return json(route, 200, { ok: true, workflowName: 'Rollback production' });
     return json(route, 404, { message: `Unexpected API request: ${pathname}` });
   });
 
@@ -85,6 +102,12 @@ async function openWorkspace(page: Page, fixture: ApiFixture = {}) {
   await page.goto('/?github=connected');
   await expect(page.getByRole('heading', { name: '项目流程看板' })).toBeVisible();
   return api;
+}
+
+function githubRequests(api: MockApi, method: string, path: string) {
+  return api.requests.filter(request => request.method === method
+    && request.pathname === '/api/github/request'
+    && new URLSearchParams(request.search).get('path') === path);
 }
 
 test('GitHub App 授权返回后载入工作台并显示仓库管理入口', async ({ page }) => {
@@ -162,4 +185,105 @@ test('失败步骤抽屉显示重跑入口并调用受保护的服务端重跑�
 
   await expect.poll(() => api.requests.filter(request => request.pathname === '/api/rerun-actions')).toHaveLength(1);
   expect(api.requests.find(request => request.pathname === '/api/rerun-actions')?.body).toEqual({ workflowId: workflow.id, stageIndex: 0, source: 'fix/urgent' });
+});
+
+test('抽屉创建 PR 仅在确认后通过 GitHub 代理提交准确负载', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-create-pr',
+    name: '创建 PR 流程',
+    repository,
+    stages: [{ stageId: 'stage-create', source: 'feature/e2e', target: 'dev' }],
+  };
+  const api = await openWorkspace(page, {
+    workflows: [workflow],
+    items: [{ workflowId: workflow.id, workflowName: workflow.name, repository, stageIndex: 0, source: 'feature/e2e', target: 'dev', pullNumber: null, kind: 'ready-to-create', message: '等待创建 PR' }],
+    states: [{ workflowId: workflow.id, stageIndex: 0, stageId: 'stage-create', repository, source: 'feature/e2e', target: 'dev', pullNumber: null, pullState: 'none', mergedAt: null, headSha: null, checksState: 'none', checksPassed: 0, checksTotal: 0, approvals: 0, requiredApprovals: 0, mergeable: null, mergeableState: null, aheadBy: 1, lastEvent: null, updatedAt: '2026-08-03T00:00:00.000Z', decision: { kind: 'ready-to-create', actionable: true, message: '等待创建 PR' } }],
+  });
+
+  await page.locator('[data-lane-step]').click();
+  const drawer = page.getByRole('dialog');
+  await drawer.getByRole('button', { name: '创建 PR' }).click();
+  const createDialog = page.getByRole('dialog');
+  await createDialog.locator('#create-title').fill('新增 E2E 覆盖');
+  await createDialog.locator('#create-body').fill('验证创建 PR 请求。');
+  expect(githubRequests(api, 'POST', '/repos/acme/demo/pulls')).toHaveLength(0);
+
+  await createDialog.getByRole('button', { name: '确认创建 PR' }).click();
+  await expect.poll(() => githubRequests(api, 'POST', '/repos/acme/demo/pulls')).toHaveLength(1);
+  expect(githubRequests(api, 'POST', '/repos/acme/demo/pulls')[0]?.body).toEqual({
+    title: '新增 E2E 覆盖',
+    head: 'feature/e2e',
+    base: 'dev',
+    body: '验证创建 PR 请求。',
+  });
+});
+
+test('抽屉合并 PR 仅在确认后通过 GitHub 代理使用当前 head SHA', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-merge-pr',
+    name: '合并 PR 流程',
+    repository,
+    stages: [{ stageId: 'stage-merge', source: 'feature/e2e', target: 'dev' }],
+  };
+  const api = await openWorkspace(page, {
+    workflows: [workflow],
+    items: [{ workflowId: workflow.id, workflowName: workflow.name, repository, stageIndex: 0, source: 'feature/e2e', target: 'dev', pullNumber: 42, kind: 'ready-to-merge', message: '可以合并' }],
+    states: [{ workflowId: workflow.id, stageIndex: 0, stageId: 'stage-merge', repository, source: 'feature/e2e', target: 'dev', pullNumber: 42, pullState: 'open', mergedAt: null, headSha: 'head-sha-42', checksState: 'success', checksPassed: 1, checksTotal: 1, approvals: 0, requiredApprovals: 0, mergeable: true, mergeableState: 'clean', aheadBy: 0, lastEvent: null, updatedAt: '2026-08-03T00:00:00.000Z', decision: { kind: 'ready-to-merge', actionable: true, message: '可以合并' } }],
+  });
+
+  await page.locator('[data-lane-step]').click();
+  await page.getByRole('dialog').getByRole('button', { name: '合并 PR' }).click();
+  const mergeDialog = page.getByRole('dialog');
+  await expect(mergeDialog.getByRole('heading', { name: '合并 PR #42' })).toBeVisible();
+  expect(githubRequests(api, 'PUT', '/repos/acme/demo/pulls/42/merge')).toHaveLength(0);
+
+  await mergeDialog.getByRole('button', { name: '确认合并' }).click();
+  await expect.poll(() => githubRequests(api, 'PUT', '/repos/acme/demo/pulls/42/merge')).toHaveLength(1);
+  expect(githubRequests(api, 'PUT', '/repos/acme/demo/pulls/42/merge')[0]?.body).toEqual({ merge_method: 'merge', sha: 'head-sha-42' });
+});
+
+test('删除流程需要确认，并且确认后才从云端删除', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-delete',
+    name: '待删除流程',
+    repository,
+    stages: [{ stageId: 'stage-delete', source: 'feature/e2e', target: 'dev' }],
+  };
+  const api = await openWorkspace(page, { workflows: [workflow] });
+
+  await page.getByRole('button', { name: '编辑流程' }).click();
+  await page.getByRole('button', { name: '删除整个流程' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('heading', { name: '删除整个流程？' })).toBeVisible();
+  expect(api.requests.filter(request => request.pathname === '/api/workflows' && request.method === 'DELETE')).toHaveLength(0);
+
+  await dialog.getByRole('button', { name: '确认删除' }).click();
+  await expect.poll(() => api.workflows).toHaveLength(0);
+  await expect(page.getByText('流程已删除')).toBeVisible();
+});
+
+test('部署回滚要求二次确认，并向服务端传递不可变运行标识', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-rollback',
+    name: '回滚流程',
+    repository,
+    stages: [{ stageId: 'stage-rollback', source: 'feature/e2e', target: 'main' }],
+    deployments: [{ target: 'main', provider: 'vercel', workflowName: 'Deploy frontend', environment: 'production', rollbackWorkflowName: 'Rollback production' }],
+  };
+  const api = await openWorkspace(page, {
+    workflows: [workflow],
+    states: [{ workflowId: workflow.id, stageIndex: 0, stageId: 'stage-rollback', repository, source: 'feature/e2e', target: 'main', pullNumber: 42, pullState: 'merged', mergedAt: '2026-08-03T00:00:00.000Z', headSha: 'merged-head', checksState: 'success', checksPassed: 1, checksTotal: 1, approvals: 0, requiredApprovals: 0, mergeable: true, mergeableState: 'clean', aheadBy: 0, lastEvent: null, updatedAt: '2026-08-03T00:00:00.000Z', decision: { kind: 'merged', actionable: false, message: '已合并' } }],
+    deploymentRuns: [{ workflowId: workflow.id, stageIndex: 0, stageId: 'stage-rollback', source: 'feature/e2e', provider: 'vercel', environment: 'production', runId: 84, runName: 'Deploy frontend', runUrl: 'https://github.com/acme/demo/actions/runs/84', deploymentUrl: 'https://deployment.example.com', state: 'success', conclusion: 'success', failureSummary: null, failureJobUrl: null, healthState: 'success', healthUrl: 'https://deployment.example.com/health', healthDetail: null, updatedAt: '2026-08-03T00:00:00.000Z', firstSeenAt: '2026-08-03T00:00:00.000Z' }],
+  });
+
+  await page.locator('[data-lane-step]').click();
+  const drawer = page.getByRole('dialog');
+  await drawer.getByRole('button', { name: '回滚到此版本' }).click();
+  const rollbackDialog = page.getByRole('dialog');
+  await expect(rollbackDialog.getByRole('heading', { name: '确认回滚这个部署？' })).toBeVisible();
+  expect(api.requests.filter(request => request.pathname === '/api/deployment-rollback')).toHaveLength(0);
+
+  await rollbackDialog.getByRole('button', { name: '确认并触发回滚' }).click();
+  await expect.poll(() => api.requests.filter(request => request.pathname === '/api/deployment-rollback')).toHaveLength(1);
+  expect(api.requests.find(request => request.pathname === '/api/deployment-rollback')?.body).toEqual({ workflowId: workflow.id, stageIndex: 0, source: 'feature/e2e', provider: 'vercel', runId: 84 });
 });

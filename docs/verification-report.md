@@ -17,7 +17,7 @@
 | 范围 | 证据 | 结果 |
 | --- | --- | --- |
 | 本地单元测试 | `npm test` | 22 个测试文件、171 项测试全部通过 |
-| 本地浏览器回归 | `npm run test:e2e` | Playwright Chromium 4 项：授权返回、流程创建与刷新恢复、步骤排序持久化、失败抽屉服务端重跑请求 | 通过（API mock） |
+| 本地浏览器回归 | `npm run test:e2e` | Playwright Chromium 8 项：授权返回、流程创建与刷新恢复、步骤排序、失败重跑、抽屉创建/合并 PR、流程删除、确认式部署回滚 | 通过（API mock） |
 | 类型检查 | `npx tsc --noEmit` | 通过 |
 | 浏览器生产构建 | `npm run lint`（Vite production build） | 通过 |
 | 变更格式 | `git diff --check` | 通过 |
@@ -41,7 +41,7 @@
 
 ### 浏览器 E2E 边界
 
-新增的 Playwright 用例启动本地 Vite，并在浏览器网络层 mock GitHub App / 工作流 / 队列 API。它验证真实 DOM、事件绑定、表单、抽屉和请求负载，适合防止前端交互回归；不使用 GitHub token、不创建或合并真实 PR，也不能替代下方需要真实第三方状态的验收项目。
+新增的 Playwright 用例启动本地 Vite，并在浏览器网络层 mock GitHub App / 工作流 / 队列 API。它验证真实 DOM、事件绑定、表单、抽屉、二次确认和请求负载，适合防止前端交互回归；不使用 GitHub token、不创建或合并真实 PR，也不能替代下方需要真实第三方状态的验收项目。
 
 ### P0：连续保存会触发流程版本自冲突
 
