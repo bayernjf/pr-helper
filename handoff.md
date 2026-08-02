@@ -12,19 +12,19 @@
 - Supabase 迁移 `001`–`019` 已执行；`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
 
-## 本地待部署修复
+## 已部署修复
 
-以下改动已提交到本地 `feature/20260722`，尚未推送或合并：
+以下修复已部署 Production 并完成回归：
 
 - 待办请求串行器：合并并发后台快照，手动 reconciliation 在快照结束后只执行一次；失败或超时保留最后一个有效的阶段快照。新增 `src/lib/action-queue-request-queue.test.ts`。
 
-本地待部署提交：`c458da48 fix(inbox): serialize concurrent refreshes`。
+对应提交：`c458da48 fix(inbox): serialize concurrent refreshes`。
 
-Production 已复现而待部署复验的风险：
+Production 已验证行为：
 
-1. 快速连续保存同一流程的 `409` 已有上线修复，但未完成 Production 连续编辑复验。
-2. 动态 PR #4、失败恢复入口和产品内 Actions 重跑/冷却已通过；重跑后立即从抽屉“重新同步”会发生并发请求，可能令抽屉短暂显示空状态。本地修复待部署。
-3. 单次 `GET /api/inbox?refresh=1` 已在 Production 约 41 秒完成；重复并发刷新仍需在本地修复部署后复验。
+1. 快速连续保存同一流程的 `409` 已在 Production 连续新增/删除与整页刷新中通过复验。
+2. 动态 PR #4、失败恢复入口和产品内 Actions 重跑/冷却已通过；重跑后重新同步的并发状态也已通过复验，抽屉不会丢失 PR 状态。
+3. 单次 `GET /api/inbox?refresh=1` 已在 Production 约 37–41 秒完成；未再复现 300 秒 `504`。
 
 ## 部署与会话边界
 
@@ -64,11 +64,9 @@ Production 已复现而待部署复验的风险：
 
 优先完成下列项目，不要立即追加复杂流程能力：
 
-1. 部署本地待办请求串行修复，在 `E2E Failure and Dynamic Rule` 的 PR #4 中重复“重新同步”，确认抽屉始终保留失败状态。
-2. 连续添加/删除流程步骤、部署门禁和恢复策略，确认不再出现 `409`，刷新后配置完整保留。
-3. 验证 Codex 修复包不修改 PR 或仓库，仅生成诊断信息。
-4. 用第二个账户验证 required approval；再分别验证 private、organization 仓库安装边界。
-5. 在单独低风险窗口配置真实部署后，验证 Vercel/Cloudflare 门禁、健康检查与确认式回滚。
+1. 用第二个账户验证 required approval；再分别验证 private、organization 仓库安装边界。
+2. 在单独低风险窗口配置真实部署后，验证 Vercel/Cloudflare 门禁、健康检查与确认式回滚。
+3. 验证 GitHub Webhook delivery 能自动投影到数据库和看板，不以手动刷新替代。
 
 不要为了验收立即触发 Production 回滚；该操作会真实改变线上版本，应仅在单独安排的低风险窗口执行。
 
