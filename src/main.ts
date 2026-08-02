@@ -11,6 +11,7 @@ import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
 import { getCloudSyncStatus, unlockCloudSync, lockCloudSync, isCloudSyncUnlocked, encryptForCloud, decryptFromCloud, rotateCloudSyncKey, type CloudSyncStatus, type SyncableData } from './lib/encrypted-sync';
+import { canPerformTeamOperation, teamRoleLabel } from './lib/team-permissions';
 import { t, getLocale, setLocale, detectLocale, registerTranslations, type Locale } from './lib/i18n';
 import en from './lib/translations/en';
 import zh from './lib/translations/zh';
@@ -39,6 +40,8 @@ type SyncHealth = { lastReconciliation: ReconciliationRun | null; stages: StageS
 type WorkflowRun = { id: number; workflowId: string; version: number; stageIndex: number; stageId: string | null; source: string; target: string; stageSnapshot: { source: string; target: string; stageId?: string }; pullNumber: number | null; state: 'active' | 'completed' | 'failed'; startedAt: string; completedAt: string | null };
 type TimelineEntry = { workflowId: string; stageIndex: number; stageId: string | null; source: string; target: string; kind: string; message: string; occurredAt: string; pullNumber: number | null; runId: number | null };
 type OperationAuditEntry = { id: number; action: string; outcome: 'success' | 'failure'; repository: string | null; workflowId: string | null; stageId: string | null; source: string | null; target: string | null; pullNumber: number | null; runId: number | null; metadata: Record<string, unknown>; failureReason: string | null; occurredAt: string };
+type Team = { id: string; name: string; role: 'owner' | 'editor' | 'operator' | 'viewer'; createdAt: string };
+type TeamMember = { githubLogin: string; role: Team['role'] };
 type PreflightCheck = { code: string; severity: 'error' | 'warning' | 'info'; title: string; detail: string; workflowId: string; stageIndex: number | null; source: string | null; fix?: string };
 type PreflightResult = { workflowId: string; workflowName: string; repository: string; checks: PreflightCheck[]; summary: { errors: number; warnings: number; info: number }; ok: boolean };
 type RecoveryStatus = { workflowId: string; stageIndex: number; source: string; retryCount: number; maxRetries: number; lastRetryAt: string | null; cooldownRemainingSeconds: number; exhausted: boolean; escalationNeeded: boolean };
@@ -104,6 +107,13 @@ let cloudSyncStatus: CloudSyncStatus = getCloudSyncStatus();
 
 const app = () => document.querySelector<HTMLDivElement>('#app')!;
 const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+function canOperateWorkflow(workflow: Workflow, operation: 'workflow-edit' | 'workflow-delete' | 'pr-create' | 'actions-rerun' | 'pull-merge' | 'deployment-rollback') {
+  return !workflow.team || canPerformTeamOperation(workflow.team.role, operation);
+}
+function sharedWorkflowBadge(workflow: Workflow) {
+  if (!workflow.team) return '';
+  return `<small class="team-workflow-badge">${escape(t('teams.sharedBadge', { team: workflow.team.name, role: teamRoleLabel(workflow.team.role) }))}</small>`;
+}
 function loadWorkflows(): Workflow[] {
   try {
     const stored = JSON.parse(localStorage.getItem('pr-helper-workflows') || '[]') as unknown;
@@ -390,6 +400,77 @@ function showPermissionsDialog() {
   dialog.className = 'create-dialog permissions-dialog';
   dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('permissions.eyebrow')}</p><h2>${t('permissions.title')}</h2><dl class="permissions-list"><dt>${t('permissions.actions.label')}</dt><dd>${t('permissions.actions.desc')}</dd><dt>${t('permissions.contents.label')}</dt><dd>${t('permissions.contents.desc')}</dd><dt>${t('permissions.pullRequests.label')}</dt><dd>${t('permissions.pullRequests.desc')}</dd></dl><p class="meta">${t('permissions.revoke')}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('rollback.cancel')}</button>${githubInstallationSettingsUrl ? `<a href="${githubInstallationSettingsUrl}" target="_blank" class="primary">${t('permissions.manage')}</a>` : ''}</div></form>`;
   document.body.append(dialog); dialog.showModal();
+  dialog.addEventListener('close', () => dialog.remove());
+}
+
+async function teamApi<T>(path = '', init?: RequestInit): Promise<T> {
+  const response = await fetch(githubAppApiUrl(`/api/workflows?resource=teams${path}`), init);
+  const payload = await response.json().catch(() => ({})) as T & { message?: string };
+  if (!response.ok) throw new Error(payload.message || t('toast.cloudFail.generic'));
+  return payload;
+}
+
+function showTeamsDialog() {
+  if (!cloudWorkflowStorage || localViteWithoutApi) { showToast(t('localMode.apiUnavailable')); return; }
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog teams-dialog';
+  document.body.append(dialog);
+  dialog.showModal();
+  let teams: Team[] = [];
+  let members: TeamMember[] = [];
+  let selectedTeamId = '';
+  let error = '';
+  const roleOptions = (selected: Team['role'] = 'viewer') => (['owner', 'editor', 'operator', 'viewer'] as const)
+    .map(role => `<option value="${role}" ${role === selected ? 'selected' : ''}>${escape(t(`teams.role.${role}`))}</option>`).join('');
+  const selectedTeam = () => teams.find(team => team.id === selectedTeamId) || null;
+  const refresh = async (nextTeamId = selectedTeamId) => {
+    try {
+      const payload = await teamApi<{ teams?: Team[] }>();
+      teams = Array.isArray(payload.teams) ? payload.teams : [];
+      selectedTeamId = teams.some(team => team.id === nextTeamId) ? nextTeamId : teams[0]?.id || '';
+      if (selectedTeamId) {
+        const result = await teamApi<{ members?: TeamMember[] }>(`&teamId=${encodeURIComponent(selectedTeamId)}`);
+        members = Array.isArray(result.members) ? result.members : [];
+      } else members = [];
+      error = '';
+    } catch (reason) { error = reason instanceof Error ? reason.message : t('toast.cloudFail.generic'); }
+    draw();
+  };
+  const draw = () => {
+    const team = selectedTeam();
+    const canManage = team?.role === 'owner';
+    const personalFlows = workflows.filter(flow => !flow.team);
+    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('teams.eyebrow')}</p><h2>${t('teams.title')}</h2><p class="meta">${t('teams.desc')}</p>${error ? `<p class="error">${escape(error)}</p>` : ''}<section class="teams-create"><label>${t('teams.create.label')}<input id="team-name" maxlength="120" placeholder="${t('teams.create.placeholder')}" /></label><button id="team-create" type="button" class="ghost">${t('teams.create.button')}</button></section>${teams.length ? `<div class="teams-layout"><label class="teams-selector">${t('teams.title')}<select id="team-select">${teams.map(item => `<option value="${escape(item.id)}" ${item.id === selectedTeamId ? 'selected' : ''}>${escape(item.name)} · ${escape(t(`teams.role.${item.role}`))}</option>`).join('')}</select></label><section class="teams-members"><h3>${t('teams.members.title')}</h3>${members.length ? `<ul>${members.map(member => `<li><span>@${escape(member.githubLogin)} <small>${escape(t(`teams.role.${member.role}`))}</small></span>${canManage ? `<button type="button" class="text-link" data-remove-member="${escape(member.githubLogin)}">${t('teams.members.remove')}</button>` : ''}</li>`).join('')}</ul>` : `<p class="meta">${t('teams.members.empty')}</p>`}${canManage ? `<div class="teams-member-form"><label>${t('teams.members.login')}<input id="team-member-login" autocomplete="off" placeholder="octocat" /></label><label>${t('teams.members.role')}<select id="team-member-role">${roleOptions()}</select></label><button id="team-member-save" type="button" class="ghost">${t('teams.members.add')}</button></div>` : `<p class="meta">${t('teams.ownerOnly')}</p>`}</section><section class="teams-share"><h3>${t('teams.share.title')}</h3>${personalFlows.length && canManage ? `<label>${t('teams.share.select')}<select id="team-workflow">${personalFlows.map(flow => `<option value="${escape(flow.id)}">${escape(flow.name)} · ${escape(flow.repository)}</option>`).join('')}</select></label><button id="team-share-workflow" type="button" class="ghost">${t('teams.share.button')}</button>` : `<p class="meta">${canManage ? t('teams.share.empty') : t('teams.ownerOnly')}</p>`}</section></div>` : `<p class="meta">${t('teams.empty')}</p>`}<div class="dialog-actions"><button value="cancel" class="ghost">${t('teams.close')}</button></div></form>`;
+    dialog.querySelector<HTMLButtonElement>('#team-create')?.addEventListener('click', async () => {
+      const name = dialog.querySelector<HTMLInputElement>('#team-name')!.value.trim();
+      if (!name) return;
+      try {
+        const result = await teamApi<{ team?: Team }>('', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'create', name }) });
+        await refresh(result.team?.id || '');
+      } catch (reason) { error = reason instanceof Error ? reason.message : t('toast.cloudFail.generic'); draw(); }
+    });
+    dialog.querySelector<HTMLSelectElement>('#team-select')?.addEventListener('change', event => { void refresh((event.target as HTMLSelectElement).value); });
+    dialog.querySelector<HTMLButtonElement>('#team-member-save')?.addEventListener('click', async () => {
+      const githubLogin = dialog.querySelector<HTMLInputElement>('#team-member-login')!.value.trim();
+      const role = dialog.querySelector<HTMLSelectElement>('#team-member-role')!.value;
+      if (!githubLogin || !selectedTeamId) return;
+      try { await teamApi('', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'member', teamId: selectedTeamId, githubLogin, role }) }); await refresh(); }
+      catch (reason) { error = reason instanceof Error ? reason.message : t('toast.cloudFail.generic'); draw(); }
+    });
+    dialog.querySelectorAll<HTMLButtonElement>('[data-remove-member]').forEach(button => button.addEventListener('click', async () => {
+      const githubLogin = button.dataset.removeMember;
+      if (!githubLogin || !selectedTeamId) return;
+      try { await teamApi('', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'remove-member', teamId: selectedTeamId, githubLogin }) }); await refresh(); }
+      catch (reason) { error = reason instanceof Error ? reason.message : t('toast.cloudFail.generic'); draw(); }
+    }));
+    dialog.querySelector<HTMLButtonElement>('#team-share-workflow')?.addEventListener('click', async () => {
+      const workflowId = dialog.querySelector<HTMLSelectElement>('#team-workflow')?.value;
+      if (!workflowId || !selectedTeamId) return;
+      try { await teamApi('', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'share-workflow', teamId: selectedTeamId, workflowId }) }); await refresh(); }
+      catch (reason) { error = reason instanceof Error ? reason.message : t('toast.cloudFail.generic'); draw(); }
+    });
+  };
+  void refresh();
   dialog.addEventListener('close', () => dialog.remove());
 }
 
@@ -702,7 +783,7 @@ function render() {
   const account = githubLogin ? `GitHub · @${escape(githubLogin)}` : t('account.label');
   const push = pushConfigured ? `<button id="push-settings" class="account-menu-item" ${pushSubscribed ? `disabled title="${t('account.push.title')}"` : ''}>${pushSubscribed ? t('account.push.on') : t('account.push.off')}</button>` : '';
   const themeIcon = currentTheme === 'dark' ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3a6 6 0 0 0 12 0V9a6 6 0 0 0-6-6z"/></svg>';
-  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">${t('brand.name')}<span>${t('brand.suffix')}</span></a><nav aria-label="${t('nav.label')}"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">${t('nav.overview')}</button></nav><div class="topbar-actions"><button id="theme-toggle" class="theme-toggle" aria-label="${currentTheme === 'dark' ? t('theme.toLight') : t('theme.toDark')}">${themeIcon}<span>${currentTheme === 'dark' ? t('theme.light') : t('theme.dark')}</span></button><button id="lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}${operationAudit}<button id="ai-settings-top" class="account-menu-item">${t('account.aiSettings')}</button><button id="cloud-sync-top" class="account-menu-item">${cloudSyncStatus.state === 'disabled' ? t('cloudSync.enable') : t('cloudSync.status.' + cloudSyncStatus.state)}</button><button id="disconnect" class="account-menu-item danger">${t('account.disconnect')}</button><button id="delete-account-top" class="account-menu-item danger">${t('account.deleteAccount')}</button><button id="permissions-top" class="account-menu-item">${t('account.permissions')}</button><a href="/privacy.html" class="account-menu-item" target="_blank">${t('account.privacy')}</a></div></div></div></header><section id="content"></section></main>`;
+  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#">${t('brand.name')}<span>${t('brand.suffix')}</span></a><nav aria-label="${t('nav.label')}"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">${t('nav.overview')}</button></nav><div class="topbar-actions"><button id="theme-toggle" class="theme-toggle" aria-label="${currentTheme === 'dark' ? t('theme.toLight') : t('theme.toDark')}">${themeIcon}<span>${currentTheme === 'dark' ? t('theme.light') : t('theme.dark')}</span></button><button id="lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}${operationAudit}<button id="team-settings-top" class="account-menu-item" ${cloudWorkflowStorage ? '' : 'disabled'}>${t('account.teams')}</button><button id="ai-settings-top" class="account-menu-item">${t('account.aiSettings')}</button><button id="cloud-sync-top" class="account-menu-item">${cloudSyncStatus.state === 'disabled' ? t('cloudSync.enable') : t('cloudSync.status.' + cloudSyncStatus.state)}</button><button id="disconnect" class="account-menu-item danger">${t('account.disconnect')}</button><button id="delete-account-top" class="account-menu-item danger">${t('account.deleteAccount')}</button><button id="permissions-top" class="account-menu-item">${t('account.permissions')}</button><a href="/privacy.html" class="account-menu-item" target="_blank">${t('account.privacy')}</a></div></div></div></header><section id="content"></section></main>`;
   const accountMenuToggle = document.querySelector<HTMLButtonElement>('#account-menu-toggle')!, accountMenuPanel = document.querySelector<HTMLElement>('#account-menu-panel')!;
   const accountMenu = accountMenuToggle.closest<HTMLElement>('.account-menu')!;
   const closeAccountMenu = () => { accountMenuPanel.hidden = true; accountMenuToggle.setAttribute('aria-expanded', 'false'); };
@@ -721,6 +802,7 @@ function render() {
   document.querySelector('#ai-settings-top')!.addEventListener('click', showAiSettings);
   document.querySelector('#cloud-sync-top')!.addEventListener('click', showCloudSyncDialog);
   document.querySelector('#operation-audit')!.addEventListener('click', showOperationAuditDialog);
+  document.querySelector('#team-settings-top')?.addEventListener('click', showTeamsDialog);
   document.querySelector('#manage-repositories')?.addEventListener('click', openRepositoryManagement);
   document.querySelector('#push-settings')?.addEventListener('click', () => void enablePushNotifications());
   document.querySelector('#disconnect')!.addEventListener('click', showDisconnectDialog);
@@ -818,6 +900,7 @@ function deploymentProviderName(provider: WorkflowStageDeployment['provider']) {
 function deploymentStateText(state: WorkflowStageDeployment['state']) { return t(`overview.deployment.${state}`); }
 function deploymentCards(workflowId: string, stageIndex: number, source?: string) {
   const deployments = stageDeployments(workflowId, stageIndex, source);
+  const flow = workflows.find(workflow => workflow.id === workflowId);
   if (!deployments.length) return '';
   return `<section class="drawer-deployments"><p class="eyebrow">${t('overview.deployment.title')}</p><div>${deployments.map(deployment => {
     const primaryUrl = deployment.deploymentUrl || deployment.runUrl;
@@ -826,7 +909,7 @@ function deploymentCards(workflowId: string, stageIndex: number, source?: string
     const failure = deployment.state === 'failure' && deployment.failureSummary ? `<p>${escape(deployment.failureSummary)}</p>` : '';
     const health = deployment.healthState ? `<small>${t('overview.deployment.health')} · ${deployment.healthState === 'success' ? t('overview.deployment.healthPassed') : t('overview.deployment.healthFailed')}${deployment.healthDetail ? ` (${escape(deployment.healthDetail)})` : ''}</small>` : '';
     const jobLink = deployment.failureJobUrl ? `<a href="${escape(deployment.failureJobUrl)}" target="_blank" rel="noreferrer">${t('overview.deployment.openFailedJob')} ↗</a>` : '';
-    const retry = deployment.state === 'failure' && deployment.runId ? `<button class="ghost deployment-retry" data-deployment-run="${deployment.runId}" data-deployment-provider="${deployment.provider}">${t('overview.deployment.retry')}</button>` : '';
+    const retry = deployment.state === 'failure' && deployment.runId && flow && canOperateWorkflow(flow, 'actions-rerun') ? `<button class="ghost deployment-retry" data-deployment-run="${deployment.runId}" data-deployment-provider="${deployment.provider}">${t('overview.deployment.retry')}</button>` : '';
     return `<article class="deployment-card ${deployment.state}"><div><b>${deploymentProviderName(deployment.provider)}</b><small>${t(`overview.deployment.${deployment.environment}`)} · ${deploymentStateText(deployment.state)}</small>${health}${failure}</div><span>${retry}${jobLink}${link}${logLink}</span></article>`;
   }).join('')}</div></section>`;
 }
@@ -836,7 +919,7 @@ function deploymentRunHistory(flow: Workflow, stageIndex: number, source?: strin
   if (!runs.length) return '';
   const target = flow.stages[stageIndex]?.target;
   return `<section class="drawer-deployment-history"><p class="eyebrow">${t('overview.deployment.history')}</p><ol>${runs.map(run => {
-    const rollback = run.state === 'success' && run.runId && run.deploymentUrl && deploymentConfigs(flow).some(configuration => configuration.target === target && configuration.provider === run.provider && configuration.rollbackWorkflowName)
+    const rollback = run.state === 'success' && run.runId && run.deploymentUrl && canOperateWorkflow(flow, 'deployment-rollback') && deploymentConfigs(flow).some(configuration => configuration.target === target && configuration.provider === run.provider && configuration.rollbackWorkflowName)
       ? `<button type="button" class="ghost deployment-rollback" data-deployment-run="${run.runId}" data-deployment-provider="${run.provider}">${t('overview.deployment.rollback')}</button>`
       : '';
     return `<li class="${run.state}"><div><b>${deploymentProviderName(run.provider)} · ${t(`overview.deployment.${run.environment}`)}</b><small>${deploymentStateText(run.state)}${run.healthState ? ` · ${t('overview.deployment.health')} ${run.healthState === 'success' ? t('overview.deployment.healthPassed') : t('overview.deployment.healthFailed')}` : ''}</small></div><time>${escape(stageUpdatedAt({ updatedAt: run.firstSeenAt } as WorkflowStageState))}</time><span>${rollback}${run.runUrl ? `<a href="${escape(run.runUrl)}" target="_blank" rel="noreferrer">${t('overview.deployment.openLogs')} ↗</a>` : ''}</span></li>`;
@@ -924,7 +1007,7 @@ function failureCenterPanel(): string {
     const prLink = item.pullNumber && flow ? `<a href="${githubPullUrl(flow.repository, item.pullNumber)}" target="_blank" rel="noreferrer">#${item.pullNumber}</a>` : '';
     const recovery = item.kind === 'checks-failed' ? recoveryStatusFor(item.workflowId, item.stageIndex, item.source) : undefined;
     const retryDisabled = recovery ? (recovery.exhausted || recovery.cooldownRemainingSeconds > 0) : false;
-    const actions = item.kind === 'checks-failed'
+    const actions = item.kind === 'checks-failed' && flow && canOperateWorkflow(flow, 'actions-rerun')
       ? `<button class="ghost fc-retry" data-fc-workflow="${escape(item.workflowId)}" data-fc-stage="${item.stageIndex}" data-fc-source="${escape(item.source)}"${retryDisabled ? ' disabled' : ''}>${t('recovery.retryActions')}</button><button class="ghost fc-repair" data-fc-workflow="${escape(item.workflowId)}" data-fc-stage="${item.stageIndex}" data-fc-source="${escape(item.source)}">${t('repair.codex')}</button>`
       : '';
     const badge = recoveryStatusBadge(recovery);
@@ -1069,14 +1152,15 @@ function projectLane(flow: Workflow) {
     ? [...targets.entries()].map(([target, routes]) => `<section class="lane-merge-group"><p>${t('overview.board.mergeTarget', { target: escape(target) })}</p><div>${routes.map(({ stage, index }) => routeCards(stage, index)).join('')}</div></section>`).join('')
     : flow.stages.map((stage, index) => routeCards(stage, index)).join('<span class="lane-connector" aria-hidden="true">→</span>');
   const orderIndex = workflows.findIndex(workflow => workflow.id === flow.id);
-  const sortingDisabled = overviewFilter !== 'all';
+  const sortingDisabled = overviewFilter !== 'all' || workflows.some(workflow => !canOperateWorkflow(workflow, 'workflow-edit'));
+  const editable = canOperateWorkflow(flow, 'workflow-edit');
   const dragLabel = t('overview.board.dragProject', { name: flow.name });
   const runSummary = laneRunSummary(flow);
   const warnings = laneConfigurationWarnings(flow);
   const warning = warnings.length ? `<div class="lane-config-warning"><b>${t('overview.configWarning.count', { count: warnings.length })}</b><span>${escape(configurationWarningText(warnings[0]))}</span></div>` : '';
   const runHistory = laneRunHistory(flow);
   const timelineSection = workflowTimelineSection(flow);
-  return `<article class="project-lane" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 22" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div></div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${escape(flow.name)}</h2><p class="lane-run-summary ${runSummary.tone}">${escape(runSummary.text)}</p></div></div><div class="lane-actions"><button data-edit-project="${escape(flow.id)}" class="link-button">${t('overview.board.edit')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button></div></header>${warning}<div class="lane-track${hasFanIn ? ' has-fan-in' : ''}">${steps}</div>${timelineSection}${runHistory}</article>`;
+  return `<article class="project-lane" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 22" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div></div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${escape(flow.name)}</h2>${sharedWorkflowBadge(flow)}<p class="lane-run-summary ${runSummary.tone}">${escape(runSummary.text)}</p></div></div><div class="lane-actions"><button data-edit-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.edit')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button></div></header>${warning}<div class="lane-track${hasFanIn ? ' has-fan-in' : ''}">${steps}</div>${timelineSection}${runHistory}</article>`;
 }
 function bindLaneSorting() {
   const lanes = [...document.querySelectorAll<HTMLElement>('[data-project-lane]')];
@@ -1156,13 +1240,13 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
       && canCreateWorkflowStage(stageIndex, flow.stages, statuses)
       && (detailStatus.kind === 'not-created' || detailStatus.kind === 'merged' && Boolean(detailStatus.aheadBy)),
   );
-  const createAction = queueItem?.kind === 'ready-to-create' || state?.decision?.kind === 'ready-to-create' || canCreateFromDetail ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
+  const createAction = (queueItem?.kind === 'ready-to-create' || state?.decision?.kind === 'ready-to-create' || canCreateFromDetail) && canOperateWorkflow(flow, 'pr-create') ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
   const statusText = detailStatus ? drawerStatusText(state, detailStatus) : queueItem?.message || drawerStatusText(state);
   // `detailStatus` is freshly read from GitHub (or optimistically set after creating a PR),
   // so it must win over a possibly delayed reconciliation record.
   const mergeStatus = detailStatus || laneMergeStatus(state);
-  const mergeAction = mergeStatus && !recentlyCreatedPullNumbers.has(stageIndex) && canMergePull(mergeStatus) ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
-  const recoveryActions = state?.checksState === 'failure' ? `<button class="ghost drawer-repair">${t('repair.codex')}</button><button class="ghost drawer-retry-actions">${t('recovery.retryActions')}</button>` : '';
+  const mergeAction = mergeStatus && !recentlyCreatedPullNumbers.has(stageIndex) && canMergePull(mergeStatus) && canOperateWorkflow(flow, 'pull-merge') ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
+  const recoveryActions = state?.checksState === 'failure' ? `<button class="ghost drawer-repair">${t('repair.codex')}</button>${canOperateWorkflow(flow, 'actions-rerun') ? `<button class="ghost drawer-retry-actions">${t('recovery.retryActions')}</button>` : ''}` : '';
   const actions = `<div class="dialog-actions drawer-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div>`;
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
@@ -1277,6 +1361,11 @@ function bindDraftStepSorting() {
 }
 
 function editor() {
+  if (active?.team && !canOperateWorkflow(active, 'workflow-edit')) {
+    screen = 'detail';
+    detail();
+    return;
+  }
   const content = document.querySelector('#content')!;
   const selected = active?.repository || '';
   const repositoryManagementAction = githubInstallationSettingsUrl ? `<button id="editor-manage-repositories" type="button" class="text-link editor-manage-repositories">${t('account.manageRepos')}</button>` : '';
@@ -1385,18 +1474,20 @@ function value(id: string) { return document.querySelector<HTMLSelectElement | H
 function renderDraft() {
   if (!active) return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${t('draft.empty.title')}</h2><p class="meta">${t('draft.empty.desc')}</p>`;
   const flow = active;
-  return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${escape(flow.name)}</h2><p class="meta">${escape(flow.repository)}</p>${flow.stages.map((stage, index) => {
+  const deleteAction = canOperateWorkflow(flow, 'workflow-delete') ? `<button id="delete-flow" class="draft-delete-flow" type="button">${t('workflowDelete.action')}</button>` : '';
+  return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${escape(flow.name)}</h2><p class="meta">${escape(flow.repository)}</p>${sharedWorkflowBadge(flow)}${flow.stages.map((stage, index) => {
     const badge = stage.waitFor?.length ? `<small>${t('draft.waitFor', { count: stage.waitFor.length })}</small>` : stage.independent ? `<small>${t('draft.independent')}</small>` : '';
     const route = `${stage.source} → ${stage.target}`;
     return `<div class="draft-step" data-draft-step="${index}"><button type="button" class="draft-step-drag-handle" draggable="true" data-draft-drag="${index}" aria-label="${escape(t('draft.drag', { name: route }))}" title="${escape(t('draft.drag', { name: route }))}"><svg viewBox="0 0 16 22" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><span>${index + 1}</span><div class="draft-step-main"><b>${escape(route)}</b>${badge}</div><div class="draft-step-move-buttons"><button type="button" data-draft-move="${index}" data-draft-direction="up" aria-label="${escape(t('draft.moveUp', { name: route }))}" title="${escape(t('draft.moveUp', { name: route }))}" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" data-draft-move="${index}" data-draft-direction="down" aria-label="${escape(t('draft.moveDown', { name: route }))}" title="${escape(t('draft.moveDown', { name: route }))}" ${index === flow.stages.length - 1 ? 'disabled' : ''}>↓</button></div><button data-remove="${index}">${t('draft.remove')}</button></div>`;
-  }).join('')}<div class="draft-footer"><button id="view-flow" class="ghost">${t('draft.viewDetail')}</button><button id="delete-flow" class="draft-delete-flow" type="button">${t('workflowDelete.action')}</button></div>`;
+  }).join('')}<div class="draft-footer"><button id="view-flow" class="ghost">${t('draft.viewDetail')}</button>${deleteAction}</div>`;
 }
 
 function detail() {
   const content = document.querySelector('#content')!;
   if (!active) { screen = 'overview'; return overview(); }
   const summary = workflowSummary(active);
-  content.innerHTML = `<section class="page-head"><p class="eyebrow">${t('detail.eyebrow')}</p><h1>${escape(active.name)}</h1><p>${escape(active.repository)} · ${escape(summary.route)}</p><button id="refresh-status" class="ghost">${t('detail.refresh')}</button></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">${t('detail.timeline.eyebrow')}</p>${active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><aside class="panel next-action"><p class="eyebrow">${t('detail.nextAction.eyebrow')}</p><h2>${nextActionTitle()}</h2><p>${statuses ? t('detail.desc.withStatuses') : t('detail.desc.noStatuses')}</p><button id="edit-flow" class="primary">${t('detail.edit')}</button></aside></section>`;
+  const editable = canOperateWorkflow(active, 'workflow-edit');
+  content.innerHTML = `<section class="page-head"><p class="eyebrow">${t('detail.eyebrow')}</p><h1>${escape(active.name)}</h1><p>${escape(active.repository)} · ${escape(summary.route)}</p>${sharedWorkflowBadge(active)}<button id="refresh-status" class="ghost">${t('detail.refresh')}</button></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">${t('detail.timeline.eyebrow')}</p>${active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><aside class="panel next-action"><p class="eyebrow">${t('detail.nextAction.eyebrow')}</p><h2>${nextActionTitle()}</h2><p>${statuses ? t('detail.desc.withStatuses') : t('detail.desc.noStatuses')}</p><button id="edit-flow" class="primary" ${editable ? '' : 'disabled'}>${t('detail.edit')}</button></aside></section>`;
   document.querySelector('#edit-flow')!.addEventListener('click', () => { screen = 'editor'; render(); });
   document.querySelector('#refresh-status')!.addEventListener('click', () => { void refreshDetailStatuses(); });
   document.querySelectorAll<HTMLButtonElement>('[data-dynamic-stage]').forEach(button => button.addEventListener('click', () => {
@@ -1452,7 +1543,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   }
   const status = statuses?.[index];
   if (!status) return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p>${t('detail.timeline.placeholder')}</p></div></article>`;
-  if (status.kind === 'not-created') { const unlocked = canCreateWorkflowStage(index, active!.stages, statuses!); return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${unlocked ? `<div class="timeline-actions"><button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button><a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${t('status.locked')}</p>`}</div></article>`; }
+  if (status.kind === 'not-created') { const unlocked = canCreateWorkflowStage(index, active!.stages, statuses!); const canCreate = canOperateWorkflow(active!, 'pr-create'); return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${unlocked ? `<div class="timeline-actions">${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${t('status.locked')}</p>`}</div></article>`; }
   if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status failure">${t('status.fetchFailed')}</b> · ${escape(status.message || '')}</p></div></article>`;
   const actions = status.checks?.total ? t('status.actions.summary', { passed: status.checks.passed, total: status.checks.total, state: status.checks.state === 'success' ? t('status.actions.passed') : status.checks.state === 'failure' ? t('status.actions.failed') : t('status.actions.running') }) : '';
   const approvals = status.requiredApprovals ? t('status.approvals', { approvals: status.approvals || 0, required: status.requiredApprovals }) : '';
@@ -1465,9 +1556,9 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const newCommits = status.kind === 'merged' && status.aheadBy
     ? `<p><b class="status neutral">${t('status.newCommits', { count: status.aheadBy })}</b> · ${canCreateNewPull ? t('status.newCommits.canCreate') : t('status.newCommits.waiting')}</p>`
     : '';
-  const newPullAction = canCreateNewPull ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr.button')}</button>` : '';
+  const newPullAction = canCreateNewPull && canOperateWorkflow(active!, 'pr-create') ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr.button')}</button>` : '';
   const stateClass = status.kind === 'merged' ? mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
-  const mergeAction = status.kind === 'open' && !recentlyCreatedPullNumbers.has(index) && canMergePull(status) ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
+  const mergeAction = status.kind === 'open' && !recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(active!, 'pull-merge') ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
   const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';
   const gateList = gates.filter(Boolean);
   return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b></p>${gateList.length ? `<div class="gate-list">${gateList.map(gate => `<span>${gate}</span>`).join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
@@ -1499,6 +1590,7 @@ async function showCodexRepairDialog(index: number, source?: string) {
   dialog.addEventListener('close', () => dialog.remove());
 }
 function showDeploymentRollbackDialog(flow: Workflow, stageIndex: number, source: string, run: WorkflowStageDeploymentRun) {
+  if (!canOperateWorkflow(flow, 'deployment-rollback')) return;
   const stage = flow.stages[stageIndex];
   const deployment = deploymentConfigs(flow).find(configuration => configuration.target === stage?.target && configuration.provider === run.provider);
   if (!stage || !deployment?.rollbackWorkflowName || !run.runId) { showToast(t('rollback.unavailable')); return; }
@@ -1528,10 +1620,11 @@ function showDeploymentRollbackDialog(flow: Workflow, stageIndex: number, source
   dialog.addEventListener('close', () => dialog.remove(), { once: true });
 }
 async function retryDeployment(flow: Workflow, state: WorkflowStageState, runId: number, provider: string, button: HTMLButtonElement) {
+  if (!canOperateWorkflow(flow, 'actions-rerun')) return;
   button.disabled = true; button.textContent = t('overview.deployment.retrying');
   try {
     const { owner, name } = parseRepository(flow.repository);
-    await githubFetch<Record<string, never>>(token, `/repos/${owner}/${name}/actions/runs/${runId}/rerun`, { method: 'POST' });
+    await githubFetch<Record<string, never>>(token, `/repos/${owner}/${name}/actions/runs/${runId}/rerun`, { method: 'POST' }, flow.id);
     await fetch(githubAppApiUrl('/api/recovery-event'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: flow.id, stageIndex: state.stageIndex, source: state.source }) }).catch(() => undefined);
     showToast(t('overview.deployment.retryStarted', { provider: deploymentProviderName(provider as WorkflowStageDeployment['provider']) }));
     void loadActionQueue().finally(render);
@@ -1543,6 +1636,7 @@ async function retryDeployment(flow: Workflow, state: WorkflowStageState, runId:
   }
 }
 async function retryFailedActions(flow: Workflow, state: WorkflowStageState, button: HTMLButtonElement) {
+  if (!canOperateWorkflow(flow, 'actions-rerun')) return;
   if (!state.headSha) { showToast(t('recovery.retryUnavailable')); return; }
   button.disabled = true; button.textContent = t('recovery.retrying');
   try {
@@ -1614,7 +1708,7 @@ function mergeErrorMessage(error: unknown) {
 }
 function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: () => void) {
   const status = statusOverride || statuses?.[index];
-  if (!active || !status?.pr || !canMergePull(status)) return;
+  if (!active || !status?.pr || !canMergePull(status) || !canOperateWorkflow(active, 'pull-merge')) return;
   const pull = status.pr;
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
@@ -1875,7 +1969,7 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
 }
 
 function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?: string) {
-  if (!active) return;
+  if (!active || !canOperateWorkflow(active, 'pr-create')) return;
   const stage = active.stages[index];
   const source = sourceOverride || stage.source;
   const identity: PullRequestDraftIdentity = { repository: active.repository, source, target: stage.target };

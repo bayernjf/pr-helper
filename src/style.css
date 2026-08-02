@@ -1023,9 +1023,94 @@ a.account-menu-item {
   color: var(--text-muted);
 }
 
+.teams-dialog {
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(84vh, 760px);
+  overflow: auto;
+}
+
+.teams-create,
+.teams-member-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.teams-create label,
+.teams-member-form label {
+  margin: 0;
+}
+
+.teams-layout {
+  display: grid;
+  gap: 18px;
+  margin: 18px 0;
+}
+
+.teams-selector {
+  margin: 0;
+}
+
+.teams-members,
+.teams-share {
+  border-top: 1px solid var(--border-default);
+  padding-top: 14px;
+}
+
+.teams-members h3,
+.teams-share h3 {
+  margin: 0 0 8px;
+  font: 800 .82rem Manrope;
+  color: var(--text-primary);
+}
+
+.teams-members ul {
+  display: grid;
+  gap: 5px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.teams-members li {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-muted);
+  color: var(--text-secondary);
+  font-size: .82rem;
+}
+
+.teams-members small {
+  color: var(--text-muted);
+}
+
+.teams-share label {
+  margin: 0 0 10px;
+}
+
+.team-workflow-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-top: 4px;
+  padding: 3px 6px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: var(--bg-card-hover);
+  font: 700 .68rem Manrope;
+}
+
 @media (max-width: 620px) {
   .operation-audit-list li { display: grid; gap: 8px; }
   .operation-audit-list span { text-align: left; }
+  .teams-create,
+  .teams-member-form { grid-template-columns: 1fr; }
 }
 
 .create-pr {

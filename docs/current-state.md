@@ -46,6 +46,8 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - 动态分支规则（如 `feature/*`、`fix/*`）、独立路径与多路径汇聚。
 - 流程配置保存在 Supabase，并保留 `localStorage` 回退和显式本地迁移提示。
 - 每次保存流程自动生成版本快照；PR 合并时记录运行实例，Overview 看板显示最近运行历史。
+- 团队协作（本地待部署）：团队 Owner 可创建团队、维护成员角色并共享个人流程；共享成员在 Lane、待办、阶段状态、部署、运行历史和时间线中看到同一份流程投影。
+- 共享流程写操作由服务端角色强制执行：Viewer 只读，Operator 可创建 PR/重跑 Actions，Editor 可编辑流程，只有 Owner 可以删除流程、合并 PR 或发起部署回滚。
 
 ### AI 与本地草稿
 
@@ -91,6 +93,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 | 校准运行遥测 | Supabase Postgres（`reconciliation_runs`） |
 | 流程版本快照与运行记录 | Supabase Postgres（`workflow_versions`、`workflow_runs`） |
 | Push subscription | Supabase Postgres |
+| 团队、成员与共享流程关系 | Supabase Postgres（`pr_helper_teams`、`pr_helper_team_members`、`pr_helper_team_workflows`） |
 | AI API Key | 浏览器 `sessionStorage` |
 | PR 草稿、Markdown 生成规则 | 浏览器 `localStorage`；可通过加密云同步上传服务端（原型） |
 | 加密云同步密文 | Supabase Postgres（`pr_helper_encrypted_sync`） |
@@ -118,7 +121,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 ## 测试覆盖
 
-- 本地单元/服务端测试：`npm test` 运行 22 个文件 / 172 个测试；`npx tsc --noEmit`、`npm run lint` 和 `git diff --check` 同时通过。
+- 本地单元/服务端测试：`npm test` 运行 23 个文件 / 178 个测试；`npx tsc --noEmit`、`npm run lint` 和 `git diff --check` 同时通过。
 - 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉、创建/合并 PR、删除流程、确认式部署回滚和操作审计查询。它验证真实 DOM、二次确认和浏览器请求负载，不替代真实 GitHub 写入、门禁和部署验收。
 - 已新增流程保存队列回归：连续编辑会串行使用服务端返回的新版本，且不会由旧响应覆盖最新编辑；真实跨窗口乐观锁冲突仍会明确报错。
 - Production E2E 通过项目与尚未通过的集成项目均以 [验证报告](verification-report.md) 为准。
@@ -228,7 +231,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - **浏览器 E2E**：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影仍必须以真实 GitHub delivery 验收。
 - **加密同步加固**：本地已实现 v2 密文格式、v1 兼容读取、口令轮换、设备标识和乐观版本冲突拒绝；`021` 已执行，代码待部署。
 - **数据保留与清理**：本地已为 Webhook、密文历史、reconciliation、事件、部署运行和审计日志定义 30/90/180/365 天保留策略；现有 Cron 每次受限清理 2,000 条，`022` 已执行，代码待部署。
-- **团队权限模型**：本地已实现 Owner、Editor、Operator、Viewer 判定，团队/成员/共享流程表以及创建团队、成员授权、流程共享 API；`023` 已执行，代码待部署。
+- **团队协作闭环**：本地已实现团队管理界面、成员角色更新/移除、流程共享、共享流程投影和服务端角色强制执行；`023` 已执行，代码待部署。实际多账号协作与 GitHub App 安装边界仍需 Production 验收。
 
 ## 变更日志
 
