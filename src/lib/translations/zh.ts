@@ -486,6 +486,7 @@ const zh: TranslationDict = {
   'notif.actionsPassed': 'Actions 全绿',
   'notif.newPullReady': '有新提交，可以创建新 PR',
   'toast.queue.failed': '待办队列刷新失败',
+  'toast.queue.timeout': '刷新超时，请稍后重试。',
   'toast.queue.unavailable': '请先连接 GitHub 后再刷新待办队列。',
 
   // Next action titles

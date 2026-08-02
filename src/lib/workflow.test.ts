@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, workflowSummary } from './workflow';
+import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, sourceRuleMatches, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
   it('saves the repository and its first selected branch transition', () => {
@@ -27,6 +27,29 @@ describe('workflow configuration', () => {
       { source: 'fix/payment', target: 'dev', independent: true, stageId: expect.any(String) },
     ]);
     expect(workflowSummary(workflow)).toEqual({ route: 'feature/login → dev · fix/payment → dev', stepCount: 2 });
+  });
+
+  it('matches only concrete branches covered by a dynamic source rule', () => {
+    expect(sourceRuleMatches('fix/*', 'fix/login')).toBe(true);
+    expect(sourceRuleMatches('fix/*', 'feature/login')).toBe(false);
+    expect(sourceRuleMatches('dev', 'dev')).toBe(true);
+    expect(sourceRuleMatches('dev', 'develop')).toBe(false);
+  });
+
+  it('selects every current projection for a dynamic stage while excluding stale stage identities', () => {
+    const workflow = {
+      ...createWorkflow('octo/app', 'fix/*', 'dev'),
+      id: 'flow-1',
+      stages: [{ source: 'fix/*', target: 'dev', stageId: 'stage-fix' }],
+    };
+    const states = [
+      { workflowId: 'flow-1', stageIndex: 0, stageId: 'stage-fix', source: 'fix/login', target: 'dev', state: 'failure' },
+      { workflowId: 'flow-1', stageIndex: 0, stageId: 'stage-fix', source: 'fix/payment', target: 'dev', state: 'success' },
+      { workflowId: 'flow-1', stageIndex: 0, stageId: 'old-stage', source: 'fix/stale', target: 'dev', state: 'failure' },
+      { workflowId: 'flow-1', stageIndex: 0, stageId: 'stage-fix', source: 'feature/other', target: 'dev', state: 'failure' },
+    ];
+
+    expect(matchingStageProjections(workflow, 0, states).map(state => state.source)).toEqual(['fix/login', 'fix/payment']);
   });
 
   it('removes one configured step without changing the other steps', () => {
