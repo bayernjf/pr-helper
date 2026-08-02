@@ -412,7 +412,7 @@ function showOperationAuditDialog() {
   const exportButton = dialog.querySelector<HTMLButtonElement>('#operation-audit-export')!;
   void (async () => {
     try {
-      const response = await fetch(githubAppApiUrl('/api/inbox?action=operation-audit&limit=200'));
+      const response = await fetch(githubAppApiUrl('/api/inbox?resource=operation-audit&limit=200'));
       const payload = await response.json().catch(() => ({})) as { entries?: OperationAuditEntry[]; message?: string };
       if (!response.ok) throw new Error(payload.message || t('audit.error'));
       const entries = Array.isArray(payload.entries) ? payload.entries : [];
