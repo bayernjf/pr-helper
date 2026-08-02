@@ -76,7 +76,7 @@ async function mockApi(page: Page, fixture: ApiFixture = {}): Promise<MockApi> {
       return json(route, 200, { ok: true });
     }
 
-    if (pathname === '/api/inbox' && url.searchParams.get('action') === 'operation-audit') return json(route, 200, { entries: fixture.auditEntries || [] });
+    if (pathname === '/api/inbox' && url.searchParams.get('resource') === 'operation-audit') return json(route, 200, { entries: fixture.auditEntries || [] });
 
     if (pathname === '/api/inbox') return json(route, 200, {
       items: fixture.items || [],
