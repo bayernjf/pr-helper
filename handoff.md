@@ -8,25 +8,23 @@
 - 当前分支：`feature/20260722`。
 - 用户已确认本批代码已上线 Production。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地静态验证已通过：`npm test`（21 个文件 / 170 项）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。
+- 当前本地静态验证已通过：`npm test`（22 个文件 / 171 项）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。
 - Supabase 迁移 `001`–`019` 已执行；`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
 
 ## 本地待部署修复
 
-以下改动只在本地工作区，尚未提交、推送或合并：
+以下改动已提交到本地 `feature/20260722`，尚未推送或合并：
 
-- GitHub App installation token 缓存与 15 秒 API 超时；前端待办队列 60 秒超时提示。
-- 同一流程的远端保存串行队列，修复连续编辑自触发 `409` 的问题；新增 `src/lib/workflow-save-queue.test.ts`。
-- 动态 Source（如 `fix/*`）从服务端投影逐条展示实际分支；详情手动刷新会校准投影，每条分支状态可打开现有失败恢复抽屉。
-- `fix/* → dev` 的 Production 投影已验证：PR #4 显示在失败中心和 Lane。当前本地仅剩动态抽屉状态文案小修复（提交 `4762e7bc`）待部署。
-- 编辑器 `查看流程详情` 入口补齐导航事件。
+- 待办请求串行器：合并并发后台快照，手动 reconciliation 在快照结束后只执行一次；失败或超时保留最后一个有效的阶段快照。新增 `src/lib/action-queue-request-queue.test.ts`。
+
+本地待部署提交：`c458da48 fix(inbox): serialize concurrent refreshes`。
 
 Production 已复现而待部署复验的风险：
 
-1. 快速连续保存同一流程会并发发送相同版本，触发服务器乐观锁 `409`。
-2. 动态来源的详情展示已在本地改为消费服务端投影，但尚未部署；#4 的 Production 投影与失败恢复闭环仍没有通过证据。
-3. `GET /api/inbox?refresh=1` 曾触发 Vercel 300 秒 `504`；本地超时/缓存改动部署后必须复验。
+1. 快速连续保存同一流程的 `409` 已有上线修复，但未完成 Production 连续编辑复验。
+2. 动态 PR #4、失败恢复入口和产品内 Actions 重跑/冷却已通过；重跑后立即从抽屉“重新同步”会发生并发请求，可能令抽屉短暂显示空状态。本地修复待部署。
+3. 单次 `GET /api/inbox?refresh=1` 已在 Production 约 41 秒完成；重复并发刷新仍需在本地修复部署后复验。
 
 ## 部署与会话边界
 
@@ -66,9 +64,9 @@ Production 已复现而待部署复验的风险：
 
 优先完成下列项目，不要立即追加复杂流程能力：
 
-1. 部署本地待部署修复后，连续添加/删除流程步骤、部署门禁和恢复策略，确认不再出现 `409`，刷新后配置完整保留。
-2. 在 `E2E Failure and Dynamic Rule` 中验证 PR #4（`fix/failure-e2e → dev`）显示 Actions 失败、禁止合并、生成 Codex 修复包，并只重跑一次 Actions 以验证冷却策略。
-3. 点击“刷新队列”，确认 60 秒内成功或给出清晰超时，不再等待 Vercel 300 秒后 `504`。
+1. 部署本地待办请求串行修复，在 `E2E Failure and Dynamic Rule` 的 PR #4 中重复“重新同步”，确认抽屉始终保留失败状态。
+2. 连续添加/删除流程步骤、部署门禁和恢复策略，确认不再出现 `409`，刷新后配置完整保留。
+3. 验证 Codex 修复包不修改 PR 或仓库，仅生成诊断信息。
 4. 用第二个账户验证 required approval；再分别验证 private、organization 仓库安装边界。
 5. 在单独低风险窗口配置真实部署后，验证 Vercel/Cloudflare 门禁、健康检查与确认式回滚。
 
