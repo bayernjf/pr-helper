@@ -8,8 +8,8 @@
 - 当前分支：`feature/20260722`。
 - 用户已确认本批代码已上线 Production。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地验证已通过：`npm test`（22 个文件 / 172 项）、`npm run test:e2e`（Playwright Chromium 9 项，API mock）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。
-- Supabase 迁移 `001`–`020` 已执行；`020_operation_audit_logs.sql` 的审计表和索引已就绪。Production 首次审计验收发现读取端路由冲突，现有 `inbox` 函数的 `resource=operation-audit` 分流已在本地验证、待部署，不会增加 Serverless Function 数量。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
+- 当前本地验证已通过：`npm test`（23 个文件 / 178 项）、`npm run test:e2e`（Playwright Chromium 9 项，API mock）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。
+- Supabase 迁移 `001`–`023` 已执行；`021`–`023` 对应代码仍待部署。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
 
 ## 已部署修复
@@ -78,10 +78,10 @@ Production 已验证行为：
 在上述生产验收通过后，建议顺序为：
 
 1. 浏览器 E2E：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影仍需真实 GitHub delivery 验收。
-2. 操作审计：`020` 已执行；本地已实现操作结果留存、账户查询和 CSV 导出。Production 读取路由修复待部署；部署后确认既有“更新流程”记录可显示并可导出 CSV。
-3. 加密云同步加固：密钥轮换、设备恢复、多设备冲突和保留策略。
-4. 历史数据保留与清理。
-5. 团队权限模型：Owner、Editor、Operator、Viewer，Production 合并/回滚单独授权。
+2. 操作审计：`020` 已执行；Production 已完成流程更新、创建/合并 PR 记录读取及 CSV 导出可用性验收。✅
+3. 加密云同步加固：本地已实现，`021` 已执行，代码待部署。
+4. 历史数据保留与清理：本地已实现，`022` 已执行，代码待部署。
+5. 团队协作闭环：本地已实现团队管理界面、成员角色管理、流程共享、共享状态投影和服务端操作授权；`023` 已执行，代码待部署。部署后需用至少两个 GitHub 账号验收角色边界。
 
 不建议优先投入任意 DAG、流程模板市场、自动 Production 合并/回滚或自建 CI/CD 引擎。
 

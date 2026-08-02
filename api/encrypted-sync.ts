@@ -20,10 +20,11 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     }
 
     if (request.method === 'POST') {
-      const payload = body(request) as { ciphertext?: unknown };
+      const payload = body(request) as { ciphertext?: unknown; expectedRevision?: unknown; keyId?: unknown; deviceId?: unknown };
       if (typeof payload.ciphertext !== 'string' || !payload.ciphertext) throw new Error('缺少加密数据');
-      await saveEncryptedSync(process.env, identity, payload.ciphertext, scope);
-      response.status(200).json({ ok: true });
+      const result = await saveEncryptedSync(process.env, identity, payload.ciphertext, scope, typeof payload.expectedRevision === 'number' ? payload.expectedRevision : null, typeof payload.keyId === 'string' ? payload.keyId : 'legacy', typeof payload.deviceId === 'string' ? payload.deviceId : null);
+      if (!result.ok) { response.status(409).json(result); return; }
+      response.status(200).json(result);
       return;
     }
 

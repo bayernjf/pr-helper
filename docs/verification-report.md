@@ -21,7 +21,8 @@
 | 类型检查 | `npx tsc --noEmit` | 通过 |
 | 浏览器生产构建 | `npm run lint`（Vite production build） | 通过 |
 | 变更格式 | `git diff --check` | 通过 |
-| 审计日志数据库迁移 | 用户已执行 `020_operation_audit_logs.sql` | 通过；审计代码部署与真实读写仍待验收 |
+| 审计日志数据库迁移 | 用户已执行 `020_operation_audit_logs.sql` | 通过 |
+| 操作审计 Production 读写 | 账户菜单显示真实的流程更新、创建 PR、合并 PR 记录 | 通过；CSV 导出按钮已启用 |
 | GitHub App 授权与仓库读取 | Production 可列出 E2E 沙箱并创建流程 | 通过 |
 | 流程单次云端保存 | Production 创建 `E2E Persistence Regression`，切回总览后整页刷新仍存在 | 通过 |
 | 创建 PR、PR Actions、应用内合并 | [PR #1](https://github.com/bayernjf/pr-helper-e2e-sandbox/pull/1) `feature/test → dev` | 通过 |
@@ -72,7 +73,7 @@ Production 已通过连续新增/删除与整页刷新复验，未再出现 `409
 
 Production 已加载操作审计界面且一次“保存恢复策略”成功返回，但审计列表显示为空。根因是前端请求 `/api/inbox?action=operation-audit`，而动态路由 `api/[action].ts` 已把路径段 `inbox` 绑定为同名参数；服务端因此返回待办队列，而前端将缺失的 `entries` 解释为空列表。
 
-本地已改为 `GET /api/inbox?resource=operation-audit&limit=200`，保留现有 Serverless Function 数量，并先让原路径的浏览器回归失败、再验证新路由通过。该修复尚待部署；部署后应确认既有“更新流程”审计记录显示，并验证 CSV 导出。
+本地已改为 `GET /api/inbox?resource=operation-audit&limit=200`，保留现有 Serverless Function 数量，并先让原路径的浏览器回归失败、再验证新路由通过。修复已部署；Production 已显示既有“更新流程”记录以及创建/合并 PR 记录，CSV 导出按钮已启用，问题已关闭。
 
 ### 未取得通过证据的集成项
 
