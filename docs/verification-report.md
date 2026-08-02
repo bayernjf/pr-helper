@@ -28,6 +28,7 @@
 | 多路径汇聚 | [PR #3](https://github.com/bayernjf/pr-helper-e2e-sandbox/pull/3) `dev → main` 仅在 #1、#2 合并并完成合并后检查后解锁 | 通过 |
 | 合并后 Actions 跟踪 | #1、#2、#3 合并后的 `Post-merge verification` 成功，界面显示“合并后验证通过” | 通过 |
 | 失败门禁的 GitHub 原生状态 | [PR #4](https://github.com/bayernjf/pr-helper-e2e-sandbox/pull/4) 为开放状态，`PR gate=FAILURE`，`mergeStateStatus=BLOCKED` | 通过 |
+| 动态来源投影与失败中心 | Production 的 `fix/* → dev` 已列出 `fix/failure-e2e`，失败处理中心显示 PR #4 并提供修复、重跑入口 | 通过 |
 
 ## 发现的问题与结论
 
@@ -47,7 +48,7 @@ Production 编辑器的每次变更都会并发发送 `PUT /api/workflows`。多
 
 服务端 reconciliation 能枚举 `fix/*` 命中的仓库分支，但详情页的即时刷新对任意包含 `*` 的 Source 直接返回“未创建”，不会请求 GitHub。Production 中的 `E2E Failure and Dynamic Rule` 流程因此没有显示 `fix/failure-e2e → dev` 的 #4 失败状态。
 
-这意味着：GitHub 门禁失败已得到验证，但“动态规则 → 产品界面失败状态 → Codex 修复 / Actions 重试”的闭环 **尚未通过 Production 验收**。本地已改为：详情页按服务端投影逐条展示实际匹配分支，并在手动刷新时触发一次服务端校准；每条状态可打开原有抽屉执行修复或重跑。该改动仍待部署后以 #4 复验。
+动态规则到失败中心和恢复抽屉的 Production 投影已通过。详情抽屉的具体分支状态曾被通配符占位状态覆盖为“等待创建 PR”，本地修复已让它优先显示该分支的 Actions 失败；该一个文案修复仍待部署复验。
 
 ### P1：待办队列生产刷新曾超时
 
