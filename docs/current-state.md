@@ -97,9 +97,17 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 数据库迁移的当前线上基线是 `001`–`019`；`018` 完成稳定阶段身份回填和索引创建，`019` 已将 `stage_id` 切换为正式主键/外键身份。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，后续部署与线上验证见下方「待执行与待验证清单」。
 
+## 最新验证结论
+
+2026-08-03 已在 Vercel Production 与公开 GitHub E2E 沙箱完成一轮可追溯验证，完整结果见 [验证报告](verification-report.md)。真实通过的链路包括 GitHub App 授权、PR 创建、严格分支保护、应用内合并、合并后 Actions 跟踪和多路径汇聚。失败 Actions 的 GitHub 原生阻塞状态也已确认。
+
+本轮同时发现两项不能忽略的线上缺口：连续编辑会让浏览器用同一流程版本并发保存而触发 `409`；动态来源规则（如 `fix/*`）的详情即时刷新不会枚举实际分支，因而无法展示已存在的失败 PR。两者均已有本地修复：保存按流程串行，动态分支从服务端投影逐条展示并可进入失败抽屉；但尚未部署复验，不得将失败恢复、Webhook 投影或动态规则状态闭环标记为已验收。
+
 ## 测试覆盖
 
-- 18 个测试文件 / 163 个测试，全部通过；新增稳定阶段身份、来源校验和限流测试。
+- 本地当前工作区：21 个测试文件 / 170 个测试，全部通过；`npx tsc --noEmit`、`npm run lint` 和 `git diff --check` 同时通过。
+- 已新增流程保存队列回归：连续编辑会串行使用服务端返回的新版本，且不会由旧响应覆盖最新编辑；真实跨窗口乐观锁冲突仍会明确报错。
+- Production E2E 通过项目与尚未通过的集成项目均以 [验证报告](verification-report.md) 为准。
 - `src/lib/` 核心业务逻辑覆盖率 81%+，包括 domain、workflow、generation-rules、pr-drafts、encrypted-sync、navigation 等。
 - 新增测试：加密模块加解密往返/错误处理（13 个）、恢复策略验证（5 个）、ensureStageIds（4 个）。
 - `main.ts`（UI 层）和多数 API 端点无浏览器 E2E 测试，属已知缺口。`preflight.ts` 依赖 GitHub API，目前仍需集成测试。
@@ -142,8 +150,8 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 ### 三、发布流程回归测试
 
-- [ ] 完整验证 `feature → dev → main` 流程（创建 PR → 合并 → Actions → 部署 → 解锁下游）
-- [ ] 验证合并后 Actions 状态读取和校准正常
+- [x] 在公开 E2E 仓库验证 `feature → dev → main` 的创建 PR → 合并 → PR Actions → 合并后 Actions → 下游解锁；部署门禁不在该沙箱范围，见 [验证报告](verification-report.md)。
+- [x] 验证合并后 Actions 状态读取和校准正常（PR #1、#2、#3）。
 - [ ] 验证 Vercel Preview/Production 部署跟踪正常
 - [ ] 验证 Cloudflare Pages Preview/Production 部署跟踪正常
 - [ ] 验证 Vercel Production 回滚（成功部署 → 确认回滚 → GitHub Environment 保护）
@@ -188,9 +196,9 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 > 详细待执行/待验证清单见上方「待执行与待验证清单」章节，包含数据库迁移、代码部署、发布回归、权限回归和新功能验证的具体步骤。
 
-1. 数据库迁移 `014`–`019` 已完成；提交代码并部署到 Preview，完成稳定身份回归。 ✅ 迁移 / ⏳ 部署与验证
-2. 完整发布回归：`feature → dev → main`、双平台部署、Production 回滚实测。 ⏳ 待验证
-3. 对 public、private、organization 仓库执行一轮 GitHub App 权限回归。 ⏳ 待验证
+1. 部署流程保存队列与队列超时修复，复验连续保存、动态来源规则和刷新队列。 ⏳ 待部署验证
+2. 完整发布回归：已通过 `feature → dev → main`、PR Actions 与应用内合并；双平台部署和 Production 回滚仍待实测。 ⏳ 部分完成
+3. 对 public、private、organization 仓库执行一轮 GitHub App 权限回归。 🟡 public 通过 / ⏳ private、organization 待验证
 4. 失败恢复已由服务端校验重试次数、冷却时间、当前提交和失败 Actions；仍不自动修改代码或合并生产。
 5. 加密云同步已接通密文上传/下载原型，仍需补齐密钥轮换、冲突处理和线上回归后再扩大使用范围。 🟡 待加固
 6. 将阶段状态、事件和部署历史从 `stage_index` 切换到稳定 `stage_id`。 ✅ 019 已执行，待部署并回归
@@ -208,6 +216,15 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - **团队权限模型**：增加团队、角色、项目和流程级权限，避免个人账户模型直接扩展到多人协作。
 
 ## 变更日志
+
+### 2026-08-03 — 真实 E2E 验证与回归修复待部署
+
+| 项目 | 结论 |
+|---|---|
+| 公开 GitHub E2E | 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；完整证据见 `docs/verification-report.md`。 |
+| 失败门禁 | PR #4 的 GitHub 原生 `PR gate=FAILURE` 与 `BLOCKED` 已确认；动态规则到产品失败处理中心的投影尚未通过。 |
+| 保存并发 | 发现连续编辑会以相同版本并发保存并触发 `409`；本地新增按流程串行保存队列和回归测试，待部署。 |
+| 刷新超时 | Production 曾在刷新待办队列时出现 Vercel 300 秒 `504`；本地增加 token 缓存、GitHub API 超时和前端超时提示，待部署。 |
 
 ### 2026-08-01 — 审计修复批次
 
