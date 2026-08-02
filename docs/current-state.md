@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-03（014–020 已执行；021–023 已在本地准备、待执行和部署；操作审计 Production 验收已通过）
+> 最后更新：2026-08-03（014–023 已执行；021–023 对应代码待部署；操作审计 Production 验收已通过）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -95,7 +95,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 | PR 草稿、Markdown 生成规则 | 浏览器 `localStorage`；可通过加密云同步上传服务端（原型） |
 | 加密云同步密文 | Supabase Postgres（`pr_helper_encrypted_sync`） |
 
-数据库迁移的线上基线是 `001`–`020`；`021_encrypted_sync_hardening.sql`、`022_data_retention.sql` 和 `023_team_permissions.sql` 已在本地准备、尚未执行。它们分别提供版本化密文同步、受限批量历史清理和团队共享权限模型。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`。
+数据库迁移的线上基线是 `001`–`023`。`021_encrypted_sync_hardening.sql`、`022_data_retention.sql` 和 `023_team_permissions.sql` 已执行，分别提供版本化密文同步、受限批量历史清理和团队共享权限模型；对应代码仍待部署。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`。
 
 ## 最新验证结论
 
@@ -149,6 +149,10 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 | 4 | `db/migrations/017_reconciliation_scope_and_degraded_state.sql` | `reconciliation_runs` / `github_webhook_deliveries` 字段 | 已完成 |
 | 5 | `db/migrations/018_stage_identity_compatibility.sql` | 阶段状态、事件、部署和运行记录字段 | 已完成 |
 | 6 | `db/migrations/019_stage_identity_primary_keys.sql` | `stage_id` 正式主键、外键和非空约束 | 已完成 |
+| 7 | `db/migrations/020_operation_audit_log.sql` | 操作审计记录 | 已完成 |
+| 8 | `db/migrations/021_encrypted_sync_hardening.sql` | 密文版本、设备与历史记录 | 已完成，代码待部署 |
+| 9 | `db/migrations/022_data_retention.sql` | 数据保留策略配置 | 已完成，代码待部署 |
+| 10 | `db/migrations/023_team_permissions.sql` | 团队、成员与流程共享模型 | 已完成，代码待部署 |
 
 已确认 4 个相关表存在，并确认 `reconciliation_runs.user_id`、`github_webhook_deliveries.installation_id`、外键和 `degraded` 状态约束已生效。018 新增的 5 个稳定身份索引均已存在，5 张相关表的 `stage_id` 空值数量均为 0。
 
@@ -222,9 +226,9 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - **并发与幂等保护**：为流程版本保存增加并发控制，并为创建 PR、合并、Actions 重试和回滚补充幂等键、CSRF 防护和限流。
 - **完整操作审计**：`020` 已执行；创建/合并 PR、流程保存/删除、Actions 重跑和部署回滚的成功/失败结果记录已实现。Production 已显示真实流程更新、创建/合并 PR 记录，CSV 导出按钮可用。✅
 - **浏览器 E2E**：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影仍必须以真实 GitHub delivery 验收。
-- **加密同步加固**：本地已实现 v2 密文格式、v1 兼容读取、口令轮换、设备标识和乐观版本冲突拒绝；待执行 `021` 并部署。
-- **数据保留与清理**：本地已为 Webhook、密文历史、reconciliation、事件、部署运行和审计日志定义 30/90/180/365 天保留策略；现有 Cron 每次受限清理 2,000 条，待执行 `022` 并部署。
-- **团队权限模型**：本地已实现 Owner、Editor、Operator、Viewer 判定，团队/成员/共享流程表以及创建团队、成员授权、流程共享 API；待执行 `023` 并部署。
+- **加密同步加固**：本地已实现 v2 密文格式、v1 兼容读取、口令轮换、设备标识和乐观版本冲突拒绝；`021` 已执行，代码待部署。
+- **数据保留与清理**：本地已为 Webhook、密文历史、reconciliation、事件、部署运行和审计日志定义 30/90/180/365 天保留策略；现有 Cron 每次受限清理 2,000 条，`022` 已执行，代码待部署。
+- **团队权限模型**：本地已实现 Owner、Editor、Operator、Viewer 判定，团队/成员/共享流程表以及创建团队、成员授权、流程共享 API；`023` 已执行，代码待部署。
 
 ## 变更日志
 
