@@ -19,6 +19,7 @@
 - GitHub App installation token 缓存与 15 秒 API 超时；前端待办队列 60 秒超时提示。
 - 同一流程的远端保存串行队列，修复连续编辑自触发 `409` 的问题；新增 `src/lib/workflow-save-queue.test.ts`。
 - 动态 Source（如 `fix/*`）从服务端投影逐条展示实际分支；详情手动刷新会校准投影，每条分支状态可打开现有失败恢复抽屉。
+- `fix/* → dev` 的 Production 投影已验证：PR #4 显示在失败中心和 Lane。当前本地仅剩动态抽屉状态文案小修复（提交 `4762e7bc`）待部署。
 - 编辑器 `查看流程详情` 入口补齐导航事件。
 
 Production 已复现而待部署复验的风险：
