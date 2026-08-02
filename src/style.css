@@ -1015,6 +1015,30 @@ a.account-menu-item {
   text-decoration: underline;
 }
 
+.dynamic-stage-actions {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dynamic-stage-actions .timeline-action {
+  align-items: center;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-light);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 7px 9px;
+  text-decoration: none;
+}
+
+.dynamic-stage-actions .timeline-action small {
+  color: var(--text-muted);
+  font: 600 .74rem Manrope;
+  text-align: right;
+}
+
 .gate-list {
   display: flex;
   flex-wrap: wrap;

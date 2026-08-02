@@ -3,6 +3,21 @@ export type DeploymentProvider = 'vercel' | 'cloudflare';
 export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string; healthCheckPath?: string; rollbackWorkflowName?: string };
 export type RecoveryPolicy = { maxRetries: number; cooldownSeconds: number };
 export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; deployments?: DeploymentConfig[]; position?: number; recoveryPolicy?: RecoveryPolicy; version?: number };
+export type WorkflowStageProjection = { workflowId: string; stageIndex: number; stageId?: string | null; source: string; target: string };
+
+export function sourceRuleMatches(rule: string, source: string) {
+  const dynamic = rule.length > 2 && rule.endsWith('*') && rule.indexOf('*') === rule.length - 1;
+  return dynamic ? source.startsWith(rule.slice(0, -1)) : rule === source;
+}
+
+export function matchingStageProjections<T extends WorkflowStageProjection>(workflow: Workflow, stageIndex: number, projections: readonly T[]): T[] {
+  const stage = workflow.stages[stageIndex];
+  if (!stage) return [];
+  return projections.filter(projection => projection.workflowId === workflow.id
+    && (stage.stageId ? projection.stageId === stage.stageId : projection.stageIndex === stageIndex)
+    && projection.target === stage.target
+    && sourceRuleMatches(stage.source, projection.source));
+}
 
 export function generateStageId(): string {
   return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
