@@ -1136,6 +1136,39 @@ export async function loadEncryptedSync(environment: Record<string, string | und
   return { ciphertext: rows[0].ciphertext, updatedAt: rows[0].updated_at, revision: Number(rows[0].revision), keyId: rows[0].key_id, deviceId: rows[0].device_id };
 }
 
+/* ── Data retention ────────────────────────────────── */
+
+export const RETENTION_DAYS = { webhookDeliveries: 30, encryptedSyncHistory: 30, reconciliationRuns: 90, stageEvents: 180, deploymentRuns: 180, operationAudit: 365 } as const;
+const RETENTION_BATCH_SIZE = 2_000;
+
+export function retentionCutoffs(now = new Date()) {
+  const cutoff = (days: number) => new Date(now.getTime() - days * 86_400_000).toISOString();
+  return Object.fromEntries(Object.entries(RETENTION_DAYS).map(([key, days]) => [key, cutoff(days)])) as { [K in keyof typeof RETENTION_DAYS]: string };
+}
+
+export async function cleanupRetainedData(environment: Record<string, string | undefined>) {
+  const sql = query(environment);
+  const cutoffs = retentionCutoffs();
+  const started = await sql<{ id: number }[]>`INSERT INTO data_retention_runs DEFAULT VALUES RETURNING id`;
+  const runId = started[0].id;
+  try {
+    const [webhooks, history, reconciliation, events, deployments, audit] = await Promise.all([
+      sql`WITH stale AS (SELECT ctid FROM github_webhook_deliveries WHERE received_at < ${cutoffs.webhookDeliveries} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM github_webhook_deliveries USING stale WHERE github_webhook_deliveries.ctid = stale.ctid RETURNING 1`,
+      sql`WITH stale AS (SELECT ctid FROM pr_helper_encrypted_sync_history WHERE replaced_at < ${cutoffs.encryptedSyncHistory} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM pr_helper_encrypted_sync_history USING stale WHERE pr_helper_encrypted_sync_history.ctid = stale.ctid RETURNING 1`,
+      sql`WITH stale AS (SELECT ctid FROM reconciliation_runs WHERE finished_at < ${cutoffs.reconciliationRuns} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM reconciliation_runs USING stale WHERE reconciliation_runs.ctid = stale.ctid RETURNING 1`,
+      sql`WITH stale AS (SELECT ctid FROM workflow_stage_events WHERE occurred_at < ${cutoffs.stageEvents} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM workflow_stage_events USING stale WHERE workflow_stage_events.ctid = stale.ctid RETURNING 1`,
+      sql`WITH stale AS (SELECT ctid FROM workflow_stage_deployment_runs WHERE updated_at < ${cutoffs.deploymentRuns} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM workflow_stage_deployment_runs USING stale WHERE workflow_stage_deployment_runs.ctid = stale.ctid RETURNING 1`,
+      sql`WITH stale AS (SELECT ctid FROM workflow_operation_audit_logs WHERE occurred_at < ${cutoffs.operationAudit} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM workflow_operation_audit_logs USING stale WHERE workflow_operation_audit_logs.ctid = stale.ctid RETURNING 1`,
+    ]);
+    const deleted = { webhooks: webhooks.length, encryptedSyncHistory: history.length, reconciliationRuns: reconciliation.length, stageEvents: events.length, deploymentRuns: deployments.length, operationAudit: audit.length };
+    await sql`UPDATE data_retention_runs SET state = 'success', finished_at = now(), deleted_counts = ${sql.json(deleted)} WHERE id = ${runId}`;
+    return deleted;
+  } catch (error) {
+    await sql`UPDATE data_retention_runs SET state = 'failure', finished_at = now(), error_message = ${error instanceof Error ? error.message.slice(0, 800) : '保留清理失败'} WHERE id = ${runId}`.catch(() => undefined);
+    throw error;
+  }
+}
+
 /* ── Account deletion ──────────────────────────────── */
 
 export async function deleteAccount(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<{ deleted: boolean }> {

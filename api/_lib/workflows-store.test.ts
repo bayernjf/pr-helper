@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, ensureStageIds, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, reconciliationState, repairCommitSha, rollbackDeploymentIsAvailable, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowStageStateMatchesDefinition } from './workflows-store';
+import { canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, ensureStageIds, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('accepts a workflow with real branch stages', () => {
@@ -149,6 +149,15 @@ describe('stored workflow validation', () => {
 describe('sync health threshold', () => {
   it('marks stages as stale after 15 minutes', () => {
     expect(STAGE_STALE_THRESHOLD_SECONDS).toBe(900);
+  });
+});
+
+describe('retention policy', () => {
+  it('uses bounded, deterministic retention cutoffs for every disposable history class', () => {
+    const cutoffs = retentionCutoffs(new Date('2026-08-03T00:00:00.000Z'));
+    expect(cutoffs.webhookDeliveries).toBe('2026-07-04T00:00:00.000Z');
+    expect(cutoffs.operationAudit).toBe('2025-08-03T00:00:00.000Z');
+    expect(cutoffs.stageEvents).toBe('2026-02-04T00:00:00.000Z');
   });
 });
 
