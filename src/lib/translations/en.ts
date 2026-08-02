@@ -486,6 +486,7 @@ const en: TranslationDict = {
   'notif.actionsPassed': 'All Actions passed',
   'notif.newPullReady': 'New commits are ready for a new PR',
   'toast.queue.failed': 'Failed to refresh the to-do queue',
+  'toast.queue.timeout': 'Refresh timed out. Please try again shortly.',
   'toast.queue.unavailable': 'Connect GitHub before refreshing the to-do queue.',
 
   // Next action titles
