@@ -112,12 +112,14 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 以下四项均已实现对应产品能力，但缺少可控的真实外部条件，不能以本地或手动刷新替代验收。它们是当前仅剩的生产验收待办。
 
-| 待办 | 所需外部条件 | 完成标准 |
-| --- | --- | --- |
-| Required approval | 第二个可访问 E2E 仓库的 GitHub 账号，以及目标分支至少 1 个 required approval 规则 | PR 在审批前显示 `needs-approval`，有效审批后自动变为 `ready-to-merge` |
-| Vercel / Cloudflare 部署与回滚 | 低风险仓库中真实的双平台 GitHub Actions、Environment 和部署密钥；Production 回滚需单独低风险窗口 | Preview/Production 门禁、健康检查、部署失败和一次确认式 Production 回滚均可追溯 |
-| GitHub Webhook 自动投影 | 可触发的 PR 或 Actions 事件，以及 GitHub delivery 与 Vercel/Supabase 投影的观察证据 | 不点击手动刷新时，delivery 自动更新对应 Lane、抽屉和时间线 |
-| private / organization 安装边界 | 已授权的 private 仓库和 organization 仓库（含 GitHub App 仓库选择范围） | 仓库列表、PR/Actions 读取和写操作均遵守安装边界，未授权仓库不可访问 |
+| 待办 | 你需要准备 | 我负责执行与记录 | 完成标准 |
+| --- | --- | --- | --- |
+| Required approval | 第二个可访问 E2E 仓库的 GitHub 账号；目标分支启用至少 1 个 required approval；第二账号具备审批权限 | 创建测试 PR、核查审批前后阶段状态，并记录 GitHub 和产品证据 | PR 在审批前显示 `needs-approval`，有效审批后自动变为 `ready-to-merge` |
+| Vercel / Cloudflare 部署与回滚 | 低风险仓库中真实的双平台 GitHub Actions、Environment、部署密钥和健康检查地址；确认可执行的 Production 回滚窗口 | 触发并跟踪 Preview/Production，验证失败投影、健康检查和确认式回滚，留存运行与回滚证据 | Preview/Production 门禁、健康检查、部署失败和一次确认式 Production 回滚均可追溯 |
+| GitHub Webhook 自动投影 | 保持 Production 看板打开；准备可触发的 PR 或 Actions 状态变更 | 触发事件，不使用手动刷新，核查 GitHub delivery、服务端投影、Lane、抽屉和时间线 | delivery 自动更新对应 Lane、抽屉和时间线 |
+| private / organization 安装边界 | 一个已授权的 private 仓库和一个 organization 测试仓库；在 GitHub App 中明确配置仓库选择范围 | 验证授权范围内的仓库列表、PR/Actions 读写，以及范围外仓库的拒绝行为 | 仓库列表、PR/Actions 读取和写操作均遵守安装边界，未授权仓库不可访问 |
+
+准备完成后只需告知对应验收项已就绪；测试触发、结果判断、证据整理和 `docs/verification-report.md` 更新由 Codex 完成。加密云同步和保留清理不要求额外账号或仓库，分别在测试草稿/规则和下一次生产 Cron 运行可观察时由 Codex 执行回归。
 
 ## 测试覆盖
 

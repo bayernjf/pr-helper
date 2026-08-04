@@ -64,12 +64,14 @@ Production 已验证行为：
 
 以下为唯一的外部条件待办。它们并非未实现，而是尚无足以产生真实验收证据的账户、仓库或部署环境：
 
-| 待办 | 需要准备 | 验收结论 |
-| --- | --- | --- |
-| Required approval | 第二个可审批 GitHub 账号，并在 E2E 分支保护中要求 1 个审批 | `needs-approval` → `ready-to-merge` |
-| Vercel / Cloudflare 部署与回滚 | 低风险仓库、真实工作流/Environment/密钥、单独回滚窗口 | 双平台门禁、健康检查和确认式 Production 回滚可追溯 |
-| GitHub Webhook 自动投影 | 可触发的 GitHub delivery 与 Vercel/Supabase 观察证据 | 无手动刷新时自动更新看板和时间线 |
-| private / organization 安装边界 | 已授权 private 仓库和 organization 仓库，配置 GitHub App 仓库选择范围 | 授权范围正确生效，范围外访问被拒绝 |
+| 待办 | 你需要准备 | Codex 负责 | 验收结论 |
+| --- | --- | --- | --- |
+| Required approval | 第二个可审批 GitHub 账号；E2E 目标分支要求 1 个审批 | 创建测试 PR，验证并记录状态迁移 | `needs-approval` → `ready-to-merge` |
+| Vercel / Cloudflare 部署与回滚 | 低风险仓库、真实工作流/Environment/密钥、健康检查地址、单独回滚窗口 | 触发、跟踪并记录双平台部署、失败和确认式回滚 | 双平台门禁、健康检查和确认式 Production 回滚可追溯 |
+| GitHub Webhook 自动投影 | 保持 Production 页面打开并准备可触发事件 | 触发事件，核查 delivery、投影和无刷新 UI 更新 | 无手动刷新时自动更新看板和时间线 |
+| private / organization 安装边界 | 已授权 private 仓库和 organization 仓库，配置 GitHub App 仓库选择范围 | 验证授权内读写和授权外拒绝 | 授权范围正确生效，范围外访问被拒绝 |
+
+你完成准备后仅需通知对应验收项已就绪；其余测试操作、证据整理和验证报告更新由 Codex 执行。加密云同步和数据保留清理无需额外准备，待测试数据或生产 Cron 可观察时由 Codex 回归。
 
 不要为了验收立即触发 Production 回滚；该操作会真实改变线上版本，应仅在单独安排的低风险窗口执行。
 
