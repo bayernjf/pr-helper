@@ -593,13 +593,14 @@ function loadAiConfig(): AiConfig | null { try { return JSON.parse(sessionStorag
 function showAiSettings() {
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
-  dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('ai.eyebrow')}</p><h2>${t('ai.title')}</h2><label>${t('ai.label.baseUrl')}<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="${t('ai.placeholder.baseUrl')}" /></label><label>${t('ai.label.model')}<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="${t('ai.placeholder.model')}" /></label><label>${t('ai.label.apiKey')}<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><label class="setting-toggle"><input id="ai-auto-generate" type="checkbox" ${aiConfig?.autoGeneratePrMessage ? 'checked' : ''} />${t('ai.toggle.label')}<span>${t('ai.toggle.desc')}</span></label><p id="ai-test-result" class="ai-connection-result">${t('ai.test.placeholder')}</p><div class="dialog-actions"><button id="test-ai" type="button" class="ghost">${t('ai.test')}</button><button value="cancel" class="ghost">${t('ai.cancel')}</button><button id="save-ai" class="primary">${t('ai.save')}</button></div></form>`;
+  dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('ai.eyebrow')}</p><h2>${t('ai.title')}</h2><label>${t('ai.label.baseUrl')}<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="${t('ai.placeholder.baseUrl')}" /></label><label>${t('ai.label.model')}<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="${t('ai.placeholder.model')}" /></label><label>${t('ai.label.apiKey')}<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><label class="setting-toggle"><input id="ai-auto-generate" type="checkbox" ${aiConfig?.autoGeneratePrMessage ? 'checked' : ''} />${t('ai.toggle.label')}<span>${t('ai.toggle.desc')}</span></label><label class="setting-toggle"><input id="ai-auto-confirm" type="checkbox" ${aiConfig?.autoConfirmPrCreation ? 'checked' : ''} />${t('ai.toggle.autoConfirm.label')}<span>${t('ai.toggle.autoConfirm.desc')}</span></label><p id="ai-test-result" class="ai-connection-result">${t('ai.test.placeholder')}</p><div class="dialog-actions"><button id="test-ai" type="button" class="ghost">${t('ai.test')}</button><button value="cancel" class="ghost">${t('ai.cancel')}</button><button id="save-ai" class="primary">${t('ai.save')}</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
   const read = (): AiConfig => ({
     baseUrl: dialog.querySelector<HTMLInputElement>('#ai-url')!.value.trim(),
     model: dialog.querySelector<HTMLInputElement>('#ai-model')!.value.trim(),
     apiKey: dialog.querySelector<HTMLInputElement>('#ai-key')!.value.trim(),
     autoGeneratePrMessage: dialog.querySelector<HTMLInputElement>('#ai-auto-generate')!.checked,
+    autoConfirmPrCreation: dialog.querySelector<HTMLInputElement>('#ai-auto-confirm')!.checked,
   });
   dialog.querySelector('#test-ai')!.addEventListener('click', async () => {
     const button = dialog.querySelector<HTMLButtonElement>('#test-ai')!, result = dialog.querySelector('#ai-test-result')!;
@@ -2090,7 +2091,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
     if (generationController || creationController || !isDialogOpen()) return;
     showAiSettings();
   });
-  const generatePrMessage = async (confirmOverwrite: boolean) => {
+  const generatePrMessage = async (confirmOverwrite: boolean, autoConfirm = false) => {
     if (generationController || creationController || !isDialogOpen()) return;
     const config = aiConfig;
     if (!config?.baseUrl || !config.apiKey || !config.model) {
@@ -2124,7 +2125,13 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
           scheduleDraftSave(100, true);
         },
       });
-      if (isDialogOpen()) flushDraft();
+      if (isDialogOpen()) {
+        flushDraft();
+        if (autoConfirm && config.autoConfirmPrCreation) {
+          generationController = null;
+          await createPullRequest();
+        }
+      }
     } catch (err) {
       const isAbortError = err instanceof Error && err.name === 'AbortError';
       if (isDialogOpen()) {
@@ -2140,11 +2147,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
     }
   };
   generateButton.addEventListener('click', () => { void generatePrMessage(true); });
-  if (aiConfig?.baseUrl && aiConfig.apiKey && aiConfig.model && shouldAutoGeneratePrMessage(aiConfig.autoGeneratePrMessage, bodyInput.value)) {
-    void generatePrMessage(false);
-  }
-  confirmButton.addEventListener('click', async event => {
-    event.preventDefault();
+  const createPullRequest = async () => {
     if (generationController || creationController || !isDialogOpen()) return;
     const title = titleInput.value.trim();
     const body = bodyInput.value.trim();
@@ -2189,7 +2192,11 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
         confirmButton.textContent = t('createPr.confirm');
       }
     }
-  });
+  };
+  confirmButton.addEventListener('click', event => { event.preventDefault(); void createPullRequest(); });
+  if (aiConfig?.baseUrl && aiConfig.apiKey && aiConfig.model && shouldAutoGeneratePrMessage(aiConfig.autoGeneratePrMessage, bodyInput.value)) {
+    void generatePrMessage(false, true);
+  }
   dialog.addEventListener('close', () => {
     dialogClosed = true;
     generationController?.abort();

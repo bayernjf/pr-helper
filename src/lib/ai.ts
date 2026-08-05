@@ -1,4 +1,4 @@
-export type AiConfig = { baseUrl: string; apiKey: string; model: string; autoGeneratePrMessage?: boolean };
+export type AiConfig = { baseUrl: string; apiKey: string; model: string; autoGeneratePrMessage?: boolean; autoConfirmPrCreation?: boolean };
 
 export function aiChatCompletionsUrl(baseUrl: string) {
   return `${baseUrl.replace(/\/$/, '')}/chat/completions`;
