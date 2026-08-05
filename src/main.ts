@@ -27,7 +27,7 @@ type GitHubWorkflowRunSummary = { status: string; conclusion: string | null };
 type Review = { state: string };
 type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
 type GitHubActionsWorkflow = { name: string; state: string; path: string };
-type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; actions?: ReturnType<typeof summarizeChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string };
+type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; actions?: ReturnType<typeof summarizeChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string; sourceBranchMissing?: boolean };
 type MergeResult = { merged: boolean; message?: string; sha?: string };
 type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
 type WorkflowStageState = WorkflowStageRunState & { workflowId: string; stageIndex: number; stageId: string | null; repository: string; source: string; target: string; mergedAt: string | null; headSha: string | null; checksPassed: number; checksTotal: number; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string | null; aheadBy: number; lastEvent: string | null; updatedAt: string; decision?: { kind: string; actionable: boolean; message: string } };
@@ -1567,7 +1567,8 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const mergeAction = status.kind === 'open' && !recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(active!, 'pull-merge') ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
   const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';
   const gateList = gates.filter(Boolean);
-  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b></p>${gateList.length ? `<div class="gate-list">${gateList.map(gate => `<span>${gate}</span>`).join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
+  const sourceBranchWarning = status.sourceBranchMissing ? `<p class="meta">${t('status.sourceBranchDeletedHint')}</p>` : '';
+  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.map(gate => `<span>${gate}</span>`).join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
 }
 async function refreshDetailStatuses() {
   await refreshStatuses(false);
@@ -1797,13 +1798,17 @@ async function refreshStatuses(renderDetail = true) {
         : recentlyCreatedNumber && recentlyChangedPull?.state === 'open'
           ? recentlyChangedPull
           : selectCurrentPull([...openPulls, ...closedPulls]);
-      if (!pr && comparison.notFound) {
+      let sourceBranchMissing = false;
+      if (comparison.notFound) {
         const targetBranchExists = await githubFetch<unknown>(token, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}`)
           .then(() => true)
           .catch(error => error instanceof GitHubRequestError && error.status === 404 ? false : true);
         if (!targetBranchExists) return { kind: 'error', message: t('status.targetBranchMissing') } as StepStatus;
-        const historicalPulls = await githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&base=${encodeURIComponent(stage.target)}&per_page=100`).catch(() => []);
-        pr = historicalPulls.find(candidate => candidate.head.ref === stage.source) || null;
+        sourceBranchMissing = true;
+        if (!pr) {
+          const historicalPulls = await githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&base=${encodeURIComponent(stage.target)}&per_page=100`).catch(() => []);
+          pr = historicalPulls.find(candidate => candidate.head.ref === stage.source) || null;
+        }
       }
       if (!pr) return comparison.notFound ? { kind: 'error', message: t('status.sourceBranchMissing') } as StepStatus : { kind: 'not-created' } as StepStatus;
       if (pr.merged_at) {
@@ -1817,12 +1822,12 @@ async function refreshStatuses(renderDetail = true) {
             ]);
             checks = runs.check_runs.length || statuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, statuses.statuses) : undefined;
             const actions = actionRuns.workflow_runs.length ? summarizeChecks(actionRuns.workflow_runs) : undefined;
-            return { kind: 'merged', pr, checks, actions, approvals: 0, aheadBy: comparison.ahead_by } as StepStatus;
+            return { kind: 'merged', pr, checks, actions, approvals: 0, aheadBy: comparison.ahead_by, sourceBranchMissing } as StepStatus;
           } catch { /* Keep the merged PR visible while its post-merge checks cannot be read yet. */ }
         }
-        return { kind: 'merged', pr, checks, approvals: 0, aheadBy: comparison.ahead_by } as StepStatus;
+        return { kind: 'merged', pr, checks, approvals: 0, aheadBy: comparison.ahead_by, sourceBranchMissing } as StepStatus;
       }
-      if (pr.state === 'closed') return { kind: 'closed', pr, approvals: 0 } as StepStatus;
+      if (pr.state === 'closed') return { kind: 'closed', pr, approvals: 0, sourceBranchMissing } as StepStatus;
       const [details, runs, commitStatuses, reviews, protection, actionRuns] = await Promise.all([
         githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls/${pr.number}`),
         githubFetch<{ check_runs: CheckRun[] }>(token, `/repos/${owner}/${name}/commits/${pr.head.sha}/check-runs?per_page=100`),
