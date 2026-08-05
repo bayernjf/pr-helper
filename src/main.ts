@@ -1544,10 +1544,11 @@ function positionMergeMenu(menu: HTMLElement, control: HTMLElement) {
 function checkDetailsMarkup(details: readonly GitHubCheckDetail[] | undefined) {
   if (!details?.length) return '';
   const groups = [...new Set(details.map(detail => detail.source))];
-  return `<div class="check-details" aria-label="${t('status.checks.details')}" data-check-details>${groups.map(source => {
+  const content = groups.map(source => {
     const entries = details.filter(detail => detail.source === source);
     return `<section class="check-source"><strong>${escape(source)}</strong>${entries.map(detail => `<a class="check-detail ${detail.state}" href="${escape(detail.url || '#')}"${detail.url ? ' target="_blank" rel="noreferrer"' : ''}><span class="check-detail-icon" aria-hidden="true">${detail.state === 'success' ? '✓' : detail.state === 'failure' ? '×' : '…'}</span><span><b>${escape(detail.name)}</b>${detail.summary ? `<small class="check-detail-summary">${escape(detail.summary)}</small>` : ''}</span><small>${detail.state === 'success' ? t('status.checks.passed') : detail.state === 'failure' ? t('status.checks.failed') : t('status.checks.running')}</small></a>`).join('')}</section>`;
-  }).join('')}</div>`;
+  }).join('');
+  return `<details class="check-details" aria-label="${t('status.checks.details')}" data-check-details><summary>${t('status.checks.details')}<span aria-hidden="true">+</span></summary><div class="check-detail-groups">${content}</div></details>`;
 }
 
 function stageTimeline(stage: Workflow['stages'][number], index: number) {

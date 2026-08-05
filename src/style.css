@@ -1199,14 +1199,28 @@ a.account-menu-item {
 }
 
 .check-details {
-  display: grid;
-  gap: 10px;
   margin-top: 12px;
   padding: 10px 12px;
   border: 1px solid var(--border-default);
   border-radius: 9px;
   background: var(--bg-subtle);
 }
+
+.check-details > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: 700 .76rem Manrope;
+  list-style: none;
+}
+
+.check-details > summary::-webkit-details-marker { display: none; }
+.check-details > summary::after { content: ''; }
+.check-details > summary > span { color: var(--text-accent); font-size: 1.1rem; line-height: 1; }
+.check-details[open] > summary > span { transform: rotate(45deg); }
+.check-detail-groups { display: grid; gap: 10px; margin-top: 10px; }
 
 .check-source {
   display: grid;
