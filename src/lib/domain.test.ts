@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canCreateStage, canCreateWorkflowStage, canMergeOpenPull, getStageAction, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks, summarizeGitHubChecks } from './domain';
+import { canCreateStage, canCreateWorkflowStage, canMergeOpenPull, getStageAction, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks, summarizeGitHubCheckDetails, summarizeGitHubChecks } from './domain';
 
 describe('workflow stages', () => {
   it('keeps the release stage locked until the previous PR and its checks succeed', () => {
@@ -31,6 +31,16 @@ describe('workflow stages', () => {
       [{ status: 'completed', conclusion: 'success' }, { status: 'completed', conclusion: 'success' }],
       [{ state: 'success' }],
     )).toEqual({ state: 'success', passed: 3, total: 3 });
+  });
+
+  it('keeps failed check provenance and an external detail link for the UI', () => {
+    expect(summarizeGitHubCheckDetails([
+      { name: 'Cloudflare Pages', status: 'completed', conclusion: 'failure', app: { slug: 'cloudflare-workers-and-pages' }, details_url: 'https://dash.cloudflare.com/build/123' },
+      { name: 'Lint, Type Check & Build', status: 'completed', conclusion: 'success', app: { slug: 'github-actions' }, html_url: 'https://github.com/example/actions/123' },
+    ], [])).toEqual([
+      { name: 'Cloudflare Pages', source: 'Cloudflare Pages', state: 'failure', conclusion: 'failure', url: 'https://dash.cloudflare.com/build/123', summary: null },
+      { name: 'Lint, Type Check & Build', source: 'GitHub Actions', state: 'success', conclusion: 'success', url: 'https://github.com/example/actions/123', summary: null },
+    ]);
   });
 
   it('only unlocks a later PR after every earlier step is merged and its post-merge checks succeed', () => {

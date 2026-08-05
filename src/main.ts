@@ -2,7 +2,7 @@ import './style.css';
 import { GitHubRequestError, githubAppApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './lib/github';
 import { buildPrPrompt, shouldAutoGeneratePrMessage, testAiConnection, type AiConfig } from './lib/ai';
 import { streamPrMessage } from './lib/ai-stream';
-import { canCreateWorkflowStage, canMergeOpenPull, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks, summarizeGitHubChecks } from './lib/domain';
+import { canCreateWorkflowStage, canMergeOpenPull, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks, summarizeGitHubCheckDetails, summarizeGitHubChecks, type GitHubCheckDetail } from './lib/domain';
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
@@ -21,13 +21,13 @@ registerTranslations('zh', zh);
 
 type Repo = { full_name: string; private: boolean };
 type Pull = { number: number; state: string; merged_at: string | null; merge_commit_sha?: string | null; mergeable?: boolean | null; mergeable_state?: string; html_url: string; head: { sha: string; ref?: string } };
-type CheckRun = { status: string; conclusion: string | null };
-type CommitStatus = { state: string };
+type CheckRun = { name?: string; app?: { slug?: string | null } | null; status: string; conclusion: string | null; html_url?: string | null; details_url?: string | null; output?: { title?: string | null; summary?: string | null } | null };
+type CommitStatus = { context?: string; state: string; target_url?: string | null };
 type GitHubWorkflowRunSummary = { status: string; conclusion: string | null };
 type Review = { state: string };
 type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
 type GitHubActionsWorkflow = { name: string; state: string; path: string };
-type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; actions?: ReturnType<typeof summarizeChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string; sourceBranchMissing?: boolean };
+type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; checkDetails?: GitHubCheckDetail[]; actions?: ReturnType<typeof summarizeChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string; sourceBranchMissing?: boolean };
 type MergeResult = { merged: boolean; message?: string; sha?: string };
 type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
 type WorkflowStageState = WorkflowStageRunState & { workflowId: string; stageIndex: number; stageId: string | null; repository: string; source: string; target: string; mergedAt: string | null; headSha: string | null; checksPassed: number; checksTotal: number; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string | null; aheadBy: number; lastEvent: string | null; updatedAt: string; decision?: { kind: string; actionable: boolean; message: string } };
@@ -1253,7 +1253,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const actions = `<div class="dialog-actions drawer-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div>`;
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
-  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p>${actions}<div class="drawer-status ${tone}"><b>${escape(statusText)}</b>${pull}${checks}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${configurationWarnings}${deployments}${deploymentHistory}${stepTimeline}${history}</section>`;
+  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p>${actions}<div class="drawer-status ${tone}"><b>${escape(statusText)}</b>${pull}${checks}${checkDetailsMarkup(detailStatus?.checkDetails)}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${configurationWarnings}${deployments}${deploymentHistory}${stepTimeline}${history}</section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);
@@ -1541,6 +1541,15 @@ function positionMergeMenu(menu: HTMLElement, control: HTMLElement) {
   if (menuHeight > availableSpace) menu.style.maxHeight = `${Math.max(96, Math.floor(availableSpace))}px`;
 }
 
+function checkDetailsMarkup(details: readonly GitHubCheckDetail[] | undefined) {
+  if (!details?.length) return '';
+  const groups = [...new Set(details.map(detail => detail.source))];
+  return `<div class="check-details" aria-label="${t('status.checks.details')}" data-check-details>${groups.map(source => {
+    const entries = details.filter(detail => detail.source === source);
+    return `<section class="check-source"><strong>${escape(source)}</strong>${entries.map(detail => `<a class="check-detail ${detail.state}" href="${escape(detail.url || '#')}"${detail.url ? ' target="_blank" rel="noreferrer"' : ''}><span class="check-detail-icon" aria-hidden="true">${detail.state === 'success' ? '✓' : detail.state === 'failure' ? '×' : '…'}</span><span><b>${escape(detail.name)}</b>${detail.summary ? `<small class="check-detail-summary">${escape(detail.summary)}</small>` : ''}</span><small>${detail.state === 'success' ? t('status.checks.passed') : detail.state === 'failure' ? t('status.checks.failed') : t('status.checks.running')}</small></a>`).join('')}</section>`;
+  }).join('')}</div>`;
+}
+
 function stageTimeline(stage: Workflow['stages'][number], index: number) {
   if (stage.source.includes('*')) {
     const states = active ? statesForStage(active, index) : [];
@@ -1569,7 +1578,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';
   const gateList = gates.filter(Boolean);
   const sourceBranchWarning = status.sourceBranchMissing ? `<p class="meta">${t('status.sourceBranchDeletedHint')}</p>` : '';
-  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.map(gate => `<span>${gate}</span>`).join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
+  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.map(gate => `<span>${gate}</span>`).join('')}</div>` : ''}${checkDetailsMarkup(status.checkDetails)}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
 }
 async function refreshDetailStatuses() {
   await refreshStatuses(false);
@@ -1822,8 +1831,9 @@ async function refreshStatuses(renderDetail = true) {
               githubFetch<{ workflow_runs: GitHubWorkflowRunSummary[] }>(token, `/repos/${owner}/${name}/actions/runs?head_sha=${encodeURIComponent(pr.merge_commit_sha)}&per_page=100`).catch(() => ({ workflow_runs: [] })),
             ]);
             checks = runs.check_runs.length || statuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, statuses.statuses) : undefined;
+            const checkDetails = runs.check_runs.length || statuses.statuses.length ? summarizeGitHubCheckDetails(runs.check_runs, statuses.statuses) : undefined;
             const actions = actionRuns.workflow_runs.length ? summarizeChecks(actionRuns.workflow_runs) : undefined;
-            return { kind: 'merged', pr, checks, actions, approvals: 0, aheadBy: comparison.ahead_by, sourceBranchMissing } as StepStatus;
+            return { kind: 'merged', pr, checks, checkDetails, actions, approvals: 0, aheadBy: comparison.ahead_by, sourceBranchMissing } as StepStatus;
           } catch { /* Keep the merged PR visible while its post-merge checks cannot be read yet. */ }
         }
         return { kind: 'merged', pr, checks, approvals: 0, aheadBy: comparison.ahead_by, sourceBranchMissing } as StepStatus;
@@ -1839,8 +1849,9 @@ async function refreshStatuses(renderDetail = true) {
       ]);
       const requiredApprovals = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
       const checks = runs.check_runs.length || commitStatuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, commitStatuses.statuses) : undefined;
+      const checkDetails = runs.check_runs.length || commitStatuses.statuses.length ? summarizeGitHubCheckDetails(runs.check_runs, commitStatuses.statuses) : undefined;
       const actions = actionRuns.workflow_runs.length ? summarizeChecks(actionRuns.workflow_runs) : undefined;
-      return { kind: 'open', pr: details, checks, actions, approvals: reviews.filter(review => review.state === 'APPROVED').length, requiredApprovals: requiredApprovals || undefined, mergeable: details.mergeable, mergeableState: details.mergeable_state, sourceBranchMissing } as StepStatus;
+      return { kind: 'open', pr: details, checks, checkDetails, actions, approvals: reviews.filter(review => review.state === 'APPROVED').length, requiredApprovals: requiredApprovals || undefined, mergeable: details.mergeable, mergeableState: details.mergeable_state, sourceBranchMissing } as StepStatus;
     } catch (err) { return { kind: 'error', message: err instanceof Error ? err.message : t('toast.unknownError') } as StepStatus; }
   }));
   statuses.forEach((status, index) => {
