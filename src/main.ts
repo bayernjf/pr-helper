@@ -1774,8 +1774,14 @@ async function refreshStatuses(renderDetail = true) {
       const recentlyMergedNumber = recentlyMergedPullNumbers.get(index);
       const recentlyChangedNumber = recentlyCreatedNumber || recentlyMergedNumber;
       const [openPulls, closedPulls, comparison, recentlyChangedPull] = await Promise.all([
-        githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + stage.source)}&base=${encodeURIComponent(stage.target)}&per_page=1`),
-        githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&head=${encodeURIComponent(owner + ':' + stage.source)}&base=${encodeURIComponent(stage.target)}&per_page=1`),
+        githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + stage.source)}&base=${encodeURIComponent(stage.target)}&per_page=1`).catch(error => {
+          if (error instanceof GitHubRequestError && error.status === 404) return [];
+          throw error;
+        }),
+        githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&head=${encodeURIComponent(owner + ':' + stage.source)}&base=${encodeURIComponent(stage.target)}&per_page=1`).catch(error => {
+          if (error instanceof GitHubRequestError && error.status === 404) return [];
+          throw error;
+        }),
         githubFetch<{ ahead_by: number }>(token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`).then(value => ({ ...value, notFound: false })).catch(error => {
           if (error instanceof GitHubRequestError && error.status === 404) return { ahead_by: 0, notFound: true };
           throw error;
