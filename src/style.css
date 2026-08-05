@@ -677,6 +677,8 @@ button.text-link {
   color: var(--bg-accent);
   width: 24px;
   height: 24px;
+  flex: 0 0 24px;
+  aspect-ratio: 1;
   border-radius: 50%;
   display: inline-grid;
   place-items: center;
@@ -724,9 +726,12 @@ button.text-link {
 .timeline article {
   display: flex;
   gap: 14px;
+  align-items: flex-start;
   border-top: 1px solid var(--border-light);
   padding: 18px 0;
 }
+
+.timeline article > div { min-width: 0; }
 
 .timeline article p {
   margin: 5px 0;
