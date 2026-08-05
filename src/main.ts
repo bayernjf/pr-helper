@@ -1009,7 +1009,7 @@ function failureCenterPanel(): string {
     const recovery = item.kind === 'checks-failed' ? recoveryStatusFor(item.workflowId, item.stageIndex, item.source) : undefined;
     const retryDisabled = recovery ? (recovery.exhausted || recovery.cooldownRemainingSeconds > 0) : false;
     const actions = item.kind === 'checks-failed' && flow && canOperateWorkflow(flow, 'actions-rerun')
-      ? `<button class="ghost fc-retry" data-fc-workflow="${escape(item.workflowId)}" data-fc-stage="${item.stageIndex}" data-fc-source="${escape(item.source)}"${retryDisabled ? ' disabled' : ''}>${t('recovery.retryActions')}</button><button class="ghost fc-repair" data-fc-workflow="${escape(item.workflowId)}" data-fc-stage="${item.stageIndex}" data-fc-source="${escape(item.source)}">${t('repair.codex')}</button>`
+      ? `<button class="ghost fc-retry" data-fc-workflow="${escape(item.workflowId)}" data-fc-stage="${item.stageIndex}" data-fc-source="${escape(item.source)}"${retryDisabled ? ' disabled' : ''}>${t('recovery.retryActions')}</button><button class="ghost fc-repair" data-fc-workflow="${escape(item.workflowId)}" data-fc-stage="${item.stageIndex}" data-fc-source="${escape(item.source)}"${item.pullNumber ? ` data-fc-pull="${item.pullNumber}"` : ''}>${t('repair.codex')}</button>`
       : '';
     const badge = recoveryStatusBadge(recovery);
     return `<li class="${tone}"><span class="fc-icon">${icon}</span><div><b>${escape(item.workflowName)}</b><small>${escape(item.source)} → ${escape(item.target)}${prLink ? ` · ${prLink}` : ''}</small><p>${escape(item.message)}</p>${badge}</div><div class="fc-actions">${actions}<button class="link-button fc-open" data-fc-workflow="${escape(item.workflowId)}" data-fc-stage="${item.stageIndex}" data-fc-source="${escape(item.source)}">${t('overview.board.stepDetail')}</button></div></li>`;
@@ -1084,7 +1084,8 @@ function bindFailureCenter() {
     const workflowId = button.dataset.fcWorkflow;
     const stageIndex = Number(button.dataset.fcStage);
     const source = button.dataset.fcSource;
-    if (workflowId) void showCodexRepairDialog(stageIndex, source);
+    const pullNumber = Number(button.dataset.fcPull);
+    if (workflowId) void showCodexRepairDialog(stageIndex, source, Number.isInteger(pullNumber) && pullNumber > 0 ? pullNumber : undefined);
   }));
 }
 function laneRunHistory(flow: Workflow): string {
@@ -1286,7 +1287,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
       button.textContent = t('recovery.sync');
     }
   });
-  dialog.querySelector<HTMLButtonElement>('.drawer-repair')?.addEventListener('click', () => { active = flow; dialog.close(); void showCodexRepairDialog(stageIndex, routeSource); });
+  dialog.querySelector<HTMLButtonElement>('.drawer-repair')?.addEventListener('click', () => { active = flow; dialog.close(); void showCodexRepairDialog(stageIndex, routeSource, detailStatus?.pr?.number || state?.pullNumber || undefined); });
   dialog.querySelector<HTMLButtonElement>('.drawer-retry-actions')?.addEventListener('click', event => { if (state) void retryFailedActions(flow, state, event.currentTarget as HTMLButtonElement); });
   dialog.querySelectorAll<HTMLButtonElement>('.deployment-retry').forEach(button => button.addEventListener('click', () => {
     const runId = Number(button.dataset.deploymentRun);
@@ -1495,7 +1496,10 @@ function detail() {
     if (!active) return;
     showProjectStepDrawer(active.id, Number(button.dataset.dynamicStage), button.dataset.dynamicSource);
   }));
-  document.querySelectorAll<HTMLButtonElement>('[data-codex-repair]').forEach(button => button.addEventListener('click', () => void showCodexRepairDialog(Number(button.dataset.codexRepair))));
+  document.querySelectorAll<HTMLButtonElement>('[data-codex-repair]').forEach(button => button.addEventListener('click', () => {
+    const index = Number(button.dataset.codexRepair);
+    void showCodexRepairDialog(index, undefined, statuses?.[index]?.pr?.number);
+  }));
   if (!pollTimer) pollTimer = window.setInterval(() => refreshStatuses(), 30000);
   if (!refreshOnFocusBound) {
     refreshOnFocusBound = true;
@@ -1570,14 +1574,14 @@ async function refreshDetailStatuses() {
   if (active?.stages.some(stage => stage.source.includes('*'))) await loadActionQueue();
   detail();
 }
-async function showCodexRepairDialog(index: number, source?: string) {
+async function showCodexRepairDialog(index: number, source?: string, pullNumber?: number) {
   if (!active) return;
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog repair-dialog';
   dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('repair.eyebrow')}</p><h2>${t('repair.collecting')}</h2><p class="meta">${t('repair.collecting.desc')}</p></form>`;
   document.body.append(dialog); dialog.showModal();
   try {
-    const response = await fetch(githubAppApiUrl('/api/repair-context'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: active.id, stageIndex: index, source }) });
+    const response = await fetch(githubAppApiUrl('/api/repair-context'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: active.id, stageIndex: index, source, pullNumber }) });
     const payload = await response.json().catch(() => ({})) as { markdown?: string; pullUrl?: string; message?: string };
     if (!response.ok || !payload.markdown) throw new Error(payload.message || t('repair.error.generate'));
     dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('repair.eyebrow')}</p><h2>${t('repair.ready.title')}</h2><p class="meta">${t('repair.ready.desc')}</p><textarea id="repair-context" readonly></textarea><div class="dialog-actions"><a class="ghost" target="_blank" href="${escape(payload.pullUrl || '#')}">${t('repair.openActions')}</a><button id="copy-repair-context" type="button" class="primary">${t('repair.copy')}</button><button value="cancel" class="ghost">${t('repair.close')}</button></div></form>`;
