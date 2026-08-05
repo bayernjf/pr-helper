@@ -19,7 +19,7 @@ export function githubPullUrl(repository: string, number: number) {
 }
 
 export function summarizeChecks(checks: { status: string; conclusion: string | null }[]) {
-  const passed = checks.filter(check => check.conclusion === 'success').length;
+  const passed = checks.filter(check => ['success', 'skipped', 'neutral'].includes(check.conclusion || '')).length;
   const hasFailure = checks.some(check => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(check.conclusion || ''));
   return { state: hasFailure ? 'failure' : passed === checks.length && checks.length > 0 ? 'success' : 'pending', passed, total: checks.length };
 }
