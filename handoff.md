@@ -9,7 +9,7 @@
 - 用户已确认本批代码已上线 Production。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
 - 当前本地验证已通过：`npm test`（23 个文件 / 178 项）、`npm run test:e2e`（Playwright Chromium 9 项，API mock）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。
-- Supabase 迁移 `001`–`023` 已执行；`021`–`023` 对应代码仍待部署。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
+- Supabase 迁移 `001`–`023` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
 
 ## 已部署修复
@@ -64,12 +64,14 @@ Production 已验证行为：
 
 以下为唯一的外部条件待办。它们并非未实现，而是尚无足以产生真实验收证据的账户、仓库或部署环境：
 
-| 待办 | 需要准备 | 验收结论 |
-| --- | --- | --- |
-| Required approval | 第二个可审批 GitHub 账号，并在 E2E 分支保护中要求 1 个审批 | `needs-approval` → `ready-to-merge` |
-| Vercel / Cloudflare 部署与回滚 | 低风险仓库、真实工作流/Environment/密钥、单独回滚窗口 | 双平台门禁、健康检查和确认式 Production 回滚可追溯 |
-| GitHub Webhook 自动投影 | 可触发的 GitHub delivery 与 Vercel/Supabase 观察证据 | 无手动刷新时自动更新看板和时间线 |
-| private / organization 安装边界 | 已授权 private 仓库和 organization 仓库，配置 GitHub App 仓库选择范围 | 授权范围正确生效，范围外访问被拒绝 |
+| 待办 | 你需要准备 | Codex 负责 | 验收结论 |
+| --- | --- | --- | --- |
+| Required approval | 第二个可审批 GitHub 账号；E2E 目标分支要求 1 个审批 | 创建测试 PR，验证并记录状态迁移 | `needs-approval` → `ready-to-merge` |
+| Vercel / Cloudflare 部署与回滚 | 低风险仓库、真实工作流/Environment/密钥、健康检查地址、单独回滚窗口 | 触发、跟踪并记录双平台部署、失败和确认式回滚 | 双平台门禁、健康检查和确认式 Production 回滚可追溯 |
+| GitHub Webhook 自动投影 | 保持 Production 页面打开并准备可触发事件 | 触发事件，核查 delivery、投影和无刷新 UI 更新 | 无手动刷新时自动更新看板和时间线 |
+| private / organization 安装边界 | 已授权 private 仓库和 organization 仓库，配置 GitHub App 仓库选择范围 | 验证授权内读写和授权外拒绝 | 授权范围正确生效，范围外访问被拒绝 |
+
+你完成准备后仅需通知对应验收项已就绪；其余测试操作、证据整理和验证报告更新由 Codex 执行。加密云同步和数据保留清理无需额外准备，待测试数据或生产 Cron 可观察时由 Codex 回归。
 
 不要为了验收立即触发 Production 回滚；该操作会真实改变线上版本，应仅在单独安排的低风险窗口执行。
 
@@ -79,9 +81,9 @@ Production 已验证行为：
 
 1. 浏览器 E2E：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影仍需真实 GitHub delivery 验收。
 2. 操作审计：`020` 已执行；Production 已完成流程更新、创建/合并 PR 记录读取及 CSV 导出可用性验收。✅
-3. 加密云同步加固：本地已实现，`021` 已执行，代码待部署。
-4. 历史数据保留与清理：本地已实现，`022` 已执行，代码待部署。
-5. 团队协作闭环：本地已实现团队管理界面、成员角色管理、流程共享、共享状态投影和服务端操作授权；`023` 已执行，代码待部署。部署后需用至少两个 GitHub 账号验收角色边界。
+3. 加密云同步加固：已部署，`021` 已执行；待验证 v1/v2 兼容、口令轮换、冲突拒绝和历史恢复。
+4. 历史数据保留与清理：已部署，`022` 已执行；待确认 Cron 产生成功运行记录并按批次清理历史数据。
+5. 团队协作闭环：已部署团队管理界面、成员角色管理、流程共享、共享状态投影和服务端操作授权；`023` 已执行。需用至少两个 GitHub 账号验收角色边界与 GitHub App 安装范围。
 
 不建议优先投入任意 DAG、流程模板市场、自动 Production 合并/回滚或自建 CI/CD 引擎。
 

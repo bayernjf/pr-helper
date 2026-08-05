@@ -13,6 +13,14 @@ describe('workflow stages', () => {
     expect(githubPullUrl('acme/payments', 42)).toBe('https://github.com/acme/payments/pull/42');
   });
 
+  it('treats skipped and neutral checks as completed non-blocking checks', () => {
+    expect(summarizeChecks([
+      { status: 'completed', conclusion: 'success' },
+      { status: 'completed', conclusion: 'skipped' },
+      { status: 'completed', conclusion: 'neutral' },
+    ])).toEqual({ state: 'success', passed: 3, total: 3 });
+  });
+
   it('summarizes GitHub check runs for the execution view', () => {
     expect(summarizeChecks([{ status: 'completed', conclusion: 'success' }, { status: 'in_progress', conclusion: null }])).toEqual({ state: 'pending', passed: 1, total: 2 });
     expect(summarizeChecks([{ status: 'completed', conclusion: 'failure' }])).toEqual({ state: 'failure', passed: 0, total: 1 });

@@ -3,6 +3,7 @@
 > 执行日期：2026-08-03（Asia/Shanghai）  
 > 范围：本地代码、Vercel Production、GitHub App 与公开 E2E 沙箱。  
 > 原则：只有可复现且有证据的结果标记为通过；本地修复未部署前不计入 Production 通过。
+> 后续状态：`021`–`023` 对应代码已在本报告之后部署 Production，但尚未纳入本报告的多账号团队协作、加密同步或保留清理验收。
 
 ## 环境与测试资源
 
@@ -89,12 +90,14 @@ Production 已加载操作审计界面且一次“保存恢复策略”成功返
 
 下列验收不能通过模拟数据或手动刷新完成，保留为项目待办，直到真实条件可用：
 
-| 待办 | 外部条件 | 验收证据 |
-| --- | --- | --- |
-| Required approval | 第二个可审批 GitHub 账号与至少 1 个 required approval | `needs-approval` 在有效审批后迁移为 `ready-to-merge` |
-| Vercel / Cloudflare 部署与回滚 | 低风险仓库的实际工作流、Environment 和部署密钥 | 双平台门禁、健康检查、失败追踪及确认式 Production 回滚 |
-| Webhook 自动投影 | GitHub delivery 与服务端数据库投影的对应证据 | 无手动刷新时 Lane、抽屉和时间线自动更新 |
-| private / organization 边界 | 已授权 private 和 organization 测试仓库 | 授权范围内成功操作，范围外仓库不可访问 |
+| 待办 | 你需要准备 | Codex 执行 | 验收证据 |
+| --- | --- | --- | --- |
+| Required approval | 第二个可审批 GitHub 账号与至少 1 个 required approval | 创建 PR、审批前后读取阶段决策 | `needs-approval` 在有效审批后迁移为 `ready-to-merge` |
+| Vercel / Cloudflare 部署与回滚 | 低风险仓库的实际工作流、Environment、部署密钥、健康检查地址和回滚窗口 | 触发并追踪双平台部署、失败与确认式回滚 | 双平台门禁、健康检查、失败追踪及确认式 Production 回滚 |
+| Webhook 自动投影 | 保持 Production 页面打开并准备可触发事件 | 触发事件，不手动刷新，核对 delivery、投影和 UI | 无手动刷新时 Lane、抽屉和时间线自动更新 |
+| private / organization 边界 | 已授权 private 和 organization 测试仓库，并设置 GitHub App 仓库范围 | 验证授权内读写及范围外拒绝 | 授权范围内成功操作，范围外仓库不可访问 |
+
+外部条件准备就绪后，用户只需通知对应验收项；Codex 负责测试执行、证据归档和本报告结论更新。加密同步和数据保留清理分别等待测试数据和下一次生产 Cron 的可观察窗口，无需额外账号或仓库。
 
 ## 建议的复验顺序
 

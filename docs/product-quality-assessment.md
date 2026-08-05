@@ -7,7 +7,7 @@
 
 ## 结论摘要
 
-> 2026-08-03 验证更新：公开 GitHub E2E 已证明 PR 创建、严格分支保护、应用内合并、合并后 Actions 和多路径汇聚可真实运行；但连续流程保存会自触发版本 `409`，动态来源规则的详情即时刷新不能显示实际匹配分支。前者已有本地待部署修复，后者仍需补齐产品闭环。详见 [验证报告](verification-report.md)。
+> 2026-08-03 状态更新：公开 GitHub E2E 已证明 PR 创建、严格分支保护、应用内合并、合并后 Actions 和多路径汇聚可真实运行；连续保存与动态来源投影问题均已完成 Production 回归。`021`–`023` 已执行并部署，团队协作、加密同步加固和保留清理的真实外部验收仍待完成。当前事实以 [当前状态](current-state.md) 为准，详见 [验证报告](verification-report.md)。
 
 PR Helper 已经超过纯浏览器 Mock 或 MVP 阶段，核心的 GitHub PR 发布闭环已经真实可用：流程配置、Lane 看板、PR 创建与合并、Checks/Actions/Approval 门禁、合并后部署追踪、失败重试、通知、Codex 修复上下文和确认式 Production 回滚都已具备。
 
