@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { githubApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './github';
+import { GitHubRequestError, githubApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './github';
 
 describe('GitHub repository helpers', () => {
   it('parses the repository selected from GitHub', () => {
@@ -28,6 +28,13 @@ describe('GitHub repository helpers', () => {
     vi.stubGlobal('fetch', fetchMock);
     await githubFetch('token', '/user');
     expect(fetchMock).toHaveBeenCalledWith('https://api.github.com/user', expect.objectContaining({ cache: 'no-store' }));
+    vi.unstubAllGlobals();
+  });
+
+  it('preserves GitHub status codes for callers that need to classify missing branches', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 404, statusText: 'Not Found', json: async () => ({ message: 'Not Found' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(githubFetch('token', '/repos/octocat/Hello-World/compare/dev...feature/deleted')).rejects.toEqual(expect.objectContaining<GitHubRequestError>({ status: 404, name: 'GitHubRequestError', message: 'Not Found' }));
     vi.unstubAllGlobals();
   });
 });

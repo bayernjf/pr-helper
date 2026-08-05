@@ -1,5 +1,5 @@
 import './style.css';
-import { githubAppApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './lib/github';
+import { GitHubRequestError, githubAppApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './lib/github';
 import { buildPrPrompt, shouldAutoGeneratePrMessage, testAiConnection, type AiConfig } from './lib/ai';
 import { streamPrMessage } from './lib/ai-stream';
 import { canCreateWorkflowStage, canMergeOpenPull, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks, summarizeGitHubChecks } from './lib/domain';
@@ -20,7 +20,7 @@ registerTranslations('en', en);
 registerTranslations('zh', zh);
 
 type Repo = { full_name: string; private: boolean };
-type Pull = { number: number; state: string; merged_at: string | null; merge_commit_sha?: string | null; mergeable?: boolean | null; mergeable_state?: string; html_url: string; head: { sha: string } };
+type Pull = { number: number; state: string; merged_at: string | null; merge_commit_sha?: string | null; mergeable?: boolean | null; mergeable_state?: string; html_url: string; head: { sha: string; ref?: string } };
 type CheckRun = { status: string; conclusion: string | null };
 type CommitStatus = { state: string };
 type GitHubWorkflowRunSummary = { status: string; conclusion: string | null };
@@ -1776,19 +1776,30 @@ async function refreshStatuses(renderDetail = true) {
       const [openPulls, closedPulls, comparison, recentlyChangedPull] = await Promise.all([
         githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + stage.source)}&base=${encodeURIComponent(stage.target)}&per_page=1`),
         githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&head=${encodeURIComponent(owner + ':' + stage.source)}&base=${encodeURIComponent(stage.target)}&per_page=1`),
-        githubFetch<{ ahead_by: number }>(token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`),
+        githubFetch<{ ahead_by: number }>(token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`).then(value => ({ ...value, notFound: false })).catch(error => {
+          if (error instanceof GitHubRequestError && error.status === 404) return { ahead_by: 0, notFound: true };
+          throw error;
+        }),
         recentlyChangedNumber ? githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls/${recentlyChangedNumber}`).catch(() => null) : Promise.resolve(null),
       ]);
       if (recentlyCreatedNumber && openPulls.some(pull => pull.number === recentlyCreatedNumber)) recentlyCreatedPullNumbers.delete(index);
       if (recentlyCreatedNumber && recentlyChangedPull?.state !== 'open') recentlyCreatedPullNumbers.delete(index);
       if (recentlyMergedNumber && !openPulls.some(pull => pull.number === recentlyMergedNumber) && closedPulls.some(pull => pull.number === recentlyMergedNumber)) recentlyMergedPullNumbers.delete(index);
       if (recentlyMergedNumber && !recentlyChangedPull?.merged_at && previous?.[index]?.kind === 'merged') return previous[index];
-      const pr = recentlyMergedNumber && recentlyChangedPull?.merged_at
+      let pr: Pull | null = recentlyMergedNumber && recentlyChangedPull?.merged_at
         ? recentlyChangedPull
         : recentlyCreatedNumber && recentlyChangedPull?.state === 'open'
           ? recentlyChangedPull
           : selectCurrentPull([...openPulls, ...closedPulls]);
-      if (!pr) return { kind: 'not-created' } as StepStatus;
+      if (!pr && comparison.notFound) {
+        const targetBranchExists = await githubFetch<unknown>(token, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}`)
+          .then(() => true)
+          .catch(error => error instanceof GitHubRequestError && error.status === 404 ? false : true);
+        if (!targetBranchExists) return { kind: 'error', message: t('status.targetBranchMissing') } as StepStatus;
+        const historicalPulls = await githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&base=${encodeURIComponent(stage.target)}&per_page=100`).catch(() => []);
+        pr = historicalPulls.find(candidate => candidate.head.ref === stage.source) || null;
+      }
+      if (!pr) return comparison.notFound ? { kind: 'error', message: t('status.sourceBranchMissing') } as StepStatus : { kind: 'not-created' } as StepStatus;
       if (pr.merged_at) {
         let checks: StepStatus['checks'];
         if (pr.merge_commit_sha) {

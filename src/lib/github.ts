@@ -1,6 +1,13 @@
 const apiBase = 'https://api.github.com';
 const appApiBase = (import.meta.env.VITE_AUTH_ORIGIN || '').replace(/\/$/, '');
 
+export class GitHubRequestError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = 'GitHubRequestError';
+  }
+}
+
 export function githubAppApiUrl(path: string) {
   return `${appApiBase}${path}`;
 }
@@ -39,7 +46,7 @@ export async function githubFetch<T>(token: string, path: string, init?: Request
   });
   if (!response.ok) {
     const detail = await response.json().catch(() => ({ message: response.statusText }));
-    throw new Error(detail.message || `GitHub 请求失败 (${response.status})`);
+    throw new GitHubRequestError(response.status, detail.message || `GitHub 请求失败 (${response.status})`);
   }
   return response.json() as Promise<T>;
 }
