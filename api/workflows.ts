@@ -1,6 +1,6 @@
 import { requestErrorStatus, type ApiRequest, type ApiResponse } from './_lib/http.js';
 import { currentGitHubIdentity } from './_lib/session.js';
-import { addTeamMember, createTeam, isStoredWorkflow, listTeamMembers, listTeams, recordOperationAudit, removeTeamMember, removeWorkflow, shareWorkflowWithTeam, upsertWorkflow, type TeamRole } from './_lib/workflows-store.js';
+import { addTeamMember, createTeam, isStoredWorkflow, listTeamMembers, listTeams, listWorkflows, recordOperationAudit, removeTeamMember, removeWorkflow, shareWorkflowWithTeam, upsertWorkflow, type TeamRole } from './_lib/workflows-store.js';
 
 function body(request: ApiRequest) {
   if (typeof request.body === 'string') {
