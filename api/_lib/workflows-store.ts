@@ -110,6 +110,11 @@ export function repairCommitSha(pull: Pick<Pull, 'merged_at' | 'merge_commit_sha
   return pull.merged_at ? pull.merge_commit_sha || pull.head.sha : pull.head.sha;
 }
 
+export function selectRepairPullNumber(rows: readonly { pull_number: number | null }[], requestedPullNumber?: number) {
+  const persisted = rows.find(row => Number.isInteger(row.pull_number) && (row.pull_number || 0) > 0)?.pull_number;
+  return persisted || (Number.isInteger(requestedPullNumber) && requestedPullNumber > 0 ? requestedPullNumber : null);
+}
+
 export function generateStageId() {
   return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
@@ -388,7 +393,7 @@ export async function requestDeploymentRollback(environment: Record<string, stri
   return { workflowName: rollbackWorkflow.name };
 }
 
-export async function codexRepairContext(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string, stageIndex: number, source?: string): Promise<CodexRepairContext> {
+export async function codexRepairContext(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string, stageIndex: number, source?: string, requestedPullNumber?: number): Promise<CodexRepairContext> {
   if (!Number.isInteger(stageIndex) || stageIndex < 0) throw new Error('无效的流程步骤');
   if (!identity.installationId) throw new Error('尚未选择 GitHub App 可访问的仓库');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
@@ -400,7 +405,7 @@ export async function codexRepairContext(environment: Record<string, string | un
   const states = source
     ? await sql<{ pull_number: number | null }[]>`SELECT pull_number FROM workflow_stage_states WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId} AND stage_id = ${stage.stageId} AND source = ${source}`
     : await sql<{ pull_number: number | null }[]>`SELECT pull_number FROM workflow_stage_states WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId} AND stage_id = ${stage.stageId}`;
-  const pullNumber = states[0]?.pull_number;
+  const pullNumber = selectRepairPullNumber(states, requestedPullNumber);
   if (!pullNumber) throw new Error('该步骤没有可用于修复的 PR');
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
@@ -411,6 +416,8 @@ export async function codexRepairContext(environment: Record<string, string | un
   type WorkflowStep = { name: string; conclusion: string | null; status: string; number?: number };
   type WorkflowJob = { name: string; html_url: string; conclusion: string | null; status: string; steps?: WorkflowStep[] };
   const pull = await installationRequest<RepairPull>(config, identity.installationId, `/repos/${owner}/${name}/pulls/${pullNumber}`);
+  const expectedSource = source || stage.source;
+  if (expectedSource.includes('*') || pull.head.ref !== expectedSource || pull.base.ref !== stage.target) throw new Error('该 PR 与当前流程步骤不匹配');
   const checkedSha = repairCommitSha(pull);
   const [checks, commitStatuses, files, actionRuns] = await Promise.all([
     installationRequest<{ check_runs: RepairCheckRun[] }>(config, identity.installationId, `/repos/${owner}/${name}/commits/${checkedSha}/check-runs?per_page=100`),
