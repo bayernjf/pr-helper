@@ -27,7 +27,7 @@ type GitHubWorkflowRunSummary = { status: string; conclusion: string | null };
 type Review = { state: string };
 type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
 type GitHubActionsWorkflow = { name: string; state: string; path: string };
-type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; actions?: ReturnType<typeof summarizeChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string };
+type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; actions?: ReturnType<typeof summarizeChecks>; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string; sourceBranchMissing?: boolean };
 type MergeResult = { merged: boolean; message?: string; sha?: string };
 type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
 type WorkflowStageState = WorkflowStageRunState & { workflowId: string; stageIndex: number; stageId: string | null; repository: string; source: string; target: string; mergedAt: string | null; headSha: string | null; checksPassed: number; checksTotal: number; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string | null; aheadBy: number; lastEvent: string | null; updatedAt: string; decision?: { kind: string; actionable: boolean; message: string } };
@@ -593,13 +593,14 @@ function loadAiConfig(): AiConfig | null { try { return JSON.parse(sessionStorag
 function showAiSettings() {
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
-  dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('ai.eyebrow')}</p><h2>${t('ai.title')}</h2><label>${t('ai.label.baseUrl')}<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="${t('ai.placeholder.baseUrl')}" /></label><label>${t('ai.label.model')}<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="${t('ai.placeholder.model')}" /></label><label>${t('ai.label.apiKey')}<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><label class="setting-toggle"><input id="ai-auto-generate" type="checkbox" ${aiConfig?.autoGeneratePrMessage ? 'checked' : ''} />${t('ai.toggle.label')}<span>${t('ai.toggle.desc')}</span></label><p id="ai-test-result" class="ai-connection-result">${t('ai.test.placeholder')}</p><div class="dialog-actions"><button id="test-ai" type="button" class="ghost">${t('ai.test')}</button><button value="cancel" class="ghost">${t('ai.cancel')}</button><button id="save-ai" class="primary">${t('ai.save')}</button></div></form>`;
+  dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('ai.eyebrow')}</p><h2>${t('ai.title')}</h2><label>${t('ai.label.baseUrl')}<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="${t('ai.placeholder.baseUrl')}" /></label><label>${t('ai.label.model')}<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="${t('ai.placeholder.model')}" /></label><label>${t('ai.label.apiKey')}<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><label class="setting-toggle"><input id="ai-auto-generate" type="checkbox" ${aiConfig?.autoGeneratePrMessage ? 'checked' : ''} />${t('ai.toggle.label')}<span>${t('ai.toggle.desc')}</span></label><label class="setting-toggle"><input id="ai-auto-confirm" type="checkbox" ${aiConfig?.autoConfirmPrCreation ? 'checked' : ''} />${t('ai.toggle.autoConfirm.label')}<span>${t('ai.toggle.autoConfirm.desc')}</span></label><p id="ai-test-result" class="ai-connection-result">${t('ai.test.placeholder')}</p><div class="dialog-actions"><button id="test-ai" type="button" class="ghost">${t('ai.test')}</button><button value="cancel" class="ghost">${t('ai.cancel')}</button><button id="save-ai" class="primary">${t('ai.save')}</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
   const read = (): AiConfig => ({
     baseUrl: dialog.querySelector<HTMLInputElement>('#ai-url')!.value.trim(),
     model: dialog.querySelector<HTMLInputElement>('#ai-model')!.value.trim(),
     apiKey: dialog.querySelector<HTMLInputElement>('#ai-key')!.value.trim(),
     autoGeneratePrMessage: dialog.querySelector<HTMLInputElement>('#ai-auto-generate')!.checked,
+    autoConfirmPrCreation: dialog.querySelector<HTMLInputElement>('#ai-auto-confirm')!.checked,
   });
   dialog.querySelector('#test-ai')!.addEventListener('click', async () => {
     const button = dialog.querySelector<HTMLButtonElement>('#test-ai')!, result = dialog.querySelector('#ai-test-result')!;
@@ -1567,7 +1568,8 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const mergeAction = status.kind === 'open' && !recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(active!, 'pull-merge') ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
   const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';
   const gateList = gates.filter(Boolean);
-  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b></p>${gateList.length ? `<div class="gate-list">${gateList.map(gate => `<span>${gate}</span>`).join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
+  const sourceBranchWarning = status.sourceBranchMissing ? `<p class="meta">${t('status.sourceBranchDeletedHint')}</p>` : '';
+  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.map(gate => `<span>${gate}</span>`).join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
 }
 async function refreshDetailStatuses() {
   await refreshStatuses(false);
@@ -1797,13 +1799,17 @@ async function refreshStatuses(renderDetail = true) {
         : recentlyCreatedNumber && recentlyChangedPull?.state === 'open'
           ? recentlyChangedPull
           : selectCurrentPull([...openPulls, ...closedPulls]);
-      if (!pr && comparison.notFound) {
+      let sourceBranchMissing = false;
+      if (comparison.notFound) {
         const targetBranchExists = await githubFetch<unknown>(token, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}`)
           .then(() => true)
           .catch(error => error instanceof GitHubRequestError && error.status === 404 ? false : true);
         if (!targetBranchExists) return { kind: 'error', message: t('status.targetBranchMissing') } as StepStatus;
-        const historicalPulls = await githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&base=${encodeURIComponent(stage.target)}&per_page=100`).catch(() => []);
-        pr = historicalPulls.find(candidate => candidate.head.ref === stage.source) || null;
+        sourceBranchMissing = true;
+        if (!pr) {
+          const historicalPulls = await githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&base=${encodeURIComponent(stage.target)}&per_page=100`).catch(() => []);
+          pr = historicalPulls.find(candidate => candidate.head.ref === stage.source) || null;
+        }
       }
       if (!pr) return comparison.notFound ? { kind: 'error', message: t('status.sourceBranchMissing') } as StepStatus : { kind: 'not-created' } as StepStatus;
       if (pr.merged_at) {
@@ -1817,12 +1823,12 @@ async function refreshStatuses(renderDetail = true) {
             ]);
             checks = runs.check_runs.length || statuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, statuses.statuses) : undefined;
             const actions = actionRuns.workflow_runs.length ? summarizeChecks(actionRuns.workflow_runs) : undefined;
-            return { kind: 'merged', pr, checks, actions, approvals: 0, aheadBy: comparison.ahead_by } as StepStatus;
+            return { kind: 'merged', pr, checks, actions, approvals: 0, aheadBy: comparison.ahead_by, sourceBranchMissing } as StepStatus;
           } catch { /* Keep the merged PR visible while its post-merge checks cannot be read yet. */ }
         }
-        return { kind: 'merged', pr, checks, approvals: 0, aheadBy: comparison.ahead_by } as StepStatus;
+        return { kind: 'merged', pr, checks, approvals: 0, aheadBy: comparison.ahead_by, sourceBranchMissing } as StepStatus;
       }
-      if (pr.state === 'closed') return { kind: 'closed', pr, approvals: 0 } as StepStatus;
+      if (pr.state === 'closed') return { kind: 'closed', pr, approvals: 0, sourceBranchMissing } as StepStatus;
       const [details, runs, commitStatuses, reviews, protection, actionRuns] = await Promise.all([
         githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls/${pr.number}`),
         githubFetch<{ check_runs: CheckRun[] }>(token, `/repos/${owner}/${name}/commits/${pr.head.sha}/check-runs?per_page=100`),
@@ -1834,7 +1840,7 @@ async function refreshStatuses(renderDetail = true) {
       const requiredApprovals = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
       const checks = runs.check_runs.length || commitStatuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, commitStatuses.statuses) : undefined;
       const actions = actionRuns.workflow_runs.length ? summarizeChecks(actionRuns.workflow_runs) : undefined;
-      return { kind: 'open', pr: details, checks, actions, approvals: reviews.filter(review => review.state === 'APPROVED').length, requiredApprovals: requiredApprovals || undefined, mergeable: details.mergeable, mergeableState: details.mergeable_state } as StepStatus;
+      return { kind: 'open', pr: details, checks, actions, approvals: reviews.filter(review => review.state === 'APPROVED').length, requiredApprovals: requiredApprovals || undefined, mergeable: details.mergeable, mergeableState: details.mergeable_state, sourceBranchMissing } as StepStatus;
     } catch (err) { return { kind: 'error', message: err instanceof Error ? err.message : t('toast.unknownError') } as StepStatus; }
   }));
   statuses.forEach((status, index) => {
@@ -2085,7 +2091,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
     if (generationController || creationController || !isDialogOpen()) return;
     showAiSettings();
   });
-  const generatePrMessage = async (confirmOverwrite: boolean) => {
+  const generatePrMessage = async (confirmOverwrite: boolean, autoConfirm = false) => {
     if (generationController || creationController || !isDialogOpen()) return;
     const config = aiConfig;
     if (!config?.baseUrl || !config.apiKey || !config.model) {
@@ -2119,7 +2125,13 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
           scheduleDraftSave(100, true);
         },
       });
-      if (isDialogOpen()) flushDraft();
+      if (isDialogOpen()) {
+        flushDraft();
+        if (autoConfirm && config.autoConfirmPrCreation) {
+          generationController = null;
+          await createPullRequest();
+        }
+      }
     } catch (err) {
       const isAbortError = err instanceof Error && err.name === 'AbortError';
       if (isDialogOpen()) {
@@ -2135,11 +2147,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
     }
   };
   generateButton.addEventListener('click', () => { void generatePrMessage(true); });
-  if (aiConfig?.baseUrl && aiConfig.apiKey && aiConfig.model && shouldAutoGeneratePrMessage(aiConfig.autoGeneratePrMessage, bodyInput.value)) {
-    void generatePrMessage(false);
-  }
-  confirmButton.addEventListener('click', async event => {
-    event.preventDefault();
+  const createPullRequest = async () => {
     if (generationController || creationController || !isDialogOpen()) return;
     const title = titleInput.value.trim();
     const body = bodyInput.value.trim();
@@ -2184,7 +2192,11 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
         confirmButton.textContent = t('createPr.confirm');
       }
     }
-  });
+  };
+  confirmButton.addEventListener('click', event => { event.preventDefault(); void createPullRequest(); });
+  if (aiConfig?.baseUrl && aiConfig.apiKey && aiConfig.model && shouldAutoGeneratePrMessage(aiConfig.autoGeneratePrMessage, bodyInput.value)) {
+    void generatePrMessage(false, true);
+  }
   dialog.addEventListener('close', () => {
     dialogClosed = true;
     generationController?.abort();
