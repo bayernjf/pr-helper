@@ -1544,10 +1544,11 @@ function positionMergeMenu(menu: HTMLElement, control: HTMLElement) {
 function checkDetailsMarkup(details: readonly GitHubCheckDetail[] | undefined) {
   if (!details?.length) return '';
   const groups = [...new Set(details.map(detail => detail.source))];
-  return `<div class="check-details" aria-label="${t('status.checks.details')}" data-check-details>${groups.map(source => {
+  const content = groups.map(source => {
     const entries = details.filter(detail => detail.source === source);
     return `<section class="check-source"><strong>${escape(source)}</strong>${entries.map(detail => `<a class="check-detail ${detail.state}" href="${escape(detail.url || '#')}"${detail.url ? ' target="_blank" rel="noreferrer"' : ''}><span class="check-detail-icon" aria-hidden="true">${detail.state === 'success' ? '✓' : detail.state === 'failure' ? '×' : '…'}</span><span><b>${escape(detail.name)}</b>${detail.summary ? `<small class="check-detail-summary">${escape(detail.summary)}</small>` : ''}</span><small>${detail.state === 'success' ? t('status.checks.passed') : detail.state === 'failure' ? t('status.checks.failed') : t('status.checks.running')}</small></a>`).join('')}</section>`;
-  }).join('')}</div>`;
+  }).join('');
+  return `<details class="check-details" aria-label="${t('status.checks.details')}" data-check-details><summary>${t('status.checks.details')}<span aria-hidden="true">+</span></summary><div class="check-detail-groups">${content}</div></details>`;
 }
 
 function stageTimeline(stage: Workflow['stages'][number], index: number) {
@@ -1583,7 +1584,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
 async function refreshDetailStatuses() {
   await refreshStatuses(false);
   if (active?.stages.some(stage => stage.source.includes('*'))) await loadActionQueue();
-  detail();
+  if (screen === 'detail') detail();
 }
 async function showCodexRepairDialog(index: number, source?: string, pullNumber?: number) {
   if (!active) return;
@@ -1736,7 +1737,7 @@ function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: 
     const button = event.currentTarget as HTMLButtonElement;
     button.disabled = true; button.textContent = t('merge.merging');
     mergingStages.add(index);
-    if (!onMerged) detail();
+    if (!onMerged && screen === 'detail') detail();
     try {
       const { owner, name } = parseRepository(active!.repository);
       const result = await githubFetch<MergeResult>(token, `/repos/${owner}/${name}/pulls/${pull.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) }, active!.id);
@@ -1750,12 +1751,12 @@ function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: 
         onMerged();
         window.setTimeout(onMerged, 1_000);
       } else {
-        detail();
+        if (screen === 'detail') detail();
         window.setTimeout(() => { void refreshStatuses(); }, 1_000);
       }
     } catch (err) {
       mergingStages.delete(index);
-      if (!onMerged) detail();
+      if (!onMerged && screen === 'detail') detail();
       showToast(mergeErrorMessage(err));
       button.disabled = false; button.textContent = t('merge.dialog.confirm');
     }
@@ -1866,7 +1867,7 @@ async function refreshStatuses(renderDetail = true) {
     showToast(message);
     if (Notification.permission === 'granted') new Notification(t('notif.title'), { body: message });
   });
-  if (renderDetail) detail();
+  if (renderDetail && screen === 'detail') detail();
 }
 
 function showGenerationRules(selectedId: string | null, onUse: (id: string) => void, onRulesChanged: () => void) {
@@ -2190,7 +2191,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
         onCreated();
         window.setTimeout(onCreated, 1_000);
       } else {
-        detail();
+        if (screen === 'detail') detail();
         window.setTimeout(() => { void refreshStatuses(); }, 1_000);
       }
     } catch (err) {
