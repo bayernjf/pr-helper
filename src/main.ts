@@ -1583,7 +1583,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
 async function refreshDetailStatuses() {
   await refreshStatuses(false);
   if (active?.stages.some(stage => stage.source.includes('*'))) await loadActionQueue();
-  detail();
+  if (screen === 'detail') detail();
 }
 async function showCodexRepairDialog(index: number, source?: string, pullNumber?: number) {
   if (!active) return;
@@ -1736,7 +1736,7 @@ function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: 
     const button = event.currentTarget as HTMLButtonElement;
     button.disabled = true; button.textContent = t('merge.merging');
     mergingStages.add(index);
-    if (!onMerged) detail();
+    if (!onMerged && screen === 'detail') detail();
     try {
       const { owner, name } = parseRepository(active!.repository);
       const result = await githubFetch<MergeResult>(token, `/repos/${owner}/${name}/pulls/${pull.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) }, active!.id);
@@ -1750,12 +1750,12 @@ function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: 
         onMerged();
         window.setTimeout(onMerged, 1_000);
       } else {
-        detail();
+        if (screen === 'detail') detail();
         window.setTimeout(() => { void refreshStatuses(); }, 1_000);
       }
     } catch (err) {
       mergingStages.delete(index);
-      if (!onMerged) detail();
+      if (!onMerged && screen === 'detail') detail();
       showToast(mergeErrorMessage(err));
       button.disabled = false; button.textContent = t('merge.dialog.confirm');
     }
@@ -1866,7 +1866,7 @@ async function refreshStatuses(renderDetail = true) {
     showToast(message);
     if (Notification.permission === 'granted') new Notification(t('notif.title'), { body: message });
   });
-  if (renderDetail) detail();
+  if (renderDetail && screen === 'detail') detail();
 }
 
 function showGenerationRules(selectedId: string | null, onUse: (id: string) => void, onRulesChanged: () => void) {
@@ -2190,7 +2190,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
         onCreated();
         window.setTimeout(onCreated, 1_000);
       } else {
-        detail();
+        if (screen === 'detail') detail();
         window.setTimeout(() => { void refreshStatuses(); }, 1_000);
       }
     } catch (err) {
