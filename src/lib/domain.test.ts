@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canCreateStage, canCreateWorkflowStage, canMergeOpenPull, getStageAction, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks, summarizeGitHubCheckDetails, summarizeGitHubChecks } from './domain';
+import { canCreateStage, canCreateWorkflowStage, canMergeOpenPull, getStageAction, githubCompareUrl, githubPullUrl, needsNewPullRequest, plainTextSummary, statusChanged, summarizeChecks, summarizeGitHubCheckDetails, summarizeGitHubChecks } from './domain';
 
 describe('workflow stages', () => {
   it('keeps the release stage locked until the previous PR and its checks succeed', () => {
@@ -41,6 +41,10 @@ describe('workflow stages', () => {
       { name: 'Cloudflare Pages', source: 'Cloudflare Pages', state: 'failure', conclusion: 'failure', url: 'https://dash.cloudflare.com/build/123', summary: null },
       { name: 'Lint, Type Check & Build', source: 'GitHub Actions', state: 'success', conclusion: 'success', url: 'https://github.com/example/actions/123', summary: null },
     ]);
+  });
+
+  it('converts GitHub HTML check summaries to safe readable text', () => {
+    expect(plainTextSummary('<table><tr><td><strong>Status:</strong></td><td>🚫&nbsp; Build failed.</td></tr></table>')).toBe('Status: 🚫 Build failed.');
   });
 
   it('only unlocks a later PR after every earlier step is merged and its post-merge checks succeed', () => {
