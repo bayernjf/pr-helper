@@ -1193,6 +1193,44 @@ a.account-menu-item {
   font: 700 .7rem Manrope;
 }
 
+.check-details {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: 9px;
+  background: var(--bg-subtle);
+}
+
+.check-source {
+  display: grid;
+  gap: 5px;
+}
+
+.check-source > strong {
+  color: var(--text-secondary);
+  font: 700 .72rem Manrope;
+  letter-spacing: .02em;
+}
+
+.check-detail {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-primary);
+  font-size: .78rem;
+  text-decoration: none;
+}
+
+.check-detail:hover { text-decoration: underline; }
+.check-detail small { color: var(--text-muted); font-size: .7rem; }
+.check-detail-summary { display: block; margin-top: 2px; }
+.check-detail-icon { color: var(--text-muted); font-weight: 800; text-align: center; }
+.check-detail.success .check-detail-icon { color: var(--text-success); }
+.check-detail.failure .check-detail-icon { color: var(--text-error); }
+
 .connection-hint {
   margin: 0 0 16px;
   padding: 10px 12px;

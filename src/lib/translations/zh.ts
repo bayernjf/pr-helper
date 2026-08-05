@@ -345,6 +345,7 @@ const zh: TranslationDict = {
   'status.checks.completed': '已完成',
   'status.checks.failed': '失败',
   'status.checks.running': '进行中',
+  'status.checks.details': '检查来源与明细',
   'status.actions.runs.summary': '{passed}/{total} Actions {state}',
   'status.approvals': '{approvals}/{required} 个审批',
   'status.merge.conflict': '存在合并冲突',
