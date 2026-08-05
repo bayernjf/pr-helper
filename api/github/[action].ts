@@ -1,4 +1,4 @@
-import { installationRequest } from '../_lib/github-api.js';
+import { GitHubApiError, installationRequest } from '../_lib/github-api.js';
 import { parseGithubAppConfig, readSignedSession } from '../_lib/github-app.js';
 import { type ApiRequest, type ApiResponse, queryValue, readCookie, requestMustBeGet } from '../_lib/http.js';
 import { githubInstallationSettingsUrl } from '../_lib/installations.js';
@@ -49,6 +49,7 @@ export function isAllowedGithubRequest(path: string, method = 'GET') {
   const repository = '/repos/[^/?]+/[^/?]+';
   if (new RegExp(`^${repository}/branches/[^/?]+/protection(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
   if (new RegExp(`^${repository}/branches(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
+  if (new RegExp(`^${repository}/branches/[^?]+(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
   if (new RegExp(`^${repository}/actions/workflows(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
   if (new RegExp(`^${repository}/environments(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
   if (new RegExp(`^${repository}/actions/runs(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
@@ -111,7 +112,10 @@ async function requestHandler(request: ApiRequest, response: ApiResponse) {
       source: null, target: null, pullNumber: null, runId: null, metadata: { method: request.method || 'GET', path: audit.path }, failureReason: error instanceof Error ? error.message : 'GitHub 请求失败',
     }).catch(() => undefined);
     const message = error instanceof Error ? error.message : 'GitHub 请求失败';
-    response.status(message.includes('团队角色') || message.includes('共享流程') || message.includes('流程与 GitHub') || message.includes('Source 和 Target') ? 403 : 401).json({ message });
+    const status = error instanceof GitHubApiError
+      ? error.status
+      : message.includes('团队角色') || message.includes('共享流程') || message.includes('流程与 GitHub') || message.includes('Source 和 Target') ? 403 : 401;
+    response.status(status).json({ message });
   }
 }
 

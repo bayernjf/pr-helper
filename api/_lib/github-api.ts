@@ -10,6 +10,13 @@ type CachedInstallationToken = { token: string; expiresAt: number };
 const installationTokenCache = new Map<string, CachedInstallationToken>();
 const installationTokenRequests = new Map<string, Promise<string>>();
 
+export class GitHubApiError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = 'GitHubApiError';
+  }
+}
+
 function requestSignal(signal?: AbortSignal | null) {
   const timeout = AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS);
   return { timeout, signal: signal ? AbortSignal.any([signal, timeout]) : timeout };
@@ -35,7 +42,7 @@ async function githubResponse<T>(path: string, token: string, init?: RequestInit
   }
   if (!response.ok) {
     const detail = await response.json().catch(() => ({ message: response.statusText })) as { message?: string };
-    throw new Error(detail.message || `GitHub 请求失败 (${response.status})`);
+    throw new GitHubApiError(response.status, detail.message || `GitHub 请求失败 (${response.status})`);
   }
   if (response.status === 204 || response.headers.get('content-length') === '0') return {} as T;
   return response.json() as Promise<T>;

@@ -12,6 +12,7 @@ describe('GitHub proxy request policy', () => {
 
   it('allows only read access to repository metadata and checks', () => {
     expect(isAllowedGithubRequest('/repos/octo/app/branches?per_page=100')).toBe(true);
+    expect(isAllowedGithubRequest('/repos/octo/app/branches/feature/20260707')).toBe(true);
     expect(isAllowedGithubRequest('/repos/octo/app/commits/abc/check-runs?per_page=100')).toBe(true);
     expect(isAllowedGithubRequest('/repos/octo/app/branches/main/protection')).toBe(true);
   });
