@@ -10,6 +10,21 @@ export type GitHubCheckDetail = {
   summary: string | null;
 };
 
+export function plainTextSummary(value: string | null | undefined) {
+  if (!value) return null;
+  const text = value
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text || null;
+}
+
 export type StageInput = { previous?: { pr: PullState; checks: CheckState }; stage: { pr: PullState; previewApproved: boolean } };
 
 export function getStageAction({ previous, stage }: StageInput): 'create-pr' | 'confirm-preview' | 'monitor' | 'locked' {
@@ -62,7 +77,7 @@ export function summarizeGitHubCheckDetails(
     state: ['failure', 'cancelled', 'timed_out', 'action_required'].includes(run.conclusion || '') ? 'failure' : run.status === 'completed' ? 'success' : 'pending',
     conclusion: run.conclusion,
     url: run.html_url || run.details_url || null,
-    summary: run.output?.summary || run.output?.title || null,
+    summary: plainTextSummary(run.output?.summary || run.output?.title),
   }));
   details.push(...commitStatuses.map(status => ({
     name: status.context || 'Commit Status',
