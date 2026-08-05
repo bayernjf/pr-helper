@@ -1840,7 +1840,7 @@ async function refreshStatuses(renderDetail = true) {
       const requiredApprovals = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
       const checks = runs.check_runs.length || commitStatuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, commitStatuses.statuses) : undefined;
       const actions = actionRuns.workflow_runs.length ? summarizeChecks(actionRuns.workflow_runs) : undefined;
-      return { kind: 'open', pr: details, checks, actions, approvals: reviews.filter(review => review.state === 'APPROVED').length, requiredApprovals: requiredApprovals || undefined, mergeable: details.mergeable, mergeableState: details.mergeable_state } as StepStatus;
+      return { kind: 'open', pr: details, checks, actions, approvals: reviews.filter(review => review.state === 'APPROVED').length, requiredApprovals: requiredApprovals || undefined, mergeable: details.mergeable, mergeableState: details.mergeable_state, sourceBranchMissing } as StepStatus;
     } catch (err) { return { kind: 'error', message: err instanceof Error ? err.message : t('toast.unknownError') } as StepStatus; }
   }));
   statuses.forEach((status, index) => {
