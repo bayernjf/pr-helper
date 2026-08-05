@@ -345,6 +345,7 @@ const en: TranslationDict = {
   'status.checks.completed': 'completed',
   'status.checks.failed': 'failed',
   'status.checks.running': 'running',
+  'status.checks.details': 'Check sources and details',
   'status.actions.runs.summary': '{passed}/{total} Actions {state}',
   'status.approvals': '{approvals}/{required} approvals',
   'status.merge.conflict': 'Merge conflict',
