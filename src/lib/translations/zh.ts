@@ -335,6 +335,8 @@ const zh: TranslationDict = {
   'status.createPrLink': '在 GitHub 创建 PR ↗',
   'status.locked': '等待前序步骤合并且合并后 Actions 成功。',
   'status.fetchFailed': '读取失败',
+  'status.sourceBranchMissing': 'Source 分支不存在或已删除',
+  'status.targetBranchMissing': 'Target 分支不存在或已删除',
   'status.actions.passed': '通过',
   'status.actions.failed': '失败',
   'status.actions.running': '进行中',
