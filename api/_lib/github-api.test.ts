@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { installationAccessToken } from './github-api';
+import { GitHubApiError, installationAccessToken, installationRequest } from './github-api';
 
 const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const config = {
@@ -29,5 +29,15 @@ describe('GitHub App installation tokens', () => {
     await expect(installationAccessToken(config, installationId)).resolves.toBe('installation-token');
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves GitHub error status codes for API callers', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: 'installation-token', expires_at: '2099-01-01T00:00:00Z' }), { status: 201, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message: 'Not Found' }), { status: 404, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const installationId = `missing-branch-${Date.now()}-${Math.random()}`;
+
+    await expect(installationRequest(config, installationId, '/repos/octo/app/compare/main...missing')).rejects.toEqual(expect.objectContaining<GitHubApiError>({ status: 404, name: 'GitHubApiError', message: 'Not Found' }));
   });
 });
