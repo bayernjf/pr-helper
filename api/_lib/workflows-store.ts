@@ -3,6 +3,7 @@ import { installationRequest } from './github-api.js';
 import { parseGithubAppConfig } from './github-app.js';
 import { sendPushNotifications, type BrowserPushSubscription } from './push.js';
 import { assertTeamOperation, type TeamOperation, type TeamRole } from '../../src/lib/team-permissions.js';
+import { summarizeGitHubChecks } from '../../src/lib/domain.js';
 
 export type StoredWorkflow = {
   id: string;
@@ -682,13 +683,6 @@ export async function projectPullRequestWebhook(environment: Record<string, stri
   return matches.length;
 }
 
-function checkSummary(checkRuns: CheckRun[], statuses: CommitStatus[]) {
-  const checks = [...checkRuns.map(check => check.conclusion), ...statuses.map(status => status.state === 'success' ? 'success' : ['failure', 'error'].includes(status.state) ? 'failure' : null)];
-  const passed = checks.filter(check => check === 'success').length;
-  const failed = checks.some(check => ['failure', 'cancelled', 'timed_out', 'action_required', 'error'].includes(check || ''));
-  return { state: failed ? 'failure' : checks.length > 0 && passed === checks.length ? 'success' : 'pending', passed, total: checks.length };
-}
-
 export function mergeChecksWithDeployments<T extends { state: string }>(checks: T, deployments: readonly DeploymentState[]) {
   if (checks.state === 'failure') return checks;
   if (deployments.includes('failure')) return { ...checks, state: 'failure' };
@@ -822,7 +816,7 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
     pull.merged_at ? Promise.resolve(null as BranchProtection | null) : installationRequest<BranchProtection>(config, row.github_installation_id, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}/protection`).catch(() => null),
   ]);
   const deploymentStates = pull.merged_at && sha ? await reconcileStageDeployments(environment, sql, row, workflow, stageIndex, source, stage.target, sha) : [];
-  const checks = mergeChecksWithDeployments(checkSummary(runs.check_runs, statuses.statuses), deploymentStates);
+  const checks = mergeChecksWithDeployments(summarizeGitHubChecks(runs.check_runs, statuses.statuses), deploymentStates);
   const requiredApprovals = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
   const approvals = reviews.filter(review => review.state === 'APPROVED').length;
   await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${workflow.repository}, ${stage.source}, ${stage.target}, ${pull.number}, ${pull.merged_at ? 'merged' : pull.state}, ${pull.merged_at || null}, ${sha || null}, ${checks.state}, ${checks.passed}, ${checks.total}, ${approvals}, ${requiredApprovals}, ${pull.mergeable ?? null}, ${pull.mergeable_state || null}, ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, head_sha = EXCLUDED.head_sha, checks_state = EXCLUDED.checks_state, checks_passed = EXCLUDED.checks_passed, checks_total = EXCLUDED.checks_total, approvals = EXCLUDED.approvals, required_approvals = EXCLUDED.required_approvals, mergeable = EXCLUDED.mergeable, mergeable_state = EXCLUDED.mergeable_state, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`;
