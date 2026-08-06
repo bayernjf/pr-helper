@@ -299,6 +299,7 @@ const zh: TranslationDict = {
   'draft.empty.title': '尚未保存步骤',
   'draft.empty.desc': '保存第一步后，流程会显示在这里。',
   'draft.remove': '删除',
+  'draft.saving': '保存中…',
   'draft.independent': '独立',
   'draft.waitFor': '等待 {count} 条路径',
   'draft.drag': '拖动排序：{name}',
