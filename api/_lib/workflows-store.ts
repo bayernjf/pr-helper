@@ -10,6 +10,7 @@ export type StoredWorkflow = {
   name: string;
   repository: string;
   stages: { source: string; target: string; independent?: boolean; waitFor?: number[]; stageId?: string }[];
+  createdAt?: string;
   deployments?: DeploymentConfig[];
   position?: number;
   recoveryPolicy?: RecoveryPolicy;
@@ -451,6 +452,7 @@ export function isStoredWorkflow(value: unknown): value is StoredWorkflow {
   if (!value || typeof value !== 'object') return false;
   const workflow = value as Partial<StoredWorkflow>;
   return typeof workflow.id === 'string' && typeof workflow.name === 'string' && typeof workflow.repository === 'string'
+    && (workflow.createdAt === undefined || typeof workflow.createdAt === 'string' && !Number.isNaN(Date.parse(workflow.createdAt)))
     && (workflow.position === undefined || Number.isInteger(workflow.position) && workflow.position >= 0)
     && (workflow.version === undefined || Number.isInteger(workflow.version) && workflow.version >= 0)
     && Array.isArray(workflow.stages) && workflow.stages.length > 0

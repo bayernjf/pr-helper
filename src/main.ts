@@ -6,7 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, githubCompareUrl, githubPullU
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, sortWorkflows, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow } from './lib/workflow';
+import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, sortWorkflows, sortWorkflowsForView, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
@@ -93,6 +93,8 @@ let actionQueueRefreshing = false;
 const actionQueueRequestQueue = new ActionQueueRequestQueue();
 let overviewFilter: 'all' | 'attention' | 'failed' = 'all';
 const expandedLaneIds = new Set<string>();
+let laneSortMode: WorkflowSortMode = 'custom';
+let laneSortDirection: WorkflowSortDirection = 'desc';
 let pushSubscribed = false;
 let pushConfigured = false;
 let repositoryManagementWindow: Window | null = null;
@@ -1057,6 +1059,14 @@ function failureCenterPanel(): string {
   const total = failures.length + deploymentFailures.length;
   return `<section class="failure-center"><div class="fc-head"><p class="eyebrow">${t('failureCenter.eyebrow')}</p><span class="fc-count">${t('failureCenter.count', { count: total })}</span></div><ul>${items}${deployItems}</ul></section>`;
 }
+function laneSortControls() {
+  const button = (mode: WorkflowSortMode, label: string) => {
+    const active = laneSortMode === mode;
+    const direction = active && mode !== 'custom' ? laneSortDirection === 'asc' ? ' ↑' : ' ↓' : '';
+    return `<button type="button" class="lane-sort-option${active ? ' active' : ''}" data-lane-sort="${mode}" aria-pressed="${active}">${label}${direction}</button>`;
+  };
+  return `<div class="lane-sort-controls" aria-label="${escape(t('overview.board.sortLabel'))}"><span>${t('overview.board.sortLabel')}</span>${button('custom', t('overview.board.sortCustom'))}${button('name', t('overview.board.sortName'))}${button('createdAt', t('overview.board.sortCreated'))}</div>`;
+}
 function overview() {
   const content = document.querySelector('#content')!;
   const localModeNotice = localViteWithoutApi ? `<section class="local-sync-notice local-mode-notice"><div><b>${t('localMode.title')}</b><p>${t('localMode.desc')}</p></div></section>` : '';
@@ -1069,14 +1079,23 @@ function overview() {
   const preflight = preflightPanel();
   const failedCount = actionQueue.filter(item => item.kind === 'checks-failed').length;
   const workflowCount = workflows.length;
-  const visibleWorkflows = workflows.filter(flow => overviewFilter === 'all' || actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed')));
+  const sortedWorkflows = sortWorkflowsForView(workflows, laneSortMode, laneSortDirection);
+  const visibleWorkflows = sortedWorkflows.filter(flow => overviewFilter === 'all' || actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed')));
   const refreshLabel = actionQueueRefreshing ? t('overview.queue.refreshing') : t('overview.queue.refresh');
-  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div><button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button id="refresh-action-queue" class="board-refresh${actionQueueRefreshing ? ' is-loading' : ''}"${actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
+  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div>${laneSortControls()}<button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button id="refresh-action-queue" class="board-refresh${actionQueueRefreshing ? ' is-loading' : ''}"${actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
+  content.classList.toggle('lane-sort-not-custom', laneSortMode !== 'custom');
   document.querySelector('#new-flow')!.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
   document.querySelector('#refresh-action-queue')?.addEventListener('click', () => void refreshActionQueue());
   document.querySelector('#run-preflight')?.addEventListener('click', async () => { await loadPreflight(); render(); });
+  document.querySelectorAll<HTMLButtonElement>('[data-lane-sort]').forEach(button => button.addEventListener('click', () => {
+    const mode = button.dataset.laneSort as WorkflowSortMode | undefined;
+    if (!mode) return;
+    if (laneSortMode === mode && mode !== 'custom') laneSortDirection = laneSortDirection === 'asc' ? 'desc' : 'asc';
+    else { laneSortMode = mode; laneSortDirection = mode === 'createdAt' ? 'desc' : 'asc'; }
+    render();
+  }));
   document.querySelectorAll<HTMLButtonElement>('[data-board-filter]').forEach(button => button.addEventListener('click', () => { overviewFilter = button.dataset.boardFilter as typeof overviewFilter; render(); }));
   document.querySelectorAll<HTMLButtonElement>('[data-lane-collapse]').forEach(button => button.addEventListener('click', () => {
     const workflowId = button.dataset.laneCollapse;
@@ -1195,7 +1214,7 @@ function projectLane(flow: Workflow) {
     ? [...targets.entries()].map(([target, routes]) => `<section class="lane-merge-group"><p>${t('overview.board.mergeTarget', { target: escape(target) })}</p><div>${routes.map(({ stage, index }) => routeCards(stage, index)).join('')}</div></section>`).join('')
     : flow.stages.map((stage, index) => routeCards(stage, index)).join('<span class="lane-connector" aria-hidden="true">→</span>');
   const orderIndex = workflows.findIndex(workflow => workflow.id === flow.id);
-  const sortingDisabled = overviewFilter !== 'all' || workflows.some(workflow => !canOperateWorkflow(workflow, 'workflow-edit'));
+  const sortingDisabled = laneSortMode !== 'custom' || overviewFilter !== 'all' || workflows.some(workflow => !canOperateWorkflow(workflow, 'workflow-edit'));
   const editable = canOperateWorkflow(flow, 'workflow-edit');
   const dragLabel = t('overview.board.dragProject', { name: flow.name });
   const runSummary = laneRunSummary(flow);

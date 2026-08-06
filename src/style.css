@@ -2593,3 +2593,9 @@ a.account-menu-item {
 .lane-collapse-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform .16s ease; }
 .project-lane.is-expanded .lane-collapse-toggle svg { transform: rotate(180deg); }
 .lane-body[hidden] { display: none; }
+.lane-sort-controls { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid var(--border-default); border-radius: 9px; background: var(--bg-card); }
+.lane-sort-controls > span { padding: 0 7px; color: var(--text-muted); font: 700 .67rem 'DM Mono'; white-space: nowrap; }
+.lane-sort-option { border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); padding: 6px 8px; font: 700 .72rem Manrope; cursor: pointer; white-space: nowrap; }
+.lane-sort-option:hover, .lane-sort-option:focus-visible { background: var(--bg-card-hover); color: var(--text-accent); outline: none; }
+.lane-sort-option.active { background: var(--bg-accent-muted); color: var(--text-accent); }
+.lane-sort-not-custom .lane-order-controls { display: none; }

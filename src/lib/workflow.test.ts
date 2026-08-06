@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, sourceRuleMatches, workflowSummary } from './workflow';
+import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
   it('saves the repository and its first selected branch transition', () => {
@@ -8,6 +8,7 @@ describe('workflow configuration', () => {
       id: expect.any(String),
       name: 'bayernjf/pr-helper',
       repository: 'bayernjf/pr-helper',
+      createdAt: expect.any(String),
       stages: [{ source: 'feature/20260722', target: 'dev' }],
     });
   });
@@ -135,6 +136,16 @@ describe('workflow configuration', () => {
     const first = { ...createWorkflow('octo/first', 'feature/first', 'main'), id: 'first', position: 0 };
 
     expect(sortWorkflows([legacy, last, first]).map(workflow => workflow.id)).toEqual(['first', 'last', 'legacy']);
+  });
+
+  it('sorts lanes by name and creation time in either direction', () => {
+    const first = { ...createWorkflow('octo/first', 'feature/first', 'main'), id: 'first', name: 'Zebra', createdAt: '2026-01-01T00:00:00.000Z' };
+    const second = { ...createWorkflow('octo/second', 'feature/second', 'main'), id: 'second', name: 'alpha', createdAt: '2026-02-01T00:00:00.000Z' };
+    expect(sortWorkflowsForView([first, second], 'name', 'asc').map(workflow => workflow.id)).toEqual(['second', 'first']);
+    expect(sortWorkflowsForView([first, second], 'name', 'desc').map(workflow => workflow.id)).toEqual(['first', 'second']);
+    expect(sortWorkflowsForView([first, second], 'createdAt', 'desc').map(workflow => workflow.id)).toEqual(['second', 'first']);
+    expect(sortWorkflowsForView([first, second], 'createdAt', 'asc').map(workflow => workflow.id)).toEqual(['first', 'second']);
+    expect(sortWorkflowsForView([first, second], 'custom', 'desc').map(workflow => workflow.id)).toEqual(['second', 'first']);
   });
 
   it('keeps default public deployments for legacy workflows and allows each project to replace them', () => {
