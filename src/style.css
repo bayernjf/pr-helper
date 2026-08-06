@@ -2546,3 +2546,25 @@ a.account-menu-item {
   font-weight: 600;
   text-decoration: none;
 }
+.lane-flow-name {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lane-flow-name:hover {
+  color: var(--text-accent);
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+
+.lane-flow-name:focus-visible {
+  outline: 2px solid var(--border-accent);
+  outline-offset: 3px;
+  border-radius: 3px;
+}

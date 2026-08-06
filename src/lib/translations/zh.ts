@@ -366,6 +366,7 @@ const zh: TranslationDict = {
   'state.waitingMerge': '等待合并',
   'status.newCommits': '有 {count} 个新提交',
   'status.newCommits.canCreate': '可创建新的 PR。',
+  'status.newCommits.waitingChanges': '等待 Source 分支产生新提交。',
   'status.newCommits.waiting': '等待前序步骤合并后 Actions 成功。',
   'status.createPr.button': '创建新 PR',
   'status.openPr': '打开 GitHub PR #{number} ↗',
