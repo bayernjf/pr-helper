@@ -153,7 +153,7 @@ function cloudSyncDeviceId() {
 function persistWorkflowsLocally() { localStorage.setItem('pr-helper-workflows', JSON.stringify(workflows)); }
 async function saveWorkflowToCloud(workflow: Workflow): Promise<Workflow> {
   if (!cloudWorkflowStorage) return workflow;
-  const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflow }) });
+  const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflow }), keepalive: true });
   if (!response.ok) throw new Error(await workflowApiError(response));
   const payload = await response.json().catch(() => ({})) as { workflow?: Workflow };
   return payload.workflow && payload.workflow.id === workflow.id ? ensureStageIds(payload.workflow) : workflow;
@@ -208,7 +208,7 @@ function save(next: Workflow) {
   active = normalized;
   workflows = saveWorkflow(workflows, normalized);
   persistWorkflowsLocally();
-  if (cloudWorkflowStorage) void workflowSaveQueue.enqueue(normalized.id);
+  return cloudWorkflowStorage ? workflowSaveQueue.enqueue(normalized.id) : Promise.resolve(true);
 }
 async function removeWorkflowFromStorage(workflowId: string) {
   workflows = deleteWorkflow(workflows, workflowId); persistWorkflowsLocally();
@@ -2274,7 +2274,22 @@ const apiKeyFieldObserver = new MutationObserver(() => {
 });
 apiKeyFieldObserver.observe(document.body, { childList: true, subtree: true });
 
-document.addEventListener('click', event => { const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-remove]'); if (!button || !active) return; const next = removeStage(active, Number(button.dataset.remove)); if (!next.stages.length) { const workflowId = active.id; active = null; void removeWorkflowFromStorage(workflowId); } else save(next); editor(); });
+document.addEventListener('click', event => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-remove]');
+  if (!button || !active) return;
+  const next = removeStage(active, Number(button.dataset.remove));
+  if (!next.stages.length) {
+    const workflowId = active.id;
+    active = null;
+    void removeWorkflowFromStorage(workflowId);
+    return;
+  }
+  button.disabled = true;
+  void save(next).then(saved => {
+    if (saved) editor();
+    else button.disabled = false;
+  });
+});
 
 if (!localStorage.getItem('pr-helper-locale')) setLocale(detectLocale());
 applyTheme(currentTheme);
