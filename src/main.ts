@@ -1569,6 +1569,14 @@ function actionRunDetails(runs: readonly GitHubWorkflowRunSummary[]): GitHubChec
   }));
 }
 
+function lockedStageText(index: number) {
+  if (!active || !statuses || index === 0) return t('status.locked');
+  const dependencies = active.stages[index]?.waitFor?.length ? active.stages[index].waitFor : [index - 1];
+  const dependencyStatuses = dependencies.map(dependency => statuses?.[dependency]);
+  const hasChecks = dependencyStatuses.every(status => status?.kind === 'merged') && dependencyStatuses.some(status => Boolean(status?.checks?.total));
+  return hasChecks ? t('status.locked') : t('status.locked.noChecks');
+}
+
 function stageTimeline(stage: Workflow['stages'][number], index: number) {
   if (stage.source.includes('*')) {
     const states = active ? statesForStage(active, index) : [];
@@ -1577,7 +1585,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   }
   const status = statuses?.[index];
   if (!status) return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p>${t('detail.timeline.placeholder')}</p></div></article>`;
-  if (status.kind === 'not-created') { const unlocked = canCreateWorkflowStage(index, active!.stages, statuses!); const canCreate = canOperateWorkflow(active!, 'pr-create'); return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${unlocked ? `<div class="timeline-actions">${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${t('status.locked')}</p>`}</div></article>`; }
+  if (status.kind === 'not-created') { const unlocked = canCreateWorkflowStage(index, active!.stages, statuses!); const canCreate = canOperateWorkflow(active!, 'pr-create'); return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${unlocked ? `<div class="timeline-actions">${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${lockedStageText(index)}</p>`}</div></article>`; }
   if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status failure">${t('status.fetchFailed')}</b> · ${escape(status.message || '')}</p></div></article>`;
   const checks = status.checks?.total ? gateDisclosure(t('status.checks.summary', { passed: status.checks.passed, total: status.checks.total, state: status.checks.state === 'success' ? t('status.checks.completed') : status.checks.state === 'failure' ? t('status.checks.failed') : t('status.checks.running') }), status.checkDetails, 'checks') : '';
   const actions = status.actions?.total ? gateDisclosure(t('status.actions.runs.summary', { passed: status.actions.passed, total: status.actions.total, state: status.actions.state === 'success' ? t('status.actions.passed') : status.actions.state === 'failure' ? t('status.actions.failed') : t('status.actions.running') }), status.actionDetails, 'actions') : '';
