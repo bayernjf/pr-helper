@@ -570,7 +570,7 @@ function stageIsUnlocked(workflow: StoredWorkflow, stageIndex: number, states: {
   return workflow.stages[stageIndex]?.independent === true || stageIndex === 0 || previous?.pull_state === 'merged' && previous.checks_state === 'success';
 }
 
-export function deriveStageDecision(workflow: StoredWorkflow, stageIndex: number, state: Pick<StageStateRow, 'stage_id' | 'pull_state' | 'checks_state' | 'approvals' | 'required_approvals' | 'mergeable' | 'mergeable_state' | 'ahead_by'>, allStates: readonly Pick<StageStateRow, 'stage_index' | 'stage_id' | 'pull_state' | 'checks_state'>[]): StageDecision {
+export function deriveStageDecision(workflow: StoredWorkflow, stageIndex: number, state: Pick<StageStateRow, 'stage_id' | 'pull_state' | 'checks_state' | 'approvals' | 'required_approvals' | 'mergeable' | 'mergeable_state' | 'ahead_by'>, allStates: readonly (Pick<StageStateRow, 'stage_index' | 'stage_id' | 'pull_state' | 'checks_state'> & { checks_total?: number })[]): StageDecision {
   const stage = workflow.stages[stageIndex];
   if (!stage || !state.stage_id || state.stage_id !== stage.stageId) return { kind: 'none', actionable: false, message: '暂无状态' };
   if (state.checks_state === 'failure') return { kind: 'checks-failed', actionable: true, message: `第 ${stageIndex + 1} 步 Actions 失败` };
@@ -581,7 +581,12 @@ export function deriveStageDecision(workflow: StoredWorkflow, stageIndex: number
   const unlocked = stageIsUnlocked(workflow, stageIndex, comparableStates);
   if (unlocked && state.pull_state === 'none' && state.ahead_by > 0) return { kind: 'ready-to-create', actionable: true, message: '可以创建下一步 PR' };
   if (unlocked && state.pull_state === 'merged' && state.ahead_by > 0) return { kind: 'ready-to-create', actionable: true, message: '有新提交，可以创建新 PR' };
-  return { kind: unlocked ? 'waiting' : 'locked', actionable: false, message: unlocked ? '等待 GitHub 状态更新' : '等待上游步骤完成' };
+  if (unlocked) return { kind: 'waiting', actionable: false, message: '等待 GitHub 状态更新' };
+  const dependencies = workflow.stages[stageIndex]?.waitFor?.length ? workflow.stages[stageIndex].waitFor : stageIndex > 0 ? [stageIndex - 1] : [];
+  const dependencyIds = dependencies.map(index => workflow.stages[index]?.stageId).filter((id): id is string => Boolean(id));
+  const dependencyStates = allStates.filter(candidate => dependencyIds.includes(candidate.stage_id));
+  const checksConfigured = dependencyStates.some(candidate => candidate.checks_total > 0 || candidate.checks_state !== 'success');
+  return { kind: 'locked', actionable: false, message: checksConfigured ? '等待前序步骤合并且合并后 Actions 成功。' : '等待前序步骤合并。' };
 }
 
 export function initialWebhookChecksState(mergedAt?: string | null) {
@@ -823,7 +828,10 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
     pull.merged_at ? Promise.resolve(null as BranchProtection | null) : installationRequest<BranchProtection>(config, row.github_installation_id, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}/protection`).catch(() => null),
   ]);
   const deploymentStates = pull.merged_at && sha ? await reconcileStageDeployments(environment, sql, row, workflow, stageIndex, source, stage.target, sha) : [];
-  const checks = mergeChecksWithDeployments(summarizeGitHubChecks(runs.check_runs, statuses.statuses), deploymentStates);
+  const observedChecks = runs.check_runs.length || statuses.statuses.length
+    ? summarizeGitHubChecks(runs.check_runs, statuses.statuses)
+    : { state: 'success' as const, passed: 0, total: 0 };
+  const checks = mergeChecksWithDeployments(observedChecks, deploymentStates);
   const requiredApprovals = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
   const approvals = reviews.filter(review => review.state === 'APPROVED').length;
   await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${workflow.repository}, ${stage.source}, ${stage.target}, ${pull.number}, ${pull.merged_at ? 'merged' : pull.state}, ${pull.merged_at || null}, ${sha || null}, ${checks.state}, ${checks.passed}, ${checks.total}, ${approvals}, ${requiredApprovals}, ${pull.mergeable ?? null}, ${pull.mergeable_state || null}, ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, head_sha = EXCLUDED.head_sha, checks_state = EXCLUDED.checks_state, checks_passed = EXCLUDED.checks_passed, checks_total = EXCLUDED.checks_total, approvals = EXCLUDED.approvals, required_approvals = EXCLUDED.required_approvals, mergeable = EXCLUDED.mergeable, mergeable_state = EXCLUDED.mergeable_state, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`;

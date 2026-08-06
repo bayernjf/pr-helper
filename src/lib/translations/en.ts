@@ -334,6 +334,7 @@ const en: TranslationDict = {
   'status.createPr': 'Create PR',
   'status.createPrLink': 'Create PR on GitHub ↗',
   'status.locked': 'Waiting for the previous step to merge and post-merge Actions to pass.',
+  'status.locked.noChecks': 'Waiting for the previous step to merge.',
   'status.fetchFailed': 'Fetch failed',
   'status.sourceBranchMissing': 'The Source branch does not exist or was deleted',
   'status.sourceBranchDeletedHint': 'Source branch deleted; showing the historical PR status',
