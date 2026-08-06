@@ -366,6 +366,7 @@ const en: TranslationDict = {
   'state.waitingMerge': 'Waiting for merge',
   'status.newCommits': '{count} new commits',
   'status.newCommits.canCreate': 'A new PR can be created.',
+  'status.newCommits.waitingChanges': 'Waiting for new commits on the Source branch.',
   'status.newCommits.waiting': 'Waiting for the previous step to merge and Actions to pass.',
   'status.createPr.button': 'Create new PR',
   'status.openPr': 'Open GitHub PR #{number} ↗',
