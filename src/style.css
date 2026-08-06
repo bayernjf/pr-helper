@@ -2568,3 +2568,47 @@ a.account-menu-item {
   outline-offset: 3px;
   border-radius: 3px;
 }
+
+.lane-collapse-toggle {
+  display: grid;
+  place-items: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  align-self: center;
+  margin-left: auto;
+  border: 1px solid var(--border-default);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color .16s ease, background-color .16s ease, color .16s ease, transform .16s ease;
+}
+.lane-collapse-toggle:hover,
+.lane-collapse-toggle:focus-visible {
+  border-color: var(--border-accent);
+  background: var(--bg-card-hover);
+  color: var(--text-accent);
+  outline: none;
+}
+.lane-collapse-toggle:focus-visible { box-shadow: 0 0 0 2px var(--border-accent); }
+.lane-collapse-toggle svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; transition: transform .16s ease; }
+.lane-collapse-toggle rect { stroke-width: 1.35; }
+.project-lane.is-expanded .lane-collapse-toggle svg { transform: rotate(180deg); }
+.project-lane > header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+}
+.lane-actions { justify-self: end; }
+.lane-body[hidden] { display: none; }
+.lane-sort-controls { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid var(--border-default); border-radius: 9px; background: var(--bg-card); }
+.lane-sort-controls > span { padding: 0 7px; color: var(--text-muted); font: 700 .67rem 'DM Mono'; white-space: nowrap; }
+.lane-sort-option { border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); padding: 6px 8px; font: 700 .72rem Manrope; cursor: pointer; white-space: nowrap; }
+.lane-sort-option:hover, .lane-sort-option:focus-visible { background: var(--bg-card-hover); color: var(--text-accent); outline: none; }
+.lane-sort-option.active { background: var(--bg-accent-muted); color: var(--text-accent); }
+.lane-sort-not-custom .lane-order-controls { display: none; }
+.board-summary .lane-sort-controls { margin-left: auto; }
+.board-summary .lane-sort-option { display: block; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); font: 700 .72rem Manrope; }
+.board-summary .lane-sort-option.active { border-color: transparent; background: var(--bg-accent-muted); color: var(--text-accent); }
+.board-summary .board-refresh + .lane-sort-controls { margin-left: 0; }
+.board-summary .lane-sort-controls + .board-refresh { margin-left: 8px; }

@@ -2,7 +2,7 @@ export type WorkflowStage = { source: string; target: string; independent?: bool
 export type DeploymentProvider = 'vercel' | 'cloudflare';
 export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string; healthCheckPath?: string; rollbackWorkflowName?: string };
 export type RecoveryPolicy = { maxRetries: number; cooldownSeconds: number };
-export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; deployments?: DeploymentConfig[]; position?: number; recoveryPolicy?: RecoveryPolicy; version?: number; team?: { id: string; name: string; role: 'owner' | 'editor' | 'operator' | 'viewer' } };
+export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; createdAt?: string; deployments?: DeploymentConfig[]; position?: number; recoveryPolicy?: RecoveryPolicy; version?: number; team?: { id: string; name: string; role: 'owner' | 'editor' | 'operator' | 'viewer' } };
 export type WorkflowStageProjection = { workflowId: string; stageIndex: number; stageId?: string | null; source: string; target: string };
 
 export function sourceRuleMatches(rule: string, source: string) {
@@ -84,7 +84,7 @@ export function removeDeployment(workflow: Workflow, index: number): Workflow {
 }
 
 export function createWorkflow(repository: string, source: string, target: string, name = repository): Workflow {
-  return { id: `${repository}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, repository, stages: [{ source, target, stageId: generateStageId() }], deployments: defaultDeployments };
+  return { id: `${repository}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, repository, createdAt: new Date().toISOString(), stages: [{ source, target, stageId: generateStageId() }], deployments: defaultDeployments };
 }
 
 export function addStage(workflow: Workflow, source: string, target: string, independent = false, waitFor: number[] = []): Workflow {
@@ -135,6 +135,23 @@ export function sortWorkflows(workflows: readonly Workflow[]): Workflow[] {
       if (leftPosition === undefined) return 1;
       if (rightPosition === undefined) return -1;
       return leftPosition - rightPosition || left.index - right.index;
+    })
+    .map(({ workflow }) => workflow);
+}
+
+export type WorkflowSortMode = 'custom' | 'name' | 'createdAt';
+export type WorkflowSortDirection = 'asc' | 'desc';
+
+export function sortWorkflowsForView(workflows: readonly Workflow[], mode: WorkflowSortMode, direction: WorkflowSortDirection): Workflow[] {
+  if (mode === 'custom' && workflows.some(workflow => workflow.position !== undefined)) return sortWorkflows(workflows);
+  if (mode === 'custom') mode = 'createdAt';
+  return workflows
+    .map((workflow, index) => ({ workflow, index }))
+    .sort((left, right) => {
+      const comparison = mode === 'name'
+        ? left.workflow.name.localeCompare(right.workflow.name, undefined, { sensitivity: 'base' })
+        : (Date.parse(left.workflow.createdAt || '') || 0) - (Date.parse(right.workflow.createdAt || '') || 0);
+      return (direction === 'asc' ? comparison : -comparison) || left.index - right.index;
     })
     .map(({ workflow }) => workflow);
 }
