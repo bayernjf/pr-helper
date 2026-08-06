@@ -1277,7 +1277,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
       && statuses
       && !stage.source.includes('*')
       && canCreateWorkflowStage(stageIndex, flow.stages, statuses)
-      && (detailStatus.kind === 'not-created' || detailStatus.kind === 'merged' && Boolean(detailStatus.aheadBy)),
+      && (detailStatus.kind === 'not-created' && Boolean(detailStatus.aheadBy) || detailStatus.kind === 'merged' && Boolean(detailStatus.aheadBy)),
   );
   const createAction = (queueItem?.kind === 'ready-to-create' || state?.decision?.kind === 'ready-to-create' || canCreateFromDetail) && canOperateWorkflow(flow, 'pr-create') ? `<button class="primary drawer-create-pr">${t('overview.run.createPr')}</button>` : '';
   const statusText = detailStatus ? drawerStatusText(state, detailStatus) : queueItem?.message || drawerStatusText(state);
@@ -1618,7 +1618,15 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   }
   const status = statuses?.[index];
   if (!status) return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p>${t('detail.timeline.placeholder')}</p></div></article>`;
-  if (status.kind === 'not-created') { const unlocked = canCreateWorkflowStage(index, active!.stages, statuses!); const canCreate = canOperateWorkflow(active!, 'pr-create'); return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${unlocked ? `<div class="timeline-actions">${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${lockedStageText(index)}</p>`}</div></article>`; }
+  if (status.kind === 'not-created') {
+    const unlocked = canCreateWorkflowStage(index, active!.stages, statuses!);
+    const hasNewCommits = Boolean(status.aheadBy);
+    const canCreate = unlocked && hasNewCommits && canOperateWorkflow(active!, 'pr-create');
+    const changeMessage = hasNewCommits
+      ? `<p><b class="status neutral">${t('status.newCommits', { count: status.aheadBy || 0 })}</b> · ${unlocked ? t('status.newCommits.canCreate') : t('status.newCommits.waiting')}</p>`
+      : unlocked ? `<p class="meta">${t('status.newCommits.waitingChanges')}</p>` : '';
+    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${changeMessage}${unlocked ? `<div class="timeline-actions">${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${lockedStageText(index)}</p>`}</div></article>`;
+  }
   if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status failure">${t('status.fetchFailed')}</b> · ${escape(status.message || '')}</p></div></article>`;
   const checks = status.checks?.total ? gateDisclosure(t('status.checks.summary', { passed: status.checks.passed, total: status.checks.total, state: status.checks.state === 'success' ? t('status.checks.completed') : status.checks.state === 'failure' ? t('status.checks.failed') : t('status.checks.running') }), status.checkDetails, 'checks') : '';
   const actions = status.actions?.total ? gateDisclosure(t('status.actions.runs.summary', { passed: status.actions.passed, total: status.actions.total, state: status.actions.state === 'success' ? t('status.actions.passed') : status.actions.state === 'failure' ? t('status.actions.failed') : t('status.actions.running') }), status.actionDetails, 'actions') : '';
@@ -1882,7 +1890,7 @@ async function refreshStatuses(renderDetail = true) {
           pr = historicalPulls.find(candidate => candidate.head.ref === stage.source) || null;
         }
       }
-      if (!pr) return comparison.notFound ? { kind: 'error', message: t('status.sourceBranchMissing') } as StepStatus : { kind: 'not-created' } as StepStatus;
+      if (!pr) return comparison.notFound ? { kind: 'error', message: t('status.sourceBranchMissing') } as StepStatus : { kind: 'not-created', aheadBy: comparison.ahead_by } as StepStatus;
       if (pr.merged_at) {
         let checks: StepStatus['checks'];
         if (pr.merge_commit_sha) {
