@@ -696,6 +696,8 @@ button.text-link {
   cursor: pointer;
 }
 
+.draft-step > button[data-remove]:disabled { cursor: wait; opacity: .55; }
+
 .draft-step-move-buttons { grid-column: 4; grid-row: 1; display: grid; gap: 1px; }
 .draft-step-move-buttons button { width: 23px; height: 18px; cursor: pointer; font: 700 .72rem Manrope; }
 .draft-step-move-buttons button:disabled { cursor: not-allowed; opacity: .28; }

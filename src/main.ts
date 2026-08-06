@@ -210,6 +210,39 @@ function save(next: Workflow) {
   persistWorkflowsLocally();
   return cloudWorkflowStorage ? workflowSaveQueue.enqueue(normalized.id) : Promise.resolve(true);
 }
+
+async function latestCloudWorkflow(workflowId: string) {
+  const response = await fetch(githubAppApiUrl('/api/workflows'));
+  if (!response.ok) throw new Error(await workflowApiError(response));
+  const payload = await response.json() as { workflows?: Workflow[] };
+  return payload.workflows?.find(workflow => workflow.id === workflowId) || null;
+}
+
+async function removeStageAndPersist(workflow: Workflow, stageIndex: number) {
+  const removedStage = workflow.stages[stageIndex];
+  if (!removedStage) return false;
+  const firstAttempt = await save(removeStage(workflow, stageIndex));
+  if (firstAttempt || !cloudWorkflowStorage) return firstAttempt;
+
+  // A concurrent save may have advanced the workflow version. Reapply only this
+  // deletion to the latest definition so unrelated remote edits are preserved.
+  try {
+    const latest = await latestCloudWorkflow(workflow.id);
+    if (!latest) throw new Error(t('toast.saved.cloudFail'));
+    const latestStageIndex = latest.stages.findIndex(stage => stage.stageId === removedStage.stageId);
+    if (latestStageIndex === -1) {
+      workflows = saveWorkflow(workflows, latest);
+      active = latest;
+      persistWorkflowsLocally();
+      cloudWorkflowSyncError = '';
+      return true;
+    }
+    return await save(removeStage(latest, latestStageIndex));
+  } catch (error) {
+    reportWorkflowSaveError(error);
+    return false;
+  }
+}
 async function removeWorkflowFromStorage(workflowId: string) {
   workflows = deleteWorkflow(workflows, workflowId); persistWorkflowsLocally();
   if (!cloudWorkflowStorage) return;
@@ -2277,7 +2310,9 @@ apiKeyFieldObserver.observe(document.body, { childList: true, subtree: true });
 document.addEventListener('click', event => {
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-remove]');
   if (!button || !active) return;
-  const next = removeStage(active, Number(button.dataset.remove));
+  const workflow = active;
+  const stageIndex = Number(button.dataset.remove);
+  const next = removeStage(workflow, stageIndex);
   if (!next.stages.length) {
     const workflowId = active.id;
     active = null;
@@ -2285,9 +2320,10 @@ document.addEventListener('click', event => {
     return;
   }
   button.disabled = true;
-  void save(next).then(saved => {
+  button.textContent = t('draft.saving');
+  void removeStageAndPersist(workflow, stageIndex).then(saved => {
     if (saved) editor();
-    else button.disabled = false;
+    else { button.disabled = false; button.textContent = t('draft.remove'); }
   });
 });
 
