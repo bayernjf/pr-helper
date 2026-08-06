@@ -299,6 +299,7 @@ const en: TranslationDict = {
   'draft.empty.title': 'No steps saved yet',
   'draft.empty.desc': 'Once you save the first step, the flow will appear here.',
   'draft.remove': 'Remove',
+  'draft.saving': 'Saving…',
   'draft.independent': 'Independent',
   'draft.waitFor': 'Wait for {count} routes',
   'draft.drag': 'Drag to reorder: {name}',
