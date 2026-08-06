@@ -140,6 +140,8 @@ const en: TranslationDict = {
   'overview.board.failed': 'Failed',
   'overview.board.filterEmpty': 'No projects match this filter',
   'overview.board.showAll': 'Show all projects',
+  'overview.board.collapse': 'Collapse lane details',
+  'overview.board.expand': 'Expand lane details',
   'overview.board.waitingSync': 'Waiting for status sync',
   'overview.board.edit': 'Edit flow',
   'overview.board.dragProject': 'Drag to reorder: {{name}}',

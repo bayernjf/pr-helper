@@ -2568,3 +2568,28 @@ a.account-menu-item {
   outline-offset: 3px;
   border-radius: 3px;
 }
+
+.lane-collapse-toggle {
+  display: grid;
+  place-items: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.lane-collapse-toggle:hover,
+.lane-collapse-toggle:focus-visible {
+  border-color: var(--border-accent);
+  background: var(--bg-card-hover);
+  color: var(--text-accent);
+  outline: none;
+}
+.lane-collapse-toggle:focus-visible { box-shadow: 0 0 0 2px var(--border-accent); }
+.lane-collapse-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform .16s ease; }
+.project-lane.is-expanded .lane-collapse-toggle svg { transform: rotate(180deg); }
+.lane-body[hidden] { display: none; }

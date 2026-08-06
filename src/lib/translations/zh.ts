@@ -140,6 +140,8 @@ const zh: TranslationDict = {
   'overview.board.failed': '失败',
   'overview.board.filterEmpty': '没有符合当前筛选的项目',
   'overview.board.showAll': '查看全部项目',
+  'overview.board.collapse': '折叠流程详情',
+  'overview.board.expand': '展开流程详情',
   'overview.board.waitingSync': '等待状态同步',
   'overview.board.edit': '编辑流程',
   'overview.board.dragProject': '拖动排序：{{name}}',
