@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-03（014–023 已执行；021–023 对应代码已部署 Production；操作审计 Production 验收已通过）
+> 最后更新：2026-08-08（014–023 已执行；021–023 对应代码已部署 Production；操作审计 Production 验收已通过；Lane 拖拽预览图修复完成）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
