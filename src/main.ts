@@ -191,9 +191,29 @@ async function persistWorkflowRemotely(workflow: Workflow): Promise<Workflow | n
   }
 }
 async function persistWorkflowOrder(next: Workflow[]) {
+  const previousPositions = new Map<string, DOMRect>();
+  document.querySelectorAll<HTMLElement>('[data-project-lane]').forEach(lane => {
+    const workflowId = lane.dataset.projectLane;
+    if (workflowId) previousPositions.set(workflowId, lane.getBoundingClientRect());
+  });
   workflows = next;
   persistWorkflowsLocally();
   render();
+  requestAnimationFrame(() => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    document.querySelectorAll<HTMLElement>('[data-project-lane]').forEach(lane => {
+      const workflowId = lane.dataset.projectLane;
+      const previous = workflowId ? previousPositions.get(workflowId) : undefined;
+      if (!previous || !workflowId) return;
+      const current = lane.getBoundingClientRect();
+      const offsetY = previous.top - current.top;
+      if (Math.abs(offsetY) < 1) return;
+      lane.animate(
+        [{ transform: `translateY(${offsetY}px)` }, { transform: 'translateY(0)' }],
+        { duration: 240, easing: 'cubic-bezier(.22, .8, .28, 1)' },
+      );
+    });
+  });
   if (!cloudWorkflowStorage) { showToast(t('toast.order.saved')); return; }
   try {
     const saved = await Promise.all(next.map(workflow => workflowSaveQueue.enqueue(workflow.id)));
