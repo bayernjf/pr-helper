@@ -1266,6 +1266,9 @@ function bindLaneSorting() {
       lane.classList.add('is-dragging');
       event.dataTransfer.effectAllowed = 'move';
       event.dataTransfer.setData('text/plain', workflowId);
+      // 原生拖拽默认用手柄按钮做预览图，改为整个 Lane 卡片，并让鼠标停在抓取位置
+      const laneRect = lane.getBoundingClientRect();
+      event.dataTransfer.setDragImage(lane, event.clientX - laneRect.left, event.clientY - laneRect.top);
     });
     handle.addEventListener('dragend', clearDragState);
   });
@@ -1428,6 +1431,9 @@ function bindDraftStepSorting() {
       step.classList.add('is-dragging');
       event.dataTransfer.effectAllowed = 'move';
       event.dataTransfer.setData('text/plain', String(index));
+      // 原生拖拽默认用手柄按钮做预览图，改为整个步骤卡片，并让鼠标停在抓取位置
+      const stepRect = step.getBoundingClientRect();
+      event.dataTransfer.setDragImage(step, event.clientX - stepRect.left, event.clientY - stepRect.top);
     });
     handle.addEventListener('dragend', () => { clearStepClasses(); draggedIndex = null; });
   });
