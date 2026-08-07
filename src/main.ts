@@ -1254,7 +1254,7 @@ function projectLane(flow: Workflow) {
 function bindLaneSorting() {
   const lanes = [...document.querySelectorAll<HTMLElement>('[data-project-lane]')];
   let draggedWorkflowId = '';
-  const clearLaneClasses = () => lanes.forEach(lane => lane.classList.remove('is-dragging', 'is-drop-before', 'is-drop-after'));
+  const clearLaneClasses = () => lanes.forEach(lane => lane.classList.remove('is-dragging', 'is-drop-before', 'is-drop-after', 'is-drag-shift-up', 'is-drag-shift-down'));
   const clearDragState = () => { clearLaneClasses(); draggedWorkflowId = ''; };
   document.querySelectorAll<HTMLButtonElement>('[data-lane-drag]').forEach(handle => {
     handle.addEventListener('dragstart', event => {
@@ -1276,9 +1276,17 @@ function bindLaneSorting() {
       if (!draggedId || !targetId || draggedId === targetId) return;
       event.preventDefault();
       if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-      lanes.forEach(item => item.classList.remove('is-drop-before', 'is-drop-after'));
+      lanes.forEach(item => item.classList.remove('is-drop-before', 'is-drop-after', 'is-drag-shift-up', 'is-drag-shift-down'));
       const bounds = lane.getBoundingClientRect();
-      lane.classList.add(event.clientY < bounds.top + bounds.height / 2 ? 'is-drop-before' : 'is-drop-after');
+      const placement = event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after';
+      lane.classList.add(placement === 'before' ? 'is-drop-before' : 'is-drop-after');
+      const draggedIndex = lanes.findIndex(item => item.dataset.projectLane === draggedId);
+      const targetIndex = lanes.indexOf(lane);
+      if (draggedIndex >= 0 && targetIndex >= 0 && draggedIndex < targetIndex) {
+        lanes.slice(draggedIndex + 1, targetIndex + 1).forEach(item => item.classList.add('is-drag-shift-up'));
+      } else if (draggedIndex >= 0 && targetIndex >= 0 && draggedIndex > targetIndex) {
+        lanes.slice(targetIndex, draggedIndex).forEach(item => item.classList.add('is-drag-shift-down'));
+      }
     });
     lane.addEventListener('drop', event => {
       event.preventDefault();
