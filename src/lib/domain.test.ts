@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canCreateStage, canCreateWorkflowStage, canMergeOpenPull, getStageAction, githubCompareUrl, githubPullUrl, needsNewPullRequest, plainTextSummary, statusChanged, summarizeChecks, summarizeGitHubCheckDetails, summarizeGitHubChecks } from './domain';
+import { canCreateStage, canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, getStageAction, githubCompareUrl, githubPullUrl, needsNewPullRequest, plainTextSummary, statusChanged, summarizeChecks, summarizeGitHubCheckDetails, summarizeGitHubChecks } from './domain';
 
 describe('workflow stages', () => {
   it('keeps the release stage locked until the previous PR and its checks succeed', () => {
@@ -45,6 +45,13 @@ describe('workflow stages', () => {
 
   it('converts GitHub HTML check summaries to safe readable text', () => {
     expect(plainTextSummary('<table><tr><td><strong>Status:</strong></td><td>🚫&nbsp; Build failed.</td></tr></table>')).toBe('Status: 🚫 Build failed.');
+  });
+
+  it('labels Cloudflare check URLs from the target branch environment', () => {
+    const summary = 'Deploy successful! Preview URL: https://preview.example.dev';
+    expect(deploymentSummaryForTarget(summary, 'Cloudflare Pages', 'dev')).toBe(summary);
+    expect(deploymentSummaryForTarget(summary, 'Cloudflare Pages', 'main')).toBe('Deploy successful! Production URL: https://preview.example.dev');
+    expect(deploymentSummaryForTarget(summary, 'GitHub Actions', 'main')).toBe(summary);
   });
 
   it('only unlocks a later PR after every earlier step is merged and its post-merge checks succeed', () => {
