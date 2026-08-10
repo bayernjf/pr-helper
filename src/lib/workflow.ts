@@ -100,6 +100,10 @@ export function removeStage(workflow: Workflow, index: number): Workflow {
   };
 }
 
+export function stageIndexForId(workflow: Workflow, stageId: string | undefined): number {
+  return stageId ? workflow.stages.findIndex(stage => stage.stageId === stageId) : -1;
+}
+
 export function reorderStages(workflow: Workflow, fromIndex: number, toIndex: number): Workflow {
   if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex) || fromIndex < 0 || toIndex < 0 || fromIndex >= workflow.stages.length || toIndex >= workflow.stages.length || fromIndex === toIndex) return workflow;
   const originalIndexes = workflow.stages.map((_, index) => index);

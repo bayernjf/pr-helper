@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, workflowSummary } from './workflow';
+import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
   it('saves the repository and its first selected branch transition', () => {
@@ -56,6 +56,20 @@ describe('workflow configuration', () => {
   it('removes one configured step without changing the other steps', () => {
     const workflow = addStage(createWorkflow('bayernjf/pr-helper', 'feature/20260722', 'dev'), 'dev', 'main');
     expect(removeStage(workflow, 0).stages).toEqual([{ source: 'dev', target: 'main', stageId: expect.any(String) }]);
+  });
+
+  it('finds a deletion target by stable stage identity after the route order changes', () => {
+    const workflow = {
+      ...createWorkflow('bayernjf/pr-helper', 'feature/20260722', 'dev'),
+      stages: [
+        { source: 'feature/20260722', target: 'dev', stageId: 'stage-feature' },
+        { source: 'fix-test', target: 'dev', stageId: 'stage-fix' },
+        { source: 'dev', target: 'main', stageId: 'stage-release' },
+      ],
+    };
+
+    expect(stageIndexForId(reorderStages(workflow, 2, 0), 'stage-fix')).toBe(2);
+    expect(stageIndexForId(workflow, 'missing-stage')).toBe(-1);
   });
 
   it('keeps selected release dependencies valid when a route is removed', () => {

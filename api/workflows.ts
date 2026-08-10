@@ -19,6 +19,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
   let identity: { login: string; githubUserId?: number; installationId?: string } | null = null;
   let audit: { action: 'workflow-created' | 'workflow-updated' | 'workflow-deleted'; repository: string | null; workflowId: string | null } | null = null;
   try {
+    response.setHeader('Cache-Control', 'private, no-store, max-age=0');
     const { session } = currentGitHubIdentity(request);
     identity = { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId };
     if (request.query?.resource === 'teams') {

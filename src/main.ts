@@ -6,7 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, g
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, sortWorkflows, sortWorkflowsForView, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
+import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, sortWorkflows, sortWorkflowsForView, stageIndexForId, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
@@ -235,7 +235,7 @@ function save(next: Workflow) {
 }
 
 async function latestCloudWorkflow(workflowId: string) {
-  const response = await fetch(githubAppApiUrl('/api/workflows'));
+  const response = await fetch(githubAppApiUrl('/api/workflows'), { cache: 'no-store' });
   if (!response.ok) throw new Error(await workflowApiError(response));
   const payload = await response.json() as { workflows?: Workflow[] };
   return payload.workflows?.find(workflow => workflow.id === workflowId) || null;
@@ -243,24 +243,26 @@ async function latestCloudWorkflow(workflowId: string) {
 
 async function removeStageAndPersist(workflow: Workflow, stageIndex: number) {
   const removedStage = workflow.stages[stageIndex];
-  if (!removedStage) return false;
+  if (!removedStage?.stageId) return false;
   const firstAttempt = await save(removeStage(workflow, stageIndex));
-  if (firstAttempt || !cloudWorkflowStorage) return firstAttempt;
+  if (!cloudWorkflowStorage) return firstAttempt;
 
-  // A concurrent save may have advanced the workflow version. Reapply only this
-  // deletion to the latest definition so unrelated remote edits are preserved.
+  // A deletion is not complete until the authoritative definition no longer has
+  // this stable stage identity. This prevents a stale response from resurrecting it.
   try {
     const latest = await latestCloudWorkflow(workflow.id);
     if (!latest) throw new Error(t('toast.saved.cloudFail'));
-    const latestStageIndex = latest.stages.findIndex(stage => stage.stageId === removedStage.stageId);
+    const latestStageIndex = stageIndexForId(latest, removedStage.stageId);
     if (latestStageIndex === -1) {
-      workflows = saveWorkflow(workflows, latest);
-      active = latest;
-      persistWorkflowsLocally();
-      cloudWorkflowSyncError = '';
+      applySavedWorkflow(latest);
       return true;
     }
-    return await save(removeStage(latest, latestStageIndex));
+    const current = workflows.find(item => item.id === workflow.id);
+    const currentStageIndex = current ? stageIndexForId(current, removedStage.stageId) : -1;
+    const next = current
+      ? { ...(currentStageIndex === -1 ? current : removeStage(current, currentStageIndex)), version: latest.version }
+      : removeStage(latest, latestStageIndex);
+    return await save(next);
   } catch (error) {
     reportWorkflowSaveError(error);
     return false;
@@ -287,7 +289,7 @@ async function loadCloudWorkflows() {
     return;
   }
   try {
-    const response = await fetch(githubAppApiUrl('/api/workflows'));
+    const response = await fetch(githubAppApiUrl('/api/workflows'), { cache: 'no-store' });
     if (response.status === 401) return;
     if (!response.ok) throw new Error(await workflowApiError(response));
     const payload = await response.json() as { workflows?: Workflow[] };
