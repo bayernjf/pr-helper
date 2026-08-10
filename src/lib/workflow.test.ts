@@ -1,8 +1,38 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
+import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
+  it('accepts the authoritative workflow returned after deleting a stage', () => {
+    const current = {
+      id: 'flow-1', name: 'Release', repository: 'octo/app', version: 4,
+      stages: [
+        { source: 'feature', target: 'dev', stageId: 'stage-feature' },
+        { source: 'fix-test', target: 'dev', stageId: 'stage-fix' },
+        { source: 'dev', target: 'main', stageId: 'stage-release' },
+      ],
+    };
+    const saved = { ...current, version: 5, stages: [current.stages[0], current.stages[2]] };
+
+    expect(applyAuthoritativeWorkflow(current, saved)).toEqual(saved);
+  });
+
+  it('does not let a late queued-save response restore stale content or downgrade the version', () => {
+    const current = {
+      id: 'flow-1', name: 'Release', repository: 'octo/app', version: 5,
+      stages: [
+        { source: 'feature', target: 'dev', stageId: 'stage-feature' },
+        { source: 'dev', target: 'main', stageId: 'stage-release' },
+      ],
+    };
+    const staleResponse = {
+      ...current, version: 4,
+      stages: [current.stages[0], { source: 'fix-test', target: 'dev', stageId: 'stage-fix' }, current.stages[1]],
+    };
+
+    expect(applyQueuedWorkflowSave(current, staleResponse)).toEqual(current);
+  });
+
   it('saves the repository and its first selected branch transition', () => {
     expect(createWorkflow('bayernjf/pr-helper', 'feature/20260722', 'dev')).toMatchObject({
       id: expect.any(String),

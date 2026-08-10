@@ -32,6 +32,19 @@ export function ensureStageIds(workflow: Workflow): Workflow {
   });
   return changed ? { ...workflow, stages } : workflow;
 }
+
+/** Keeps edits made while an ordinary save request was in flight. */
+export function applyQueuedWorkflowSave(current: Workflow | undefined, saved: Workflow): Workflow {
+  if (!current) return saved;
+  if (typeof saved.version === 'number' && typeof current.version === 'number' && saved.version < current.version) return current;
+  return typeof saved.version === 'number' ? { ...current, version: saved.version } : current;
+}
+
+/** Applies a server-side mutation result, unless a newer result already won the race. */
+export function applyAuthoritativeWorkflow(current: Workflow | undefined, saved: Workflow): Workflow {
+  if (current && typeof saved.version === 'number' && typeof current.version === 'number' && saved.version < current.version) return current;
+  return saved;
+}
 export type DeploymentConfigurationWarningCode = 'no-deployments' | 'actions-unavailable' | 'workflow-not-found' | 'environment-missing' | 'environment-not-found' | 'health-path-invalid' | 'rollback-workflow-not-found';
 export type DeploymentConfigurationWarning = { code: DeploymentConfigurationWarningCode; deploymentIndex?: number; value?: string };
 
