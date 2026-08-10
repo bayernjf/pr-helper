@@ -1152,7 +1152,9 @@ function overview() {
   const sortControls = content.querySelector<HTMLElement>('.lane-sort-controls');
   const boardSummary = content.querySelector<HTMLElement>('.board-summary');
   const refreshQueueButton = content.querySelector<HTMLElement>('#refresh-action-queue');
+  const searchControl = content.querySelector<HTMLElement>('.lane-search');
   if (sortControls && boardSummary && refreshQueueButton) boardSummary.insertBefore(sortControls, refreshQueueButton);
+  if (searchControl && boardSummary && sortControls) boardSummary.insertBefore(searchControl, sortControls);
   document.querySelector('#new-flow')!.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
