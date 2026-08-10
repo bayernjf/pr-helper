@@ -90,6 +90,12 @@ export function summarizeGitHubCheckDetails(
   return details;
 }
 
+export function deploymentSummaryForTarget(summary: string | null, source: string, target: string) {
+  if (!summary || !source.toLowerCase().includes('cloudflare')) return summary;
+  const environment = target === 'main' ? 'Production' : target === 'dev' ? 'Preview' : null;
+  return environment ? summary.replace(/\b(?:Preview|Production)\s+URL\s*:/i, `${environment} URL:`) : summary;
+}
+
 export function canCreateStage(index: number, statuses: { kind: string; checks?: { state: string } }[]) {
   return statuses.slice(0, index).every(status => status.kind === 'merged' && (!status.checks || status.checks.state === 'success'));
 }
