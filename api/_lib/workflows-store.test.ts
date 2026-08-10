@@ -1,8 +1,21 @@
 import { describe, expect, it } from 'vitest';
 
-import { canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, ensureStageIds, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowStageStateMatchesDefinition } from './workflows-store';
+import { canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
+  it('falls back to the requested route when browser and database stage IDs differ', () => {
+    const workflow = {
+      id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [
+        { source: 'feature', target: 'dev', stageId: 's-db-feature' },
+        { source: 'fix-test', target: 'dev', stageId: 's-db-fix' },
+        { source: 'dev', target: 'main', stageId: 's-db-release' },
+      ],
+    };
+
+    expect(findWorkflowStageIndexForRemoval(workflow, 's-browser-fix', 1, 'fix-test', 'dev')).toBe(1);
+    expect(findWorkflowStageIndexForRemoval(workflow, 's-browser-fix', 1, 'feature', 'dev')).toBe(-1);
+  });
+
   it('accepts a workflow with real branch stages', () => {
     expect(isStoredWorkflow({ id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature/payments', target: 'dev' }, { source: 'dev', target: 'main' }] })).toBe(true);
   });

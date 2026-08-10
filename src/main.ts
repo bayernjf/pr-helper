@@ -241,13 +241,14 @@ function save(next: Workflow) {
 }
 
 async function removeStageAndPersist(workflow: Workflow, stageIndex: number) {
-  const removedStage = workflow.stages[stageIndex];
+  const normalizedWorkflow = ensureStageIds(workflow);
+  const removedStage = normalizedWorkflow.stages[stageIndex];
   if (!removedStage?.stageId) return false;
-  if (!cloudWorkflowStorage) return save(removeStage(workflow, stageIndex));
+  if (!cloudWorkflowStorage) return save(removeStage(normalizedWorkflow, stageIndex));
 
   workflowMutationRevision += 1;
   try {
-    const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: workflow.id, stageId: removedStage.stageId }) });
+    const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: workflow.id, stageId: removedStage.stageId, stageIndex, source: removedStage.source, target: removedStage.target }) });
     if (!response.ok) throw new Error(await workflowApiError(response));
     const payload = await response.json() as { workflow?: Workflow };
     const saved = payload.workflow ? ensureStageIds(payload.workflow) : null;
