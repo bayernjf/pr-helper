@@ -751,12 +751,18 @@ function ownerAndName(repository: string) {
   return { owner, name };
 }
 
+export function pullDetailPath(repository: string, pullNumber: number) {
+  const { owner, name } = ownerAndName(repository);
+  return `/repos/${owner}/${name}/pulls/${pullNumber}`;
+}
+
 async function pullForStage(environment: Record<string, string | undefined>, installationId: string, workflow: StoredWorkflow, stage: StoredWorkflow['stages'][number]) {
   const config = parseGithubAppConfig(environment);
   const { owner, name } = ownerAndName(workflow.repository);
   const path = `/repos/${owner}/${name}/pulls?state=all&head=${encodeURIComponent(`${owner}:${stage.source}`)}&base=${encodeURIComponent(stage.target)}&per_page=10`;
   const pulls = await installationRequest<Pull[]>(config, installationId, path);
-  return pulls[0];
+  const pull = pulls[0];
+  return pull ? installationRequest<Pull>(config, installationId, pullDetailPath(workflow.repository, pull.number)) : undefined;
 }
 
 async function routeSourcesForStage(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number) {

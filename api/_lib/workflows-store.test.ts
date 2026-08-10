@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowStageStateMatchesDefinition } from './workflows-store';
+import { canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
+  it('fetches a pull detail after discovery so mergeability is authoritative', () => {
+    expect(pullDetailPath('octo/app', 42)).toBe('/repos/octo/app/pulls/42');
+  });
+
   it('falls back to the requested route when browser and database stage IDs differ', () => {
     const workflow = {
       id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [
