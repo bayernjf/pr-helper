@@ -2,7 +2,7 @@ import './style.css';
 import { GitHubRequestError, githubAppApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './lib/github';
 import { buildPrPrompt, shouldAutoGeneratePrMessage, testAiConnection, type AiConfig } from './lib/ai';
 import { streamPrMessage } from './lib/ai-stream';
-import { canCreateWorkflowStage, canMergeOpenPull, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks, summarizeGitHubCheckDetails, summarizeGitHubChecks, type GitHubCheckDetail } from './lib/domain';
+import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks, summarizeGitHubCheckDetails, summarizeGitHubChecks, type GitHubCheckDetail } from './lib/domain';
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
@@ -191,9 +191,29 @@ async function persistWorkflowRemotely(workflow: Workflow): Promise<Workflow | n
   }
 }
 async function persistWorkflowOrder(next: Workflow[]) {
+  const previousPositions = new Map<string, DOMRect>();
+  document.querySelectorAll<HTMLElement>('[data-project-lane]').forEach(lane => {
+    const workflowId = lane.dataset.projectLane;
+    if (workflowId) previousPositions.set(workflowId, lane.getBoundingClientRect());
+  });
   workflows = next;
   persistWorkflowsLocally();
   render();
+  requestAnimationFrame(() => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    document.querySelectorAll<HTMLElement>('[data-project-lane]').forEach(lane => {
+      const workflowId = lane.dataset.projectLane;
+      const previous = workflowId ? previousPositions.get(workflowId) : undefined;
+      if (!previous || !workflowId) return;
+      const current = lane.getBoundingClientRect();
+      const offsetY = previous.top - current.top;
+      if (Math.abs(offsetY) < 1) return;
+      lane.animate(
+        [{ transform: `translateY(${offsetY}px)` }, { transform: 'translateY(0)' }],
+        { duration: 240, easing: 'cubic-bezier(.22, .8, .28, 1)' },
+      );
+    });
+  });
   if (!cloudWorkflowStorage) { showToast(t('toast.order.saved')); return; }
   try {
     const saved = await Promise.all(next.map(workflow => workflowSaveQueue.enqueue(workflow.id)));
@@ -1234,7 +1254,7 @@ function projectLane(flow: Workflow) {
 function bindLaneSorting() {
   const lanes = [...document.querySelectorAll<HTMLElement>('[data-project-lane]')];
   let draggedWorkflowId = '';
-  const clearLaneClasses = () => lanes.forEach(lane => lane.classList.remove('is-dragging', 'is-drop-before', 'is-drop-after'));
+  const clearLaneClasses = () => lanes.forEach(lane => lane.classList.remove('is-dragging', 'is-drop-before', 'is-drop-after', 'is-drag-shift-up', 'is-drag-shift-down'));
   const clearDragState = () => { clearLaneClasses(); draggedWorkflowId = ''; };
   document.querySelectorAll<HTMLButtonElement>('[data-lane-drag]').forEach(handle => {
     handle.addEventListener('dragstart', event => {
@@ -1246,6 +1266,9 @@ function bindLaneSorting() {
       lane.classList.add('is-dragging');
       event.dataTransfer.effectAllowed = 'move';
       event.dataTransfer.setData('text/plain', workflowId);
+      // 原生拖拽默认用手柄按钮做预览图，改为整个 Lane 卡片，并让鼠标停在抓取位置
+      const laneRect = lane.getBoundingClientRect();
+      event.dataTransfer.setDragImage(lane, event.clientX - laneRect.left, event.clientY - laneRect.top);
     });
     handle.addEventListener('dragend', clearDragState);
   });
@@ -1256,9 +1279,17 @@ function bindLaneSorting() {
       if (!draggedId || !targetId || draggedId === targetId) return;
       event.preventDefault();
       if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-      lanes.forEach(item => item.classList.remove('is-drop-before', 'is-drop-after'));
+      lanes.forEach(item => item.classList.remove('is-drop-before', 'is-drop-after', 'is-drag-shift-up', 'is-drag-shift-down'));
       const bounds = lane.getBoundingClientRect();
-      lane.classList.add(event.clientY < bounds.top + bounds.height / 2 ? 'is-drop-before' : 'is-drop-after');
+      const placement = event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after';
+      lane.classList.add(placement === 'before' ? 'is-drop-before' : 'is-drop-after');
+      const draggedIndex = lanes.findIndex(item => item.dataset.projectLane === draggedId);
+      const targetIndex = lanes.indexOf(lane);
+      if (draggedIndex >= 0 && targetIndex >= 0 && draggedIndex < targetIndex) {
+        lanes.slice(draggedIndex + 1, targetIndex + 1).forEach(item => item.classList.add('is-drag-shift-up'));
+      } else if (draggedIndex >= 0 && targetIndex >= 0 && draggedIndex > targetIndex) {
+        lanes.slice(targetIndex, draggedIndex).forEach(item => item.classList.add('is-drag-shift-down'));
+      }
     });
     lane.addEventListener('drop', event => {
       event.preventDefault();
@@ -1291,12 +1322,12 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const tone = queueItem?.kind === 'checks-failed' ? 'failed' : queueItem ? 'attention' : run.tone;
   const pullNumber = detailStatus?.pr?.number || queueItem?.pullNumber || state?.pullNumber || null;
   const drawerChecks = detailStatus?.checks?.total
-    ? gateDisclosure(t('overview.run.checkCount', { passed: detailStatus.checks.passed, total: detailStatus.checks.total }), detailStatus.checkDetails, 'checks')
+    ? gateDisclosure(t('overview.run.checkCount', { passed: detailStatus.checks.passed, total: detailStatus.checks.total }), detailStatus.checkDetails, 'checks', stage.target)
     : !detailStatus && state?.checksTotal
       ? `<p>${t('overview.run.checkCount', { passed: state.checksPassed, total: state.checksTotal })}</p>`
       : '';
   const drawerActions = detailStatus?.actions?.total
-    ? gateDisclosure(t('status.actions.runs.summary', { passed: detailStatus.actions.passed, total: detailStatus.actions.total, state: detailStatus.actions.state === 'success' ? t('status.actions.passed') : detailStatus.actions.state === 'failure' ? t('status.actions.failed') : t('status.actions.running') }), detailStatus.actionDetails, 'actions')
+    ? gateDisclosure(t('status.actions.runs.summary', { passed: detailStatus.actions.passed, total: detailStatus.actions.total, state: detailStatus.actions.state === 'success' ? t('status.actions.passed') : detailStatus.actions.state === 'failure' ? t('status.actions.failed') : t('status.actions.running') }), detailStatus.actionDetails, 'actions', stage.target)
     : '';
   const pull = pullNumber ? `<a class="drawer-pr-link" href="${githubPullUrl(flow.repository, pullNumber)}" target="_blank" rel="noreferrer">PR #${pullNumber} ↗</a>` : `<p>${t('overview.board.noPull')}</p>`;
   const events = stageEvents(workflowId, stageIndex, routeSource);
@@ -1400,6 +1431,9 @@ function bindDraftStepSorting() {
       step.classList.add('is-dragging');
       event.dataTransfer.effectAllowed = 'move';
       event.dataTransfer.setData('text/plain', String(index));
+      // 原生拖拽默认用手柄按钮做预览图，改为整个步骤卡片，并让鼠标停在抓取位置
+      const stepRect = step.getBoundingClientRect();
+      event.dataTransfer.setDragImage(step, event.clientX - stepRect.left, event.clientY - stepRect.top);
     });
     handle.addEventListener('dragend', () => { clearStepClasses(); draggedIndex = null; });
   });
@@ -1611,18 +1645,18 @@ function positionMergeMenu(menu: HTMLElement, control: HTMLElement) {
   if (menuHeight > availableSpace) menu.style.maxHeight = `${Math.max(96, Math.floor(availableSpace))}px`;
 }
 
-function checkDetailsMarkup(details: readonly GitHubCheckDetail[] | undefined) {
+function checkDetailsMarkup(details: readonly GitHubCheckDetail[] | undefined, target?: string) {
   if (!details?.length) return '';
   const groups = [...new Set(details.map(detail => detail.source))];
   return `<div class="check-detail-groups">${groups.map(source => {
     const entries = details.filter(detail => detail.source === source);
-    return `<section class="check-source"><strong>${escape(source)}</strong>${entries.map(detail => `<a class="check-detail ${detail.state}" href="${escape(detail.url || '#')}"${detail.url ? ' target="_blank" rel="noreferrer"' : ''}><span class="check-detail-icon" aria-hidden="true">${detail.state === 'success' ? '✓' : detail.state === 'failure' ? '×' : '…'}</span><span><b>${escape(detail.name)}</b>${detail.summary ? `<small class="check-detail-summary">${escape(detail.summary)}</small>` : ''}</span><small>${detail.state === 'success' ? t('status.checks.passed') : detail.state === 'failure' ? t('status.checks.failed') : t('status.checks.running')}</small></a>`).join('')}</section>`;
+    return `<section class="check-source"><strong>${escape(source)}</strong>${entries.map(detail => { const summary = deploymentSummaryForTarget(detail.summary, detail.source, target || ''); return `<a class="check-detail ${detail.state}" href="${escape(detail.url || '#')}"${detail.url ? ' target="_blank" rel="noreferrer"' : ''}><span class="check-detail-icon" aria-hidden="true">${detail.state === 'success' ? '✓' : detail.state === 'failure' ? '×' : '…'}</span><span><b>${escape(detail.name)}</b>${summary ? `<small class="check-detail-summary">${escape(summary)}</small>` : ''}</span><small>${detail.state === 'success' ? t('status.checks.passed') : detail.state === 'failure' ? t('status.checks.failed') : t('status.checks.running')}</small></a>`; }).join('')}</section>`;
   }).join('')}</div>`;
 }
 
-function gateDisclosure(summary: string, details: readonly GitHubCheckDetail[] | undefined, kind: 'checks' | 'actions') {
+function gateDisclosure(summary: string, details: readonly GitHubCheckDetail[] | undefined, kind: 'checks' | 'actions', target?: string) {
   if (!details?.length) return `<span>${summary}</span>`;
-  return `<details class="gate-disclosure" data-${kind}-details><summary>${summary}</summary>${checkDetailsMarkup(details)}</details>`;
+  return `<details class="gate-disclosure" data-${kind}-details><summary>${summary}</summary>${checkDetailsMarkup(details, target)}</details>`;
 }
 
 function actionRunDetails(runs: readonly GitHubWorkflowRunSummary[]): GitHubCheckDetail[] {
@@ -1662,8 +1696,8 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
     return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${changeMessage}${unlocked ? `<div class="timeline-actions">${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${lockedStageText(index)}</p>`}</div></article>`;
   }
   if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status failure">${t('status.fetchFailed')}</b> · ${escape(status.message || '')}</p></div></article>`;
-  const checks = status.checks?.total ? gateDisclosure(t('status.checks.summary', { passed: status.checks.passed, total: status.checks.total, state: status.checks.state === 'success' ? t('status.checks.completed') : status.checks.state === 'failure' ? t('status.checks.failed') : t('status.checks.running') }), status.checkDetails, 'checks') : '';
-  const actions = status.actions?.total ? gateDisclosure(t('status.actions.runs.summary', { passed: status.actions.passed, total: status.actions.total, state: status.actions.state === 'success' ? t('status.actions.passed') : status.actions.state === 'failure' ? t('status.actions.failed') : t('status.actions.running') }), status.actionDetails, 'actions') : '';
+  const checks = status.checks?.total ? gateDisclosure(t('status.checks.summary', { passed: status.checks.passed, total: status.checks.total, state: status.checks.state === 'success' ? t('status.checks.completed') : status.checks.state === 'failure' ? t('status.checks.failed') : t('status.checks.running') }), status.checkDetails, 'checks', stage.target) : '';
+  const actions = status.actions?.total ? gateDisclosure(t('status.actions.runs.summary', { passed: status.actions.passed, total: status.actions.total, state: status.actions.state === 'success' ? t('status.actions.passed') : status.actions.state === 'failure' ? t('status.actions.failed') : t('status.actions.running') }), status.actionDetails, 'actions', stage.target) : '';
   const approvals = status.requiredApprovals ? t('status.approvals', { approvals: status.approvals || 0, required: status.requiredApprovals }) : '';
   const mergeability = status.mergeable === false || status.mergeableState === 'dirty' ? t('status.merge.conflict') : status.mergeableState === 'behind' ? t('status.merge.behind') : status.mergeableState === 'blocked' ? t('status.merge.blocked') : '';
   const mergeabilityPending = status.mergeable !== true || status.mergeableState !== 'clean';

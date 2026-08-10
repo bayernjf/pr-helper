@@ -1,6 +1,6 @@
 # PR Helper Handoff
 
-> 最后更新：2026-08-03
+> 最后更新：2026-08-08
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 
 ## 当前状态
@@ -8,7 +8,7 @@
 - 当前分支：`feature/20260722`。
 - 用户已确认本批代码已上线 Production。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地验证已通过：`npm test`（23 个文件 / 178 项）、`npm run test:e2e`（Playwright Chromium 9 项，API mock）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。
+- 当前本地验证已通过：`npm test`（23 个文件 / 186 项）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。本轮 Lane 排序动画未改变业务数据模型；浏览器 E2E 仍保持既有 API mock 覆盖范围。
 - Supabase 迁移 `001`–`023` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
 
@@ -44,6 +44,16 @@ Production 已验证行为：
 - 若未来要让用户授权后返回 Cloudflare 并持续操作，必须单独设计跨站 Cookie、`SameSite=None; Secure`、CORS 凭据、回跳白名单和 CSRF 防护；未经专项安全设计不得直接改动。
 
 ## 本批次已交付
+
+### Lane 自定义排序动画（2026-08-08）
+
+- 拖动中的 Lane 使用轻微抬升、阴影和降低透明度，避免拖动源与目标混淆。
+- 拖动经过其他 Lane 时，被跨越的 Lane 会以平滑位移让出空间，同时显示细线放置提示。
+- 松手后使用前后布局位置差执行平滑归位动画；系统启用"减少动态效果"时自动跳过动画。
+- 修复原生拖拽预览图：HTML5 默认用抓取手柄（30×42px 按钮）作为预览图，导致整个卡片不可见。改为使用整个 Lane 卡片作为拖拽预览图，鼠标跟随完整卡片而非小手柄。draft step 拖拽同样修复。
+- 仅影响看板视觉反馈，不改变自定义排序、创建时间/流程名称排序、持久化和权限逻辑。
+
+相关本地提交：`129db809`、`7483a649`、`795823c4`、`b8761c01`。
 
 - 阶段稳定身份：`stage_id`、迁移 `018`/`019`、流程排序后状态不再按数组位置错配。
 - 流程版本并发控制、创建 PR 重复检查、Actions 重跑/回滚幂等事件键、请求来源校验和用户级限流。
