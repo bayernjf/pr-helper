@@ -896,11 +896,44 @@ function returnToSourceLane(workflowId: string) {
     const lane = [...document.querySelectorAll<HTMLElement>('[data-project-lane]')]
       .find(element => element.dataset.projectLane === workflowId);
     if (!lane) return;
-    lane.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' });
-    lane.classList.remove('is-return-highlight');
-    void lane.offsetWidth;
-    lane.classList.add('is-return-highlight');
-    lane.addEventListener('animationend', () => lane.classList.remove('is-return-highlight'), { once: true });
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const highlight = () => {
+      lane.classList.remove('is-return-highlight');
+      void lane.offsetWidth;
+      lane.classList.add('is-return-highlight');
+      lane.addEventListener('animationend', () => lane.classList.remove('is-return-highlight'), { once: true });
+    };
+    lane.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'center' });
+    if (reducedMotion) { highlight(); return; }
+
+    let frame = 0;
+    let timeout = 0;
+    let done = false;
+    let previousTop = lane.getBoundingClientRect().top;
+    let stableFrames = 0;
+    let hasMoved = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      document.removeEventListener('scrollend', finish);
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timeout);
+      highlight();
+    };
+    const waitForStablePosition = () => {
+      const top = lane.getBoundingClientRect().top;
+      const moved = Math.abs(top - previousTop) >= 1;
+      hasMoved ||= moved;
+      const laneCenter = top + lane.offsetHeight / 2;
+      const alreadyCentered = Math.abs(laneCenter - window.innerHeight / 2) < 2;
+      stableFrames = !moved && (hasMoved || alreadyCentered) ? stableFrames + 1 : 0;
+      previousTop = top;
+      if (stableFrames >= 5) { finish(); return; }
+      frame = window.requestAnimationFrame(waitForStablePosition);
+    };
+    document.addEventListener('scrollend', finish, { once: true });
+    frame = window.requestAnimationFrame(waitForStablePosition);
+    timeout = window.setTimeout(finish, 1_500);
   });
 }
 
