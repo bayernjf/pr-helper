@@ -664,6 +664,39 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
   return existingAccess?.team ? { ...savedWorkflow, team: existingAccess.team } : savedWorkflow;
 }
 
+export async function removeWorkflowStage(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string, stageId: string) {
+  if (!workflowId || !stageId) throw new Error('无效的流程步骤');
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  const access = await requireWorkflowOperation(sql, user.id, workflowId, 'workflow-edit');
+  let savedWorkflow: StoredWorkflow | null = null;
+  await sql.begin(async transaction => {
+    await transaction`SELECT pg_advisory_xact_lock(hashtext(${`${access.ownerUserId}:${workflowId}`}))`;
+    const rows = await transaction<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${access.ownerUserId} AND id = ${workflowId} FOR UPDATE`;
+    const previous = storedWorkflowFromPayload(rows[0]?.payload);
+    if (!previous) throw new Error('未找到对应流程');
+    const stageIndex = previous.stages.findIndex(stage => stage.stageId === stageId);
+    if (stageIndex === -1) { savedWorkflow = previous; return; }
+    if (previous.stages.length === 1) throw new Error('流程至少需要保留一个步骤');
+    const stages = previous.stages
+      .filter(stage => stage.stageId !== stageId)
+      .map(stage => !stage.waitFor ? stage : { ...stage, waitFor: stage.waitFor.filter(dependency => dependency !== stageIndex).map(dependency => dependency > stageIndex ? dependency - 1 : dependency) });
+    const latestRows = await transaction<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId}`;
+    savedWorkflow = { ...ensureStageIds({ ...previous, stages }), version: (latestRows[0]?.version || 0) + 1 };
+    await transaction`UPDATE pr_helper_workflows SET payload = ${transaction.json(savedWorkflow)}, updated_at = now() WHERE user_id = ${access.ownerUserId} AND id = ${workflowId}`;
+    await transaction`DELETE FROM workflow_stage_events WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId} AND stage_id = ${stageId}`;
+    await pruneStaleWorkflowStageData(transaction, access.ownerUserId, savedWorkflow);
+    await saveWorkflowVersion(transaction, access.ownerUserId, savedWorkflow);
+    await recordOperationAuditForUser(transaction, access.ownerUserId, identity.installationId, {
+      action: 'workflow-updated', outcome: 'success', repository: savedWorkflow.repository,
+      workflowId, stageId, source: null, target: null, pullNumber: null, runId: null,
+      metadata: { version: savedWorkflow.version, stageCount: savedWorkflow.stages.length, operation: 'stage-deleted' }, failureReason: null,
+    });
+  });
+  if (!savedWorkflow) throw new Error('删除流程步骤失败');
+  return access.team ? { ...savedWorkflow, team: access.team } : savedWorkflow;
+}
+
 export async function removeWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string) {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);

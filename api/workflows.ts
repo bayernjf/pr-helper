@@ -1,6 +1,6 @@
 import { requestErrorStatus, type ApiRequest, type ApiResponse } from './_lib/http.js';
 import { currentGitHubIdentity } from './_lib/session.js';
-import { addTeamMember, createTeam, isStoredWorkflow, listTeamMembers, listTeams, listWorkflows, recordOperationAudit, removeTeamMember, removeWorkflow, shareWorkflowWithTeam, upsertWorkflow, type TeamRole } from './_lib/workflows-store.js';
+import { addTeamMember, createTeam, isStoredWorkflow, listTeamMembers, listTeams, listWorkflows, recordOperationAudit, removeTeamMember, removeWorkflow, removeWorkflowStage, shareWorkflowWithTeam, upsertWorkflow, type TeamRole } from './_lib/workflows-store.js';
 
 function body(request: ApiRequest) {
   if (typeof request.body === 'string') {
@@ -39,10 +39,16 @@ export default async function handler(request: ApiRequest, response: ApiResponse
       response.status(200).json({ workflows: await listWorkflows(process.env, identity) });
       return;
     }
-    const payload = body(request) as { workflow?: unknown; id?: unknown } | undefined;
+    const payload = body(request) as { workflow?: unknown; id?: unknown; workflowId?: unknown; stageId?: unknown } | undefined;
     if (request.method === 'PUT' && isStoredWorkflow(payload?.workflow)) {
       audit = { action: payload.workflow.version === undefined ? 'workflow-created' : 'workflow-updated', repository: payload.workflow.repository, workflowId: payload.workflow.id };
       const workflow = await upsertWorkflow(process.env, identity, payload.workflow);
+      response.status(200).json({ ok: true, workflow });
+      return;
+    }
+    if (request.method === 'PATCH' && typeof payload?.workflowId === 'string' && typeof payload?.stageId === 'string') {
+      audit = { action: 'workflow-updated', repository: null, workflowId: payload.workflowId };
+      const workflow = await removeWorkflowStage(process.env, identity, payload.workflowId, payload.stageId);
       response.status(200).json({ ok: true, workflow });
       return;
     }

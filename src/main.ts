@@ -238,35 +238,20 @@ function save(next: Workflow) {
   return cloudWorkflowStorage ? workflowSaveQueue.enqueue(normalized.id) : Promise.resolve(true);
 }
 
-async function latestCloudWorkflow(workflowId: string) {
-  const response = await fetch(githubAppApiUrl('/api/workflows'), { cache: 'no-store' });
-  if (!response.ok) throw new Error(await workflowApiError(response));
-  const payload = await response.json() as { workflows?: Workflow[] };
-  return payload.workflows?.find(workflow => workflow.id === workflowId) || null;
-}
-
 async function removeStageAndPersist(workflow: Workflow, stageIndex: number) {
   const removedStage = workflow.stages[stageIndex];
   if (!removedStage?.stageId) return false;
-  const firstAttempt = await save(removeStage(workflow, stageIndex));
-  if (!cloudWorkflowStorage) return firstAttempt;
+  if (!cloudWorkflowStorage) return save(removeStage(workflow, stageIndex));
 
-  // A deletion is not complete until the authoritative definition no longer has
-  // this stable stage identity. This prevents a stale response from resurrecting it.
+  workflowMutationRevision += 1;
   try {
-    const latest = await latestCloudWorkflow(workflow.id);
-    if (!latest) throw new Error(t('toast.saved.cloudFail'));
-    const latestStageIndex = stageIndexForId(latest, removedStage.stageId);
-    if (latestStageIndex === -1) {
-      applySavedWorkflow(latest);
-      return true;
-    }
-    const current = workflows.find(item => item.id === workflow.id);
-    const currentStageIndex = current ? stageIndexForId(current, removedStage.stageId) : -1;
-    const next = current
-      ? { ...(currentStageIndex === -1 ? current : removeStage(current, currentStageIndex)), version: latest.version }
-      : removeStage(latest, latestStageIndex);
-    return await save(next);
+    const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: workflow.id, stageId: removedStage.stageId }) });
+    if (!response.ok) throw new Error(await workflowApiError(response));
+    const payload = await response.json() as { workflow?: Workflow };
+    const saved = payload.workflow ? ensureStageIds(payload.workflow) : null;
+    if (!saved || stageIndexForId(saved, removedStage.stageId) !== -1) throw new Error(t('toast.saved.cloudFail'));
+    applySavedWorkflow(saved);
+    return true;
   } catch (error) {
     reportWorkflowSaveError(error);
     return false;
