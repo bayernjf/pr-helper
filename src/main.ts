@@ -1135,9 +1135,20 @@ function overview() {
   const failedCount = actionQueue.filter(item => item.kind === 'checks-failed').length;
   const workflowCount = workflows.length;
   const sortedWorkflows = sortWorkflowsForView(workflows, laneSortMode, laneSortDirection);
-  const visibleWorkflows = sortedWorkflows.filter(flow => overviewFilter === 'all' || actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed')));
+  const filterMatchedWorkflows = sortedWorkflows.filter(flow => overviewFilter === 'all' || actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed')));
+  const normalizedSearch = laneSearchQuery.trim().toLocaleLowerCase();
+  const visibleWorkflows = filterMatchedWorkflows.filter(flow => !normalizedSearch || `${flow.name} ${flow.repository}`.toLocaleLowerCase().includes(normalizedSearch));
+  const hasSearchMiss = Boolean(normalizedSearch && !visibleWorkflows.length);
   const refreshLabel = actionQueueRefreshing ? t('overview.queue.refreshing') : t('overview.queue.refresh');
   content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div>${laneSortControls()}<button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button id="refresh-action-queue" class="board-refresh${actionQueueRefreshing ? ' is-loading' : ''}"${actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
+  const emptyResetButton = content.querySelector<HTMLButtonElement>('.board-empty button[data-board-filter="all"]');
+  if (hasSearchMiss && emptyResetButton) {
+    emptyResetButton.removeAttribute('data-board-filter');
+    emptyResetButton.id = 'clear-lane-search';
+    emptyResetButton.textContent = t('overview.board.searchClear');
+    content.querySelector('.board-empty h3')!.textContent = t('overview.board.searchEmpty');
+  }
+  content.querySelector<HTMLElement>('.board-summary')?.insertAdjacentHTML('afterbegin', `<label class="lane-search"><span>${t('overview.board.search')}</span><input id="lane-search" type="search" value="${escape(laneSearchQuery)}" placeholder="${escape(t('overview.board.searchPlaceholder'))}" autocomplete="off" /></label>`);
   content.classList.toggle('lane-sort-not-custom', laneSortMode !== 'custom');
   const sortControls = content.querySelector<HTMLElement>('.lane-sort-controls');
   const boardSummary = content.querySelector<HTMLElement>('.board-summary');
@@ -1147,6 +1158,14 @@ function overview() {
   document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
   document.querySelector('#refresh-action-queue')?.addEventListener('click', () => void refreshActionQueue());
+  document.querySelector<HTMLInputElement>('#lane-search')?.addEventListener('input', event => {
+    laneSearchQuery = (event.target as HTMLInputElement).value;
+    render();
+    const search = document.querySelector<HTMLInputElement>('#lane-search');
+    search?.focus();
+    search?.setSelectionRange(laneSearchQuery.length, laneSearchQuery.length);
+  });
+  document.querySelector<HTMLButtonElement>('#clear-lane-search')?.addEventListener('click', () => { laneSearchQuery = ''; render(); });
   document.querySelector('#run-preflight')?.addEventListener('click', async () => { await loadPreflight(); render(); });
   document.querySelectorAll<HTMLButtonElement>('[data-lane-sort]').forEach(button => button.addEventListener('click', () => {
     const mode = button.dataset.laneSort as WorkflowSortMode | undefined;
@@ -1273,7 +1292,7 @@ function projectLane(flow: Workflow) {
     ? [...targets.entries()].map(([target, routes]) => `<section class="lane-merge-group"><p>${t('overview.board.mergeTarget', { target: escape(target) })}</p><div>${routes.map(({ stage, index }) => routeCards(stage, index)).join('')}</div></section>`).join('')
     : flow.stages.map((stage, index) => routeCards(stage, index)).join('<span class="lane-connector" aria-hidden="true">→</span>');
   const orderIndex = workflows.findIndex(workflow => workflow.id === flow.id);
-  const sortingDisabled = laneSortMode !== 'custom' || overviewFilter !== 'all' || workflows.some(workflow => !canOperateWorkflow(workflow, 'workflow-edit'));
+  const sortingDisabled = laneSortMode !== 'custom' || overviewFilter !== 'all' || laneSearchQuery.trim() !== '' || workflows.some(workflow => !canOperateWorkflow(workflow, 'workflow-edit'));
   const editable = canOperateWorkflow(flow, 'workflow-edit');
   const dragLabel = t('overview.board.dragProject', { name: flow.name });
   const runSummary = laneRunSummary(flow);
