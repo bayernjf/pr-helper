@@ -646,11 +646,25 @@ function showToast(message: string) {
 function persistPullRequestDrafts(next: typeof pullRequestDrafts) { pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); draftStorageSynchronized = true; } catch { draftStorageSynchronized = false; showToast(t('connect.draft.saveError')); } }
 persistPullRequestDrafts(pullRequestDrafts);
 function loadAiConfig(): AiConfig | null { try { return JSON.parse(sessionStorage.getItem('pr-helper-ai') || 'null') as AiConfig | null; } catch { return null; } }
-function showAiSettings() {
+function showAiSettings(selectedRuleId: string | null = null, onRuleChange?: (id: string) => void) {
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
-  dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('ai.eyebrow')}</p><h2>${t('ai.title')}</h2><label>${t('ai.label.baseUrl')}<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="${t('ai.placeholder.baseUrl')}" /></label><label>${t('ai.label.model')}<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="${t('ai.placeholder.model')}" /></label><label>${t('ai.label.apiKey')}<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><label class="setting-toggle"><input id="ai-auto-generate" type="checkbox" ${aiConfig?.autoGeneratePrMessage ? 'checked' : ''} />${t('ai.toggle.label')}<span>${t('ai.toggle.desc')}</span></label><label class="setting-toggle"><input id="ai-auto-confirm" type="checkbox" ${aiConfig?.autoConfirmPrCreation ? 'checked' : ''} />${t('ai.toggle.autoConfirm.label')}<span>${t('ai.toggle.autoConfirm.desc')}</span></label><p id="ai-test-result" class="ai-connection-result">${t('ai.test.placeholder')}</p><div class="dialog-actions"><button id="test-ai" type="button" class="ghost">${t('ai.test')}</button><button value="cancel" class="ghost">${t('ai.cancel')}</button><button id="save-ai" class="primary">${t('ai.save')}</button></div></form>`;
+  let selectedGenerationRuleId = selectedRuleId || defaultGenerationRule(generationRules)?.id || null;
+  const selectedGenerationRule = () => generationRuleById(generationRules, selectedGenerationRuleId);
+  dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('ai.eyebrow')}</p><h2>${t('ai.title')}</h2><label>${t('ai.label.baseUrl')}<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="${t('ai.placeholder.baseUrl')}" /></label><label>${t('ai.label.model')}<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="${t('ai.placeholder.model')}" /></label><label>${t('ai.label.apiKey')}<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><label class="setting-toggle"><input id="ai-auto-generate" type="checkbox" ${aiConfig?.autoGeneratePrMessage ? 'checked' : ''} />${t('ai.toggle.label')}<span>${t('ai.toggle.desc')}</span></label><label class="setting-toggle"><input id="ai-auto-confirm" type="checkbox" ${aiConfig?.autoConfirmPrCreation ? 'checked' : ''} />${t('ai.toggle.autoConfirm.label')}<span>${t('ai.toggle.autoConfirm.desc')}</span></label><p id="ai-test-result" class="ai-connection-result">${t('ai.test.placeholder')}</p><div class="dialog-actions"><button id="ai-generation-rules" type="button" class="ghost">${escape(generationRuleButtonLabel(selectedGenerationRule()))}</button><button id="test-ai" type="button" class="ghost">${t('ai.test')}</button><button value="cancel" class="ghost">${t('ai.cancel')}</button><button id="save-ai" class="primary">${t('ai.save')}</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
+  const ruleButton = dialog.querySelector<HTMLButtonElement>('#ai-generation-rules')!;
+  const syncRuleButton = () => {
+    selectedGenerationRuleId ||= defaultGenerationRule(generationRules)?.id || null;
+    ruleButton.textContent = generationRuleButtonLabel(selectedGenerationRule());
+  };
+  ruleButton.addEventListener('click', () => {
+    showGenerationRules(selectedGenerationRuleId, id => {
+      selectedGenerationRuleId = id;
+      onRuleChange?.(id);
+      syncRuleButton();
+    }, syncRuleButton);
+  });
   const read = (): AiConfig => ({
     baseUrl: dialog.querySelector<HTMLInputElement>('#ai-url')!.value.trim(),
     model: dialog.querySelector<HTMLInputElement>('#ai-model')!.value.trim(),
@@ -857,7 +871,7 @@ function render() {
   document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) active = null; goTo(target); }));
   document.querySelector('#theme-toggle')!.addEventListener('click', toggleTheme);
   document.querySelector('#lang-toggle')!.addEventListener('click', () => { setLocale(getLocale() === 'zh' ? 'en' : 'zh'); render(); });
-  document.querySelector('#ai-settings-top')!.addEventListener('click', showAiSettings);
+  document.querySelector('#ai-settings-top')!.addEventListener('click', () => showAiSettings());
   document.querySelector('#cloud-sync-top')!.addEventListener('click', showCloudSyncDialog);
   document.querySelector('#operation-audit')!.addEventListener('click', showOperationAuditDialog);
   document.querySelector('#team-settings-top')?.addEventListener('click', showTeamsDialog);
@@ -2240,7 +2254,10 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
   });
   aiSettingsButton.addEventListener('click', () => {
     if (generationController || creationController || !isDialogOpen()) return;
-    showAiSettings();
+    showAiSettings(selectedGenerationRuleId, id => {
+      selectedGenerationRuleId = id;
+      syncRuleButton();
+    });
   });
   const generatePrMessage = async (confirmOverwrite: boolean, autoConfirm = false) => {
     if (generationController || creationController || !isDialogOpen()) return;
