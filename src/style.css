@@ -2647,9 +2647,16 @@ a.account-menu-item {
 .project-lane.is-drop-before::before { top: 0; }
 .project-lane.is-drop-after::after { bottom: 0; }
 
+@keyframes lane-return-highlight {
+  0%, 100% { border-color: var(--border-default); box-shadow: var(--shadow-card); }
+  50% { border-color: var(--border-accent); box-shadow: 0 0 0 4px var(--bg-accent-muted), var(--shadow-card); }
+}
+.project-lane.is-return-highlight { animation: lane-return-highlight .48s ease-in-out 2; }
+
 @media (prefers-reduced-motion: reduce) {
   .project-lane { transition: none; }
   .project-lane.is-dragging,
   .project-lane.is-drag-shift-up,
   .project-lane.is-drag-shift-down { transform: none; }
+  .project-lane.is-return-highlight { animation: none; border-color: var(--border-accent); box-shadow: 0 0 0 4px var(--bg-accent-muted), var(--shadow-card); }
 }

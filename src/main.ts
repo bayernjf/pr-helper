@@ -92,6 +92,7 @@ let actionQueueError = '';
 let actionQueueRefreshing = false;
 const actionQueueRequestQueue = new ActionQueueRequestQueue();
 let overviewFilter: 'all' | 'attention' | 'failed' = 'all';
+let laneSearchQuery = '';
 const expandedLaneIds = new Set<string>();
 let laneSortMode: WorkflowSortMode = 'custom';
 let laneSortDirection: WorkflowSortDirection = 'desc';
@@ -893,6 +894,24 @@ function goTo(target: Screen | 'back') {
   render();
 }
 
+function returnToSourceLane(workflowId: string) {
+  expandedLaneIds.add(workflowId);
+  overviewFilter = 'all';
+  screen = 'overview';
+  if (pollTimer) { window.clearInterval(pollTimer); pollTimer = undefined; }
+  render();
+  window.requestAnimationFrame(() => {
+    const lane = [...document.querySelectorAll<HTMLElement>('[data-project-lane]')]
+      .find(element => element.dataset.projectLane === workflowId);
+    if (!lane) return;
+    lane.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' });
+    lane.classList.remove('is-return-highlight');
+    void lane.offsetWidth;
+    lane.classList.add('is-return-highlight');
+    lane.addEventListener('animationend', () => lane.classList.remove('is-return-highlight'), { once: true });
+  });
+}
+
 function renderContent() {
   if (screen === 'overview') { overview(); return; }
   stopOverviewSnapshotPolling();
@@ -1610,7 +1629,8 @@ function detail() {
   if (!active) { screen = 'overview'; return overview(); }
   const summary = workflowSummary(active);
   const editable = canOperateWorkflow(active, 'workflow-edit');
-  content.innerHTML = `<section class="page-head"><p class="eyebrow">${t('detail.eyebrow')}</p><h1>${escape(active.name)}</h1><p>${escape(active.repository)} · ${escape(summary.route)}</p>${sharedWorkflowBadge(active)}<button id="refresh-status" class="ghost">${t('detail.refresh')}</button></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">${t('detail.timeline.eyebrow')}</p>${active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><aside class="panel next-action"><p class="eyebrow">${t('detail.nextAction.eyebrow')}</p><h2>${nextActionTitle()}</h2><p>${statuses ? t('detail.desc.withStatuses') : t('detail.desc.noStatuses')}</p><button id="edit-flow" class="primary" ${editable ? '' : 'disabled'}>${t('detail.edit')}</button></aside></section>`;
+  content.innerHTML = `<section class="page-head"><button id="back-from-detail" class="ghost">${t('editor.back.overview')}</button><p class="eyebrow">${t('detail.eyebrow')}</p><h1>${escape(active.name)}</h1><p>${escape(active.repository)} · ${escape(summary.route)}</p>${sharedWorkflowBadge(active)}<button id="refresh-status" class="ghost">${t('detail.refresh')}</button></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">${t('detail.timeline.eyebrow')}</p>${active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><aside class="panel next-action"><p class="eyebrow">${t('detail.nextAction.eyebrow')}</p><h2>${nextActionTitle()}</h2><p>${statuses ? t('detail.desc.withStatuses') : t('detail.desc.noStatuses')}</p><button id="edit-flow" class="primary" ${editable ? '' : 'disabled'}>${t('detail.edit')}</button></aside></section>`;
+  document.querySelector('#back-from-detail')!.addEventListener('click', () => returnToSourceLane(active!.id));
   document.querySelector('#edit-flow')!.addEventListener('click', () => { screen = 'editor'; render(); });
   document.querySelector('#refresh-status')!.addEventListener('click', () => { void refreshDetailStatuses(); });
   document.querySelectorAll<HTMLButtonElement>('[data-dynamic-stage]').forEach(button => button.addEventListener('click', () => {
