@@ -6,7 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, g
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, sortWorkflows, sortWorkflowsForView, stageIndexForId, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
+import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
@@ -2017,6 +2017,17 @@ function nextActionTitle() {
 async function readBranchProtection(owner: string, name: string, branch: string) {
   try { return await githubFetch<BranchProtection>(token, `/repos/${owner}/${name}/branches/${encodeURIComponent(branch)}/protection`); } catch { return null; }
 }
+async function resolveDetailSource(owner: string, name: string, sourceRule: string, target: string): Promise<string | null> {
+  if (!sourceRule.includes('*')) return sourceRule;
+  const branches = await githubFetch<{ name: string }[]>(token, `/repos/${owner}/${name}/branches?per_page=100`);
+  const matches = branches.map(branch => branch.name).filter(source => sourceRuleMatches(sourceRule, source));
+  if (!matches.length) return null;
+  const openPulls = await Promise.all(matches.map(async source => {
+    const pulls = await githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + source)}&base=${encodeURIComponent(target)}&per_page=1`).catch(() => []);
+    return { source, pull: pulls[0] };
+  }));
+  return openPulls.find(candidate => candidate.pull)?.source || matches[0];
+}
 async function refreshStatuses(renderDetail = true) {
   if (!active) return;
   const button = document.querySelector<HTMLButtonElement>('#refresh-status');
@@ -2024,21 +2035,22 @@ async function refreshStatuses(renderDetail = true) {
   const { owner, name } = parseRepository(active.repository);
   const previous = statuses;
   statuses = await Promise.all(active.stages.map(async (stage, index) => {
-    if (stage.source.includes('*')) return { kind: 'not-created' } as StepStatus;
     try {
+      const source = await resolveDetailSource(owner, name, stage.source, stage.target);
+      if (!source) return { kind: 'not-created' } as StepStatus;
       const recentlyCreatedNumber = recentlyCreatedPullNumbers.get(index);
       const recentlyMergedNumber = recentlyMergedPullNumbers.get(index);
       const recentlyChangedNumber = recentlyCreatedNumber || recentlyMergedNumber;
       const [openPulls, closedPulls, comparison, recentlyChangedPull] = await Promise.all([
-        githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + stage.source)}&base=${encodeURIComponent(stage.target)}&per_page=1`).catch(error => {
+        githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + source)}&base=${encodeURIComponent(stage.target)}&per_page=1`).catch(error => {
           if (error instanceof GitHubRequestError && error.status === 404) return [];
           throw error;
         }),
-        githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&head=${encodeURIComponent(owner + ':' + stage.source)}&base=${encodeURIComponent(stage.target)}&per_page=1`).catch(error => {
+        githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&head=${encodeURIComponent(owner + ':' + source)}&base=${encodeURIComponent(stage.target)}&per_page=1`).catch(error => {
           if (error instanceof GitHubRequestError && error.status === 404) return [];
           throw error;
         }),
-        githubFetch<{ ahead_by: number }>(token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`).then(value => ({ ...value, notFound: false })).catch(error => {
+        githubFetch<{ ahead_by: number }>(token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(source)}`).then(value => ({ ...value, notFound: false })).catch(error => {
           if (error instanceof GitHubRequestError && error.status === 404) return { ahead_by: 0, notFound: true };
           throw error;
         }),
@@ -2062,7 +2074,7 @@ async function refreshStatuses(renderDetail = true) {
         sourceBranchMissing = true;
         if (!pr) {
           const historicalPulls = await githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&base=${encodeURIComponent(stage.target)}&per_page=100`).catch(() => []);
-          pr = historicalPulls.find(candidate => candidate.head.ref === stage.source) || null;
+          pr = historicalPulls.find(candidate => candidate.head.ref === source) || null;
         }
       }
       if (!pr) return comparison.notFound ? { kind: 'error', message: t('status.sourceBranchMissing') } as StepStatus : { kind: 'not-created', aheadBy: comparison.ahead_by } as StepStatus;
