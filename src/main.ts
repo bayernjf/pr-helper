@@ -6,7 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, g
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addDeployment, addStage, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, sortWorkflows, sortWorkflowsForView, stageIndexForId, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
+import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, sortWorkflows, sortWorkflowsForView, stageIndexForId, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
@@ -164,9 +164,10 @@ async function saveWorkflowToCloud(workflow: Workflow): Promise<Workflow> {
   const payload = await response.json().catch(() => ({})) as { workflow?: Workflow };
   return payload.workflow && payload.workflow.id === workflow.id ? ensureStageIds(payload.workflow) : workflow;
 }
-function applySavedWorkflow(saved: Workflow) {
+function applySavedWorkflow(saved: Workflow, authoritative = false) {
   const latest = workflows.find(workflow => workflow.id === saved.id);
-  const normalized = ensureStageIds({ ...(latest || saved), version: saved.version });
+  const applied = authoritative ? applyAuthoritativeWorkflow(latest, saved) : applyQueuedWorkflowSave(latest, saved);
+  const normalized = ensureStageIds(applied);
   workflows = saveWorkflow(workflows, normalized);
   if (active?.id === normalized.id) active = normalized;
   persistWorkflowsLocally();
@@ -251,7 +252,7 @@ async function removeStageAndPersist(workflow: Workflow, stageIndex: number) {
     const payload = await response.json() as { workflow?: Workflow };
     const saved = payload.workflow ? ensureStageIds(payload.workflow) : null;
     if (!saved || stageIndexForId(saved, removedStage.stageId) !== -1) throw new Error(t('toast.saved.cloudFail'));
-    applySavedWorkflow(saved);
+    applySavedWorkflow(saved, true);
     return true;
   } catch (error) {
     reportWorkflowSaveError(error);
