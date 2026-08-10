@@ -56,6 +56,7 @@ let token = sessionStorage.getItem('github-token') || '';
 let repos: Repo[] = [];
 let workflows = loadWorkflows();
 let active: Workflow | null = workflows[0] || null;
+let workflowMutationRevision = 0;
 let screen: Screen = 'overview';
 let branches: string[] = [];
 let repositoryActionWorkflows: GitHubActionsWorkflow[] = [];
@@ -92,6 +93,7 @@ let actionQueueError = '';
 let actionQueueRefreshing = false;
 const actionQueueRequestQueue = new ActionQueueRequestQueue();
 let overviewFilter: 'all' | 'attention' | 'failed' = 'all';
+let laneSearchQuery = '';
 const expandedLaneIds = new Set<string>();
 let laneSortMode: WorkflowSortMode = 'custom';
 let laneSortDirection: WorkflowSortDirection = 'desc';
@@ -191,6 +193,7 @@ async function persistWorkflowRemotely(workflow: Workflow): Promise<Workflow | n
   }
 }
 async function persistWorkflowOrder(next: Workflow[]) {
+  workflowMutationRevision += 1;
   const previousPositions = new Map<string, DOMRect>();
   document.querySelectorAll<HTMLElement>('[data-project-lane]').forEach(lane => {
     const workflowId = lane.dataset.projectLane;
@@ -227,6 +230,7 @@ async function persistWorkflowOrder(next: Workflow[]) {
   }
 }
 function save(next: Workflow) {
+  workflowMutationRevision += 1;
   const normalized = ensureStageIds(next);
   active = normalized;
   workflows = saveWorkflow(workflows, normalized);
@@ -269,6 +273,7 @@ async function removeStageAndPersist(workflow: Workflow, stageIndex: number) {
   }
 }
 async function removeWorkflowFromStorage(workflowId: string) {
+  workflowMutationRevision += 1;
   workflows = deleteWorkflow(workflows, workflowId); persistWorkflowsLocally();
   if (!cloudWorkflowStorage) return;
   try {
@@ -288,6 +293,7 @@ async function loadCloudWorkflows() {
     pendingLocalWorkflowSync = false;
     return;
   }
+  const requestRevision = workflowMutationRevision;
   try {
     const response = await fetch(githubAppApiUrl('/api/workflows'), { cache: 'no-store' });
     if (response.status === 401) return;
@@ -296,6 +302,9 @@ async function loadCloudWorkflows() {
     if (!Array.isArray(payload.workflows)) return;
     cloudWorkflowStorage = true;
     cloudWorkflowSyncError = '';
+    // A slow bootstrap response may describe the workflow before an in-page edit.
+    // Never let it overwrite a newer local mutation while its save is in flight.
+    if (requestRevision !== workflowMutationRevision) return;
     if (payload.workflows.length) { workflows = sortWorkflows(payload.workflows); active = workflows[0] || null; persistWorkflowsLocally(); }
     else pendingLocalWorkflowSync = workflows.length > 0;
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
@@ -893,6 +902,23 @@ function goTo(target: Screen | 'back') {
   render();
 }
 
+function returnToSourceLane(workflowId: string) {
+  expandedLaneIds.add(workflowId);
+  screen = 'overview';
+  if (pollTimer) { window.clearInterval(pollTimer); pollTimer = undefined; }
+  render();
+  window.requestAnimationFrame(() => {
+    const lane = [...document.querySelectorAll<HTMLElement>('[data-project-lane]')]
+      .find(element => element.dataset.projectLane === workflowId);
+    if (!lane) return;
+    lane.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' });
+    lane.classList.remove('is-return-highlight');
+    void lane.offsetWidth;
+    lane.classList.add('is-return-highlight');
+    lane.addEventListener('animationend', () => lane.classList.remove('is-return-highlight'), { once: true });
+  });
+}
+
 function renderContent() {
   if (screen === 'overview') { overview(); return; }
   stopOverviewSnapshotPolling();
@@ -1116,18 +1142,39 @@ function overview() {
   const failedCount = actionQueue.filter(item => item.kind === 'checks-failed').length;
   const workflowCount = workflows.length;
   const sortedWorkflows = sortWorkflowsForView(workflows, laneSortMode, laneSortDirection);
-  const visibleWorkflows = sortedWorkflows.filter(flow => overviewFilter === 'all' || actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed')));
+  const filterMatchedWorkflows = sortedWorkflows.filter(flow => overviewFilter === 'all' || actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed')));
+  const normalizedSearch = laneSearchQuery.trim().toLocaleLowerCase();
+  const visibleWorkflows = filterMatchedWorkflows.filter(flow => !normalizedSearch || `${flow.name} ${flow.repository}`.toLocaleLowerCase().includes(normalizedSearch));
+  const hasSearchMiss = Boolean(normalizedSearch && !visibleWorkflows.length);
   const refreshLabel = actionQueueRefreshing ? t('overview.queue.refreshing') : t('overview.queue.refresh');
   content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div>${laneSortControls()}<button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button id="refresh-action-queue" class="board-refresh${actionQueueRefreshing ? ' is-loading' : ''}"${actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section>`;
+  const emptyResetButton = content.querySelector<HTMLButtonElement>('.board-empty button[data-board-filter="all"]');
+  if (hasSearchMiss && emptyResetButton) {
+    emptyResetButton.removeAttribute('data-board-filter');
+    emptyResetButton.id = 'clear-lane-search';
+    emptyResetButton.textContent = t('overview.board.searchClear');
+    content.querySelector('.board-empty h3')!.textContent = t('overview.board.searchEmpty');
+  }
+  content.querySelector<HTMLElement>('.board-summary')?.insertAdjacentHTML('afterbegin', `<label class="lane-search"><span>${t('overview.board.search')}</span><input id="lane-search" type="search" value="${escape(laneSearchQuery)}" placeholder="${escape(t('overview.board.searchPlaceholder'))}" autocomplete="off" /></label>`);
   content.classList.toggle('lane-sort-not-custom', laneSortMode !== 'custom');
   const sortControls = content.querySelector<HTMLElement>('.lane-sort-controls');
   const boardSummary = content.querySelector<HTMLElement>('.board-summary');
   const refreshQueueButton = content.querySelector<HTMLElement>('#refresh-action-queue');
+  const searchControl = content.querySelector<HTMLElement>('.lane-search');
   if (sortControls && boardSummary && refreshQueueButton) boardSummary.insertBefore(sortControls, refreshQueueButton);
+  if (searchControl && boardSummary && sortControls) boardSummary.insertBefore(searchControl, sortControls);
   document.querySelector('#new-flow')!.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; screen = 'editor'; render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
   document.querySelector('#refresh-action-queue')?.addEventListener('click', () => void refreshActionQueue());
+  document.querySelector<HTMLInputElement>('#lane-search')?.addEventListener('input', event => {
+    laneSearchQuery = (event.target as HTMLInputElement).value;
+    render();
+    const search = document.querySelector<HTMLInputElement>('#lane-search');
+    search?.focus();
+    search?.setSelectionRange(laneSearchQuery.length, laneSearchQuery.length);
+  });
+  document.querySelector<HTMLButtonElement>('#clear-lane-search')?.addEventListener('click', () => { laneSearchQuery = ''; render(); });
   document.querySelector('#run-preflight')?.addEventListener('click', async () => { await loadPreflight(); render(); });
   document.querySelectorAll<HTMLButtonElement>('[data-lane-sort]').forEach(button => button.addEventListener('click', () => {
     const mode = button.dataset.laneSort as WorkflowSortMode | undefined;
@@ -1254,7 +1301,7 @@ function projectLane(flow: Workflow) {
     ? [...targets.entries()].map(([target, routes]) => `<section class="lane-merge-group"><p>${t('overview.board.mergeTarget', { target: escape(target) })}</p><div>${routes.map(({ stage, index }) => routeCards(stage, index)).join('')}</div></section>`).join('')
     : flow.stages.map((stage, index) => routeCards(stage, index)).join('<span class="lane-connector" aria-hidden="true">→</span>');
   const orderIndex = workflows.findIndex(workflow => workflow.id === flow.id);
-  const sortingDisabled = laneSortMode !== 'custom' || overviewFilter !== 'all' || workflows.some(workflow => !canOperateWorkflow(workflow, 'workflow-edit'));
+  const sortingDisabled = laneSortMode !== 'custom' || overviewFilter !== 'all' || laneSearchQuery.trim() !== '' || workflows.some(workflow => !canOperateWorkflow(workflow, 'workflow-edit'));
   const editable = canOperateWorkflow(flow, 'workflow-edit');
   const dragLabel = t('overview.board.dragProject', { name: flow.name });
   const runSummary = laneRunSummary(flow);
@@ -1610,7 +1657,8 @@ function detail() {
   if (!active) { screen = 'overview'; return overview(); }
   const summary = workflowSummary(active);
   const editable = canOperateWorkflow(active, 'workflow-edit');
-  content.innerHTML = `<section class="page-head"><p class="eyebrow">${t('detail.eyebrow')}</p><h1>${escape(active.name)}</h1><p>${escape(active.repository)} · ${escape(summary.route)}</p>${sharedWorkflowBadge(active)}<button id="refresh-status" class="ghost">${t('detail.refresh')}</button></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">${t('detail.timeline.eyebrow')}</p>${active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><aside class="panel next-action"><p class="eyebrow">${t('detail.nextAction.eyebrow')}</p><h2>${nextActionTitle()}</h2><p>${statuses ? t('detail.desc.withStatuses') : t('detail.desc.noStatuses')}</p><button id="edit-flow" class="primary" ${editable ? '' : 'disabled'}>${t('detail.edit')}</button></aside></section>`;
+  content.innerHTML = `<section class="page-head"><button id="back-from-detail" class="ghost">${t('editor.back.overview')}</button><p class="eyebrow">${t('detail.eyebrow')}</p><h1>${escape(active.name)}</h1><p>${escape(active.repository)} · ${escape(summary.route)}</p>${sharedWorkflowBadge(active)}<button id="refresh-status" class="ghost">${t('detail.refresh')}</button></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">${t('detail.timeline.eyebrow')}</p>${active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><aside class="panel next-action"><p class="eyebrow">${t('detail.nextAction.eyebrow')}</p><h2>${nextActionTitle()}</h2><p>${statuses ? t('detail.desc.withStatuses') : t('detail.desc.noStatuses')}</p><button id="edit-flow" class="primary" ${editable ? '' : 'disabled'}>${t('detail.edit')}</button></aside></section>`;
+  document.querySelector('#back-from-detail')!.addEventListener('click', () => returnToSourceLane(active!.id));
   document.querySelector('#edit-flow')!.addEventListener('click', () => { screen = 'editor'; render(); });
   document.querySelector('#refresh-status')!.addEventListener('click', () => { void refreshDetailStatuses(); });
   document.querySelectorAll<HTMLButtonElement>('[data-dynamic-stage]').forEach(button => button.addEventListener('click', () => {
