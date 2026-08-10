@@ -39,7 +39,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
       response.status(200).json({ workflows: await listWorkflows(process.env, identity) });
       return;
     }
-    const payload = body(request) as { workflow?: unknown; id?: unknown; workflowId?: unknown; stageId?: unknown } | undefined;
+    const payload = body(request) as { workflow?: unknown; id?: unknown; workflowId?: unknown; stageId?: unknown; stageIndex?: unknown; source?: unknown; target?: unknown } | undefined;
     if (request.method === 'PUT' && isStoredWorkflow(payload?.workflow)) {
       audit = { action: payload.workflow.version === undefined ? 'workflow-created' : 'workflow-updated', repository: payload.workflow.repository, workflowId: payload.workflow.id };
       const workflow = await upsertWorkflow(process.env, identity, payload.workflow);
@@ -48,7 +48,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     }
     if (request.method === 'PATCH' && typeof payload?.workflowId === 'string' && typeof payload?.stageId === 'string') {
       audit = { action: 'workflow-updated', repository: null, workflowId: payload.workflowId };
-      const workflow = await removeWorkflowStage(process.env, identity, payload.workflowId, payload.stageId);
+      const workflow = await removeWorkflowStage(process.env, identity, payload.workflowId, payload.stageId, typeof payload.stageIndex === 'number' ? payload.stageIndex : undefined, typeof payload.source === 'string' ? payload.source : undefined, typeof payload.target === 'string' ? payload.target : undefined);
       response.status(200).json({ ok: true, workflow });
       return;
     }
