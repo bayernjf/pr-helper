@@ -136,6 +136,7 @@ const zh: TranslationDict = {
   'overview.board.addProject': '+ 添加项目',
   'overview.board.summary': '项目状态筛选',
   'overview.board.search': '搜索',
+  'overview.board.searchCount': '搜索结果',
   'overview.board.searchPlaceholder': '按流程名称或仓库搜索',
   'overview.board.searchEmpty': '没有匹配的流程',
   'overview.board.searchClear': '清除搜索',
