@@ -135,7 +135,7 @@ const en: TranslationDict = {
   'overview.board.sub': 'See every project’s PR flow, gates, and current position in one place.',
   'overview.board.addProject': '+ Add project',
   'overview.board.summary': 'Project status filters',
-  'overview.board.search': 'Search workflows',
+  'overview.board.search': 'Search',
   'overview.board.searchPlaceholder': 'Search by workflow or repository',
   'overview.board.searchEmpty': 'No matching workflows',
   'overview.board.searchClear': 'Clear search',
