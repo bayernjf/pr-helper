@@ -1194,7 +1194,7 @@ function overview() {
     emptyResetButton.textContent = t('overview.board.searchClear');
     content.querySelector('.board-empty h3')!.textContent = t('overview.board.searchEmpty');
   }
-  content.querySelector<HTMLElement>('.board-summary')?.insertAdjacentHTML('afterbegin', `<div class="lane-search-group"><span class="lane-search-count">${escape(t('overview.board.searchCount', { count: visibleWorkflows.length }))}</span><label class="lane-search"><span>${t('overview.board.search')}</span><input id="lane-search" type="search" value="${escape(laneSearchQuery)}" placeholder="${escape(t('overview.board.searchPlaceholder'))}" autocomplete="off" /></label></div>`);
+  content.querySelector<HTMLElement>('.board-summary')?.insertAdjacentHTML('afterbegin', `<div class="lane-search-group"><div class="lane-search-count" role="status"><span>${visibleWorkflows.length}</span>${t('overview.board.searchCount')}</div><label class="lane-search"><span>${t('overview.board.search')}</span><input id="lane-search" type="search" value="${escape(laneSearchQuery)}" placeholder="${escape(t('overview.board.searchPlaceholder'))}" autocomplete="off" /></label></div>`);
   content.classList.toggle('lane-sort-not-custom', laneSortMode !== 'custom');
   const sortControls = content.querySelector<HTMLElement>('.lane-sort-controls');
   const boardSummary = content.querySelector<HTMLElement>('.board-summary');

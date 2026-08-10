@@ -136,7 +136,7 @@ const en: TranslationDict = {
   'overview.board.addProject': '+ Add project',
   'overview.board.summary': 'Project status filters',
   'overview.board.search': 'Search',
-  'overview.board.searchCount': '{count} workflows',
+  'overview.board.searchCount': 'Search results',
   'overview.board.searchPlaceholder': 'Search by workflow or repository',
   'overview.board.searchEmpty': 'No matching workflows',
   'overview.board.searchClear': 'Clear search',
