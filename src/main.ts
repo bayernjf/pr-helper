@@ -56,6 +56,7 @@ let token = sessionStorage.getItem('github-token') || '';
 let repos: Repo[] = [];
 let workflows = loadWorkflows();
 let active: Workflow | null = workflows[0] || null;
+let workflowMutationRevision = 0;
 let screen: Screen = 'overview';
 let branches: string[] = [];
 let repositoryActionWorkflows: GitHubActionsWorkflow[] = [];
@@ -192,6 +193,7 @@ async function persistWorkflowRemotely(workflow: Workflow): Promise<Workflow | n
   }
 }
 async function persistWorkflowOrder(next: Workflow[]) {
+  workflowMutationRevision += 1;
   const previousPositions = new Map<string, DOMRect>();
   document.querySelectorAll<HTMLElement>('[data-project-lane]').forEach(lane => {
     const workflowId = lane.dataset.projectLane;
@@ -228,6 +230,7 @@ async function persistWorkflowOrder(next: Workflow[]) {
   }
 }
 function save(next: Workflow) {
+  workflowMutationRevision += 1;
   const normalized = ensureStageIds(next);
   active = normalized;
   workflows = saveWorkflow(workflows, normalized);
@@ -270,6 +273,7 @@ async function removeStageAndPersist(workflow: Workflow, stageIndex: number) {
   }
 }
 async function removeWorkflowFromStorage(workflowId: string) {
+  workflowMutationRevision += 1;
   workflows = deleteWorkflow(workflows, workflowId); persistWorkflowsLocally();
   if (!cloudWorkflowStorage) return;
   try {
@@ -289,6 +293,7 @@ async function loadCloudWorkflows() {
     pendingLocalWorkflowSync = false;
     return;
   }
+  const requestRevision = workflowMutationRevision;
   try {
     const response = await fetch(githubAppApiUrl('/api/workflows'), { cache: 'no-store' });
     if (response.status === 401) return;
@@ -297,6 +302,9 @@ async function loadCloudWorkflows() {
     if (!Array.isArray(payload.workflows)) return;
     cloudWorkflowStorage = true;
     cloudWorkflowSyncError = '';
+    // A slow bootstrap response may describe the workflow before an in-page edit.
+    // Never let it overwrite a newer local mutation while its save is in flight.
+    if (requestRevision !== workflowMutationRevision) return;
     if (payload.workflows.length) { workflows = sortWorkflows(payload.workflows); active = workflows[0] || null; persistWorkflowsLocally(); }
     else pendingLocalWorkflowSync = workflows.length > 0;
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
