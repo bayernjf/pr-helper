@@ -1306,6 +1306,15 @@ function timelineEntryIcon(kind: string): string {
   if (kind === 'pull-cleared') return '🔁';
   return '•';
 }
+function dynamicBranchStatusText(state: WorkflowStageState) {
+  const status = drawerStatusText(state);
+  const pull = state.pullNumber ? t('overview.run.prStatus', { number: state.pullNumber, status }) : status;
+  const readyToMerge = state.pullState === 'open'
+    && state.checksState === 'success'
+    && state.mergeable === true
+    && state.mergeableState === 'clean';
+  return readyToMerge ? `${t('state.waitingMerge')} · ${pull}` : pull;
+}
 function workflowTimelineSection(flow: Workflow): string {
   const entries = timeline.filter(entry => entry.workflowId === flow.id).slice(0, 8);
   if (!entries.length) return '';
@@ -1791,7 +1800,7 @@ function lockedStageText(index: number) {
 function stageTimeline(stage: Workflow['stages'][number], index: number) {
   if (stage.source.includes('*')) {
     const states = active ? statesForStage(active, index) : [];
-    const runs = states.map(state => `<button type="button" class="timeline-action" data-dynamic-stage="${index}" data-dynamic-source="${escape(state.source)}"><b>${escape(state.source)}</b><small>${escape(drawerStatusText(state))}</small></button>`).join('');
+    const runs = states.map(state => `<button type="button" class="timeline-action" data-dynamic-stage="${index}" data-dynamic-source="${escape(state.source)}"><b>${escape(state.source)}</b><small>${escape(dynamicBranchStatusText(state))}</small></button>`).join('');
     return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p class="meta">${t('detail.dynamicRoute')}</p>${runs ? `<div class="timeline-actions dynamic-stage-actions">${runs}</div>` : `<p>${t('detail.timeline.placeholder')}</p>`}</div></article>`;
   }
   const status = statuses?.[index];
