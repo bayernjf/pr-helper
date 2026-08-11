@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsNewWorkflow } from './navigation';
+import { navigationClass, navigationTarget, selectWorkflowAfterCloudLoad, shouldRefreshWorkflowDetail, startsNewWorkflow } from './navigation';
 
 describe('navigation state', () => {
   it('marks only the current screen as active', () => {
@@ -19,6 +19,13 @@ describe('navigation state', () => {
   it('treats the editor navigation tab as starting a new workflow', () => {
     expect(startsNewWorkflow('editor')).toBe(true);
     expect(startsNewWorkflow('overview')).toBe(false);
+  });
+
+  it('does not replace a new workflow editor with the first cloud workflow', () => {
+    const loaded = [{ id: 'existing' }, { id: 'other' }];
+    expect(selectWorkflowAfterCloudLoad(null, loaded, 'editor')).toBeNull();
+    expect(selectWorkflowAfterCloudLoad(loaded[1], loaded, 'editor')).toEqual(loaded[1]);
+    expect(selectWorkflowAfterCloudLoad(null, loaded, 'overview')).toEqual(loaded[0]);
   });
 
   it('refreshes GitHub status when entering a workflow detail page', () => {
