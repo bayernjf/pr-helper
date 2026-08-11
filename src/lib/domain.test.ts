@@ -98,9 +98,11 @@ describe('workflow stages', () => {
     expect(canMergeOpenPull({ checks: undefined, approvalsMet: true, mergeable: true, mergeableState: 'unknown' })).toBe(false);
   });
 
-  it('never allows merging before observed Actions succeed or required approvals arrive', () => {
+  it('never allows merging before observed checks or Actions succeed or required approvals arrive', () => {
     expect(canMergeOpenPull({ checks: 'pending', approvalsMet: true, mergeable: true, mergeableState: 'clean' })).toBe(false);
     expect(canMergeOpenPull({ checks: 'success', approvalsMet: true, mergeable: true, mergeableState: 'clean' })).toBe(true);
     expect(canMergeOpenPull({ checks: 'success', approvalsMet: false, mergeable: true, mergeableState: 'clean' })).toBe(false);
+    expect(canMergeOpenPull({ checks: 'success', actions: 'pending', approvalsMet: true, mergeable: true, mergeableState: 'clean' })).toBe(false);
+    expect(canMergeOpenPull({ checks: 'success', actions: 'success', approvalsMet: true, mergeable: true, mergeableState: 'clean' })).toBe(true);
   });
 });
