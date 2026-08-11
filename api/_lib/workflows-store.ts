@@ -500,6 +500,10 @@ export function branchRuleMatches(rule: string, branch: string) {
   return isBranchRule(rule) ? branch.startsWith(rule.slice(0, -1)) : rule === branch;
 }
 
+export function branchSourcesForRule(rule: string, candidates: readonly string[]) {
+  return [...new Set(candidates.filter(source => branchRuleMatches(rule, source)))];
+}
+
 function withoutTeamAccess(workflow: StoredWorkflow): StoredWorkflow {
   const { team: _team, ...stored } = workflow;
   return stored;
@@ -771,11 +775,16 @@ async function routeSourcesForStage(environment: Record<string, string | undefin
   if (!row.github_installation_id) return [];
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
-  const [branches, saved] = await Promise.all([
+  const [branches, pulls, saved] = await Promise.all([
     installationRequest<Branch[]>(config, row.github_installation_id!, `/repos/${owner}/${name}/branches?per_page=100`).catch(() => []),
+    installationRequest<{ head?: { ref?: string } }[]>(config, row.github_installation_id!, `/repos/${owner}/${name}/pulls?state=all&base=${encodeURIComponent(stage.target)}&per_page=100`).catch(() => []),
     sql<{ source: string }[]>`SELECT source FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageIdentity(workflow, stageIndex)}`,
   ]);
-  return [...new Set([...branches.map(branch => branch.name), ...saved.map(state => state.source)].filter(source => branchRuleMatches(stage.source, source)))];
+  return branchSourcesForRule(stage.source, [
+    ...branches.map(branch => branch.name),
+    ...pulls.map(pull => pull.head?.ref || '').filter(Boolean),
+    ...saved.map(state => state.source),
+  ]);
 }
 
 function deploymentConfigsForTarget(workflow: StoredWorkflow, target: string) {
