@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-12（PR #5/#7/#8 Production E2E 已完成；双平台部署跟踪、应用内合并、Actions 合并门禁与发布运行完成状态已复验）
+> 最后更新：2026-08-12（PR #5/#7/#8 Production E2E 与 Webhook 自动投影已完成；双平台部署跟踪、应用内合并、Actions 合并门禁与发布运行完成状态已复验）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -89,6 +89,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - PR #8 合并前已验证 `4/4 Checks`、`4/4 Actions` 通过；合并后已验证 `3/3 Checks`、`3/3 Actions` 通过，以及 Vercel 和 Cloudflare Pages Production 部署成功。
 - 已修复并 Production 复验：Actions 未全绿时不显示应用内“合并 PR”；发布运行在合并后终态出现时会从“进行中”更新为“发布完成”。
 - 已修复并 Production 复验：动态来源 `feature/* → dev` 在 PR #9 已合并后可由完整 reconciliation 发现并投影至 Lane 与步骤抽屉。
+- GitHub App 已订阅 Pull request、Pull request review、Check run、Check suite、Status 与 Workflow run 事件。沙箱 PR #11 重开事件在 GitHub Recent Deliveries 返回 `202`（2.73 秒）；生产详情页未手动刷新，在下一个轮询周期自动展示 `feature/webhook-live-e2e-2 · PR #11`，Webhook 自动投影验收通过。
 - “重新同步”在真实全量 reconciliation 下约需 150 秒；当前以 180 秒超时保障结果正确，后台同步和局部更新体验仍是后续优化项。
 
 ## 数据边界
@@ -112,7 +113,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 2026-08-03 已在 Vercel Production 与公开 GitHub E2E 沙箱完成一轮可追溯验证，完整结果见 [验证报告](verification-report.md)。真实通过的链路包括 GitHub App 授权、PR 创建、严格分支保护、应用内合并、合并后 Actions 跟踪和多路径汇聚。失败 Actions 的 GitHub 原生阻塞状态也已确认。
 
-本轮发现的连续编辑版本 `409` 已通过 Production 连续新增/删除和整页刷新复验。动态来源规则（如 `fix/*`）已在 Production 通过服务端投影逐条展示实际分支，PR #4 在失败中心、Lane 和抽屉均显示失败；产品内 Actions 重跑、冷却和 Codex 修复包边界也已通过。并发待办刷新导致抽屉短暂读取空快照的问题，已在请求串行修复上线后通过 Production 复验。Webhook 自动投影仍不得标记为已验收。
+本轮发现的连续编辑版本 `409` 已通过 Production 连续新增/删除和整页刷新复验。动态来源规则（如 `fix/*`）已在 Production 通过服务端投影逐条展示实际分支，PR #4 在失败中心、Lane 和抽屉均显示失败；产品内 Actions 重跑、冷却和 Codex 修复包边界也已通过。并发待办刷新导致抽屉短暂读取空快照的问题，已在请求串行修复上线后通过 Production 复验。Webhook 自动投影已在生产完成真实验收。
 
 操作审计的 Production 首次验收曾因动态路由参数冲突而误显示为空；现有 `inbox` 函数已改用不冲突的 `resource=operation-audit` 分流。修复部署后，账户菜单已显示真实的流程更新、创建 PR 和合并 PR 记录，CSV 导出按钮也已启用，验收通过。
 
@@ -124,7 +125,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 | --- | --- | --- |
 | Required approval | PR #5 已在第二账号审批后完成应用内合并 | 补齐审批前 `needs-approval` 与审批后 `ready-to-merge` 的完整证据即可关闭 |
 | Vercel / Cloudflare 部署 | PR #7 Preview、PR #8 Production 双平台跟踪已通过 | 健康检查、失败投影与确认式 Production 回滚 |
-| GitHub Webhook 自动投影 | 未验收 | 需要真实 delivery 在无手动刷新的情况下更新 UI 和数据库投影 |
+| GitHub Webhook 自动投影 | 沙箱 PR #11 重开事件返回 `202`，且生产详情页无需手动刷新自动显示动态来源 | 通过 |
 | private / organization 安装边界 | 未验收 | 需要对应仓库、安装范围和授权内外读写测试 |
 
 下表保留各验收的原始准备条件和完成标准；Required approval 与双平台部署的当前结论以上表为准，尚未关闭的部分仅为补充证据、健康检查、失败投影或回滚。
@@ -133,20 +134,19 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 | --- | --- | --- | --- |
 | Required approval | 第二个可访问 E2E 仓库的 GitHub 账号；目标分支启用至少 1 个 required approval；第二账号具备审批权限 | 创建测试 PR、核查审批前后阶段状态，并记录 GitHub 和产品证据 | PR 在审批前显示 `needs-approval`，有效审批后自动变为 `ready-to-merge` |
 | Vercel / Cloudflare 部署与回滚 | 低风险仓库中真实的双平台 GitHub Actions、Environment、部署密钥和健康检查地址；确认可执行的 Production 回滚窗口 | 触发并跟踪 Preview/Production，验证失败投影、健康检查和确认式回滚，留存运行与回滚证据 | Preview/Production 门禁、健康检查、部署失败和一次确认式 Production 回滚均可追溯 |
-| GitHub Webhook 自动投影 | 保持 Production 看板打开；准备可触发的 PR 或 Actions 状态变更 | 触发事件，不使用手动刷新，核查 GitHub delivery、服务端投影、Lane、抽屉和时间线 | delivery 自动更新对应 Lane、抽屉和时间线 |
 | private / organization 安装边界 | 一个已授权的 private 仓库和一个 organization 测试仓库；在 GitHub App 中明确配置仓库选择范围 | 验证授权范围内的仓库列表、PR/Actions 读写，以及范围外仓库的拒绝行为 | 仓库列表、PR/Actions 读取和写操作均遵守安装边界，未授权仓库不可访问 |
 
 准备完成后只需告知对应验收项已就绪；测试触发、结果判断、证据整理和 `docs/verification-report.md` 更新由 Codex 完成。加密云同步和保留清理不要求额外账号或仓库，分别在测试草稿/规则和下一次生产 Cron 运行可观察时由 Codex 执行回归。
 
 ## 测试覆盖
 
-- 本地单元/服务端测试：`npm test` 运行 23 个文件 / 195 个测试；`npx tsc --noEmit`、`npm run lint` 和 `git diff --check` 同时通过。
+- 本地单元/服务端测试：`npm test` 运行 23 个文件 / 196 个测试；`npx tsc --noEmit`、`npm run lint` 和 `git diff --check` 同时通过。
 - 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉、创建/合并 PR、删除流程、确认式部署回滚和操作审计查询。它验证真实 DOM、二次确认和浏览器请求负载，不替代真实 GitHub 写入、门禁和部署验收。
 - 已新增流程保存队列回归：连续编辑会串行使用服务端返回的新版本，且不会由旧响应覆盖最新编辑；真实跨窗口乐观锁冲突仍会明确报错。
 - Production E2E 通过项目与尚未通过的集成项目均以 [验证报告](verification-report.md) 为准。
 - `src/lib/` 核心业务逻辑覆盖率 81%+，包括 domain、workflow、generation-rules、pr-drafts、encrypted-sync、navigation 等。
 - 新增测试：加密模块加解密往返/错误处理（13 个）、恢复策略验证（5 个）、ensureStageIds（4 个）。
-- `main.ts` 的高频看板路径已有浏览器 E2E；创建/合并真实 PR、部署回滚与 Webhook 自动投影仍需分别以真实外部条件验收。`preflight.ts` 依赖 GitHub API，目前仍需集成测试。
+- `main.ts` 的高频看板路径已有浏览器 E2E；创建/合并真实 PR 与 Webhook 自动投影已完成 Production 验收，部署回滚仍需真实外部条件。`preflight.ts` 依赖 GitHub API，目前仍需集成测试。
 
 ## 当前运维边界
 
@@ -233,7 +233,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 > 详细待执行/待验证清单见上方「待执行与待验证清单」章节，包含数据库迁移、代码部署、发布回归、权限回归和新功能验证的具体步骤。
 
-1. Webhook 自动投影、private / organization 安装边界、Web Push、团队多账号协作、加密同步线上回归与数据保留 Cron：详见上方「依赖外部条件的待办」。
+1. private / organization 安装边界、Web Push、团队多账号协作、加密同步线上回归与数据保留 Cron：详见上方「依赖外部条件的待办」。
 2. 完整发布回归：已通过 `feature → dev → main`、PR Actions、应用内合并与双平台 Preview/Production 部署跟踪；健康检查、失败部署投影和 Production 回滚仍待实测。 ⏳ 部分完成
 3. 对 public、private、organization 仓库执行一轮 GitHub App 权限回归。 🟡 public 通过 / ⏳ private、organization 待验证
 4. 失败恢复已由服务端校验重试次数、冷却时间、当前提交和失败 Actions；仍不自动修改代码或合并生产。
@@ -247,7 +247,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - **正式切换稳定阶段身份**：`019` 已将核心主键、外键和查询条件从 `stage_index` 切换到 `stage_id`；待 Preview 回归。
 - **并发与幂等保护**：为流程版本保存增加并发控制，并为创建 PR、合并、Actions 重试和回滚补充幂等键、CSRF 防护和限流。
 - **完整操作审计**：`020` 已执行；创建/合并 PR、流程保存/删除、Actions 重跑和部署回滚的成功/失败结果记录已实现。Production 已显示真实流程更新、创建/合并 PR 记录，CSV 导出按钮可用。✅
-- **浏览器 E2E**：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影仍必须以真实 GitHub delivery 验收。
+- **浏览器 E2E**：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影已通过真实 GitHub delivery 验收。
 - **加密同步加固**：已部署 v2 密文格式、v1 兼容读取、口令轮换、设备标识和乐观版本冲突拒绝；`021` 已执行，待线上回归。
 - **数据保留与清理**：已部署 Webhook、密文历史、reconciliation、事件、部署运行和审计日志的 30/90/180/365 天保留策略；现有 Cron 每次受限清理 2,000 条，`022` 已执行，待运行观察。
 - **团队协作闭环**：已部署团队管理界面、成员角色更新/移除、流程共享、共享流程投影和服务端角色强制执行；`023` 已执行。实际多账号协作与 GitHub App 安装边界仍需 Production 验收。
