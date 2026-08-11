@@ -89,7 +89,7 @@ Production 已通过连续新增/删除与整页刷新复验，未再出现 `409
 
 `feature/webhook-auto-e2e → dev` 的 PR #9 已通过审批并合并，PR gate 和合并后 Vercel、Cloudflare Pages、Post-merge verification 三项 Actions 均成功；但完成一次全量 reconciliation 后，Lane 仍未显示该动态来源。GitHub 上的分支、PR 和目标分支均符合 `feature/* → dev`。
 
-已补充服务端来源发现兜底：除按目标分支筛选的 PR 列表外，还读取完整 PR 列表并在服务端按目标分支过滤，再与仓库分支和已保存来源去重合并。该修复已通过单元测试，等待部署后用 PR #9 的历史状态复验。此项未改变 Webhook 验收结论。
+已补充服务端来源发现兜底：除按目标分支筛选的 PR 列表外，还读取完整 PR 列表并在服务端按目标分支过滤，再与仓库分支和已保存来源去重合并。修复部署后已在 Production 执行完整 reconciliation 复验：第 1 步出现 `feature/webhook-auto-e2e · PR #9`，抽屉显示 `3/3` 门禁通过以及 Vercel、Cloudflare Preview 部署成功，且不存在重复合并入口。此项已关闭，不改变 Webhook 验收结论。
 
 ### P1：操作审计读取复用了动态路由参数
 
