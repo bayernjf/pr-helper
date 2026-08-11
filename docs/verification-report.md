@@ -5,6 +5,21 @@
 > 原则：只有可复现且有证据的结果标记为通过；本地修复未部署前不计入 Production 通过。
 > 后续状态：`021`–`023` 对应代码已在本报告之后部署 Production，但尚未纳入本报告的多账号团队协作、加密同步或保留清理验收。
 
+## 2026-08-12 Production 追加验收
+
+本节补充 2026-08-11 至 2026-08-12 在同一 Production 与 E2E 沙箱完成的真实验证；不替代本报告中仍列为待验证的 Webhook、回滚、private / organization、Web Push 与多账号协作项目。
+
+| 范围 | 证据 | 结果 |
+| --- | --- | --- |
+| Required approval 流程 | PR #5 `feature/approval-e2e → dev` 在第二 GitHub 账号审批后成为可合并状态，并由应用内完成合并 | 通过 |
+| Preview 部署跟踪 | PR #7 `feature/deployment-e2e → dev` 合并后，Vercel 与 Cloudflare Pages Preview Actions 均成功，抽屉显示部署记录 | 通过 |
+| 合并门禁 | PR #8 `dev → main` 在 `3/4 Actions` 进行中时不显示合并按钮；全部通过后显示合并入口 | 通过 |
+| Production 部署跟踪 | PR #8 合并后，Vercel、Cloudflare Pages 与 Post-merge verification 三项 main 分支 Actions 均成功；页面显示两项 Production 部署成功 | 通过 |
+| 发布运行状态 | 合并后终态已将 PR #8 的运行记录从“发布运行中”更新为“发布完成” | 通过 |
+| 同步超时保护 | 真实全量 reconciliation 约 150 秒；前端等待阈值调整为 180 秒后成功完成并保留同步结果 | 通过 |
+
+本轮本地回归：`npm test` 23 个测试文件 / 195 个测试通过，`npx tsc --noEmit` 与 `npm run lint` 通过。
+
 ## 环境与测试资源
 
 - Production：`https://pr-helper-ten.vercel.app/?github=connected`
@@ -81,8 +96,8 @@ Production 已加载操作审计界面且一次“保存恢复策略”成功返
 | 项目 | 当前状态 | 原因 |
 | --- | --- | --- |
 | GitHub Webhook 自动投影 | 待验证 | 未取得 webhook delivery 与数据库投影的对应证据；手动刷新不等于 webhook 通过 |
-| 审批门禁 | 待验证 | 需要第二个可审批账户；单账号无法审批自己的 PR |
-| Vercel / Cloudflare 部署门禁、健康检查、确认式回滚 | 待验证 | E2E 沙箱未配置真实部署工作流和 Environment |
+| 审批门禁 | 已完成基础 E2E | PR #5 已经第二账号审批后完成应用内合并；审批前状态的完整截图证据仍可在下次复验补充 |
+| Vercel / Cloudflare 部署门禁、健康检查、确认式回滚 | 部署门禁通过；其余待验证 | Preview/Production 跟踪已通过；健康检查、失败投影和确认式回滚仍需低风险窗口 |
 | Web Push（关闭页面投递） | 待验证 | 需 VAPID、订阅、Service Worker 与关闭页面场景 |
 | private / organization 仓库授权边界 | 待验证 | 本轮只使用公开仓库 |
 
