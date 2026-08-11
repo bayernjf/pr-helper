@@ -1507,7 +1507,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
     active = flow;
     try {
       await refreshStatuses(false);
-      const queueLoaded = await loadActionQueue();
+      const queueLoaded = await loadActionQueue(true, flow.repository);
       if (!queueLoaded && actionQueueError) showToast(actionQueueError);
       dialog.addEventListener('close', () => showProjectStepDrawer(flow.id, stageIndex, routeSource), { once: true });
       dialog.close();
