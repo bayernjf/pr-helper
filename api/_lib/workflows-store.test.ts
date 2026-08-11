@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -66,6 +66,13 @@ describe('stored workflow validation', () => {
   it('discovers dynamic sources from pull requests even when a branch is absent', () => {
     expect(branchSourcesForRule('feature/*', ['feature/deployment-e2e', 'dev', 'feature/deployment-e2e']))
       .toEqual(['feature/deployment-e2e']);
+  });
+
+  it('uses unfiltered pull results as a fallback while keeping the target route', () => {
+    expect(dynamicSourceCandidates('feature/*', [], [
+      { source: 'feature/webhook-auto-e2e' },
+      { source: 'feature/other', target: 'main' },
+    ], [], 'dev')).toEqual(['feature/webhook-auto-e2e']);
   });
 
   it('locks a merged stage until its post-merge Actions have been reconciled', () => {
