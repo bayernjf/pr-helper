@@ -1932,6 +1932,7 @@ async function retryFailedActions(flow: Workflow, state: WorkflowStageState, but
 function canMergePull(status: StepStatus) {
   return status.kind === 'open' && canMergeOpenPull({
     checks: status.checks?.state,
+    actions: status.actions?.state,
     approvalsMet: !status.requiredApprovals || (status.approvals || 0) >= status.requiredApprovals,
     mergeable: status.mergeable,
     mergeableState: status.mergeableState,
