@@ -5,6 +5,21 @@
 > 原则：只有可复现且有证据的结果标记为通过；本地修复未部署前不计入 Production 通过。
 > 后续状态：`021`–`023` 对应代码已在本报告之后部署 Production，但尚未纳入本报告的多账号团队协作、加密同步或保留清理验收。
 
+## 2026-08-12 Production 追加验收
+
+本节补充 2026-08-11 至 2026-08-12 在同一 Production 与 E2E 沙箱完成的真实验证；不替代本报告中仍列为待验证的 Webhook、回滚、private / organization、Web Push 与多账号协作项目。
+
+| 范围 | 证据 | 结果 |
+| --- | --- | --- |
+| Required approval 流程 | PR #5 `feature/approval-e2e → dev` 在第二 GitHub 账号审批后成为可合并状态，并由应用内完成合并 | 通过 |
+| Preview 部署跟踪 | PR #7 `feature/deployment-e2e → dev` 合并后，Vercel 与 Cloudflare Pages Preview Actions 均成功，抽屉显示部署记录 | 通过 |
+| 合并门禁 | PR #8 `dev → main` 在 `3/4 Actions` 进行中时不显示合并按钮；全部通过后显示合并入口 | 通过 |
+| Production 部署跟踪 | PR #8 合并后，Vercel、Cloudflare Pages 与 Post-merge verification 三项 main 分支 Actions 均成功；页面显示两项 Production 部署成功 | 通过 |
+| 发布运行状态 | 合并后终态已将 PR #8 的运行记录从“发布运行中”更新为“发布完成” | 通过 |
+| 同步超时保护 | 真实全量 reconciliation 约 150 秒；前端等待阈值调整为 180 秒后成功完成并保留同步结果 | 通过 |
+
+本轮本地回归：`npm test` 23 个测试文件 / 195 个测试通过，`npx tsc --noEmit` 与 `npm run lint` 通过。
+
 ## 环境与测试资源
 
 - Production：`https://pr-helper-ten.vercel.app/?github=connected`
@@ -70,6 +85,12 @@ Production 已通过连续新增/删除与整页刷新复验，未再出现 `409
 
 已上线请求串行器和回归测试：并发快照读取会合并，随后只执行一次 reconciliation；失败请求保留上一次可靠快照。Production 从动态抽屉重新同步耗时 37.474 秒，抽屉刷新后仍保留 PR #4 的失败状态，问题已关闭。
 
+### P1：动态来源未投影 PR #9
+
+`feature/webhook-auto-e2e → dev` 的 PR #9 已通过审批并合并，PR gate 和合并后 Vercel、Cloudflare Pages、Post-merge verification 三项 Actions 均成功；但完成一次全量 reconciliation 后，Lane 仍未显示该动态来源。GitHub 上的分支、PR 和目标分支均符合 `feature/* → dev`。
+
+已补充服务端来源发现兜底：除按目标分支筛选的 PR 列表外，还读取完整 PR 列表并在服务端按目标分支过滤，再与仓库分支和已保存来源去重合并。该修复已通过单元测试，等待部署后用 PR #9 的历史状态复验。此项未改变 Webhook 验收结论。
+
 ### P1：操作审计读取复用了动态路由参数
 
 Production 已加载操作审计界面且一次“保存恢复策略”成功返回，但审计列表显示为空。根因是前端请求 `/api/inbox?action=operation-audit`，而动态路由 `api/[action].ts` 已把路径段 `inbox` 绑定为同名参数；服务端因此返回待办队列，而前端将缺失的 `entries` 解释为空列表。
@@ -80,9 +101,9 @@ Production 已加载操作审计界面且一次“保存恢复策略”成功返
 
 | 项目 | 当前状态 | 原因 |
 | --- | --- | --- |
-| GitHub Webhook 自动投影 | 待验证 | 未取得 webhook delivery 与数据库投影的对应证据；手动刷新不等于 webhook 通过 |
-| 审批门禁 | 待验证 | 需要第二个可审批账户；单账号无法审批自己的 PR |
-| Vercel / Cloudflare 部署门禁、健康检查、确认式回滚 | 待验证 | E2E 沙箱未配置真实部署工作流和 Environment |
+| GitHub Webhook 自动投影 | 待验证 | 未取得 webhook delivery 与数据库投影的对应证据；PR #9 的动态来源补救修复尚待部署复验，手动刷新不等于 webhook 通过 |
+| 审批门禁 | 已完成基础 E2E | PR #5 已经第二账号审批后完成应用内合并；审批前状态的完整截图证据仍可在下次复验补充 |
+| Vercel / Cloudflare 部署门禁、健康检查、确认式回滚 | 部署门禁通过；其余待验证 | Preview/Production 跟踪已通过；健康检查、失败投影和确认式回滚仍需低风险窗口 |
 | Web Push（关闭页面投递） | 待验证 | 需 VAPID、订阅、Service Worker 与关闭页面场景 |
 | private / organization 仓库授权边界 | 待验证 | 本轮只使用公开仓库 |
 
