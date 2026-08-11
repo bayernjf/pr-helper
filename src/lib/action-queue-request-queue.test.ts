@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { ActionQueueRequestQueue } from './action-queue-request-queue';
+import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './action-queue-request-queue';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -9,6 +9,10 @@ function deferred<T>() {
 }
 
 describe('ActionQueueRequestQueue', () => {
+  it('allows the full reconciliation window to complete', () => {
+    expect(ACTION_QUEUE_REFRESH_TIMEOUT_MS).toBe(180_000);
+  });
+
   it('coalesces snapshot reads and queues one reconciliation after the snapshot completes', async () => {
     const queue = new ActionQueueRequestQueue();
     const snapshot = deferred<boolean>();
