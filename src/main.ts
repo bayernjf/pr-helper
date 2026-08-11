@@ -8,7 +8,7 @@ import { navigationClass, navigationTarget, shouldRefreshWorkflowDetail, startsN
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
 import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
-import { ActionQueueRequestQueue } from './lib/action-queue-request-queue';
+import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
 import { getCloudSyncStatus, unlockCloudSync, lockCloudSync, isCloudSyncUnlocked, encryptForCloud, decryptFromCloud, rotateCloudSyncKey, type CloudSyncStatus, type SyncableData } from './lib/encrypted-sync';
 import { canPerformTeamOperation, teamRoleLabel } from './lib/team-permissions';
@@ -303,7 +303,7 @@ async function loadActionQueue(reconcile = true) {
 }
 async function loadActionQueueOnce(reconcile: boolean) {
   try {
-    const response = await fetch(githubAppApiUrl(reconcile ? '/api/inbox?refresh=1' : '/api/inbox'), reconcile ? { signal: AbortSignal.timeout(60_000) } : undefined);
+    const response = await fetch(githubAppApiUrl(reconcile ? '/api/inbox?refresh=1' : '/api/inbox'), reconcile ? { signal: AbortSignal.timeout(ACTION_QUEUE_REFRESH_TIMEOUT_MS) } : undefined);
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { message?: string };
       actionQueueError = payload.message || t('toast.queue.failed');
