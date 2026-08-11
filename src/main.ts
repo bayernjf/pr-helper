@@ -1594,6 +1594,11 @@ function bindDraftStepSorting() {
   }));
 }
 
+function bindDraftActions() {
+  document.querySelector('#view-flow')?.addEventListener('click', () => goTo('detail'));
+  document.querySelector('#delete-flow')?.addEventListener('click', () => { if (active) showDeleteWorkflowDialog(active); });
+}
+
 function editor() {
   if (active?.team && !canOperateWorkflow(active, 'workflow-edit')) {
     screen = 'detail';
@@ -1609,8 +1614,7 @@ function editor() {
   document.querySelector('#back-from-editor')!.addEventListener('click', () => { if (!active) editorDraft = { repository: '', name: '', source: '', target: '' }; goTo('back'); });
   document.querySelector<HTMLInputElement>('#flow-name')!.addEventListener('input', event => { if (!active) editorDraft.name = (event.target as HTMLInputElement).value; });
   document.querySelector('#editor-manage-repositories')?.addEventListener('click', openRepositoryManagement);
-  document.querySelector('#view-flow')?.addEventListener('click', () => goTo('detail'));
-  document.querySelector('#delete-flow')?.addEventListener('click', () => { if (active) showDeleteWorkflowDialog(active); });
+  bindDraftActions();
   document.querySelector<HTMLSelectElement>('#repo')!.addEventListener('change', async event => { const repository = (event.target as HTMLSelectElement).value; if (active?.repository !== repository) active = null; editorDraft = { ...editorDraft, repository, source: '', target: '' }; await loadBranches(repository); });
   bindDraftStepSorting();
   if (selected) loadBranches(selected);
@@ -1662,7 +1666,7 @@ function renderStepForm(repository: string) {
   sourceBranchToggle.addEventListener('click', () => { if (sourceBranchOptions.hidden) { sourceInput.focus(); openSourceBranches(); } else closeSourceBranches(); });
   sourceBranchOptions.querySelectorAll<HTMLButtonElement>('[data-source-branch]').forEach(button => button.addEventListener('click', () => { sourceInput.value = button.dataset.sourceBranch || ''; sync(); closeSourceBranches(); sourceInput.focus(); }));
   document.querySelector('#target')!.addEventListener('change', event => { if (!active) editorDraft.target = (event.target as HTMLSelectElement).value; sync(); }); sync();
-    document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } const isNew = active?.repository !== repository; if (isNew && workflows.some(workflow => workflow.repository === repository)) { showToast(t('editor.error.repoUsed')); return; } if (active?.repository === repository && active.stages.some(stage => stage.source === source && stage.target === target)) { showToast(t('editor.error.duplicateRoute')); return; } const name = value('flow-name') || repository; const independent = document.querySelector<HTMLInputElement>('#independent-route')!.checked; const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="wait-for-route"]:checked')].map(input => Number(input.value)); const next = active?.repository === repository ? { ...addStage(active, source, target, independent, waitFor), name } : createWorkflow(repository, source, target, name); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); bindDraftStepSorting(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.routeSaved', { source, target })); renderStepForm(repository); });
+    document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } const isNew = active?.repository !== repository; if (isNew && workflows.some(workflow => workflow.repository === repository)) { showToast(t('editor.error.repoUsed')); return; } if (active?.repository === repository && active.stages.some(stage => stage.source === source && stage.target === target)) { showToast(t('editor.error.duplicateRoute')); return; } const name = value('flow-name') || repository; const independent = document.querySelector<HTMLInputElement>('#independent-route')!.checked; const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="wait-for-route"]:checked')].map(input => Number(input.value)); const next = active?.repository === repository ? { ...addStage(active, source, target, independent, waitFor), name } : createWorkflow(repository, source, target, name); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); bindDraftActions(); bindDraftStepSorting(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.routeSaved', { source, target })); renderStepForm(repository); });
   document.querySelector<HTMLButtonElement>('#add-deployment')?.addEventListener('click', () => {
     if (!active) return;
     const healthCheckPath = value('deployment-health-path').trim();
