@@ -31,10 +31,13 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     const projectedStages = accepted && eventName === 'pull_request' && pull && payload.repository?.full_name
       ? await projectPullRequestWebhook(process.env, { repository: payload.repository.full_name, source: pull.head.ref, target: pull.base.ref, number: pull.number, state: pull.state, mergedAt: pull.merged_at })
       : 0;
-    const reconciledStages = accepted && payload.repository?.full_name && payload.installation?.id
-      ? await reconcileWorkflowStages(process.env, { repository: payload.repository.full_name, installationId: String(payload.installation.id), eventName }, 'webhook')
-      : 0;
-    response.status(202).json({ accepted, duplicate: !accepted, projectedStages, reconciledStages });
+    const shouldReconcile = accepted && Boolean(payload.repository?.full_name && payload.installation?.id);
+    // A GitHub webhook must acknowledge quickly. Full reconciliation can take
+    // minutes, so let the scheduler compensate after the delivery is recorded.
+    response.status(202).json({ accepted, duplicate: !accepted, projectedStages, reconciliationScheduled: shouldReconcile });
+    if (shouldReconcile) {
+      void reconcileWorkflowStages(process.env, { repository: payload.repository!.full_name, installationId: String(payload.installation!.id), eventName }, 'webhook').catch(() => undefined);
+    }
   } catch (error) {
     response.status(401).json({ message: error instanceof Error ? error.message : 'GitHub Webhook 处理失败' });
   }
