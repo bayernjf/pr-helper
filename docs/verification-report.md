@@ -7,7 +7,7 @@
 
 ## 2026-08-12 Production 追加验收
 
-本节补充 2026-08-11 至 2026-08-12 在同一 Production 与 E2E 沙箱完成的真实验证；不替代本报告中仍列为待验证的 Webhook、回滚、private / organization、Web Push 与多账号协作项目。
+本节补充 2026-08-11 至 2026-08-12 在同一 Production 与 E2E 沙箱完成的真实验证；不替代本报告中仍列为待验证的回滚、private / organization、Web Push 与多账号协作项目。
 
 | 范围 | 证据 | 结果 |
 | --- | --- | --- |
@@ -17,8 +17,9 @@
 | Production 部署跟踪 | PR #8 合并后，Vercel、Cloudflare Pages 与 Post-merge verification 三项 main 分支 Actions 均成功；页面显示两项 Production 部署成功 | 通过 |
 | 发布运行状态 | 合并后终态已将 PR #8 的运行记录从“发布运行中”更新为“发布完成” | 通过 |
 | 同步超时保护 | 真实全量 reconciliation 约 150 秒；前端等待阈值调整为 180 秒后成功完成并保留同步结果 | 通过 |
+| GitHub Webhook 自动投影 | GitHub App 订阅 PR、Checks、Status 与 Workflow 事件；沙箱 PR #11 的 `pull_request.reopened` delivery 返回 `202`（2.73 秒），Production 详情页不点击刷新，在下一个轮询周期自动新增 `feature/webhook-live-e2e-2 · PR #11` | 通过 |
 
-本轮本地回归：`npm test` 23 个测试文件 / 195 个测试通过，`npx tsc --noEmit` 与 `npm run lint` 通过。
+本轮本地回归：`npm test` 23 个测试文件 / 196 个测试通过，`npx tsc --noEmit` 与 `npm run lint` 通过。
 
 ## 环境与测试资源
 
@@ -97,11 +98,16 @@ Production 已加载操作审计界面且一次“保存恢复策略”成功返
 
 本地已改为 `GET /api/inbox?resource=operation-audit&limit=200`，保留现有 Serverless Function 数量，并先让原路径的浏览器回归失败、再验证新路由通过。修复已部署；Production 已显示既有“更新流程”记录以及创建/合并 PR 记录，CSV 导出按钮已启用，问题已关闭。
 
+### 已关闭：GitHub Webhook 自动投影
+
+GitHub App 的 Webhook URL、Secret、SSL verification 和 Active 状态均已配置。此前缺少事件订阅；启用 PR、Checks、Status 与 Workflow 相关事件后，真实投递暴露了服务端在响应前执行完整 reconciliation 导致 GitHub 超时的问题。
+
+修复上线后，沙箱 PR #11 被临时关闭并重新打开以触发真实 `pull_request.reopened` 事件。GitHub Recent Deliveries 显示该 delivery 返回 `202`，耗时 2.73 秒；payload 对应 `bayernjf/pr-helper-e2e-sandbox#11`。Production 中已打开的 `PR Helper E2E Sandbox` 流程详情没有点击“刷新 GitHub 状态”，一个前端轮询周期后，动态 `feature/* → dev` 步骤自动新增 `feature/webhook-live-e2e-2 · PR #11`。此项验收通过。
+
 ### 未取得通过证据的集成项
 
 | 项目 | 当前状态 | 原因 |
 | --- | --- | --- |
-| GitHub Webhook 自动投影 | 待验证 | 未取得 webhook delivery 与数据库投影的对应证据；PR #9 的动态来源补救修复尚待部署复验，手动刷新不等于 webhook 通过 |
 | 审批门禁 | 已完成基础 E2E | PR #5 已经第二账号审批后完成应用内合并；审批前状态的完整截图证据仍可在下次复验补充 |
 | Vercel / Cloudflare 部署门禁、健康检查、确认式回滚 | 部署门禁通过；其余待验证 | Preview/Production 跟踪已通过；健康检查、失败投影和确认式回滚仍需低风险窗口 |
 | Web Push（关闭页面投递） | 待验证 | 需 VAPID、订阅、Service Worker 与关闭页面场景 |
@@ -115,7 +121,6 @@ Production 已加载操作审计界面且一次“保存恢复策略”成功返
 | --- | --- | --- | --- |
 | Required approval | 第二个可审批 GitHub 账号与至少 1 个 required approval | 创建 PR、审批前后读取阶段决策 | `needs-approval` 在有效审批后迁移为 `ready-to-merge` |
 | Vercel / Cloudflare 部署与回滚 | 低风险仓库的实际工作流、Environment、部署密钥、健康检查地址和回滚窗口 | 触发并追踪双平台部署、失败与确认式回滚 | 双平台门禁、健康检查、失败追踪及确认式 Production 回滚 |
-| Webhook 自动投影 | 保持 Production 页面打开并准备可触发事件 | 触发事件，不手动刷新，核对 delivery、投影和 UI | 无手动刷新时 Lane、抽屉和时间线自动更新 |
 | private / organization 边界 | 已授权 private 和 organization 测试仓库，并设置 GitHub App 仓库范围 | 验证授权内读写及范围外拒绝 | 授权范围内成功操作，范围外仓库不可访问 |
 
 外部条件准备就绪后，用户只需通知对应验收项；Codex 负责测试执行、证据归档和本报告结论更新。加密同步和数据保留清理分别等待测试数据和下一次生产 Cron 的可观察窗口，无需额外账号或仓库。
