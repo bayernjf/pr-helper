@@ -1308,7 +1308,10 @@ function timelineEntryIcon(kind: string): string {
 }
 function dynamicBranchStatusText(state: WorkflowStageState) {
   const status = drawerStatusText(state);
-  const pull = state.pullNumber ? t('overview.run.prStatus', { number: state.pullNumber, status }) : status;
+  const pullPrefix = state.pullNumber ? `PR #${state.pullNumber}` : '';
+  const pull = state.pullNumber && !status.startsWith(pullPrefix)
+    ? t('overview.run.prStatus', { number: state.pullNumber, status })
+    : status;
   const readyToMerge = state.pullState === 'open'
     && state.checksState === 'success'
     && state.mergeable === true
