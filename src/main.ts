@@ -304,13 +304,14 @@ async function loadCloudWorkflows() {
     else pendingLocalWorkflowSync = workflows.length > 0;
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
 }
-async function loadActionQueue(reconcile = true) {
+async function loadActionQueue(reconcile = true, repository?: string) {
   if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = []; syncHealth = null; workflowRuns = []; timeline = []; recoveryStatuses = []; actionQueueError = ''; return false; }
-  return actionQueueRequestQueue.run(reconcile, loadActionQueueOnce);
+  return actionQueueRequestQueue.run(reconcile, currentReconcile => loadActionQueueOnce(currentReconcile, repository));
 }
-async function loadActionQueueOnce(reconcile: boolean) {
+async function loadActionQueueOnce(reconcile: boolean, repository?: string) {
   try {
-    const response = await fetch(githubAppApiUrl(reconcile ? '/api/inbox?refresh=1' : '/api/inbox'), reconcile ? { signal: AbortSignal.timeout(ACTION_QUEUE_REFRESH_TIMEOUT_MS) } : undefined);
+    const query = reconcile ? `?refresh=1${repository ? `&repository=${encodeURIComponent(repository)}` : ''}` : '';
+    const response = await fetch(githubAppApiUrl(`/api/inbox${query}`), reconcile ? { signal: AbortSignal.timeout(ACTION_QUEUE_REFRESH_TIMEOUT_MS) } : undefined);
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { message?: string };
       actionQueueError = payload.message || t('toast.queue.failed');
@@ -1856,7 +1857,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
 }
 async function refreshDetailStatuses() {
   await refreshStatuses(false, false);
-  if (active?.stages.some(stage => stage.source.includes('*'))) await loadActionQueue();
+  if (active?.stages.some(stage => stage.source.includes('*'))) await loadActionQueue(true, active.repository);
   if (screen === 'detail') detail();
 }
 async function showCodexRepairDialog(index: number, source?: string, pullNumber?: number) {
