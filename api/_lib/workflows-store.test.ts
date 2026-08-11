@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowStageStateMatchesDefinition } from './workflows-store';
+import { branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -71,6 +71,13 @@ describe('stored workflow validation', () => {
   it('locks a merged stage until its post-merge Actions have been reconciled', () => {
     expect(initialWebhookChecksState('2026-07-27T10:00:00Z')).toBe('pending');
     expect(initialWebhookChecksState(null)).toBe('unknown');
+  });
+
+  it('completes a merged workflow run whenever post-merge checks reach a terminal state', () => {
+    expect(workflowRunCompletionState(true, 'success')).toBe('completed');
+    expect(workflowRunCompletionState(true, 'failure')).toBe('failed');
+    expect(workflowRunCompletionState(true, 'pending')).toBeNull();
+    expect(workflowRunCompletionState(false, 'success')).toBeNull();
   });
 
   it('uses the merge commit and compactly preserves GitHub failure output for a repair handoff', () => {
