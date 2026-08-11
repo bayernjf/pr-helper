@@ -1841,7 +1841,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
 }
 async function refreshDetailStatuses() {
-  await refreshStatuses(false);
+  await refreshStatuses(false, false);
   if (active?.stages.some(stage => stage.source.includes('*'))) await loadActionQueue();
   if (screen === 'detail') detail();
 }
@@ -2044,7 +2044,7 @@ async function resolveDetailSource(owner: string, name: string, sourceRule: stri
   }));
   return openPulls.find(candidate => candidate.pull)?.source || matches[0];
 }
-async function refreshStatuses(renderDetail = true) {
+async function refreshStatuses(renderDetail = true, refreshProjectedStates = true) {
   if (!active) return;
   const button = document.querySelector<HTMLButtonElement>('#refresh-status');
   if (button) { button.disabled = true; button.textContent = t('detail.refresh.loading'); }
@@ -2141,6 +2141,7 @@ async function refreshStatuses(renderDetail = true) {
     showToast(message);
     if (Notification.permission === 'granted') new Notification(t('notif.title'), { body: message });
   });
+  if (refreshProjectedStates && active?.stages.some(stage => stage.source.includes('*'))) await loadActionQueue(false);
   if (renderDetail && screen === 'detail') detail();
 }
 
