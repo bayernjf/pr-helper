@@ -1,5 +1,8 @@
 type QueueRequest = (reconcile: boolean) => Promise<boolean>;
 
+// Reconciliation fans out across GitHub and can legitimately take longer than a normal API read.
+export const ACTION_QUEUE_REFRESH_TIMEOUT_MS = 180_000;
+
 /** Ensures background snapshots cannot race a user-requested reconciliation. */
 export class ActionQueueRequestQueue {
   private active: { reconcile: boolean; promise: Promise<boolean> } | null = null;
