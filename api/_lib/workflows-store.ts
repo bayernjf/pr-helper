@@ -177,6 +177,12 @@ export function reconciliationState(stagesFailed: number, stagesReconciled: numb
   if (stagesFailed <= 0) return 'success';
   return stagesReconciled > 0 ? 'degraded' : 'failure';
 }
+export function workflowRunCompletionState(merged: boolean, checksState: string): 'completed' | 'failed' | null {
+  if (!merged) return null;
+  if (checksState === 'success') return 'completed';
+  if (checksState === 'failure') return 'failed';
+  return null;
+}
 export const STAGE_STALE_THRESHOLD_SECONDS = 15 * 60;
 
 export const DEFAULT_RECOVERY_POLICY = { maxRetries: 3, cooldownSeconds: 300 };
@@ -905,11 +911,9 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   const route = `${stage.source} → ${stage.target}`;
   if (before?.checks_state !== checks.state && ['success', 'failure'].includes(checks.state)) {
     await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:checks:${sha}:${checks.state}`, kind: `checks-${checks.state}`, title: checks.state === 'failure' ? 'Actions 失败，需要处理' : 'Actions 已全绿', body: `${workflow.repository} · ${route}`, url: `/` });
-    if (pull.merged_at) {
-      const runState = checks.state === 'success' ? 'completed' : 'failed';
-      await sql`UPDATE workflow_runs SET state = ${runState}, completed_at = now() WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND pull_number = ${pull.number} AND state = 'active'`;
-    }
   }
+  const runState = workflowRunCompletionState(Boolean(pull.merged_at), checks.state);
+  if (runState) await sql`UPDATE workflow_runs SET state = ${runState}, completed_at = now() WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND pull_number = ${pull.number} AND state = 'active'`;
   if (!pull.merged_at && requiredApprovals > 0 && approvals >= requiredApprovals && (!before || before.approvals < before.required_approvals)) {
     await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:merge-ready:${pull.number}:${pull.head.sha}`, kind: 'merge-ready', title: 'PR 已满足合并条件', body: `${workflow.repository} · ${route} · PR #${pull.number}`, url: `/` });
   }
