@@ -74,7 +74,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - 稳定阶段决策：服务端统一输出 `locked`、`waiting`、`checks-failed`、`needs-approval`、`ready-to-merge`、`ready-to-create` 和 `merged` 决策，待办队列与阶段状态共用同一套判断。
 - 保存并发保护：流程版本使用数据库事务锁和版本号校验，检测到其他窗口更新时拒绝覆盖。
 - 请求安全保护：受保护 API 校验浏览器来源并按登录用户/操作限流；创建 PR 前检查同一 Source → Target 的开放 PR，Actions 重试和部署回滚使用稳定事件键去重。
-- 自动化方案：已确认“阈值触发 → AI/PR → 门禁 → 按步骤合并 → 合并后门禁/部署 → 下一步”的产品方案，第一阶段不使用画布，详情见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。当前尚未执行自动创建 PR、自动合并或自动推进。
+- 自动化方案：已确认“阈值触发 → AI/PR → 门禁 → 按步骤合并 → 合并后门禁/部署 → 下一步”的产品方案，第一阶段不使用画布，详情见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。当前尚未执行自动创建 PR、自动合并或自动推进；自动创建 PR 必须同时满足 AI 自动生成标题/描述、自动确认创建和至少一条有效生成规则，任一缺失时开关不可启用。
 
 ### 公网部署
 
@@ -241,7 +241,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 4. 失败恢复已由服务端校验重试次数、冷却时间、当前提交和失败 Actions；仍不自动修改代码或合并生产。
 5. 加密云同步已接通密文上传/下载原型，仍需补齐密钥轮换、冲突处理和线上回归后再扩大使用范围。 🟡 待加固
 6. 阶段状态、事件和部署历史已切换到稳定 `stage_id`。 ✅ 019 已执行，并已通过当前 Production 流程回归。
-7. PR 流程自动化：优先实现无画布的逐步骤自动化策略；方案与验收标准见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。 ⏳ 尚未落地
+7. PR 流程自动化：优先实现无画布的逐步骤自动化策略；自动创建 PR 受 AI 自动生成、自动确认和有效生成规则三项前置条件保护。方案与验收标准见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。 ⏳ 尚未落地
 
 ### 八、非验收类后续开发
 
