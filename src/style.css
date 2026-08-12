@@ -414,6 +414,29 @@ body {
   padding: 56px 0 28px;
 }
 
+.detail-page-head {
+  display: block;
+}
+
+.detail-page-head-main {
+  min-width: 0;
+}
+
+.detail-refresh {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.detail-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.detail-title-row h1 {
+  margin: 0;
+}
+
 .page-head h1 {
   font-size: clamp(2rem, 4vw, 3.4rem);
 }
@@ -1964,6 +1987,16 @@ a.account-menu-item {
   .flow-grid, .editor-layout, .detail-grid, .two, .rules-layout {
     grid-template-columns: 1fr;
   }
+
+  .detail-page-head {
+    display: block;
+  }
+
+  .detail-refresh {
+    margin-top: 4px;
+  }
+
+  .detail-title-row { align-items: flex-start; flex-wrap: wrap; }
 
   .rules-sidebar {
     border-right: 0;
