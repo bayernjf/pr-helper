@@ -99,8 +99,15 @@ async function enqueueServerAutoCreate(environment: Record<string, string | unde
   const triggerMinCommits = typeof automation.triggerMinCommits === 'number' && Number.isInteger(automation.triggerMinCommits) ? Math.min(20, Math.max(1, automation.triggerMinCommits)) : 1;
   if (aheadBy < triggerMinCommits) return null;
   const idempotencyKey = `${workflow.id}:${stage.stageId}:${source}:${stage.target}:${headSha}:create-pr`;
-  const existing = await sql<{ id: number; state: WorkflowAutomationAction['state'] }[]>`SELECT id, state FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
-  if (existing[0]) return existing[0].state === 'queued' ? existing[0].id : null;
+  const existing = await sql<{ id: number; state: WorkflowAutomationAction['state']; updated_at: string }[]>`SELECT id, state, updated_at FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
+  if (existing[0]) {
+    const stale = ['running', 'paused'].includes(existing[0].state) && Date.now() - Date.parse(existing[0].updated_at) > 120_000;
+    if (stale) {
+      const reset = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'queued', failure_reason = NULL, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${existing[0].id} AND state IN ('running', 'paused') RETURNING id`;
+      return reset[0]?.id || null;
+    }
+    return existing[0].state === 'queued' ? existing[0].id : null;
+  }
   const version = (await sql<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`)[0]?.version || workflow.version || 1;
   const snapshot = { ...workflow, stages: workflow.stages.map(item => ({ ...item })) };
   const run = await sql<{ id: number }[]>`INSERT INTO workflow_automation_runs (user_id, workflow_id, workflow_version, stage_index, stage_id, source, target, workflow_snapshot) VALUES (${row.user_id}, ${workflow.id}, ${version}, ${stageIndex}, ${stage.stageId}, ${source}, ${stage.target}, ${sql.json(snapshot)}) RETURNING id`;
@@ -122,7 +129,7 @@ async function scheduleServerAutoCreate(environment: Record<string, string | und
 }
 
 async function generateAutomationMessage(baseUrl: string, apiKey: string, model: string, source: string, target: string, commits: string[], generationRule: string) {
-  const response = await fetch(aiChatCompletionsUrl(baseUrl), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model, messages: [{ role: 'user', content: buildPrPrompt(source, target, commits, generationRule) }], temperature: 0.2 }) });
+  const response = await fetch(aiChatCompletionsUrl(baseUrl), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model, messages: [{ role: 'user', content: buildPrPrompt(source, target, commits, generationRule) }], temperature: 0.2, max_tokens: 1200 }), signal: AbortSignal.timeout(20_000) });
   if (!response.ok) throw new Error(`AI 生成失败 (${response.status})`);
   const payload = await response.json() as { choices?: { message?: { content?: string } }[] };
   const content = payload.choices?.[0]?.message?.content || '';

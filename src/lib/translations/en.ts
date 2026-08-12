@@ -159,6 +159,8 @@ const en: TranslationDict = {
   'overview.board.dragProject': 'Drag to reorder: {{name}}',
   'overview.board.moveUp': 'Move project up: {{name}}',
   'overview.board.moveDown': 'Move project down: {{name}}',
+  'overview.board.order': 'Order',
+  'overview.board.orderFor': 'Flow order: {{name}}',
   'overview.board.sortAllOnly': 'Switch to All projects to change the order',
   'overview.board.mergeTarget': 'Merges into {target}',
   'overview.run.waiting-sync': 'Waiting for status sync',
