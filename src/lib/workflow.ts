@@ -202,6 +202,14 @@ export function reorderWorkflows(workflows: readonly Workflow[], draggedId: stri
   return reordered.map((workflow, position) => ({ ...workflow, position }));
 }
 
+export function moveWorkflowToPosition(workflows: readonly Workflow[], workflowId: string, position: number): Workflow[] {
+  const fromIndex = workflows.findIndex(workflow => workflow.id === workflowId);
+  if (!Number.isInteger(position) || fromIndex === -1 || position < 1 || position > workflows.length) return [...workflows];
+  const target = workflows[position - 1];
+  if (!target || target.id === workflowId) return [...workflows];
+  return reorderWorkflows(workflows, workflowId, target.id, fromIndex < position - 1 ? 'after' : 'before');
+}
+
 export function workflowSummary(workflow: Workflow) {
   const isLinear = workflow.stages.every((stage, index) => index === 0 || !stage.independent && workflow.stages[index - 1]?.target === stage.source);
   const route = isLinear
