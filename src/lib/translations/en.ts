@@ -322,6 +322,8 @@ const en: TranslationDict = {
   'draft.autoCreatePrerequisites': 'Configure the server credential, enable auto-generate and auto-confirm, and keep at least one generation rule first.',
   'draft.autoCreateEnabled': 'Auto-create policy enabled for this step.',
   'draft.autoCreateDisabled': 'Auto-create policy disabled for this step.',
+  'detail.autoCreateDesc': 'Creates a PR in the background when conditions are met.',
+  'detail.autoCreateReadonly': 'You do not have permission to edit this workflow.',
   'automation.executeCreate': 'Run auto-create PR',
   'automation.queueFailed': 'Unable to queue the automation action.',
   'automation.executeFailed': 'Automatic PR creation failed.',

@@ -322,6 +322,8 @@ const zh: TranslationDict = {
   'draft.autoCreatePrerequisites': '请先配置服务端 AI 凭据，并开启自动生成、自动确认且至少保留一条生成规则。',
   'draft.autoCreateEnabled': '已开启当前步骤自动创建策略。',
   'draft.autoCreateDisabled': '已关闭当前步骤自动创建策略。',
+  'detail.autoCreateDesc': '满足条件后由后台自动创建 PR。',
+  'detail.autoCreateReadonly': '你没有编辑此流程的权限。',
   'automation.executeCreate': '执行自动创建 PR',
   'automation.queueFailed': '无法加入自动化动作队列。',
   'automation.executeFailed': '自动创建 PR 执行失败。',
