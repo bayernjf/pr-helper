@@ -1,6 +1,6 @@
 import { requestErrorStatus, type ApiRequest, type ApiResponse } from './_lib/http.js';
 import { currentGitHubIdentity } from './_lib/session.js';
-import { addTeamMember, createTeam, deleteAiAutomationCredential, enqueueWorkflowAutomationAction, executeWorkflowAutomationAction, getAiAutomationCredential, isStoredWorkflow, listTeamMembers, listTeams, listWorkflowAutomationActions, listWorkflows, recordOperationAudit, removeTeamMember, removeWorkflow, removeWorkflowStage, saveAiAutomationCredential, shareWorkflowWithTeam, upsertWorkflow, type TeamRole } from './_lib/workflows-store.js';
+import { addTeamMember, createTeam, deleteAiAutomationCredential, enqueueWorkflowAutomationAction, executeWorkflowAutomationAction, getAiAutomationCredential, isStoredWorkflow, listTeamMembers, listTeams, listWorkflowAutomationActions, listWorkflows, recordOperationAudit, removeTeamMember, removeWorkflow, removeWorkflowStage, saveAiAutomationCredential, shareWorkflowWithTeam, testSavedAiAutomationCredential, upsertWorkflow, type TeamRole } from './_lib/workflows-store.js';
 import { testAiConnection } from '../src/lib/ai.js';
 import { validateAiBaseUrl } from './_lib/ai-credentials.js';
 
@@ -33,6 +33,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
       if (!request.method || request.method === 'GET') { response.status(200).json({ credential: await getAiAutomationCredential(process.env, identity) }); return; }
       if (request.method === 'DELETE') { await deleteAiAutomationCredential(process.env, identity); response.status(200).json({ ok: true }); return; }
       if (request.method === 'POST') {
+        if (request.query?.action === 'test-saved') { response.status(200).json(await testSavedAiAutomationCredential(process.env, identity)); return; }
         const payload = body(request) as Record<string, unknown>;
         const baseUrl = typeof payload.baseUrl === 'string' ? validateAiBaseUrl(payload.baseUrl.trim()) : '';
         const model = typeof payload.model === 'string' ? payload.model.trim() : '';
