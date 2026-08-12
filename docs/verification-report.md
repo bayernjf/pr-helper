@@ -1,6 +1,6 @@
 # PR Helper 验证报告
 
-> 执行日期：2026-08-03（Asia/Shanghai）  
+> 执行日期：2026-08-12（Asia/Shanghai）
 > 范围：本地代码、Vercel Production、GitHub App 与公开 E2E 沙箱。  
 > 原则：只有可复现且有证据的结果标记为通过；本地修复未部署前不计入 Production 通过。
 > 后续状态：`021`–`023` 对应代码已在本报告之后部署 Production，但尚未纳入本报告的多账号团队协作、加密同步或保留清理验收。
@@ -19,7 +19,7 @@
 | 同步超时保护 | 真实全量 reconciliation 约 150 秒；前端等待阈值调整为 180 秒后成功完成并保留同步结果 | 通过 |
 | GitHub Webhook 自动投影 | GitHub App 订阅 PR、Checks、Status 与 Workflow 事件；沙箱 PR #11 的 `pull_request.reopened` delivery 返回 `202`（2.73 秒），Production 详情页不点击刷新，在下一个轮询周期自动新增 `feature/webhook-live-e2e-2 · PR #11` | 通过 |
 
-本轮本地回归：`npm test` 23 个测试文件 / 196 个测试通过，`npx tsc --noEmit` 与 `npm run lint` 通过。
+本轮本地回归：`npm test` 24 个测试文件 / 205 个测试通过，`npx tsc --noEmit`、`npm run lint` 与 `git diff --check` 通过。
 
 ## 2026-08-12 刷新链路优化追加验收
 
