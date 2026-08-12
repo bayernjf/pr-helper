@@ -24,6 +24,18 @@ describe('stored workflow validation', () => {
     expect(isStoredWorkflow({ id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature/payments', target: 'dev' }, { source: 'dev', target: 'main' }] })).toBe(true);
   });
 
+  it('accepts server auto-create policies with a rule snapshot and legacy browser policies', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature/payments', target: 'dev' }] };
+    expect(isStoredWorkflow({ ...workflow, stages: [{ ...workflow.stages[0], automation: { autoCreatePullRequest: true, executionMode: 'browser-session' } }] })).toBe(true);
+    expect(isStoredWorkflow({ ...workflow, stages: [{ ...workflow.stages[0], automation: { autoCreatePullRequest: true, executionMode: 'server', generationRule: { name: 'Default', content: '# Rule', capturedAt: '2026-08-12T00:00:00.000Z' } } }] })).toBe(true);
+    expect(isStoredWorkflow({ ...workflow, stages: [{ ...workflow.stages[0], automation: { autoCreatePullRequest: true, executionMode: 'server' } }] })).toBe(false);
+  });
+
+  it('rejects an automation policy on a step without auto-create enabled', () => {
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature/payments', target: 'dev', automation: { autoCreatePullRequest: false, executionMode: 'browser-session' } }] };
+    expect(isStoredWorkflow(workflow)).toBe(false);
+  });
+
   it('accepts an optional non-negative lane position and rejects invalid positions', () => {
     const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature/payments', target: 'dev' }] };
     expect(isStoredWorkflow({ ...workflow, position: 0 })).toBe(true);

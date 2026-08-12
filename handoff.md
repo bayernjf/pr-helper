@@ -8,8 +8,8 @@
 - 当前分支：`feature/20260722`。
 - 用户已确认本批代码已上线 Production。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地验证已通过：`npm test`（23 个文件 / 186 项）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。本轮 Lane 排序动画未改变业务数据模型；浏览器 E2E 仍保持既有 API mock 覆盖范围。
-- Supabase 迁移 `001`–`023` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
+- 当前本地验证已通过：`npm test`（24 个文件 / 205 项）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。后台自动创建 PR 代码未改变现有手动流程行为；浏览器 E2E 仍保持既有 API mock 覆盖范围。
+- Supabase 迁移 `001`–`026` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
 
 ## 2026-08-12 刷新链路最新结论
@@ -95,11 +95,13 @@ Production 已验证行为：
 
 ## 后续高价值投入
 
-### PR 流程自动化（下一项产品开发）
+### PR 流程自动化（本地代码已完成，待部署验收）
 
-自动化方案已确认但尚未落地，详见 [`docs/automated-workflow-plan.md`](docs/automated-workflow-plan.md)。先实现服务端加密 AI 凭据 PoC，验证保存、测试、替换、删除、日志脱敏和安全暂停，再在现有步骤编辑器中增加逐步骤策略；第一阶段不做画布。自动创建 PR 只有在服务端自动流程凭据可用、AI 设置中的“自动生成标题和描述”“自动确认创建”均开启，且存在有效生成规则时才允许用户启用；条件满足不会自动勾选，必须用户主动点击，默认规则优先。默认关闭所有高风险自动动作，服务端通过 Webhook/reconciliation、统一阶段决策、策略快照和幂等动作队列执行。
+自动化方案已确认，详见 [`docs/automated-workflow-plan.md`](docs/automated-workflow-plan.md)。服务端加密 AI 凭据、`024`–`026`、步骤规则快照、幂等动作队列和 Webhook/Cron/inbox 后台触发已在本地落地；第一阶段不做画布。自动创建 PR 只有在服务端自动流程凭据可用、AI 设置中的“自动生成标题和描述”“自动确认创建”均开启，且存在有效生成规则快照时才允许用户启用；条件满足不会自动勾选，必须用户主动点击，默认规则优先。默认关闭自动合并、自动推进和生产高风险动作。
 
 当前浏览器 AI Key 位于 `sessionStorage`，同一标签页刷新后仍存在；限制是后端无法读取，而不是刷新即丢失。它继续用于手动流程且不会自动上传。自动流程使用用户单独保存的服务端加密凭据；现有口令派生的加密云同步因服务端无法解密，不能复用。AI 失败处理第一版只生成修复上下文或 Codex 修复任务，不做无人值守代码修改、推送或生产合并。
+
+当前本地已落地自动流程 AI 凭据、步骤级自动创建策略配置和规则快照、`025_workflow_automation_queue.sql` 对应的运行快照和幂等动作队列、`026_ai_automation_preferences.sql` 对应的服务端偏好，以及 webhook / cron / inbox reconciliation 的后台自动触发。`024`、`025`、`026` 已执行，Vercel Production/Preview 已配置 `AI_CREDENTIALS_ENCRYPTION_KEY`；代码尚未部署。本次执行器以稳定幂等键和 `queued → running` 原子领取防止重复创建，失败动作会暂停；不自动合并。
 
 在上述生产验收通过后，建议顺序为：
 

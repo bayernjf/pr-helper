@@ -4,12 +4,14 @@ import { parseGithubAppConfig } from './github-app.js';
 import { sendPushNotifications, type BrowserPushSubscription } from './push.js';
 import { assertTeamOperation, type TeamOperation, type TeamRole } from '../../src/lib/team-permissions.js';
 import { summarizeGitHubChecks } from '../../src/lib/domain.js';
+import { credentialKeyHint, decryptAiApiKey, encryptAiApiKey, maskAiApiKey } from './ai-credentials.js';
+import { buildPrPrompt, aiChatCompletionsUrl } from '../../src/lib/ai.js';
 
 export type StoredWorkflow = {
   id: string;
   name: string;
   repository: string;
-  stages: { source: string; target: string; independent?: boolean; waitFor?: number[]; stageId?: string }[];
+  stages: { source: string; target: string; independent?: boolean; waitFor?: number[]; stageId?: string; automation?: { autoCreatePullRequest: true; executionMode: 'browser-session' } | { autoCreatePullRequest: true; executionMode: 'server'; generationRule: { name: string; content: string; capturedAt: string } } }[];
   createdAt?: string;
   deployments?: DeploymentConfig[];
   position?: number;
@@ -17,6 +19,167 @@ export type StoredWorkflow = {
   version?: number;
   team?: { id: string; name: string; role: TeamRole };
 };
+
+export type AiAutomationCredentialStatus = { configured: boolean; baseUrl: string | null; model: string | null; keyHint: string | null; keyMask: string | null; autoGeneratePrMessage: boolean; autoConfirmPrCreation: boolean; updatedAt: string | null; lastUsedAt: string | null };
+export type WorkflowAutomationAction = { id: number; runId: number; workflowId: string; stageId: string; stageIndex: number; source: string; target: string; kind: 'create-pr' | 'merge-pr' | 'advance-stage'; idempotencyKey: string; state: 'queued' | 'running' | 'succeeded' | 'failed' | 'paused' | 'cancelled'; attempts: number; failureReason: string | null; createdAt: string; updatedAt: string };
+
+export async function getAiAutomationCredential(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<AiAutomationCredentialStatus> {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const rows = await query(environment)<{ base_url: string; model: string; key_hint: string; ciphertext: string; auto_generate_pr_message: boolean; auto_confirm_pr_creation: boolean; updated_at: string; last_used_at: string | null }[]>`SELECT base_url, model, key_hint, ciphertext, auto_generate_pr_message, auto_confirm_pr_creation, updated_at, last_used_at FROM pr_helper_ai_automation_credentials WHERE user_id = ${user.id}`;
+  const row = rows[0];
+  if (!row) return { configured: false, baseUrl: null, model: null, keyHint: null, keyMask: null, autoGeneratePrMessage: false, autoConfirmPrCreation: false, updatedAt: null, lastUsedAt: null };
+  let keyMask: string | null = null;
+  try { keyMask = maskAiApiKey(decryptAiApiKey(environment, row.ciphertext)); } catch { keyMask = null; }
+  return { configured: Boolean(keyMask), baseUrl: row.base_url, model: row.model, keyHint: row.key_hint, keyMask, autoGeneratePrMessage: row.auto_generate_pr_message, autoConfirmPrCreation: row.auto_confirm_pr_creation, updatedAt: row.updated_at, lastUsedAt: row.last_used_at };
+}
+
+export async function saveAiAutomationCredential(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, input: { baseUrl: string; model: string; apiKey: string; autoGeneratePrMessage: boolean; autoConfirmPrCreation: boolean }) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const ciphertext = encryptAiApiKey(environment, input.apiKey);
+  const hint = credentialKeyHint(input.apiKey);
+  await query(environment)`INSERT INTO pr_helper_ai_automation_credentials (user_id, base_url, model, ciphertext, key_version, key_hint, auto_generate_pr_message, auto_confirm_pr_creation) VALUES (${user.id}, ${input.baseUrl}, ${input.model}, ${ciphertext}, ${'v1'}, ${hint}, ${input.autoGeneratePrMessage}, ${input.autoConfirmPrCreation}) ON CONFLICT (user_id) DO UPDATE SET base_url = EXCLUDED.base_url, model = EXCLUDED.model, ciphertext = EXCLUDED.ciphertext, key_version = EXCLUDED.key_version, key_hint = EXCLUDED.key_hint, auto_generate_pr_message = EXCLUDED.auto_generate_pr_message, auto_confirm_pr_creation = EXCLUDED.auto_confirm_pr_creation, updated_at = now()`;
+  return getAiAutomationCredential(environment, identity);
+}
+
+export async function readAiAutomationCredential(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  return readAiAutomationCredentialForUser(environment, user.id);
+}
+
+async function readAiAutomationCredentialForUser(environment: Record<string, string | undefined>, userId: string) {
+  const rows = await query(environment)<{ base_url: string; model: string; ciphertext: string; auto_generate_pr_message: boolean; auto_confirm_pr_creation: boolean }[]>`SELECT base_url, model, ciphertext, auto_generate_pr_message, auto_confirm_pr_creation FROM pr_helper_ai_automation_credentials WHERE user_id = ${userId}`;
+  const row = rows[0];
+  return row ? { baseUrl: row.base_url, model: row.model, apiKey: decryptAiApiKey(environment, row.ciphertext), autoGeneratePrMessage: row.auto_generate_pr_message, autoConfirmPrCreation: row.auto_confirm_pr_creation } : null;
+}
+
+export async function deleteAiAutomationCredential(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  await query(environment)`DELETE FROM pr_helper_ai_automation_credentials WHERE user_id = ${user.id}`;
+}
+
+export async function enqueueWorkflowAutomationAction(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, input: { workflowId: string; stageIndex: number; source: string; kind: 'create-pr' | 'merge-pr' | 'advance-stage'; idempotencyKey: string; generationRule?: string }) {
+  if (!input.workflowId || !input.source || !input.idempotencyKey || !Number.isInteger(input.stageIndex) || input.stageIndex < 0) throw new Error('无效的自动化动作');
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  const access = await requireWorkflowOperation(sql, user.id, input.workflowId, 'workflow-edit');
+  const workflow = access.workflow;
+  const stage = workflow ? stageForIndex(workflow, input.stageIndex) : undefined;
+  if (!workflow || !stage || !stage.stageId || !branchRuleMatches(stage.source, input.source)) throw new Error('未找到对应流程步骤');
+  if (input.kind === 'create-pr' && stage.automation?.autoCreatePullRequest !== true) throw new Error('当前步骤未开启自动创建 PR');
+  if (input.kind === 'create-pr' && !input.generationRule?.trim()) throw new Error('自动创建 PR 必须提供有效的生成规则快照');
+  const existing = await sql<{ id: number; run_id: number; workflow_id: string; stage_id: string; source: string; target: string; kind: WorkflowAutomationAction['kind']; idempotency_key: string; state: WorkflowAutomationAction['state']; attempts: number; failure_reason: string | null; created_at: string; updated_at: string }[]>`SELECT id, run_id, workflow_id, stage_id, source, target, kind, idempotency_key, state, attempts, failure_reason, created_at, updated_at FROM workflow_automation_actions WHERE user_id = ${access.ownerUserId} AND idempotency_key = ${input.idempotencyKey} LIMIT 1`;
+  if (existing[0]) {
+    const row = existing[0];
+    return { id: Number(row.id), runId: Number(row.run_id), workflowId: row.workflow_id, stageId: row.stage_id, stageIndex: input.stageIndex, source: row.source, target: row.target, kind: row.kind, idempotencyKey: row.idempotency_key, state: row.state, attempts: row.attempts, failureReason: row.failure_reason, createdAt: row.created_at, updatedAt: row.updated_at } satisfies WorkflowAutomationAction;
+  }
+  const version = (await sql<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflow.id}`)[0]?.version || workflow.version || 1;
+  const snapshot = { ...workflow, stages: workflow.stages.map(item => ({ ...item })) };
+  const runRows = await sql<{ id: number }[]>`INSERT INTO workflow_automation_runs (user_id, workflow_id, workflow_version, stage_index, stage_id, source, target, workflow_snapshot) VALUES (${access.ownerUserId}, ${workflow.id}, ${version}, ${input.stageIndex}, ${stage.stageId}, ${input.source}, ${stage.target}, ${sql.json(snapshot)}) RETURNING id`;
+  const runId = Number(runRows[0].id);
+  const rows = await sql<{ id: number; run_id: number; workflow_id: string; stage_id: string; source: string; target: string; kind: WorkflowAutomationAction['kind']; idempotency_key: string; state: WorkflowAutomationAction['state']; attempts: number; failure_reason: string | null; created_at: string; updated_at: string }[]>`INSERT INTO workflow_automation_actions (user_id, run_id, workflow_id, stage_id, source, target, kind, idempotency_key, payload) VALUES (${access.ownerUserId}, ${runId}, ${workflow.id}, ${stage.stageId}, ${input.source}, ${stage.target}, ${input.kind}, ${input.idempotencyKey}, ${sql.json({ generationRule: input.generationRule || '' })}) ON CONFLICT (user_id, idempotency_key) DO UPDATE SET updated_at = workflow_automation_actions.updated_at RETURNING id, run_id, workflow_id, stage_id, source, target, kind, idempotency_key, state, attempts, failure_reason, created_at, updated_at`;
+  const row = rows[0];
+  return { id: Number(row.id), runId: Number(row.run_id), workflowId: row.workflow_id, stageId: row.stage_id, stageIndex: input.stageIndex, source: row.source, target: row.target, kind: row.kind, idempotencyKey: row.idempotency_key, state: row.state, attempts: row.attempts, failureReason: row.failure_reason, createdAt: row.created_at, updatedAt: row.updated_at } satisfies WorkflowAutomationAction;
+}
+
+type AutomationActionRow = { id: number; run_id: number; workflow_id: string; stage_id: string; stage_index: number; source: string; target: string; kind: WorkflowAutomationAction['kind']; state: WorkflowAutomationAction['state']; attempts: number; payload: { generationRule?: string } | null };
+
+async function enqueueServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string) {
+  const stage = stageForIndex(workflow, stageIndex);
+  const automation = stage?.automation;
+  if (!stage || !stage.stageId || !row.github_installation_id || automation?.autoCreatePullRequest !== true || automation.executionMode !== 'server' || !automation.generationRule.content.trim()) return null;
+  const credentialRows = await sql<{ id: string }[]>`SELECT user_id AS id FROM pr_helper_ai_automation_credentials WHERE user_id = ${row.user_id} AND auto_generate_pr_message = true AND auto_confirm_pr_creation = true LIMIT 1`;
+  if (!credentialRows[0]) return null;
+  const idempotencyKey = `${workflow.id}:${stage.stageId}:${source}:${stage.target}:${headSha}:create-pr`;
+  const existing = await sql<{ id: number; state: WorkflowAutomationAction['state'] }[]>`SELECT id, state FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
+  if (existing[0]) return existing[0].state === 'queued' ? existing[0].id : null;
+  const version = (await sql<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`)[0]?.version || workflow.version || 1;
+  const snapshot = { ...workflow, stages: workflow.stages.map(item => ({ ...item })) };
+  const run = await sql<{ id: number }[]>`INSERT INTO workflow_automation_runs (user_id, workflow_id, workflow_version, stage_index, stage_id, source, target, workflow_snapshot) VALUES (${row.user_id}, ${workflow.id}, ${version}, ${stageIndex}, ${stage.stageId}, ${source}, ${stage.target}, ${sql.json(snapshot)}) RETURNING id`;
+  const actions = await sql<{ id: number }[]>`INSERT INTO workflow_automation_actions (user_id, run_id, workflow_id, stage_id, source, target, kind, idempotency_key, payload) VALUES (${row.user_id}, ${run[0].id}, ${workflow.id}, ${stage.stageId}, ${source}, ${stage.target}, 'create-pr', ${idempotencyKey}, ${sql.json({ generationRule: automation.generationRule.content })}) ON CONFLICT (user_id, idempotency_key) DO NOTHING RETURNING id`;
+  if (actions[0]) return actions[0].id;
+  await sql`DELETE FROM workflow_automation_runs WHERE user_id = ${row.user_id} AND id = ${run[0].id}`;
+  const concurrent = await sql<{ id: number; state: WorkflowAutomationAction['state'] }[]>`SELECT id, state FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
+  return concurrent[0]?.state === 'queued' ? concurrent[0].id : null;
+}
+
+async function scheduleServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string) {
+  const states = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`;
+  const current = states.find(state => state.stage_id === workflow.stages[stageIndex]?.stageId && state.source === source);
+  if (!current || deriveStageDecision(workflow, stageIndex, current, states).kind !== 'ready-to-create') return;
+  const actionId = await enqueueServerAutoCreate(environment, sql, row, workflow, stageIndex, source, headSha);
+  if (!actionId) return;
+  try { await executeWorkflowAutomationActionForUser(environment, row.user_id, row.github_installation_id!, actionId); }
+  catch { /* The action is paused with a user-visible reason; reconciliation must keep running. */ }
+}
+
+async function generateAutomationMessage(baseUrl: string, apiKey: string, model: string, source: string, target: string, commits: string[], generationRule: string) {
+  const response = await fetch(aiChatCompletionsUrl(baseUrl), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model, messages: [{ role: 'user', content: buildPrPrompt(source, target, commits, generationRule) }], temperature: 0.2 }) });
+  if (!response.ok) throw new Error(`AI 生成失败 (${response.status})`);
+  const payload = await response.json() as { choices?: { message?: { content?: string } }[] };
+  const content = payload.choices?.[0]?.message?.content || '';
+  const parsed = JSON.parse(content.replace(/^```json\s*|\s*```$/g, '').trim()) as { title?: unknown; body?: unknown };
+  if (typeof parsed.title !== 'string' || !parsed.title.trim() || typeof parsed.body !== 'string') throw new Error('AI 返回的 PR 内容格式无效');
+  return { title: parsed.title.trim().slice(0, 256), body: parsed.body.slice(0, 50_000) };
+}
+
+async function executeWorkflowAutomationActionForUser(environment: Record<string, string | undefined>, userId: string, installationId: string, actionId: number) {
+  if (!Number.isInteger(actionId) || actionId <= 0 || !installationId) throw new Error('无效的自动化执行请求');
+  const sql = query(environment);
+  const rows = await sql<AutomationActionRow[]>`SELECT id, run_id, workflow_id, stage_id, stage_index, source, target, kind, state, attempts, payload FROM workflow_automation_actions WHERE user_id = ${userId} AND id = ${actionId} LIMIT 1`;
+  const action = rows[0];
+  if (!action) throw new Error('未找到自动化动作');
+  if (action.state === 'succeeded') return { state: action.state, pullNumber: null };
+  if (action.state !== 'queued') throw new Error(`当前动作状态为 ${action.state}，不能执行`);
+  if (action.kind !== 'create-pr') throw new Error('当前仅支持执行自动创建 PR 动作');
+  const claimed = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'running', attempts = attempts + 1, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId} AND state = 'queued' RETURNING id`;
+  if (!claimed.length) throw new Error('动作已被其他执行请求领取');
+  try {
+    const workflowRows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${userId} AND id = ${action.workflow_id}`;
+    const workflow = storedWorkflowFromPayload(workflowRows[0]?.payload);
+    const stage = workflow ? stageForIndex(workflow, action.stage_index) : undefined;
+    if (!workflow || !stage || stage.stageId !== action.stage_id || stage.automation?.autoCreatePullRequest !== true || stage.automation.executionMode !== 'server') throw new Error('流程步骤自动创建策略已失效');
+    if (!action.payload?.generationRule?.trim()) throw new Error('自动化动作缺少生成规则快照');
+    const currentStates = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
+    const current = currentStates.find(state => state.stage_id === action.stage_id && state.source === action.source);
+    if (!current || deriveStageDecision(workflow, action.stage_index, current, currentStates).kind !== 'ready-to-create') throw new Error('当前步骤尚未满足自动创建 PR 的门禁');
+    const credential = await readAiAutomationCredentialForUser(environment, userId);
+    if (!credential || !credential.autoGeneratePrMessage || !credential.autoConfirmPrCreation) throw new Error('服务端 AI 自动生成或自动确认设置未开启');
+    const { owner, name } = ownerAndName(workflow.repository);
+    const config = parseGithubAppConfig(environment);
+    const openPulls = await installationRequest<Pull[]>(config, installationId, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(`${owner}:${action.source}`)}&base=${encodeURIComponent(action.target)}&per_page=10`);
+    if (openPulls[0]) throw new Error(`该分支已存在 PR #${openPulls[0].number}`);
+    const comparison = await installationRequest<{ commits: { commit: { message: string } }[] }>(config, installationId, `/repos/${owner}/${name}/compare/${encodeURIComponent(action.target)}...${encodeURIComponent(action.source)}`);
+    if (!comparison.commits.length) throw new Error('Source 分支没有可创建 PR 的新提交');
+    const message = await generateAutomationMessage(credential.baseUrl, credential.apiKey, credential.model, action.source, action.target, comparison.commits.map(item => item.commit.message), action.payload?.generationRule || '');
+    const created = await installationRequest<Pull>(config, installationId, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify({ title: message.title, head: action.source, base: action.target, body: message.body }) });
+    await sql`UPDATE workflow_automation_actions SET state = 'succeeded', updated_at = now(), payload = ${sql.json({ ...(action.payload || {}), pullNumber: created.number })} WHERE user_id = ${userId} AND id = ${actionId}`;
+    await sql`UPDATE workflow_automation_runs SET state = 'succeeded', updated_at = now(), completed_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
+    await recordOperationAuditForUser(sql, userId, installationId, {
+      action: 'pull-created', outcome: 'success', repository: workflow.repository, workflowId: workflow.id,
+      stageId: action.stage_id, source: action.source, target: action.target, pullNumber: created.number, runId: action.run_id,
+      metadata: { via: 'workflow-automation' }, failureReason: null,
+    });
+    return { state: 'succeeded', pullNumber: created.number, pullUrl: created.html_url };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : '自动创建 PR 失败';
+    await sql`UPDATE workflow_automation_actions SET state = 'paused', failure_reason = ${reason.slice(0, 800)}, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId}`;
+    await sql`UPDATE workflow_automation_runs SET state = 'paused', updated_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
+    throw error;
+  }
+}
+
+export async function executeWorkflowAutomationAction(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, actionId: number) {
+  if (!identity.installationId) throw new Error('无效的自动化执行请求');
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  return executeWorkflowAutomationActionForUser(environment, user.id, identity.installationId, actionId);
+}
+
+export async function listWorkflowAutomationActions(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId?: string) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const sql = query(environment);
+  const rows = await sql<{ id: number; run_id: number; workflow_id: string; stage_id: string; stage_index: number; source: string; target: string; kind: WorkflowAutomationAction['kind']; idempotency_key: string; state: WorkflowAutomationAction['state']; attempts: number; failure_reason: string | null; created_at: string; updated_at: string }[]>`SELECT id, run_id, workflow_id, stage_id, stage_index, source, target, kind, idempotency_key, state, attempts, failure_reason, created_at, updated_at FROM workflow_automation_actions WHERE user_id = ${user.id} ${workflowId ? sql`AND workflow_id = ${workflowId}` : sql``} ORDER BY created_at DESC LIMIT 100`;
+  return rows.map(row => ({ id: Number(row.id), runId: Number(row.run_id), workflowId: row.workflow_id, stageId: row.stage_id, stageIndex: row.stage_index, source: row.source, target: row.target, kind: row.kind, idempotencyKey: row.idempotency_key, state: row.state, attempts: row.attempts, failureReason: row.failure_reason, createdAt: row.created_at, updatedAt: row.updated_at } satisfies WorkflowAutomationAction));
+}
 
 type DatabaseUser = { id: string };
 type WorkflowRow = { payload: unknown; version?: number };
@@ -462,6 +625,17 @@ export async function codexRepairContext(environment: Record<string, string | un
   return { markdown, pullNumber, pullUrl: pull.html_url };
 }
 
+function isStoredStageAutomation(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const automation = value as { autoCreatePullRequest?: unknown; executionMode?: unknown; generationRule?: { name?: unknown; content?: unknown; capturedAt?: unknown } };
+  if (automation.autoCreatePullRequest !== true) return false;
+  if (automation.executionMode === 'browser-session') return true;
+  return automation.executionMode === 'server'
+    && typeof automation.generationRule?.name === 'string' && automation.generationRule.name.length > 0
+    && typeof automation.generationRule?.content === 'string' && automation.generationRule.content.length > 0
+    && typeof automation.generationRule?.capturedAt === 'string' && !Number.isNaN(Date.parse(automation.generationRule.capturedAt));
+}
+
 export function isStoredWorkflow(value: unknown): value is StoredWorkflow {
   if (!value || typeof value !== 'object') return false;
   const workflow = value as Partial<StoredWorkflow>;
@@ -472,7 +646,7 @@ export function isStoredWorkflow(value: unknown): value is StoredWorkflow {
     && Array.isArray(workflow.stages) && workflow.stages.length > 0
     && (workflow.deployments === undefined || Array.isArray(workflow.deployments) && workflow.deployments.every(deployment => Boolean(deployment) && typeof deployment.target === 'string' && deployment.target.length > 0 && ['vercel', 'cloudflare'].includes(deployment.provider || '') && typeof deployment.workflowName === 'string' && deployment.workflowName.length > 0 && ['preview', 'production'].includes(deployment.environment || '') && (deployment.githubEnvironment === undefined || typeof deployment.githubEnvironment === 'string') && (deployment.healthCheckPath === undefined || typeof deployment.healthCheckPath === 'string' && deployment.healthCheckPath.startsWith('/')) && (deployment.rollbackWorkflowName === undefined || typeof deployment.rollbackWorkflowName === 'string' && deployment.rollbackWorkflowName.length > 0)))
     && (workflow.recoveryPolicy === undefined || typeof workflow.recoveryPolicy === 'object' && typeof workflow.recoveryPolicy.maxRetries === 'number' && workflow.recoveryPolicy.maxRetries >= 0 && workflow.recoveryPolicy.maxRetries <= 20 && typeof workflow.recoveryPolicy.cooldownSeconds === 'number' && workflow.recoveryPolicy.cooldownSeconds >= 0 && workflow.recoveryPolicy.cooldownSeconds <= 86400)
-    && workflow.stages.every((stage, index) => Boolean(stage) && typeof stage.source === 'string' && typeof stage.target === 'string' && stage.source.length > 0 && stage.target.length > 0 && (stage.independent === undefined || typeof stage.independent === 'boolean') && (stage.waitFor === undefined || Array.isArray(stage.waitFor) && stage.waitFor.every(dependency => Number.isInteger(dependency) && dependency >= 0 && dependency < index)) && (stage.stageId === undefined || typeof stage.stageId === 'string' && stage.stageId.length > 0));
+    && workflow.stages.every((stage, index) => Boolean(stage) && typeof stage.source === 'string' && typeof stage.target === 'string' && stage.source.length > 0 && stage.target.length > 0 && (stage.independent === undefined || typeof stage.independent === 'boolean') && (stage.waitFor === undefined || Array.isArray(stage.waitFor) && stage.waitFor.every(dependency => Number.isInteger(dependency) && dependency >= 0 && dependency < index)) && (stage.stageId === undefined || typeof stage.stageId === 'string' && stage.stageId.length > 0) && (stage.automation === undefined || isStoredStageAutomation(stage.automation)));
 }
 
 export function sortStoredWorkflows(workflows: readonly StoredWorkflow[]) {
@@ -880,7 +1054,8 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
     : [];
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
-  const comparison = await installationRequest<{ ahead_by: number }>(config, row.github_installation_id, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`).catch(() => ({ ahead_by: 0 }));
+  const comparison = await installationRequest<{ ahead_by: number; head_commit?: { id?: string }; commits?: { sha?: string }[] }>(config, row.github_installation_id, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`).catch(() => ({ ahead_by: 0 }));
+  const comparisonHeadSha = comparison.head_commit?.id || comparison.commits?.at(-1)?.sha;
   if (!pull) {
     await sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`;
     await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_state, checks_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${workflow.repository}, ${stage.source}, ${stage.target}, 'none', 'unknown', ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, pull_number = NULL, pull_state = 'none', merged_at = NULL, head_sha = NULL, checks_state = 'unknown', checks_passed = 0, checks_total = 0, approvals = 0, required_approvals = 0, mergeable = NULL, mergeable_state = NULL, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`;
@@ -889,6 +1064,7 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
     if (unlocked && comparison.ahead_by > 0 && (previous[0]?.ahead_by || 0) === 0) {
       await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:none`, kind: 'new-pr-ready', title: '可以创建下一步 PR', body: `${workflow.repository} · ${stage.source} → ${stage.target}`, url: '/' });
     }
+    if (comparison.ahead_by > 0 && comparisonHeadSha) await scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha);
     return true;
   }
   const sha = pull.merged_at ? pull.merge_commit_sha : pull.head.sha;
@@ -929,6 +1105,7 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   if (pull.merged_at && unlocked && comparison.ahead_by > 0 && (before?.ahead_by || 0) === 0) {
     await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:${pull.number}`, kind: 'new-pr-ready', title: '有新提交，可以创建新 PR', body: `${workflow.repository} · ${route}`, url: '/' });
   }
+  if (comparison.ahead_by > 0 && comparisonHeadSha) await scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha);
   return true;
 }
 

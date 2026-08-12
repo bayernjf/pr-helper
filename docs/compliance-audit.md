@@ -13,7 +13,8 @@
 | Installation Token | ✅ 合规 | 短期生成，仅服务端使用，不持久化 |
 | Session Cookie | ✅ 合规 | `HttpOnly; Secure; SameSite=Lax`，签名防篡改 |
 | Session Secret | ✅ 合规 | 通过 `AUTH_SESSION_SECRET` 环境变量注入 |
-| AI API Key | ✅ 合规 | 仅存浏览器 `sessionStorage`，不传服务端、不持久化 |
+| 浏览器 AI API Key | ✅ 合规 | 仍仅存浏览器 `sessionStorage`，用于手动流程，不自动上传 |
+| 服务端自动化 AI API Key | ✅ 受控 | 用户主动配置后以 AES-GCM 密文存储；API 只返回掩码，后台执行时短时解密；`AI_CREDENTIALS_ENCRYPTION_KEY` 仅在 Vercel 环境变量中 |
 | GitHub PAT（开发回退） | ⚠️ 注意 | `sessionStorage` 存储 PAT，XSS 可读取；标记为开发用途，生产走 GitHub App |
 
 ## 二、数据隐私

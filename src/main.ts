@@ -6,7 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, g
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, selectWorkflowAfterCloudLoad, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
+import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
@@ -108,6 +108,7 @@ const mergingStages = new Set<number>();
 const recentlyCreatedPullNumbers = new Map<number, number>();
 const recentlyMergedPullNumbers = new Map<number, number>();
 let aiConfig: AiConfig | null = loadAiConfig();
+let automationCredentialConfigured = false;
 let generationRules = loadGenerationRules(() => localStorage.getItem(GENERATION_RULES_KEY));
 let pullRequestDrafts = loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), Date.now());
 let draftStorageSynchronized = true;
@@ -229,6 +230,7 @@ async function persistWorkflowOrder(next: Workflow[]) {
     showToast(t('toast.order.saved'));
   } catch (error) {
     cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail');
+    await loadAutomationCredentialStatus();
     render();
     showToast(t('toast.order.local', { error: cloudWorkflowSyncError }));
   }
@@ -673,13 +675,23 @@ function showToast(message: string) {
 function persistPullRequestDrafts(next: typeof pullRequestDrafts) { pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); draftStorageSynchronized = true; } catch { draftStorageSynchronized = false; showToast(t('connect.draft.saveError')); } }
 persistPullRequestDrafts(pullRequestDrafts);
 function loadAiConfig(): AiConfig | null { try { return JSON.parse(sessionStorage.getItem('pr-helper-ai') || 'null') as AiConfig | null; } catch { return null; } }
+let automationAutoGeneratePrMessage = false;
+let automationAutoConfirmPrCreation = false;
+function autoCreatePrerequisites() { return automationCredentialConfigured && automationAutoGeneratePrMessage && automationAutoConfirmPrCreation && generationRules.length; }
+async function loadAutomationCredentialStatus() {
+  try { const response = await fetch(githubAppApiUrl('/api/ai-credentials')); const payload = await response.json().catch(() => ({})) as { credential?: { configured?: boolean; autoGeneratePrMessage?: boolean; autoConfirmPrCreation?: boolean } }; automationCredentialConfigured = Boolean(response.ok && payload.credential?.configured); automationAutoGeneratePrMessage = Boolean(payload.credential?.autoGeneratePrMessage); automationAutoConfirmPrCreation = Boolean(payload.credential?.autoConfirmPrCreation); }
+  catch { automationCredentialConfigured = false; automationAutoGeneratePrMessage = false; automationAutoConfirmPrCreation = false; }
+}
 function showAiSettings(selectedRuleId: string | null = null, onRuleChange?: (id: string) => void) {
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
   let selectedGenerationRuleId = selectedRuleId || defaultGenerationRule(generationRules)?.id || null;
   const selectedGenerationRule = () => generationRuleById(generationRules, selectedGenerationRuleId);
-  dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('ai.eyebrow')}</p><h2>${t('ai.title')}</h2><label>${t('ai.label.baseUrl')}<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="${t('ai.placeholder.baseUrl')}" /></label><label>${t('ai.label.model')}<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="${t('ai.placeholder.model')}" /></label><label>${t('ai.label.apiKey')}<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><label class="setting-toggle"><input id="ai-auto-generate" type="checkbox" ${aiConfig?.autoGeneratePrMessage ? 'checked' : ''} />${t('ai.toggle.label')}<span>${t('ai.toggle.desc')}</span></label><label class="setting-toggle"><input id="ai-auto-confirm" type="checkbox" ${aiConfig?.autoConfirmPrCreation ? 'checked' : ''} />${t('ai.toggle.autoConfirm.label')}<span>${t('ai.toggle.autoConfirm.desc')}</span></label><p id="ai-test-result" class="ai-connection-result">${t('ai.test.placeholder')}</p><div class="dialog-actions"><button id="ai-generation-rules" type="button" class="ghost">${escape(generationRuleButtonLabel(selectedGenerationRule()))}</button><button id="test-ai" type="button" class="ghost">${t('ai.test')}</button><button value="cancel" class="ghost">${t('ai.cancel')}</button><button id="save-ai" class="primary">${t('ai.save')}</button></div></form>`;
+  dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('ai.eyebrow')}</p><h2>${t('ai.title')}</h2><label>${t('ai.label.baseUrl')}<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="${t('ai.placeholder.baseUrl')}" /></label><label>${t('ai.label.model')}<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="${t('ai.placeholder.model')}" /></label><label>${t('ai.label.apiKey')}<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><label class="setting-toggle"><input id="ai-auto-generate" type="checkbox" ${aiConfig?.autoGeneratePrMessage ? 'checked' : ''} />${t('ai.toggle.label')}<span>${t('ai.toggle.desc')}</span></label><label class="setting-toggle"><input id="ai-auto-confirm" type="checkbox" ${aiConfig?.autoConfirmPrCreation ? 'checked' : ''} />${t('ai.toggle.autoConfirm.label')}<span>${t('ai.toggle.autoConfirm.desc')}</span></label><p id="ai-test-result" class="ai-connection-result">${t('ai.test.placeholder')}</p><fieldset class="ai-automation-credential"><legend>${t('ai.automation.title')}</legend><small>${t('ai.automation.desc')}</small><p id="ai-automation-status" class="meta">${t('ai.automation.loading')}</p><div class="dialog-actions"><button id="save-ai-automation" type="button" class="ghost">${t('ai.automation.save')}</button><button id="delete-ai-automation" type="button" class="ghost" disabled>${t('ai.automation.delete')}</button></div></fieldset><div class="dialog-actions"><button id="ai-generation-rules" type="button" class="ghost">${escape(generationRuleButtonLabel(selectedGenerationRule()))}</button><button id="test-ai" type="button" class="ghost">${t('ai.test')}</button><button value="cancel" class="ghost">${t('ai.cancel')}</button><button id="save-ai" class="primary">${t('ai.save')}</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
+  const automationStatus = dialog.querySelector<HTMLElement>('#ai-automation-status')!;
+  const automationSave = dialog.querySelector<HTMLButtonElement>('#save-ai-automation')!;
+  const automationDelete = dialog.querySelector<HTMLButtonElement>('#delete-ai-automation')!;
   const ruleButton = dialog.querySelector<HTMLButtonElement>('#ai-generation-rules')!;
   const syncRuleButton = () => {
     selectedGenerationRuleId ||= defaultGenerationRule(generationRules)?.id || null;
@@ -698,6 +710,28 @@ function showAiSettings(selectedRuleId: string | null = null, onRuleChange?: (id
     apiKey: dialog.querySelector<HTMLInputElement>('#ai-key')!.value.trim(),
     autoGeneratePrMessage: dialog.querySelector<HTMLInputElement>('#ai-auto-generate')!.checked,
     autoConfirmPrCreation: dialog.querySelector<HTMLInputElement>('#ai-auto-confirm')!.checked,
+  });
+  const automationApi = async (init?: RequestInit) => {
+    const response = await fetch(githubAppApiUrl('/api/ai-credentials'), init);
+    const payload = await response.json().catch(() => ({})) as { credential?: { configured?: boolean; keyMask?: string | null; autoGeneratePrMessage?: boolean; autoConfirmPrCreation?: boolean }; message?: string };
+    if (!response.ok) throw new Error(payload.message || t('ai.automation.error'));
+    return payload;
+  };
+  const refreshAutomationStatus = async () => {
+    try { const payload = await automationApi(); const credential = payload.credential; automationStatus.textContent = credential?.configured ? `${t('ai.automation.configured')} · ${credential.keyMask || ''}` : t('ai.automation.notConfigured'); automationDelete.disabled = !credential?.configured; }
+    catch (error) { automationStatus.textContent = error instanceof Error ? error.message : t('ai.automation.error'); }
+  };
+  void refreshAutomationStatus();
+  automationSave.addEventListener('click', async () => {
+    const config = read(); automationSave.disabled = true;
+    try { const payload = await automationApi({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl: config.baseUrl, model: config.model, apiKey: config.apiKey, autoGeneratePrMessage: config.autoGeneratePrMessage, autoConfirmPrCreation: config.autoConfirmPrCreation }) }); automationCredentialConfigured = Boolean(payload.credential?.configured); automationAutoGeneratePrMessage = Boolean(payload.credential?.autoGeneratePrMessage); automationAutoConfirmPrCreation = Boolean(payload.credential?.autoConfirmPrCreation); automationStatus.textContent = `${t('ai.automation.configured')} · ${payload.credential?.keyMask || ''}`; automationDelete.disabled = false; }
+    catch (error) { automationStatus.textContent = error instanceof Error ? error.message : t('ai.automation.error'); }
+    finally { automationSave.disabled = false; }
+  });
+  automationDelete.addEventListener('click', async () => {
+    automationDelete.disabled = true;
+    try { await automationApi({ method: 'DELETE' }); automationCredentialConfigured = false; automationAutoGeneratePrMessage = false; automationAutoConfirmPrCreation = false; automationStatus.textContent = t('ai.automation.notConfigured'); }
+    catch (error) { automationStatus.textContent = error instanceof Error ? error.message : t('ai.automation.error'); automationDelete.disabled = false; }
   });
   dialog.querySelector('#test-ai')!.addEventListener('click', async () => {
     const button = dialog.querySelector<HTMLButtonElement>('#test-ai')!, result = dialog.querySelector('#ai-test-result')!;
@@ -1600,6 +1634,16 @@ function bindDraftStepSorting() {
 function bindDraftActions() {
   document.querySelector('#view-flow')?.addEventListener('click', () => goTo('detail'));
   document.querySelector('#delete-flow')?.addEventListener('click', () => { if (active) showDeleteWorkflowDialog(active); });
+  document.querySelectorAll<HTMLInputElement>('[data-auto-create-stage]').forEach(input => input.addEventListener('change', () => {
+    if (!active) return;
+    const stageIndex = Number(input.dataset.autoCreateStage);
+    const rule = defaultGenerationRule(generationRules);
+    if (input.checked && (!autoCreatePrerequisites() || !rule)) { input.checked = false; showToast(t('draft.autoCreatePrerequisites')); return; }
+    save(setStageAutoCreate(active, stageIndex, input.checked, rule ? { name: rule.name, content: rule.content } : undefined));
+    showToast(input.checked ? t('draft.autoCreateEnabled') : t('draft.autoCreateDisabled'));
+    const draft = document.querySelector('#draft');
+    if (draft) { draft.innerHTML = renderDraft(); bindDraftActions(); bindDraftStepSorting(); }
+  }));
 }
 
 function editor() {
@@ -1723,7 +1767,10 @@ function renderDraft() {
   return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${escape(flow.name)}</h2><p class="meta">${escape(flow.repository)}</p>${sharedWorkflowBadge(flow)}${flow.stages.map((stage, index) => {
     const badge = stage.waitFor?.length ? `<small>${t('draft.waitFor', { count: stage.waitFor.length })}</small>` : stage.independent ? `<small>${t('draft.independent')}</small>` : '';
     const route = `${stage.source} → ${stage.target}`;
-    return `<div class="draft-step" data-draft-step="${index}"><button type="button" class="draft-step-drag-handle" draggable="true" data-draft-drag="${index}" aria-label="${escape(t('draft.drag', { name: route }))}" title="${escape(t('draft.drag', { name: route }))}"><svg viewBox="0 0 16 22" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><span>${index + 1}</span><div class="draft-step-main"><b>${escape(route)}</b>${badge}</div><div class="draft-step-move-buttons"><button type="button" data-draft-move="${index}" data-draft-direction="up" aria-label="${escape(t('draft.moveUp', { name: route }))}" title="${escape(t('draft.moveUp', { name: route }))}" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" data-draft-move="${index}" data-draft-direction="down" aria-label="${escape(t('draft.moveDown', { name: route }))}" title="${escape(t('draft.moveDown', { name: route }))}" ${index === flow.stages.length - 1 ? 'disabled' : ''}>↓</button></div><button data-remove="${index}">${t('draft.remove')}</button></div>`;
+    const autoEnabled = stage.automation?.autoCreatePullRequest === true;
+    const autoDisabled = !autoEnabled && !autoCreatePrerequisites();
+    const autoHint = autoDisabled ? t('draft.autoCreatePrerequisites') : t('draft.autoCreateDesc');
+    return `<div class="draft-step" data-draft-step="${index}"><button type="button" class="draft-step-drag-handle" draggable="true" data-draft-drag="${index}" aria-label="${escape(t('draft.drag', { name: route }))}" title="${escape(t('draft.drag', { name: route }))}"><svg viewBox="0 0 16 22" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><span>${index + 1}</span><div class="draft-step-main"><b>${escape(route)}</b>${badge}<label class="draft-auto-create"><input type="checkbox" data-auto-create-stage="${index}" ${autoEnabled ? 'checked' : ''} ${autoDisabled ? 'disabled' : ''} /><span>${t('draft.autoCreate')}</span></label><small>${autoHint}</small></div><div class="draft-step-move-buttons"><button type="button" data-draft-move="${index}" data-draft-direction="up" aria-label="${escape(t('draft.moveUp', { name: route }))}" title="${escape(t('draft.moveUp', { name: route }))}" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" data-draft-move="${index}" data-draft-direction="down" aria-label="${escape(t('draft.moveDown', { name: route }))}" title="${escape(t('draft.moveDown', { name: route }))}" ${index === flow.stages.length - 1 ? 'disabled' : ''}>↓</button></div><button data-remove="${index}">${t('draft.remove')}</button></div>`;
   }).join('')}<div class="draft-footer"><button id="view-flow" class="ghost">${t('draft.viewDetail')}</button>${deleteAction}</div>`;
 }
 
@@ -1751,6 +1798,7 @@ function detail() {
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && screen === 'detail') void refreshStatuses(); });
   }
   document.querySelectorAll<HTMLButtonElement>('[data-create-pr]').forEach(button => button.addEventListener('click', () => showCreateDialog(Number(button.dataset.createPr))));
+  document.querySelectorAll<HTMLButtonElement>('[data-execute-auto-create]').forEach(button => button.addEventListener('click', () => void executeAutoCreatePr(Number(button.dataset.executeAutoCreate))));
   document.querySelectorAll<HTMLButtonElement>('[data-merge-pr]').forEach(button => button.addEventListener('click', () => showMergeDialog(Number(button.dataset.mergePr))));
   document.querySelectorAll<HTMLButtonElement>('[data-merge-menu-toggle]').forEach(button => button.addEventListener('click', () => {
     const menu = document.querySelector<HTMLElement>(`[data-merge-menu="${button.dataset.mergeMenuToggle}"]`)!;
@@ -1817,6 +1865,35 @@ function lockedStageText(index: number) {
   return hasChecks ? t('status.locked') : t('status.locked.noChecks');
 }
 
+async function executeAutoCreatePr(stageIndex: number) {
+  if (!active || !canOperateWorkflow(active, 'pr-create')) return;
+  const stage = active.stages[stageIndex];
+  const rule = stage?.automation?.executionMode === 'server' ? stage.automation.generationRule : undefined;
+  if (!stage || !rule || !stage.automation?.autoCreatePullRequest || !autoCreatePrerequisites()) { showToast(t('draft.autoCreatePrerequisites')); return; }
+  if (!await confirmAutoCreateExecution(stage.source, stage.target, rule.name)) return;
+  const key = `${active.id}:${stage.stageId}:${stage.source}:${stage.target}:create-pr:${Date.now()}`;
+  try {
+    const queueResponse = await fetch(githubAppApiUrl('/api/automation'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: active.id, stageIndex, source: stage.source, kind: 'create-pr', idempotencyKey: key, generationRule: rule.content }) });
+    const queued = await queueResponse.json().catch(() => ({})) as { action?: { id?: number }; message?: string };
+    if (!queueResponse.ok || !queued.action?.id) throw new Error(queued.message || t('automation.queueFailed'));
+    const executeResponse = await fetch(githubAppApiUrl('/api/automation?action=execute'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actionId: queued.action.id }) });
+    const executed = await executeResponse.json().catch(() => ({})) as { result?: { pullNumber?: number; pullUrl?: string }; message?: string };
+    if (!executeResponse.ok) throw new Error(executed.message || t('automation.executeFailed'));
+    showToast(t('automation.executeSucceeded', { number: executed.result?.pullNumber || 0 }));
+    await refreshStatuses();
+  } catch (error) { showToast(error instanceof Error ? error.message : t('automation.executeFailed')); }
+}
+
+function confirmAutoCreateExecution(source: string, target: string, ruleName: string) {
+  return new Promise<boolean>(resolve => {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'create-dialog confirm-dialog';
+    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('automation.confirm.eyebrow')}</p><h2>${t('automation.confirm.title')}</h2><p>${t('automation.confirm.desc', { source: escape(source), target: escape(target), rule: escape(ruleName) })}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('automation.confirm.cancel')}</button><button value="confirm" class="primary">${t('automation.confirm.confirm')}</button></div></form>`;
+    document.body.append(dialog); dialog.showModal();
+    dialog.addEventListener('close', () => { resolve(dialog.returnValue === 'confirm'); dialog.remove(); }, { once: true });
+  });
+}
+
 function stageTimeline(stage: Workflow['stages'][number], index: number) {
   if (stage.source.includes('*')) {
     const states = active ? statesForStage(active, index) : [];
@@ -1832,7 +1909,8 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
     const changeMessage = hasNewCommits
       ? `<p><b class="status neutral">${t('status.newCommits', { count: status.aheadBy || 0 })}</b> · ${unlocked ? t('status.newCommits.canCreate') : t('status.newCommits.waiting')}</p>`
       : unlocked ? `<p class="meta">${t('status.newCommits.waitingChanges')}</p>` : '';
-    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${changeMessage}${unlocked ? `<div class="timeline-actions">${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${lockedStageText(index)}</p>`}</div></article>`;
+    const autoCreate = canCreate && stage.automation?.autoCreatePullRequest && autoCreatePrerequisites() && defaultGenerationRule(generationRules) ? `<button class="timeline-action" data-execute-auto-create="${index}">${t('automation.executeCreate')}</button>` : '';
+    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${changeMessage}${unlocked ? `<div class="timeline-actions">${autoCreate}${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${lockedStageText(index)}</p>`}</div></article>`;
   }
   if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status failure">${t('status.fetchFailed')}</b> · ${escape(status.message || '')}</p></div></article>`;
   const checks = status.checks?.total ? gateDisclosure(t('status.checks.summary', { passed: status.checks.passed, total: status.checks.total, state: status.checks.state === 'success' ? t('status.checks.completed') : status.checks.state === 'failure' ? t('status.checks.failed') : t('status.checks.running') }), status.checkDetails, 'checks', stage.target) : '';
@@ -1849,7 +1927,8 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const newCommits = status.kind === 'merged' && status.aheadBy
     ? `<p><b class="status neutral">${t('status.newCommits', { count: status.aheadBy })}</b> · ${canCreateNewPull ? t('status.newCommits.canCreate') : t('status.newCommits.waiting')}</p>`
     : '';
-  const newPullAction = canCreateNewPull && canOperateWorkflow(active!, 'pr-create') ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr.button')}</button>` : '';
+  const autoNewPullAction = canCreateNewPull && canOperateWorkflow(active!, 'pr-create') && stage.automation?.autoCreatePullRequest && autoCreatePrerequisites() && defaultGenerationRule(generationRules) ? `<button class="timeline-action" data-execute-auto-create="${index}">${t('automation.executeCreate')}</button>` : '';
+  const newPullAction = canCreateNewPull && canOperateWorkflow(active!, 'pr-create') ? `${autoNewPullAction}<button class="timeline-action" data-create-pr="${index}">${t('status.createPr.button')}</button>` : '';
   const stateClass = status.kind === 'merged' ? mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
   const mergeAction = status.kind === 'open' && !recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(active!, 'pull-merge') ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
   const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';

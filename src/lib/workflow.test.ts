@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
+import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -49,6 +49,18 @@ describe('workflow configuration', () => {
       { source: 'feature/20260722', target: 'dev', stageId: expect.any(String) },
       { source: 'dev', target: 'main', stageId: expect.any(String) },
     ]);
+  });
+
+  it('sets and removes a per-stage auto-create policy', () => {
+    const workflow = addStage(createWorkflow('octo/app', 'feature/a', 'dev'), 'dev', 'main');
+    const enabled = setStageAutoCreate(workflow, 1, true, { name: 'Default', content: '# Rule' });
+    expect(enabled.stages[1].automation).toMatchObject({ autoCreatePullRequest: true, executionMode: 'server', generationRule: { name: 'Default', content: '# Rule', capturedAt: expect.any(String) } });
+    expect(setStageAutoCreate(enabled, 1, false).stages[1].automation).toBeUndefined();
+  });
+
+  it('does not enable auto-create without a generation rule snapshot', () => {
+    const workflow = createWorkflow('octo/app', 'feature/a', 'dev');
+    expect(setStageAutoCreate(workflow, 0, true)).toEqual(workflow);
   });
 
   it('adds an independent merge route without changing legacy linear routes', () => {
