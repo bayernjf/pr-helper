@@ -11,7 +11,7 @@ export type StoredWorkflow = {
   id: string;
   name: string;
   repository: string;
-  stages: { source: string; target: string; independent?: boolean; waitFor?: number[]; stageId?: string; automation?: { autoCreatePullRequest: true; executionMode: 'browser-session' } | { autoCreatePullRequest: true; executionMode: 'server'; generationRule: { name: string; content: string; capturedAt: string } } }[];
+  stages: { source: string; target: string; independent?: boolean; waitFor?: number[]; stageId?: string; automation?: { autoCreatePullRequest: true; executionMode: 'browser-session'; triggerMinCommits?: number } | { autoCreatePullRequest: true; executionMode: 'server'; triggerMinCommits?: number; generationRule: { name: string; content: string; capturedAt: string } } }[];
   createdAt?: string;
   deployments?: DeploymentConfig[];
   position?: number;
@@ -83,12 +83,14 @@ export async function enqueueWorkflowAutomationAction(environment: Record<string
 
 type AutomationActionRow = { id: number; run_id: number; workflow_id: string; stage_id: string; stage_index: number; source: string; target: string; kind: WorkflowAutomationAction['kind']; state: WorkflowAutomationAction['state']; attempts: number; payload: { generationRule?: string } | null };
 
-async function enqueueServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string) {
+async function enqueueServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string, aheadBy: number) {
   const stage = stageForIndex(workflow, stageIndex);
   const automation = stage?.automation;
   if (!stage || !stage.stageId || !row.github_installation_id || automation?.autoCreatePullRequest !== true || automation.executionMode !== 'server' || !automation.generationRule.content.trim()) return null;
   const credentialRows = await sql<{ id: string }[]>`SELECT user_id AS id FROM pr_helper_ai_automation_credentials WHERE user_id = ${row.user_id} AND auto_generate_pr_message = true AND auto_confirm_pr_creation = true LIMIT 1`;
   if (!credentialRows[0]) return null;
+  const triggerMinCommits = typeof automation.triggerMinCommits === 'number' && Number.isInteger(automation.triggerMinCommits) ? Math.min(20, Math.max(1, automation.triggerMinCommits)) : 1;
+  if (aheadBy < triggerMinCommits) return null;
   const idempotencyKey = `${workflow.id}:${stage.stageId}:${source}:${stage.target}:${headSha}:create-pr`;
   const existing = await sql<{ id: number; state: WorkflowAutomationAction['state'] }[]>`SELECT id, state FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
   if (existing[0]) return existing[0].state === 'queued' ? existing[0].id : null;
@@ -106,7 +108,7 @@ async function scheduleServerAutoCreate(environment: Record<string, string | und
   const states = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`;
   const current = states.find(state => state.stage_id === workflow.stages[stageIndex]?.stageId && state.source === source);
   if (!current || deriveStageDecision(workflow, stageIndex, current, states).kind !== 'ready-to-create') return;
-  const actionId = await enqueueServerAutoCreate(environment, sql, row, workflow, stageIndex, source, headSha);
+  const actionId = await enqueueServerAutoCreate(environment, sql, row, workflow, stageIndex, source, headSha, current.ahead_by);
   if (!actionId) return;
   try { await executeWorkflowAutomationActionForUser(environment, row.user_id, row.github_installation_id!, actionId); }
   catch { /* The action is paused with a user-visible reason; reconciliation must keep running. */ }
@@ -142,6 +144,8 @@ async function executeWorkflowAutomationActionForUser(environment: Record<string
     const currentStates = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
     const current = currentStates.find(state => state.stage_id === action.stage_id && state.source === action.source);
     if (!current || deriveStageDecision(workflow, action.stage_index, current, currentStates).kind !== 'ready-to-create') throw new Error('当前步骤尚未满足自动创建 PR 的门禁');
+    const triggerMinCommits = typeof stage.automation.triggerMinCommits === 'number' && Number.isInteger(stage.automation.triggerMinCommits) ? Math.min(20, Math.max(1, stage.automation.triggerMinCommits)) : 1;
+    if (current.ahead_by < triggerMinCommits) throw new Error(`新提交数未达到自动创建阈值（需要 ${triggerMinCommits} 个）`);
     const credential = await readAiAutomationCredentialForUser(environment, userId);
     if (!credential || !credential.autoGeneratePrMessage || !credential.autoConfirmPrCreation) throw new Error('服务端 AI 自动生成或自动确认设置未开启');
     const { owner, name } = ownerAndName(workflow.repository);
