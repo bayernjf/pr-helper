@@ -1515,14 +1515,13 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const mergeStatus = detailStatus || laneMergeStatus(state);
   const mergeAction = mergeStatus && !recentlyCreatedPullNumbers.has(stageIndex) && canMergePull(mergeStatus) && canOperateWorkflow(flow, 'pull-merge') ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
   const recoveryActions = state?.checksState === 'failure' ? `<button class="ghost drawer-repair">${t('repair.codex')}</button>${canOperateWorkflow(flow, 'actions-rerun') ? `<button class="ghost drawer-retry-actions">${t('recovery.retryActions')}</button>` : ''}` : '';
-  const actions = `<div class="dialog-actions drawer-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div>`;
+  const actions = `<div class="dialog-actions drawer-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div>`;
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
   dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p>${actions}<div class="drawer-status ${tone}"><b>${escape(statusText)}</b>${pull}${drawerChecks}${drawerActions}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${configurationWarnings}${deployments}${deploymentHistory}${stepTimeline}${history}</section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);
-  dialog.querySelector('.drawer-close-action')!.addEventListener('click', close);
   dialog.querySelector<HTMLButtonElement>('.drawer-create-pr')?.addEventListener('click', () => {
     active = flow;
     dialog.close();
