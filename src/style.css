@@ -422,18 +422,14 @@ body {
   min-width: 0;
 }
 
-.detail-refresh {
-  flex: 0 0 auto;
-  margin: 0;
-}
-
-.detail-title-row {
+.detail-page-actions {
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
-.detail-title-row h1 {
+.detail-refresh {
+  flex: 0 0 auto;
   margin: 0;
 }
 
@@ -1992,11 +1988,7 @@ a.account-menu-item {
     display: block;
   }
 
-  .detail-refresh {
-    margin-top: 4px;
-  }
-
-  .detail-title-row { align-items: flex-start; flex-wrap: wrap; }
+  .detail-page-actions { flex-wrap: wrap; }
 
   .rules-sidebar {
     border-right: 0;
