@@ -875,7 +875,7 @@ async function init() {
 async function hydrateCloudWorkspace() {
   try {
     await loadCloudWorkflows();
-    if (cloudWorkflowStorage) await Promise.all([loadActionQueue(false), loadPushState()]);
+    if (cloudWorkflowStorage) await Promise.all([loadActionQueue(false), loadPushState(), loadAutomationCredentialStatus()]);
   } finally {
     cloudWorkspaceLoading = false;
     render();
