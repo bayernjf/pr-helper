@@ -144,7 +144,7 @@ GitHub App 的 Webhook URL、Secret、SSL verification 和 Active 状态均已�
 
 ## 尚未进入验收的功能
 
-2026-08-12 已确认 PR 流程自动化方案。服务端加密 AI 凭据、步骤级规则快照、动作队列和后台自动创建执行已在本地实现，但尚未部署 Production，因此不属于 Production 通过项。`024`–`026` 已执行，Vercel Production/Preview 已配置加密密钥。Webhook、Cron 与 inbox reconciliation 进入 `ready-to-create` 后会使用稳定幂等键入队，并由原子领取执行器再次验证当前决策、凭据、自动生成/确认偏好、规则快照、新提交与开放 PR；失败动作暂停。逐步骤自动合并、合并后自动推进、新提交阈值仍不属于当前实现。自动创建 PR 必须验证服务端自动流程凭据、AI 自动生成标题/描述、自动确认创建和有效生成规则四项前置条件，缺少任一项时不得启用；条件满足也不会自动勾选，必须用户主动开启。详见 [`automated-workflow-plan.md`](automated-workflow-plan.md)。
+2026-08-12 已确认 PR 流程自动化方案。服务端加密 AI 凭据、步骤级规则快照、1–20 新提交阈值、动作队列和后台自动创建执行已在本地实现，但尚未部署 Production，因此不属于 Production 通过项。阈值仅在流程详情页配置，旧策略默认按 1 处理。`024`–`026` 已执行，Vercel Production/Preview 已配置加密密钥。Webhook、Cron 与 inbox reconciliation 进入 `ready-to-create` 后会使用稳定幂等键入队，并由原子领取执行器再次验证当前决策、凭据、自动生成/确认偏好、规则快照、新提交阈值与开放 PR；失败动作暂停。逐步骤自动合并和合并后自动推进仍不属于当前实现。自动创建 PR 必须验证服务端自动流程凭据、AI 自动生成标题/描述、自动确认创建和有效生成规则四项前置条件，缺少任一项时不得启用；条件满足也不会自动勾选，必须用户主动开启。详见 [`automated-workflow-plan.md`](automated-workflow-plan.md)。
 
 本地追加：服务端加密凭据 API、`024` 迁移和步骤级自动创建策略配置已实现，`024`–`026` 已执行且环境变量已配置；待部署后进行线上验收。
 

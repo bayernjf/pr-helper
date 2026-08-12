@@ -82,7 +82,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - 稳定阶段决策：服务端统一输出 `locked`、`waiting`、`checks-failed`、`needs-approval`、`ready-to-merge`、`ready-to-create` 和 `merged` 决策，待办队列与阶段状态共用同一套判断。
 - 保存并发保护：流程版本使用数据库事务锁和版本号校验，检测到其他窗口更新时拒绝覆盖。
 - 请求安全保护：受保护 API 校验浏览器来源并按登录用户/操作限流；创建 PR 前检查同一 Source → Target 的开放 PR，Actions 重试和部署回滚使用稳定事件键去重。
-- 自动化方案：已确认“阈值触发 → AI/PR → 门禁 → 按步骤合并 → 合并后门禁/部署 → 下一步”的产品方案，第一阶段不使用画布，详情见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。`024`–`026` 已执行，服务端加密 AI 凭据、偏好、步骤规则快照、幂等动作队列和后台自动创建 PR 已在本地实现；Webhook、Cron 和 inbox reconciliation 在 `ready-to-create` 时可触发，部署后待真实验收。自动创建 PR 必须同时满足服务端自动流程凭据可用、AI 自动生成标题/描述、自动确认创建和有效规则快照，任一缺失时开关不可启用。条件满足只解除开启资格，不会自动勾选，必须用户主动点击。自动合并、Production 自动合并和自动回滚仍未实现。
+- 自动化方案：已确认“阈值触发 → AI/PR → 门禁 → 按步骤合并 → 合并后门禁/部署 → 下一步”的产品方案，第一阶段不使用画布，详情见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。`024`–`026` 已执行，服务端加密 AI 凭据、偏好、步骤规则快照、幂等动作队列和后台自动创建 PR 已在本地实现；Webhook、Cron 和 inbox reconciliation 在 `ready-to-create` 时可触发，部署后待真实验收。每个步骤可在流程详情页设置 1–20 的新提交触发阈值，只有 `aheadBy >= 阈值` 才会尝试自动创建 PR；流程编辑页不显示该配置。自动创建 PR 必须同时满足服务端自动流程凭据可用、AI 自动生成标题/描述、自动确认创建和有效规则快照，任一缺失时开关不可启用。条件满足只解除开启资格，不会自动勾选，必须用户主动点击。自动合并、Production 自动合并和自动回滚仍未实现。
 
 ### 公网部署
 
