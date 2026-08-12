@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { GitHubRequestError, githubApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './github';
+import { GITHUB_REQUEST_TIMEOUT_MS, GitHubRequestError, githubApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './github';
 
 describe('GitHub repository helpers', () => {
   it('parses the repository selected from GitHub', () => {
@@ -27,7 +27,8 @@ describe('GitHub repository helpers', () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ login: 'octocat' }) });
     vi.stubGlobal('fetch', fetchMock);
     await githubFetch('token', '/user');
-    expect(fetchMock).toHaveBeenCalledWith('https://api.github.com/user', expect.objectContaining({ cache: 'no-store' }));
+    expect(GITHUB_REQUEST_TIMEOUT_MS).toBe(20_000);
+    expect(fetchMock).toHaveBeenCalledWith('https://api.github.com/user', expect.objectContaining({ cache: 'no-store', signal: expect.any(AbortSignal) }));
     vi.unstubAllGlobals();
   });
 
