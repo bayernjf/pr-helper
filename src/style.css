@@ -1178,14 +1178,31 @@ a.account-menu-item {
 }
 
 .auto-create-threshold {
-  width: 58px;
-  min-height: 28px;
-  padding: 4px 6px;
+  width: 42px !important;
+  height: 30px !important;
+  min-height: 30px;
+  padding: 3px 5px;
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--bg-input);
   color: var(--text-primary);
-  font: 700 .72rem 'DM Mono';
+  font: 700 .75rem 'DM Mono';
+  line-height: 1;
+  text-align: center;
+  cursor: text;
+  box-sizing: border-box;
+  appearance: textfield;
+}
+
+.auto-create-threshold::-webkit-inner-spin-button,
+.auto-create-threshold::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.auto-create-threshold:focus {
+  outline: 2px solid var(--border-accent);
+  outline-offset: 1px;
 }
 
 .timeline-action {
