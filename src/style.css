@@ -415,10 +415,7 @@ body {
 }
 
 .detail-page-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
+  display: block;
 }
 
 .detail-page-head-main {
@@ -427,7 +424,17 @@ body {
 
 .detail-refresh {
   flex: 0 0 auto;
-  margin-top: 8px;
+  margin: 0;
+}
+
+.detail-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.detail-title-row h1 {
+  margin: 0;
 }
 
 .page-head h1 {
@@ -1982,12 +1989,14 @@ a.account-menu-item {
   }
 
   .detail-page-head {
-    gap: 14px;
+    display: block;
   }
 
   .detail-refresh {
     margin-top: 4px;
   }
+
+  .detail-title-row { align-items: flex-start; flex-wrap: wrap; }
 
   .rules-sidebar {
     border-right: 0;
