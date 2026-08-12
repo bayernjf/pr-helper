@@ -37,10 +37,14 @@ async function inbox(request: ApiRequest, response: ApiResponse) {
     }
     // Page loads return the persisted projection immediately. A full GitHub reconciliation
     // is reserved for an explicit queue refresh; Webhooks and cron keep the snapshot fresh.
-    if (session.installationId && shouldReconcileInbox(request)) await reconcileWorkflowStages(process.env, { installationId: session.installationId, repository: reconciliationRepository(request), eventName: 'inbox_refresh' }, 'inbox_refresh');
+    let reconciliationScheduled = false;
+    if (session.installationId && shouldReconcileInbox(request)) {
+      reconciliationScheduled = true;
+      void reconcileWorkflowStages(process.env, { installationId: session.installationId, repository: reconciliationRepository(request), eventName: 'inbox_refresh' }, 'inbox_refresh').catch(() => undefined);
+    }
     const identity = { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId };
     const [items, states, events, deployments, deploymentRuns, configurationWarnings, syncHealth, runs, timeline, recoveryStatuses] = await Promise.all([listActionableStages(process.env, identity), listWorkflowStageStates(process.env, identity), listRecentWorkflowStageEvents(process.env, identity), listWorkflowStageDeployments(process.env, identity), listWorkflowStageDeploymentRuns(process.env, identity), listWorkflowConfigurationWarnings(process.env, identity), listSyncHealth(process.env, identity), listWorkflowRuns(process.env, identity), listWorkflowTimeline(process.env, identity), listRecoveryStatuses(process.env, identity)]);
-    response.status(200).json({ items, states, events, deployments, deploymentRuns, configurationWarnings, syncHealth, runs, timeline, recoveryStatuses });
+    response.status(200).json({ items, states, events, deployments, deploymentRuns, configurationWarnings, syncHealth, runs, timeline, recoveryStatuses, reconciliationScheduled });
   } catch (error) {
     response.status(requestErrorStatus(error)).json({ message: error instanceof Error ? error.message : '无法读取待办队列' });
   }

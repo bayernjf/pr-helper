@@ -93,6 +93,7 @@ let preflightError = '';
 let recoveryStatuses: RecoveryStatus[] = [];
 let actionQueueError = '';
 let actionQueueRefreshing = false;
+let actionQueueReconciliationScheduled = false;
 const actionQueueRequestQueue = new ActionQueueRequestQueue();
 let overviewFilter: 'all' | 'attention' | 'failed' = 'all';
 let laneSearchQuery = '';
@@ -317,7 +318,7 @@ async function loadActionQueueOnce(reconcile: boolean, repository?: string) {
       actionQueueError = payload.message || t('toast.queue.failed');
       return false;
     }
-    const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[]; events?: WorkflowStageEvent[]; deployments?: WorkflowStageDeployment[]; deploymentRuns?: WorkflowStageDeploymentRun[]; configurationWarnings?: WorkflowConfigurationWarning[]; syncHealth?: SyncHealth; runs?: WorkflowRun[]; timeline?: TimelineEntry[]; recoveryStatuses?: RecoveryStatus[] };
+    const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[]; events?: WorkflowStageEvent[]; deployments?: WorkflowStageDeployment[]; deploymentRuns?: WorkflowStageDeploymentRun[]; configurationWarnings?: WorkflowConfigurationWarning[]; syncHealth?: SyncHealth; runs?: WorkflowRun[]; timeline?: TimelineEntry[]; recoveryStatuses?: RecoveryStatus[]; reconciliationScheduled?: boolean };
     actionQueue = Array.isArray(payload.items) ? payload.items : [];
     workflowStageStates = Array.isArray(payload.states) ? payload.states : [];
     workflowStageEvents = Array.isArray(payload.events) ? payload.events : [];
@@ -328,6 +329,7 @@ async function loadActionQueueOnce(reconcile: boolean, repository?: string) {
     workflowRuns = Array.isArray(payload.runs) ? payload.runs : [];
     timeline = Array.isArray(payload.timeline) ? payload.timeline : [];
     recoveryStatuses = Array.isArray(payload.recoveryStatuses) ? payload.recoveryStatuses : [];
+    actionQueueReconciliationScheduled = Boolean(reconcile && payload.reconciliationScheduled);
     actionQueueError = '';
     return true;
   } catch (error) {
@@ -348,7 +350,7 @@ async function refreshActionQueue() {
   if (remainingFeedbackTime > 0) await new Promise<void>(resolve => window.setTimeout(resolve, remainingFeedbackTime));
   actionQueueRefreshing = false;
   if (loaded) {
-    showToast(t('toast.queue.refreshed', { count: actionQueue.length }));
+    showToast(actionQueueReconciliationScheduled ? t('toast.queue.syncStarted') : t('toast.queue.refreshed', { count: actionQueue.length }));
   } else {
     showToast(cloudWorkflowStorage ? actionQueueError || t('toast.queue.failed') : t('toast.queue.unavailable'));
   }

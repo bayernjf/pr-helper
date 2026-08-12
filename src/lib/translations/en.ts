@@ -558,6 +558,7 @@ const en: TranslationDict = {
   'toast.repos.error': 'Unable to sync authorized repositories',
   'toast.repos.hint': 'After saving on GitHub, close the authorization page to return here and sync repositories.',
   'toast.queue.refreshed': 'Action queue refreshed. {count} item(s) need attention.',
+  'toast.queue.syncStarted': 'Background sync started. Updated statuses will appear shortly.',
   'toast.unknownError': 'Unknown error',
 
   // Notification (system)
