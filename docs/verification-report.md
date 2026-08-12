@@ -129,6 +129,10 @@ GitHub App 的 Webhook URL、Secret、SSL verification 和 Active 状态均已�
 
 1. 满足「外部条件待办」的条件后，按表中顺序完成四项验收；Production 回滚仅在单独低风险窗口执行。
 
+## 尚未进入验收的功能
+
+2026-08-12 已确认 PR 流程自动化方案，但代码尚未实现，因此不属于本报告的通过项。第一阶段将使用现有步骤编辑器，不引入画布；自动创建 PR、逐步骤自动合并、合并后自动推进、新提交阈值、策略快照和动作幂等完成后再建立独立验收记录。详见 [`automated-workflow-plan.md`](automated-workflow-plan.md)。
+
 ## 沙箱保留状态
 
 - #1、#2、#3 已合并，保留作为成功链路审计证据。

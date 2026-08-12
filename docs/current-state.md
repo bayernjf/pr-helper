@@ -14,7 +14,7 @@ PR Helper 是 GitHub-first 的 PR / Release Control Tower。用户以项目 Lane
 - 多路径汇聚门禁：下游步骤可等待多个上游路径全部合并且合并后检查成功。
 - Lane 上下拖动、键盘/按钮排序和项目状态筛选。
 
-当前不提供任意 DAG 编辑器、流程模板市场或未经确认的生产自动合并。
+当前不提供任意 DAG 编辑器、流程模板市场或默认开启的自动化执行。按步骤配置的自动 PR/合并/推进方案已确认，尚未实现。
 
 ## 当前架构
 
@@ -74,6 +74,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - 稳定阶段决策：服务端统一输出 `locked`、`waiting`、`checks-failed`、`needs-approval`、`ready-to-merge`、`ready-to-create` 和 `merged` 决策，待办队列与阶段状态共用同一套判断。
 - 保存并发保护：流程版本使用数据库事务锁和版本号校验，检测到其他窗口更新时拒绝覆盖。
 - 请求安全保护：受保护 API 校验浏览器来源并按登录用户/操作限流；创建 PR 前检查同一 Source → Target 的开放 PR，Actions 重试和部署回滚使用稳定事件键去重。
+- 自动化方案：已确认“阈值触发 → AI/PR → 门禁 → 按步骤合并 → 合并后门禁/部署 → 下一步”的产品方案，第一阶段不使用画布，详情见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。当前尚未执行自动创建 PR、自动合并或自动推进。
 
 ### 公网部署
 
@@ -219,6 +220,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 - 加密云同步正式启用：需确定密钥管理方案（当前口令仅存内存，刷新即丢失）
 - 失败恢复策略进一步增强：是否需要服务端持久化策略配置（当前按流程保存在 workflow 中）
+- 自动化执行默认值已确认：高风险自动创建、自动合并和自动推进默认关闭，用户逐步骤开启；实现前仍需完成策略快照、动作幂等和暂停/恢复设计。
 
 ### 七、合规
 
@@ -239,6 +241,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 4. 失败恢复已由服务端校验重试次数、冷却时间、当前提交和失败 Actions；仍不自动修改代码或合并生产。
 5. 加密云同步已接通密文上传/下载原型，仍需补齐密钥轮换、冲突处理和线上回归后再扩大使用范围。 🟡 待加固
 6. 阶段状态、事件和部署历史已切换到稳定 `stage_id`。 ✅ 019 已执行，并已通过当前 Production 流程回归。
+7. PR 流程自动化：优先实现无画布的逐步骤自动化策略；方案与验收标准见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。 ⏳ 尚未落地
 
 ### 八、非验收类后续开发
 
