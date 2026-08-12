@@ -558,6 +558,7 @@ const zh: TranslationDict = {
   'toast.repos.error': '无法同步授权仓库',
   'toast.repos.hint': '在 GitHub 保存后关闭授权页，将自动回到这里并同步仓库。',
   'toast.queue.refreshed': '待办队列已刷新，当前 {count} 项待处理。',
+  'toast.queue.syncStarted': '已开始后台同步，状态更新后会自动显示。',
   'toast.unknownError': '未知错误',
 
   // Notification (system)
