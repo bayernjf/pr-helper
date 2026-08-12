@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, matchingStageProjections, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
+import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -184,6 +184,18 @@ describe('workflow configuration', () => {
 
     expect(reorderWorkflows([first, second], 'missing', 'second', 'before')).toEqual([first, second]);
     expect(reorderWorkflows([first, second], 'first', 'missing', 'before')).toEqual([first, second]);
+  });
+
+  it('moves a project lane to its requested one-based custom position', () => {
+    const first = { ...createWorkflow('octo/first', 'feature/first', 'main'), id: 'first' };
+    const second = { ...createWorkflow('octo/second', 'feature/second', 'main'), id: 'second' };
+    const third = { ...createWorkflow('octo/third', 'feature/third', 'main'), id: 'third' };
+
+    const reordered = moveWorkflowToPosition([first, second, third], 'first', 3);
+
+    expect(reordered.map(workflow => workflow.id)).toEqual(['second', 'third', 'first']);
+    expect(reordered.map(workflow => workflow.position)).toEqual([0, 1, 2]);
+    expect(moveWorkflowToPosition([first, second, third], 'first', 0)).toEqual([first, second, third]);
   });
 
   it('sorts persisted lane positions while preserving legacy relative order', () => {

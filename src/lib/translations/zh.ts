@@ -159,6 +159,8 @@ const zh: TranslationDict = {
   'overview.board.dragProject': '拖动排序：{{name}}',
   'overview.board.moveUp': '上移项目：{{name}}',
   'overview.board.moveDown': '下移项目：{{name}}',
+  'overview.board.order': '序号',
+  'overview.board.orderFor': '流程序号：{{name}}',
   'overview.board.sortAllOnly': '切换到“全部项目”后可调整顺序',
   'overview.board.mergeTarget': '汇聚到 {target}',
   'overview.run.waiting-sync': '等待状态同步',
