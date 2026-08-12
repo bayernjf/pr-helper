@@ -1,5 +1,6 @@
 const apiBase = 'https://api.github.com';
 const appApiBase = (import.meta.env.VITE_AUTH_ORIGIN || '').replace(/\/$/, '');
+export const GITHUB_REQUEST_TIMEOUT_MS = 20_000;
 
 export class GitHubRequestError extends Error {
   constructor(public readonly status: number, message: string) {
@@ -37,13 +38,20 @@ export function selectCurrentPull<T extends { state: string }>(pulls: T[]) {
 export async function githubFetch<T>(token: string, path: string, init?: RequestInit, workflowId?: string): Promise<T> {
   const useGitHubApp = !token;
   const workflowQuery = workflowId ? `&workflowId=${encodeURIComponent(workflowId)}` : '';
-  const response = await fetch(useGitHubApp ? githubAppApiUrl(`/api/github/request?path=${encodeURIComponent(path)}${workflowQuery}`) : `${apiBase}${path}`, {
-    ...init,
-    cache: 'no-store',
-    headers: useGitHubApp
-      ? { ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers }
-      : { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', ...init?.headers },
-  });
+  let response: Response;
+  try {
+    response = await fetch(useGitHubApp ? githubAppApiUrl(`/api/github/request?path=${encodeURIComponent(path)}${workflowQuery}`) : `${apiBase}${path}`, {
+      ...init,
+      cache: 'no-store',
+      signal: init?.signal || AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
+      headers: useGitHubApp
+        ? { ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers }
+        : { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', ...init?.headers },
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'TimeoutError') throw new GitHubRequestError(504, 'GitHub 请求超时，请稍后重试。');
+    throw error;
+  }
   if (!response.ok) {
     const detail = await response.json().catch(() => ({ message: response.statusText }));
     throw new GitHubRequestError(response.status, detail.message || `GitHub 请求失败 (${response.status})`);
