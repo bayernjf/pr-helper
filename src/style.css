@@ -1164,12 +1164,28 @@ a.account-menu-item {
   height: 15px;
   margin: 0;
   accent-color: var(--text-accent);
+  cursor: pointer;
+}
+
+.timeline-auto-create input:disabled {
+  cursor: not-allowed;
 }
 
 .timeline-auto-create small {
   flex-basis: 100%;
   color: var(--text-muted);
   font: 500 .72rem Manrope;
+}
+
+.auto-create-threshold {
+  width: 58px;
+  min-height: 28px;
+  padding: 4px 6px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: 700 .72rem 'DM Mono';
 }
 
 .timeline-action {

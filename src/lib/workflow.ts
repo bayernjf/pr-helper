@@ -1,11 +1,13 @@
 export type WorkflowStageAutomation = {
   autoCreatePullRequest: true;
   executionMode: 'server';
+  triggerMinCommits?: number;
   generationRule: { name: string; content: string; capturedAt: string };
 } | {
   // Legacy browser-only policies are intentionally not promoted automatically.
   autoCreatePullRequest: true;
   executionMode: 'browser-session';
+  triggerMinCommits?: number;
 };
 export type WorkflowStage = { source: string; target: string; independent?: boolean; waitFor?: number[]; stageId?: string; automation?: WorkflowStageAutomation };
 export type DeploymentProvider = 'vercel' | 'cloudflare';
@@ -113,10 +115,11 @@ export function addStage(workflow: Workflow, source: string, target: string, ind
   return { ...workflow, stages: [...workflow.stages, { source, target, stageId: generateStageId(), ...(independent ? { independent: true } : {}), ...(waitFor.length ? { waitFor } : {}) }] };
 }
 
-export function setStageAutoCreate(workflow: Workflow, stageIndex: number, enabled: boolean, generationRule?: { name: string; content: string }): Workflow {
+export function setStageAutoCreate(workflow: Workflow, stageIndex: number, enabled: boolean, generationRule?: { name: string; content: string }, triggerMinCommits = 1): Workflow {
   if (!Number.isInteger(stageIndex) || !workflow.stages[stageIndex]) return workflow;
   if (enabled && (!generationRule?.name.trim() || !generationRule.content.trim())) return workflow;
-  return { ...workflow, stages: workflow.stages.map((stage, index) => index === stageIndex ? { ...stage, ...(enabled ? { automation: { autoCreatePullRequest: true, executionMode: 'server' as const, generationRule: { name: generationRule!.name.trim(), content: generationRule!.content, capturedAt: new Date().toISOString() } } } : { automation: undefined }) } : stage) };
+  const threshold = Number.isInteger(triggerMinCommits) ? Math.min(20, Math.max(1, triggerMinCommits)) : 1;
+  return { ...workflow, stages: workflow.stages.map((stage, index) => index === stageIndex ? { ...stage, ...(enabled ? { automation: { autoCreatePullRequest: true, executionMode: 'server' as const, triggerMinCommits: threshold, generationRule: { name: generationRule!.name.trim(), content: generationRule!.content, capturedAt: new Date().toISOString() } } } : { automation: undefined }) } : stage) };
 }
 
 export function removeStage(workflow: Workflow, index: number): Workflow {
