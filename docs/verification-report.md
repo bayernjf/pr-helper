@@ -21,6 +21,8 @@
 
 本轮本地回归：`npm test` 24 个测试文件 / 205 个测试通过，`npx tsc --noEmit`、`npm run lint` 与 `git diff --check` 通过。
 
+PR #172 的初始 Vercel Preview 失败并非 Vercel 服务故障，而是 Serverless TypeScript 编译暴露了 `api/` 未被本地 `tsconfig.json` 覆盖的类型错误。已将 `api/` 纳入 TypeScript 检查并修复错误，提交 `26e342a1` 已推送，等待新的 Preview Check 作为线上验证。
+
 ## 2026-08-12 刷新链路优化追加验收
 
 | 范围 | 证据 | 结果 |

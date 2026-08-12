@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-12（后台自动创建 PR 代码已完成本地验证；尚未部署线上验收）
+> 最后更新：2026-08-12（PR #172 修复 Vercel Serverless TypeScript 编译；等待新 Preview Check）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态

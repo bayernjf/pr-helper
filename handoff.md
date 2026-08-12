@@ -11,6 +11,7 @@
 - 当前本地验证已通过：`npm test`（24 个文件 / 205 项）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。后台自动创建 PR 代码未改变现有手动流程行为；浏览器 E2E 仍保持既有 API mock 覆盖范围。
 - Supabase 迁移 `001`–`026` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
+- PR #172 的首个 Vercel Preview 失败原因为 Vercel 对 `api/` 完整 TypeScript 编译，而仓库原 `tsconfig.json` 仅包含 `src/`；已将 `api/` 纳入检查并修复类型错误，修复提交为 `26e342a1`，已推送等待 Check 重跑。
 
 ## 2026-08-12 刷新链路最新结论
 
