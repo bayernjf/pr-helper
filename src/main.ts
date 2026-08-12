@@ -1785,7 +1785,6 @@ function detail() {
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && screen === 'detail') void refreshStatuses(); });
   }
   document.querySelectorAll<HTMLButtonElement>('[data-create-pr]').forEach(button => button.addEventListener('click', () => showCreateDialog(Number(button.dataset.createPr))));
-  document.querySelectorAll<HTMLButtonElement>('[data-execute-auto-create]').forEach(button => button.addEventListener('click', () => void executeAutoCreatePr(Number(button.dataset.executeAutoCreate))));
   document.querySelectorAll<HTMLInputElement>('[data-detail-auto-create-stage]').forEach(input => input.addEventListener('change', () => {
     if (!active) return;
     const stageIndex = Number(input.dataset.detailAutoCreateStage);
@@ -1927,7 +1926,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
     const changeMessage = hasNewCommits
       ? `<p><b class="status neutral">${t('status.newCommits', { count: status.aheadBy || 0 })}</b> · ${unlocked ? t('status.newCommits.canCreate') : t('status.newCommits.waiting')}</p>`
       : unlocked ? `<p class="meta">${t('status.newCommits.waitingChanges')}</p>` : '';
-    const autoCreate = canCreate && stage.automation?.autoCreatePullRequest && (status.aheadBy || 0) >= (stage.automation.triggerMinCommits || 1) && autoCreatePrerequisites() && defaultGenerationRule(generationRules) ? `<button class="timeline-action" data-execute-auto-create="${index}">${t('automation.executeCreate')}</button>` : '';
+    const autoCreate = '';
     return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${changeMessage}${unlocked ? `<div class="timeline-actions">${autoCreate}${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${lockedStageText(index)}</p>`}</div></article>`;
   }
   if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status failure">${t('status.fetchFailed')}</b> · ${escape(status.message || '')}</p></div></article>`;
@@ -1945,7 +1944,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const newCommits = status.kind === 'merged' && status.aheadBy
     ? `<p><b class="status neutral">${t('status.newCommits', { count: status.aheadBy })}</b> · ${canCreateNewPull ? t('status.newCommits.canCreate') : t('status.newCommits.waiting')}</p>`
     : '';
-  const autoNewPullAction = canCreateNewPull && canOperateWorkflow(active!, 'pr-create') && stage.automation?.autoCreatePullRequest && (status.aheadBy || 0) >= (stage.automation.triggerMinCommits || 1) && autoCreatePrerequisites() && defaultGenerationRule(generationRules) ? `<button class="timeline-action" data-execute-auto-create="${index}">${t('automation.executeCreate')}</button>` : '';
+  const autoNewPullAction = '';
   const newPullAction = canCreateNewPull && canOperateWorkflow(active!, 'pr-create') ? `${autoNewPullAction}<button class="timeline-action" data-create-pr="${index}">${t('status.createPr.button')}</button>` : '';
   const stateClass = status.kind === 'merged' ? mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
   const mergeAction = status.kind === 'open' && !recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(active!, 'pull-merge') ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
