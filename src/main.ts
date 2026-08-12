@@ -304,13 +304,14 @@ async function loadCloudWorkflows() {
     else pendingLocalWorkflowSync = workflows.length > 0;
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
 }
-async function loadActionQueue(reconcile = true) {
+async function loadActionQueue(reconcile = true, repository?: string) {
   if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = []; syncHealth = null; workflowRuns = []; timeline = []; recoveryStatuses = []; actionQueueError = ''; return false; }
-  return actionQueueRequestQueue.run(reconcile, loadActionQueueOnce);
+  return actionQueueRequestQueue.run(reconcile, currentReconcile => loadActionQueueOnce(currentReconcile, repository));
 }
-async function loadActionQueueOnce(reconcile: boolean) {
+async function loadActionQueueOnce(reconcile: boolean, repository?: string) {
   try {
-    const response = await fetch(githubAppApiUrl(reconcile ? '/api/inbox?refresh=1' : '/api/inbox'), reconcile ? { signal: AbortSignal.timeout(ACTION_QUEUE_REFRESH_TIMEOUT_MS) } : undefined);
+    const query = reconcile ? `?refresh=1${repository ? `&repository=${encodeURIComponent(repository)}` : ''}` : '';
+    const response = await fetch(githubAppApiUrl(`/api/inbox${query}`), reconcile ? { signal: AbortSignal.timeout(ACTION_QUEUE_REFRESH_TIMEOUT_MS) } : undefined);
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { message?: string };
       actionQueueError = payload.message || t('toast.queue.failed');
@@ -609,7 +610,7 @@ function showDeleteWorkflowDialog(workflow: Workflow) {
     active = null;
     screen = 'overview';
     await removeWorkflowFromStorage(workflow.id);
-    await loadActionQueue();
+    await loadActionQueue(true, workflow.repository);
     render();
     showToast(t('workflowDelete.success'));
   }, { once: true });
@@ -1274,7 +1275,7 @@ function bindFailureCenter() {
       const payload = await response.json().catch(() => ({})) as { count?: number; message?: string };
       if (!response.ok) throw new Error(payload.message || t('recovery.retryFailed'));
       showToast(t('recovery.retryStarted', { count: payload.count || 0 }));
-      void loadActionQueue().finally(render);
+      void loadActionQueue(true, flow.repository).finally(render);
     } catch (error) {
       showToast(error instanceof Error ? error.message : t('recovery.retryFailed'));
       button.disabled = false;
@@ -1489,14 +1490,14 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   dialog.querySelector<HTMLButtonElement>('.drawer-create-pr')?.addEventListener('click', () => {
     active = flow;
     dialog.close();
-    showCreateDialog(stageIndex, () => { void loadActionQueue().finally(render); }, routeSource);
+    showCreateDialog(stageIndex, () => { void loadActionQueue(true, flow.repository).finally(render); }, routeSource);
   });
   dialog.querySelector<HTMLButtonElement>('.drawer-merge-pr')?.addEventListener('click', () => {
     if (!mergeStatus) return;
     active = flow;
     dialog.close();
     showMergeDialog(stageIndex, mergeStatus, () => {
-      void loadActionQueue().finally(render);
+      void loadActionQueue(true, flow.repository).finally(render);
     });
   });
   dialog.querySelector<HTMLButtonElement>('.drawer-sync')?.addEventListener('click', async event => {
@@ -1506,7 +1507,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
     active = flow;
     try {
       await refreshStatuses(false);
-      const queueLoaded = await loadActionQueue();
+      const queueLoaded = await loadActionQueue(true, flow.repository);
       if (!queueLoaded && actionQueueError) showToast(actionQueueError);
       dialog.addEventListener('close', () => showProjectStepDrawer(flow.id, stageIndex, routeSource), { once: true });
       dialog.close();
@@ -1856,7 +1857,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
 }
 async function refreshDetailStatuses() {
   await refreshStatuses(false, false);
-  if (active?.stages.some(stage => stage.source.includes('*'))) await loadActionQueue();
+  if (active?.stages.some(stage => stage.source.includes('*'))) await loadActionQueue(true, active.repository);
   if (screen === 'detail') detail();
 }
 async function showCodexRepairDialog(index: number, source?: string, pullNumber?: number) {
@@ -1900,8 +1901,8 @@ function showDeploymentRollbackDialog(flow: Workflow, stageIndex: number, source
       if (!response.ok) throw new Error(payload.message || t('rollback.failed'));
       dialog.close();
       showToast(t('rollback.started', { workflow: payload.workflowName || rollbackWorkflowName }));
-      void loadActionQueue().finally(render);
-      window.setTimeout(() => void loadActionQueue().finally(render), 1_500);
+      void loadActionQueue(true, flow.repository).finally(render);
+      window.setTimeout(() => void loadActionQueue(true, flow.repository).finally(render), 1_500);
     } catch (error) {
       errorElement.textContent = error instanceof Error ? error.message : t('rollback.failed');
       errorElement.hidden = false;
@@ -1918,8 +1919,8 @@ async function retryDeployment(flow: Workflow, state: WorkflowStageState, runId:
     await githubFetch<Record<string, never>>(token, `/repos/${owner}/${name}/actions/runs/${runId}/rerun`, { method: 'POST' }, flow.id);
     await fetch(githubAppApiUrl('/api/recovery-event'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: flow.id, stageIndex: state.stageIndex, source: state.source }) }).catch(() => undefined);
     showToast(t('overview.deployment.retryStarted', { provider: deploymentProviderName(provider as WorkflowStageDeployment['provider']) }));
-    void loadActionQueue().finally(render);
-    window.setTimeout(() => void loadActionQueue().finally(render), 1_500);
+    void loadActionQueue(true, flow.repository).finally(render);
+    window.setTimeout(() => void loadActionQueue(true, flow.repository).finally(render), 1_500);
   } catch (error) {
     showToast(error instanceof Error ? error.message : t('recovery.retryFailed'));
   } finally {
@@ -1935,8 +1936,8 @@ async function retryFailedActions(flow: Workflow, state: WorkflowStageState, but
     const payload = await response.json().catch(() => ({})) as { count?: number; message?: string };
     if (!response.ok) throw new Error(payload.message || t('recovery.retryFailed'));
     showToast(t('recovery.retryStarted', { count: payload.count || 0 }));
-    void loadActionQueue().finally(render);
-    window.setTimeout(() => void loadActionQueue().finally(render), 1_500);
+    void loadActionQueue(true, flow.repository).finally(render);
+    window.setTimeout(() => void loadActionQueue(true, flow.repository).finally(render), 1_500);
   } catch (error) {
     showToast(error instanceof Error ? error.message : t('recovery.retryFailed'));
   } finally {
