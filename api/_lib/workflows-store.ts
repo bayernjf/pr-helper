@@ -5,7 +5,7 @@ import { sendPushNotifications, type BrowserPushSubscription } from './push.js';
 import { assertTeamOperation, type TeamOperation } from '../../src/lib/team-permissions.js';
 import { summarizeGitHubChecks } from '../../src/lib/domain.js';
 import { credentialKeyHint, decryptAiApiKey, encryptAiApiKey, maskAiApiKey } from './ai-credentials.js';
-import { buildPrPrompt, aiChatCompletionsUrl } from '../../src/lib/ai.js';
+import { buildPrPrompt, aiChatCompletionsUrl, testAiConnection } from '../../src/lib/ai.js';
 
 export type StoredWorkflow = {
   id: string;
@@ -44,6 +44,13 @@ export async function saveAiAutomationCredential(environment: Record<string, str
 export async function readAiAutomationCredential(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }) {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   return readAiAutomationCredentialForUser(environment, user.id);
+}
+
+export async function testSavedAiAutomationCredential(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }) {
+  const credential = await readAiAutomationCredential(environment, identity);
+  if (!credential) throw new Error('尚未配置服务端 AI 凭据');
+  await testAiConnection(credential, AbortSignal.timeout(15_000));
+  return { ok: true, baseUrl: credential.baseUrl, model: credential.model };
 }
 
 async function readAiAutomationCredentialForUser(environment: Record<string, string | undefined>, userId: string) {
