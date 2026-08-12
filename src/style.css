@@ -414,6 +414,22 @@ body {
   padding: 56px 0 28px;
 }
 
+.detail-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.detail-page-head-main {
+  min-width: 0;
+}
+
+.detail-refresh {
+  flex: 0 0 auto;
+  margin-top: 8px;
+}
+
 .page-head h1 {
   font-size: clamp(2rem, 4vw, 3.4rem);
 }
@@ -1963,6 +1979,14 @@ a.account-menu-item {
 
   .flow-grid, .editor-layout, .detail-grid, .two, .rules-layout {
     grid-template-columns: 1fr;
+  }
+
+  .detail-page-head {
+    gap: 14px;
+  }
+
+  .detail-refresh {
+    margin-top: 4px;
   }
 
   .rules-sidebar {
