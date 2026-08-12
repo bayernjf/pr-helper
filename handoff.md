@@ -1,6 +1,6 @@
 # PR Helper Handoff
 
-> 最后更新：2026-08-08
+> 最后更新：2026-08-12
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 
 ## 当前状态
@@ -8,9 +8,18 @@
 - 当前分支：`feature/20260722`。
 - 用户已确认本批代码已上线 Production。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地验证已通过：`npm test`（23 个文件 / 186 项）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。本轮 Lane 排序动画未改变业务数据模型；浏览器 E2E 仍保持既有 API mock 覆盖范围。
-- Supabase 迁移 `001`–`023` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
+- 当前本地验证已通过：`npm test`（24 个文件 / 205 项）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。后台自动创建 PR 代码未改变现有手动流程行为；浏览器 E2E 仍保持既有 API mock 覆盖范围。
+- Supabase 迁移 `001`–`026` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
+- PR #172 的首个 Vercel Preview 失败原因为 Vercel 对 `api/` 完整 TypeScript 编译，而仓库原 `tsconfig.json` 仅包含 `src/`；随后又因 Hobby 计划 Serverless Function 数量限制在部署输出阶段失败。已将 `api/` 纳入本地检查、修复类型错误，并把自动化与 AI 凭据入口合并到 `/api/workflows` rewrite；提交 `93c00d41` 后 Vercel Preview、CI 和 Preview Comments 全部通过。
+
+## 2026-08-12 刷新链路最新结论
+
+- 详情页、步骤抽屉及创建/合并/重试/回滚/删除后的刷新按当前仓库触发；流程总览手动“刷新队列”和定时 reconciliation 仍为全量。
+- 手动 reconciliation 已改为后台执行，接口先返回已持久化快照，不再等待 GitHub 全量请求完成。
+- 浏览器侧 GitHub API 请求统一设置 20 秒超时；超时后刷新控件恢复可操作并显示错误。
+- Production 私有流程 `bayernjf/pr-helper-e2e-sandbox-private` 的 PR #1 门禁显示 `1/1 已通过`；后台同步最近实测约 26 秒。
+- 下一步：验证详情刷新和抽屉同步的成功/超时终态，并通过 Vercel 日志定位后台 reconciliation 的具体慢请求。
 
 ## 已部署修复
 
@@ -87,15 +96,24 @@ Production 已验证行为：
 
 ## 后续高价值投入
 
+### PR 流程自动化（本地代码已完成，待部署验收）
+
+自动化方案已确认，详见 [`docs/automated-workflow-plan.md`](docs/automated-workflow-plan.md)。服务端加密 AI 凭据、`024`–`026`、步骤规则快照、幂等动作队列和 Webhook/Cron/inbox 后台触发已在本地落地；第一阶段不做画布。自动创建 PR 只有在服务端自动流程凭据可用、AI 设置中的“自动生成标题和描述”“自动确认创建”均开启，且存在有效生成规则快照时才允许用户启用；条件满足不会自动勾选，必须用户主动点击，默认规则优先。默认关闭自动合并、自动推进和生产高风险动作。
+
+当前浏览器 AI Key 位于 `sessionStorage`，同一标签页刷新后仍存在；限制是后端无法读取，而不是刷新即丢失。它继续用于手动流程且不会自动上传。自动流程使用用户单独保存的服务端加密凭据；现有口令派生的加密云同步因服务端无法解密，不能复用。AI 失败处理第一版只生成修复上下文或 Codex 修复任务，不做无人值守代码修改、推送或生产合并。
+
+当前本地已落地自动流程 AI 凭据、步骤级自动创建策略配置和规则快照、`025_workflow_automation_queue.sql` 对应的运行快照和幂等动作队列、`026_ai_automation_preferences.sql` 对应的服务端偏好，以及 webhook / cron / inbox reconciliation 的后台自动触发。`024`、`025`、`026` 已执行，Vercel Production/Preview 已配置 `AI_CREDENTIALS_ENCRYPTION_KEY`；代码尚未部署。本次执行器以稳定幂等键和 `queued → running` 原子领取防止重复创建，失败动作会暂停；不自动合并。
+
 在上述生产验收通过后，建议顺序为：
 
-1. 浏览器 E2E：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影仍需真实 GitHub delivery 验收。
-2. 操作审计：`020` 已执行；Production 已完成流程更新、创建/合并 PR 记录读取及 CSV 导出可用性验收。✅
-3. 加密云同步加固：已部署，`021` 已执行；待验证 v1/v2 兼容、口令轮换、冲突拒绝和历史恢复。
-4. 历史数据保留与清理：已部署，`022` 已执行；待确认 Cron 产生成功运行记录并按批次清理历史数据。
-5. 团队协作闭环：已部署团队管理界面、成员角色管理、流程共享、共享状态投影和服务端操作授权；`023` 已执行。需用至少两个 GitHub 账号验收角色边界与 GitHub App 安装范围。
+1. 后台自动创建 PR：部署 Preview 后用测试仓库验证规则快照、Webhook/Cron 触发、幂等去重和失败暂停，再决定是否进入 Production。
+2. 浏览器 E2E：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影已有真实 delivery 证据。
+3. 操作审计：`020` 已执行；Production 已完成流程更新、创建/合并 PR 记录读取及 CSV 导出可用性验收。✅
+4. 加密云同步加固：已部署，`021` 已执行；待验证 v1/v2 兼容、口令轮换、冲突拒绝和历史恢复。
+5. 历史数据保留与清理：已部署，`022` 已执行；待确认 Cron 产生成功运行记录并按批次清理历史数据。
+6. 团队协作闭环：已部署团队管理界面、成员角色管理、流程共享、共享状态投影和服务端操作授权；`023` 已执行。需用至少两个 GitHub 账号验收角色边界与 GitHub App 安装范围。
 
-不建议优先投入任意 DAG、流程模板市场、自动 Production 合并/回滚或自建 CI/CD 引擎。
+不建议第一阶段投入任意 DAG、流程模板市场、自建 CI/CD 引擎或无额外安全设计的 AI 自动修复。画布仅在条件分支、并行节点、汇聚节点和回滚路径的可视化需求明确后再投入。
 
 ## 常用命令
 

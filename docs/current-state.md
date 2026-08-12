@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-12（PR #5/#7/#8 Production E2E 与 Webhook 自动投影已完成；双平台部署跟踪、应用内合并、Actions 合并门禁与发布运行完成状态已复验）
+> 最后更新：2026-08-12（PR #172 已修复 Serverless TypeScript 编译与 Hobby 函数数量限制，Preview Checks 全部通过）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -14,7 +14,15 @@ PR Helper 是 GitHub-first 的 PR / Release Control Tower。用户以项目 Lane
 - 多路径汇聚门禁：下游步骤可等待多个上游路径全部合并且合并后检查成功。
 - Lane 上下拖动、键盘/按钮排序和项目状态筛选。
 
-当前不提供任意 DAG 编辑器、流程模板市场或未经确认的生产自动合并。
+当前不提供任意 DAG 编辑器、流程模板市场或默认开启的自动化执行。按步骤配置的自动 PR/合并/推进方案已确认；自动创建 PR 的服务端第一版已在本地实现，待部署验收，自动合并和自动推进仍未实现。
+
+## 当前整体评估
+
+- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
+- **功能质量：8/10**。流程 CRUD、Lane 看板、动态来源、多路径汇聚、PR 创建/合并、五类门禁、合并后 Actions/部署状态、失败恢复和审计均已具备；后台自动创建 PR 待线上真实验证。
+- **产品完善度：7.5/10**。个人使用和小团队发布控制塔已可用；多账号权限、private/organization 边界、Web Push 关闭页面投递和部署回滚仍需外部条件验收。
+- **生产准备度：7/10**。主链路已有真实 Production 证据，但自动化 PR、健康检查/失败部署投影、确认式回滚和部分协作能力不能仅凭本地测试视为通过。
+- **结论：综合 7.5/10**。产品已超过 MVP，可继续作为受控生产工具使用；下一步优先完成后台自动创建 PR 的 Preview/Production 验收和剩余外部条件验收，不建议立即投入画布、模板市场或自动合并。
 
 ## 当前架构
 
@@ -54,7 +62,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - OpenAI Chat Completions 兼容 SSE 流式生成 PR 标题和描述。
 - 已有内容时覆盖前确认；生成和手写内容按仓库/Source/Target 保存 24 小时。
 - Markdown 生成规则支持新增、编辑、导入、默认规则和单选。
-- AI API Key 仅保存在浏览器会话；PR 草稿和生成规则以浏览器本地数据为主，解锁加密云同步原型后可上传/下载密文，尚未承诺自动冲突合并。
+- AI API Key 当前保存在浏览器 `sessionStorage`：同一标签页刷新和站内跳转后仍然存在，但后端、Webhook 和定时任务无法读取，关闭标签页或换设备后也不能作为无人值守凭据。PR 草稿和生成规则以浏览器本地数据为主，解锁加密云同步原型后可上传/下载密文，尚未承诺自动冲突合并。
 
 ### 监控、通知与失败恢复
 
@@ -74,6 +82,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - 稳定阶段决策：服务端统一输出 `locked`、`waiting`、`checks-failed`、`needs-approval`、`ready-to-merge`、`ready-to-create` 和 `merged` 决策，待办队列与阶段状态共用同一套判断。
 - 保存并发保护：流程版本使用数据库事务锁和版本号校验，检测到其他窗口更新时拒绝覆盖。
 - 请求安全保护：受保护 API 校验浏览器来源并按登录用户/操作限流；创建 PR 前检查同一 Source → Target 的开放 PR，Actions 重试和部署回滚使用稳定事件键去重。
+- 自动化方案：已确认“阈值触发 → AI/PR → 门禁 → 按步骤合并 → 合并后门禁/部署 → 下一步”的产品方案，第一阶段不使用画布，详情见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。`024`–`026` 已执行，服务端加密 AI 凭据、偏好、步骤规则快照、幂等动作队列和后台自动创建 PR 已在本地实现；Webhook、Cron 和 inbox reconciliation 在 `ready-to-create` 时可触发，部署后待真实验收。自动创建 PR 必须同时满足服务端自动流程凭据可用、AI 自动生成标题/描述、自动确认创建和有效规则快照，任一缺失时开关不可启用。条件满足只解除开启资格，不会自动勾选，必须用户主动点击。自动合并、Production 自动合并和自动回滚仍未实现。
 
 ### 公网部署
 
@@ -87,6 +96,13 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 - 在 `bayernjf/pr-helper-e2e-sandbox` 完成 `feature/* → dev` 与 `dev → main` 实际链路：PR #5、#7 合并后触发 Preview；PR #8 从 `dev` 合并到 `main` 后触发 Production。
 - PR #8 合并前已验证 `4/4 Checks`、`4/4 Actions` 通过；合并后已验证 `3/3 Checks`、`3/3 Actions` 通过，以及 Vercel 和 Cloudflare Pages Production 部署成功。
+
+### 2026-08-12 刷新链路优化
+
+- 详情页、步骤抽屉及创建/合并/重试/回滚/删除后的刷新按当前仓库触发；流程总览手动刷新和定时任务仍为全量。
+- 手动 reconciliation 改为后台执行，接口先返回已持久化快照，避免单个 GitHub 慢请求阻塞页面。
+- 浏览器 GitHub API 请求统一设置 20 秒超时；超时后刷新控件恢复可操作。
+- 私有仓库 `bayernjf/pr-helper-e2e-sandbox-private` 的 PR #1 已验证 `1/1` 门禁通过；后台同步最近实测约 26 秒，具体慢请求仍待日志定位。
 - 已修复并 Production 复验：Actions 未全绿时不显示应用内“合并 PR”；发布运行在合并后终态出现时会从“进行中”更新为“发布完成”。
 - 已修复并 Production 复验：动态来源 `feature/* → dev` 在 PR #9 已合并后可由完整 reconciliation 发现并投影至 Lane 与步骤抽屉。
 - GitHub App 已订阅 Pull request、Pull request review、Check run、Check suite、Status 与 Workflow run 事件。沙箱 PR #11 重开事件在 GitHub Recent Deliveries 返回 `202`（2.73 秒）；生产详情页未手动刷新，在下一个轮询周期自动展示 `feature/webhook-live-e2e-2 · PR #11`，Webhook 自动投影验收通过。
@@ -107,7 +123,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 | PR 草稿、Markdown 生成规则 | 浏览器 `localStorage`；可通过加密云同步上传服务端（原型） |
 | 加密云同步密文 | Supabase Postgres（`pr_helper_encrypted_sync`） |
 
-数据库迁移的线上基线是 `001`–`023`。`021_encrypted_sync_hardening.sql`、`022_data_retention.sql` 和 `023_team_permissions.sql` 已执行，对应加密同步加固、受限批量历史清理和团队共享权限代码均已部署 Production；它们仍需分别完成线上回归与多账号验收。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`。
+数据库迁移线上基线为 `001`–`026`，其中 `024_ai_automation_credentials.sql`、`025_workflow_automation_queue.sql` 与 `026_ai_automation_preferences.sql` 已执行。`024` 对应的服务端 API 还要求 Vercel 配置 `AI_CREDENTIALS_ENCRYPTION_KEY`（32 字节 hex 或 base64），不得写入代码、数据库或日志。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`。
 
 ## 最新验证结论
 
@@ -175,10 +191,13 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 | 8 | `db/migrations/021_encrypted_sync_hardening.sql` | 密文版本、设备与历史记录 | 已完成，代码已部署，待线上回归 |
 | 9 | `db/migrations/022_data_retention.sql` | 数据保留策略配置 | 已完成，代码已部署，待 Cron 运行观察 |
 | 10 | `db/migrations/023_team_permissions.sql` | 团队、成员与流程共享模型 | 已完成，代码已部署，待多账号验收 |
+| 11 | `db/migrations/024_ai_automation_credentials.sql` | 服务端加密 AI 凭据 | 已完成，代码待部署验收 |
+| 12 | `db/migrations/025_workflow_automation_queue.sql` | 自动化运行快照与幂等动作队列 | 已完成，代码待部署验收 |
+| 13 | `db/migrations/026_ai_automation_preferences.sql` | 服务端自动生成/自动确认偏好 | 已完成，代码待部署验收 |
 
 已确认 4 个相关表存在，并确认 `reconciliation_runs.user_id`、`github_webhook_deliveries.installation_id`、外键和 `degraded` 状态约束已生效。018 新增的 5 个稳定身份索引均已存在，5 张相关表的 `stage_id` 空值数量均为 0。
 
-`018` 已执行并完成结构校验，`019` 已执行；下一步部署代码到 Preview，验证稳定 `stage_id` 查询和历史时间线。
+`018`–`026` 已执行并完成用户确认；自动化相关代码仍需部署到 Preview/Production 后进行真实 GitHub 验收。
 
 ### 二、代码部署状态
 
@@ -217,8 +236,9 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 ### 六、后续设计决策（待确定）
 
-- 加密云同步正式启用：需确定密钥管理方案（当前口令仅存内存，刷新即丢失）
+- 加密云同步正式启用：需确定密钥管理方案（这里指云同步解锁口令仅存内存，页面刷新后需要重新解锁；不是 AI Key）
 - 失败恢复策略进一步增强：是否需要服务端持久化策略配置（当前按流程保存在 workflow 中）
+- 自动化执行默认值已确认：高风险自动创建、自动合并和自动推进默认关闭，用户逐步骤开启；自动创建 PR 的策略快照、动作幂等和失败暂停已在本地实现，自动合并和自动推进仍未实现。
 
 ### 七、合规
 
@@ -239,6 +259,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 4. 失败恢复已由服务端校验重试次数、冷却时间、当前提交和失败 Actions；仍不自动修改代码或合并生产。
 5. 加密云同步已接通密文上传/下载原型，仍需补齐密钥轮换、冲突处理和线上回归后再扩大使用范围。 🟡 待加固
 6. 阶段状态、事件和部署历史已切换到稳定 `stage_id`。 ✅ 019 已执行，并已通过当前 Production 流程回归。
+7. PR 流程自动化：服务端加密 AI 凭据、步骤级规则快照、`025` 运行快照/幂等动作队列和 `026` 自动化偏好已落地；Webhook、Cron 和 inbox reconciliation 会在 `ready-to-create` 自动入队，执行器会重校验统一阶段决策、服务端自动生成/确认、规则快照、新提交和开放 PR。自动创建 PR 受服务端凭据、AI 自动生成、自动确认和有效生成规则四项前置条件保护，自动合并仍不做。方案与验收标准见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。 🟡 代码完成，待部署和真实验收
 
 ### 八、非验收类后续开发
 

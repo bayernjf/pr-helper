@@ -12,6 +12,7 @@ The current implementation includes:
 - GitHub Webhook + scheduled reconciliation, Web Push, failure details, Actions reruns, and Codex repair packages.
 - Server-validated Actions reruns with retry limits and cooldowns, plus a method/path allowlist for the GitHub proxy.
 - Vercel/Cloudflare deployment gates, health checks, run history, configuration warnings, and confirmed Production rollback.
+- Server-side encrypted AI credentials and opt-in background PR creation with rule snapshots, idempotent actions, and reconciliation triggers. Automatic merge remains disabled.
 
 See [docs/current-state.md](docs/current-state.md) for the authoritative architecture, feature boundaries, and next priorities. Historical specifications and plans under `docs/superpowers/` are retained for decision history.
 
@@ -46,7 +47,7 @@ npm run lint
 
 ## Database
 
-Run every migration in `db/migrations/` in numeric order. The current schema baseline is `001` through `018`; request handlers never create or alter tables. See [db/README.md](db/README.md).
+Run every migration in `db/migrations/` in numeric order. The current applied schema baseline is `001` through `026`; request handlers never create or alter tables. See [db/README.md](db/README.md).
 
 Required Vercel settings for the secure API include:
 
