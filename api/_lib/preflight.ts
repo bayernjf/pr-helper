@@ -178,7 +178,7 @@ function checkUpstreamDependencies(workflow: StoredWorkflow, stageStates: { stag
       });
     } else if (!stage.independent && i > 0) {
       const prev = preceding.find(s => s.stageIndex === i - 1);
-      blocked = prev && (prev.pullState !== 'merged' || prev.checksState !== 'success');
+      blocked = Boolean(prev && (prev.pullState !== 'merged' || prev.checksState !== 'success'));
     }
     if (blocked) {
       checks.push({

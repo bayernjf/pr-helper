@@ -117,7 +117,7 @@ async function repairContext(request: ApiRequest, response: ApiResponse) {
   if (request.method !== 'POST') { response.status(405).json({ message: 'Method not allowed' }); return; }
   try {
     const { session } = currentGitHubIdentity(request);
-    const payload = body(request) as { workflowId?: unknown; stageIndex?: unknown; source?: unknown };
+    const payload = body(request) as { workflowId?: unknown; stageIndex?: unknown; source?: unknown; pullNumber?: unknown };
     if (typeof payload.workflowId !== 'string' || typeof payload.stageIndex !== 'number') throw new Error('无效的修复任务请求');
     const context = await codexRepairContext(process.env, { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId }, payload.workflowId, payload.stageIndex, typeof payload.source === 'string' ? payload.source : undefined, typeof payload.pullNumber === 'number' ? payload.pullNumber : undefined);
     response.status(200).json(context);

@@ -1,6 +1,8 @@
 import { requestErrorStatus, type ApiRequest, type ApiResponse } from './_lib/http.js';
 import { currentGitHubIdentity } from './_lib/session.js';
-import { addTeamMember, createTeam, isStoredWorkflow, listTeamMembers, listTeams, listWorkflows, recordOperationAudit, removeTeamMember, removeWorkflow, removeWorkflowStage, shareWorkflowWithTeam, upsertWorkflow, type TeamRole } from './_lib/workflows-store.js';
+import { addTeamMember, createTeam, deleteAiAutomationCredential, enqueueWorkflowAutomationAction, executeWorkflowAutomationAction, getAiAutomationCredential, isStoredWorkflow, listTeamMembers, listTeams, listWorkflowAutomationActions, listWorkflows, recordOperationAudit, removeTeamMember, removeWorkflow, removeWorkflowStage, saveAiAutomationCredential, shareWorkflowWithTeam, upsertWorkflow, type TeamRole } from './_lib/workflows-store.js';
+import { testAiConnection } from '../src/lib/ai.js';
+import { validateAiBaseUrl } from './_lib/ai-credentials.js';
 
 function body(request: ApiRequest) {
   if (typeof request.body === 'string') {
@@ -15,6 +17,11 @@ function responseMessage(error: unknown) {
   return error instanceof Error ? error.message : '流程同步失败';
 }
 
+function automationIdentity(request: ApiRequest) {
+  const { session } = currentGitHubIdentity(request);
+  return { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId };
+}
+
 export default async function handler(request: ApiRequest, response: ApiResponse) {
   let identity: { login: string; githubUserId?: number; installationId?: string } | null = null;
   let audit: { action: 'workflow-created' | 'workflow-updated' | 'workflow-deleted'; repository: string | null; workflowId: string | null } | null = null;
@@ -22,6 +29,36 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     response.setHeader('Cache-Control', 'private, no-store, max-age=0');
     const { session } = currentGitHubIdentity(request);
     identity = { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId };
+    if (request.query?.resource === 'ai-credentials') {
+      if (!request.method || request.method === 'GET') { response.status(200).json({ credential: await getAiAutomationCredential(process.env, identity) }); return; }
+      if (request.method === 'DELETE') { await deleteAiAutomationCredential(process.env, identity); response.status(200).json({ ok: true }); return; }
+      if (request.method === 'POST') {
+        const payload = body(request) as Record<string, unknown>;
+        const baseUrl = typeof payload.baseUrl === 'string' ? validateAiBaseUrl(payload.baseUrl.trim()) : '';
+        const model = typeof payload.model === 'string' ? payload.model.trim() : '';
+        const apiKey = typeof payload.apiKey === 'string' ? payload.apiKey.trim() : '';
+        if (!baseUrl || !model || !apiKey || apiKey.length > 4096) throw new Error('请完整填写 AI Base URL、模型和 API Key');
+        await testAiConnection({ baseUrl, model, apiKey });
+        response.status(200).json({ credential: await saveAiAutomationCredential(process.env, identity, { baseUrl, model, apiKey, autoGeneratePrMessage: payload.autoGeneratePrMessage === true, autoConfirmPrCreation: payload.autoConfirmPrCreation === true }) });
+        return;
+      }
+      response.status(405).json({ message: 'Method not allowed' }); return;
+    }
+    if (request.query?.resource === 'automation') {
+      const workflowId = typeof request.query?.workflowId === 'string' ? request.query.workflowId : undefined;
+      if (!request.method || request.method === 'GET') { response.status(200).json({ actions: await listWorkflowAutomationActions(process.env, identity, workflowId) }); return; }
+      if (request.method === 'POST' && request.query?.action === 'execute') {
+        const payload = body(request) as Record<string, unknown>;
+        const actionId = typeof payload.actionId === 'number' ? payload.actionId : Number(payload.actionId);
+        response.status(200).json({ result: await executeWorkflowAutomationAction(process.env, identity, actionId) }); return;
+      }
+      if (request.method === 'POST') {
+        const payload = body(request) as Record<string, unknown>;
+        const result = await enqueueWorkflowAutomationAction(process.env, identity, { workflowId: typeof payload.workflowId === 'string' ? payload.workflowId : '', stageIndex: typeof payload.stageIndex === 'number' ? payload.stageIndex : -1, source: typeof payload.source === 'string' ? payload.source : '', kind: payload.kind === 'merge-pr' || payload.kind === 'advance-stage' ? payload.kind : 'create-pr', idempotencyKey: typeof payload.idempotencyKey === 'string' ? payload.idempotencyKey : '', generationRule: typeof payload.generationRule === 'string' ? payload.generationRule : '' });
+        response.status(200).json({ action: result }); return;
+      }
+      response.status(405).json({ message: 'Method not allowed' }); return;
+    }
     if (request.query?.resource === 'teams') {
       const teamId = typeof request.query?.teamId === 'string' ? request.query.teamId : undefined;
       if (!request.method || request.method === 'GET') {

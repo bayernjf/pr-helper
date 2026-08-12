@@ -1,6 +1,6 @@
 # PR Helper 验证报告
 
-> 执行日期：2026-08-03（Asia/Shanghai）  
+> 执行日期：2026-08-12（Asia/Shanghai）
 > 范围：本地代码、Vercel Production、GitHub App 与公开 E2E 沙箱。  
 > 原则：只有可复现且有证据的结果标记为通过；本地修复未部署前不计入 Production 通过。
 > 后续状态：`021`–`023` 对应代码已在本报告之后部署 Production，但尚未纳入本报告的多账号团队协作、加密同步或保留清理验收。
@@ -19,7 +19,20 @@
 | 同步超时保护 | 真实全量 reconciliation 约 150 秒；前端等待阈值调整为 180 秒后成功完成并保留同步结果 | 通过 |
 | GitHub Webhook 自动投影 | GitHub App 订阅 PR、Checks、Status 与 Workflow 事件；沙箱 PR #11 的 `pull_request.reopened` delivery 返回 `202`（2.73 秒），Production 详情页不点击刷新，在下一个轮询周期自动新增 `feature/webhook-live-e2e-2 · PR #11` | 通过 |
 
-本轮本地回归：`npm test` 23 个测试文件 / 196 个测试通过，`npx tsc --noEmit` 与 `npm run lint` 通过。
+本轮本地回归：`npm test` 24 个测试文件 / 205 个测试通过，`npx tsc --noEmit`、`npm run lint` 与 `git diff --check` 通过。
+
+PR #172 的初始 Vercel Preview 失败并非 Vercel 服务故障：第一次是 Serverless TypeScript 编译暴露了 `api/` 未被本地 `tsconfig.json` 覆盖的类型错误；第二次是 Hobby 计划的 Serverless Function 数量限制。已将 `api/` 纳入 TypeScript 检查、修复类型错误，并将两个自动化入口合并到 `/api/workflows` rewrite。提交 `93c00d41` 后 Vercel Preview、CI 和 Preview Comments 全部通过。
+
+## 2026-08-12 刷新链路优化追加验收
+
+| 范围 | 证据 | 结果 |
+| --- | --- | --- |
+| 私有仓库流程读取 | `bayernjf/pr-helper-e2e-sandbox-private` 的 PR #1 显示 `1/1 已通过` | 通过 |
+| 后台 reconciliation | Production 看板显示“已同步 1 个步骤”，最近一次耗时约 `26067ms` | 通过；后台执行不阻塞看板 |
+| 手动刷新保护 | 详情刷新不再无限等待；浏览器 GitHub 请求已设置 20 秒超时 | 已部署，需继续观察成功/超时两种终态 |
+| 当前仓库范围 | 详情、抽屉及流程操作后请求携带仓库范围；总览刷新和 Cron 仍为全量 | 代码已验证，待日志确认生产请求参数 |
+
+本轮本地回归：`npm test` 23 个测试文件 / 198 个测试通过，`npx tsc --noEmit` 与 `npm run lint` 通过。
 
 ## 环境与测试资源
 
@@ -128,6 +141,14 @@ GitHub App 的 Webhook URL、Secret、SSL verification 和 Active 状态均已�
 ## 建议的复验顺序
 
 1. 满足「外部条件待办」的条件后，按表中顺序完成四项验收；Production 回滚仅在单独低风险窗口执行。
+
+## 尚未进入验收的功能
+
+2026-08-12 已确认 PR 流程自动化方案。服务端加密 AI 凭据、步骤级规则快照、动作队列和后台自动创建执行已在本地实现，但尚未部署 Production，因此不属于 Production 通过项。`024`–`026` 已执行，Vercel Production/Preview 已配置加密密钥。Webhook、Cron 与 inbox reconciliation 进入 `ready-to-create` 后会使用稳定幂等键入队，并由原子领取执行器再次验证当前决策、凭据、自动生成/确认偏好、规则快照、新提交与开放 PR；失败动作暂停。逐步骤自动合并、合并后自动推进、新提交阈值仍不属于当前实现。自动创建 PR 必须验证服务端自动流程凭据、AI 自动生成标题/描述、自动确认创建和有效生成规则四项前置条件，缺少任一项时不得启用；条件满足也不会自动勾选，必须用户主动开启。详见 [`automated-workflow-plan.md`](automated-workflow-plan.md)。
+
+本地追加：服务端加密凭据 API、`024` 迁移和步骤级自动创建策略配置已实现，`024`–`026` 已执行且环境变量已配置；待部署后进行线上验收。
+
+本地追加：`025` 动作队列和 `ready-to-create` 执行入口已实现；步骤策略保存时捕获默认规则快照，Webhook、Cron 与 inbox reconciliation 均可触发后台执行。执行前重新校验统一阶段决策、服务端自动生成/自动确认偏好、生成规则快照、新提交与开放 PR。`026_ai_automation_preferences.sql` 已执行。自动合并不在本阶段范围内。
 
 ## 沙箱保留状态
 

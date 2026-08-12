@@ -2,4 +2,8 @@
   "framework": "vite",
   "buildCommand": "npm run build",
   "outputDirectory": "dist"
+  ,"rewrites": [
+    { "source": "/api/ai-credentials", "destination": "/api/workflows?resource=ai-credentials" },
+    { "source": "/api/automation", "destination": "/api/workflows?resource=automation" }
+  ]
 }
