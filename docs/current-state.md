@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-12（PR #5/#7/#8 Production E2E 与 Webhook 自动投影已完成；双平台部署跟踪、应用内合并、Actions 合并门禁与发布运行完成状态已复验）
+> 最后更新：2026-08-12（Production 刷新链路已改为按仓库范围并异步 reconciliation；浏览器 GitHub 请求增加 20 秒超时；私有仓库 PR #1 门禁已复验）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -54,7 +54,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - OpenAI Chat Completions 兼容 SSE 流式生成 PR 标题和描述。
 - 已有内容时覆盖前确认；生成和手写内容按仓库/Source/Target 保存 24 小时。
 - Markdown 生成规则支持新增、编辑、导入、默认规则和单选。
-- AI API Key 仅保存在浏览器会话；PR 草稿和生成规则以浏览器本地数据为主，解锁加密云同步原型后可上传/下载密文，尚未承诺自动冲突合并。
+- AI API Key 当前保存在浏览器 `sessionStorage`：同一标签页刷新和站内跳转后仍然存在，但后端、Webhook 和定时任务无法读取，关闭标签页或换设备后也不能作为无人值守凭据。PR 草稿和生成规则以浏览器本地数据为主，解锁加密云同步原型后可上传/下载密文，尚未承诺自动冲突合并。
 
 ### 监控、通知与失败恢复
 
@@ -74,7 +74,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - 稳定阶段决策：服务端统一输出 `locked`、`waiting`、`checks-failed`、`needs-approval`、`ready-to-merge`、`ready-to-create` 和 `merged` 决策，待办队列与阶段状态共用同一套判断。
 - 保存并发保护：流程版本使用数据库事务锁和版本号校验，检测到其他窗口更新时拒绝覆盖。
 - 请求安全保护：受保护 API 校验浏览器来源并按登录用户/操作限流；创建 PR 前检查同一 Source → Target 的开放 PR，Actions 重试和部署回滚使用稳定事件键去重。
-- 自动化方案：已确认“阈值触发 → AI/PR → 门禁 → 按步骤合并 → 合并后门禁/部署 → 下一步”的产品方案，第一阶段不使用画布，详情见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。当前尚未执行自动创建 PR、自动合并或自动推进；自动创建 PR 必须同时满足 AI 自动生成标题/描述、自动确认创建和至少一条有效生成规则，任一缺失时开关不可启用。三项满足只解除开启资格，不会自动勾选，必须用户主动点击。
+- 自动化方案：已确认“阈值触发 → AI/PR → 门禁 → 按步骤合并 → 合并后门禁/部署 → 下一步”的产品方案，第一阶段不使用画布，详情见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。当前尚未执行自动创建 PR、自动合并或自动推进；先实施服务端加密 AI 凭据 PoC，再接步骤级自动创建。自动创建 PR 必须同时满足服务端自动流程凭据可用、AI 自动生成标题/描述、自动确认创建和至少一条有效生成规则，任一缺失时开关不可启用。条件满足只解除开启资格，不会自动勾选，必须用户主动点击。
 
 ### 公网部署
 
@@ -88,6 +88,13 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 - 在 `bayernjf/pr-helper-e2e-sandbox` 完成 `feature/* → dev` 与 `dev → main` 实际链路：PR #5、#7 合并后触发 Preview；PR #8 从 `dev` 合并到 `main` 后触发 Production。
 - PR #8 合并前已验证 `4/4 Checks`、`4/4 Actions` 通过；合并后已验证 `3/3 Checks`、`3/3 Actions` 通过，以及 Vercel 和 Cloudflare Pages Production 部署成功。
+
+### 2026-08-12 刷新链路优化
+
+- 详情页、步骤抽屉及创建/合并/重试/回滚/删除后的刷新按当前仓库触发；流程总览手动刷新和定时任务仍为全量。
+- 手动 reconciliation 改为后台执行，接口先返回已持久化快照，避免单个 GitHub 慢请求阻塞页面。
+- 浏览器 GitHub API 请求统一设置 20 秒超时；超时后刷新控件恢复可操作。
+- 私有仓库 `bayernjf/pr-helper-e2e-sandbox-private` 的 PR #1 已验证 `1/1` 门禁通过；后台同步最近实测约 26 秒，具体慢请求仍待日志定位。
 - 已修复并 Production 复验：Actions 未全绿时不显示应用内“合并 PR”；发布运行在合并后终态出现时会从“进行中”更新为“发布完成”。
 - 已修复并 Production 复验：动态来源 `feature/* → dev` 在 PR #9 已合并后可由完整 reconciliation 发现并投影至 Lane 与步骤抽屉。
 - GitHub App 已订阅 Pull request、Pull request review、Check run、Check suite、Status 与 Workflow run 事件。沙箱 PR #11 重开事件在 GitHub Recent Deliveries 返回 `202`（2.73 秒）；生产详情页未手动刷新，在下一个轮询周期自动展示 `feature/webhook-live-e2e-2 · PR #11`，Webhook 自动投影验收通过。
@@ -218,7 +225,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 ### 六、后续设计决策（待确定）
 
-- 加密云同步正式启用：需确定密钥管理方案（当前口令仅存内存，刷新即丢失）
+- 加密云同步正式启用：需确定密钥管理方案（这里指云同步解锁口令仅存内存，页面刷新后需要重新解锁；不是 AI Key）
 - 失败恢复策略进一步增强：是否需要服务端持久化策略配置（当前按流程保存在 workflow 中）
 - 自动化执行默认值已确认：高风险自动创建、自动合并和自动推进默认关闭，用户逐步骤开启；实现前仍需完成策略快照、动作幂等和暂停/恢复设计。
 
@@ -241,7 +248,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 4. 失败恢复已由服务端校验重试次数、冷却时间、当前提交和失败 Actions；仍不自动修改代码或合并生产。
 5. 加密云同步已接通密文上传/下载原型，仍需补齐密钥轮换、冲突处理和线上回归后再扩大使用范围。 🟡 待加固
 6. 阶段状态、事件和部署历史已切换到稳定 `stage_id`。 ✅ 019 已执行，并已通过当前 Production 流程回归。
-7. PR 流程自动化：优先实现无画布的逐步骤自动化策略；自动创建 PR 受 AI 自动生成、自动确认和有效生成规则三项前置条件保护。方案与验收标准见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。 ⏳ 尚未落地
+7. PR 流程自动化：先实现服务端加密 AI 凭据 PoC，再实现无画布的逐步骤自动化策略；自动创建 PR 受服务端凭据、AI 自动生成、自动确认和有效生成规则四项前置条件保护。方案与验收标准见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。 ⏳ 尚未落地
 
 ### 八、非验收类后续开发
 
