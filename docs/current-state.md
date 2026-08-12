@@ -74,7 +74,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - 稳定阶段决策：服务端统一输出 `locked`、`waiting`、`checks-failed`、`needs-approval`、`ready-to-merge`、`ready-to-create` 和 `merged` 决策，待办队列与阶段状态共用同一套判断。
 - 保存并发保护：流程版本使用数据库事务锁和版本号校验，检测到其他窗口更新时拒绝覆盖。
 - 请求安全保护：受保护 API 校验浏览器来源并按登录用户/操作限流；创建 PR 前检查同一 Source → Target 的开放 PR，Actions 重试和部署回滚使用稳定事件键去重。
-- 自动化方案：已确认“阈值触发 → AI/PR → 门禁 → 按步骤合并 → 合并后门禁/部署 → 下一步”的产品方案，第一阶段不使用画布，详情见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。当前尚未执行自动创建 PR、自动合并或自动推进；自动创建 PR 必须同时满足 AI 自动生成标题/描述、自动确认创建和至少一条有效生成规则，任一缺失时开关不可启用。
+- 自动化方案：已确认“阈值触发 → AI/PR → 门禁 → 按步骤合并 → 合并后门禁/部署 → 下一步”的产品方案，第一阶段不使用画布，详情见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。当前尚未执行自动创建 PR、自动合并或自动推进；自动创建 PR 必须同时满足 AI 自动生成标题/描述、自动确认创建和至少一条有效生成规则，任一缺失时开关不可启用。三项满足只解除开启资格，不会自动勾选，必须用户主动点击。
 
 ### 公网部署
 
