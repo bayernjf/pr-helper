@@ -100,9 +100,11 @@ Production 已验证行为：
 
 自动化方案已确认，详见 [`docs/automated-workflow-plan.md`](docs/automated-workflow-plan.md)。服务端加密 AI 凭据、`024`–`026`、步骤规则快照、幂等动作队列和 Webhook/Cron/inbox 后台触发已在本地落地；第一阶段不做画布。自动创建 PR 只有在服务端自动流程凭据可用、AI 设置中的“自动生成标题和描述”“自动确认创建”均开启，且存在有效生成规则快照时才允许用户启用；条件满足不会自动勾选，必须用户主动点击，默认规则优先。默认关闭自动合并、自动推进和生产高风险动作。
 
-当前浏览器 AI Key 位于 `sessionStorage`，同一标签页刷新后仍存在；限制是后端无法读取，而不是刷新即丢失。它继续用于手动流程且不会自动上传。自动流程使用用户单独保存的服务端加密凭据；现有口令派生的加密云同步因服务端无法解密，不能复用。AI 失败处理第一版只生成修复上下文或 Codex 修复任务，不做无人值守代码修改、推送或生产合并。
+当前浏览器 AI Key 位于 `sessionStorage`，同一标签页刷新后仍存在；限制是后端无法读取，而不是刷新即丢失。它继续用于手动流程且不会自动上传。自动流程使用用户单独保存的服务端加密凭据；现有口令派生的加密云同步因服务端无法解密，不能复用。AI 生成标题/描述失败时自动动作暂停并保留脱敏原因；用户可重新生成或手动填写内容，明确确认后 Unpause 继续原动作，不采用未经确认的兜底文案，也不做无人值守代码修改、推送或生产合并。
 
-当前本地已落地自动流程 AI 凭据、步骤级自动创建策略配置和规则快照、`025_workflow_automation_queue.sql` 对应的运行快照和幂等动作队列、`026_ai_automation_preferences.sql` 对应的服务端偏好，以及 webhook / cron / inbox reconciliation 的后台自动触发。`024`、`025`、`026` 已执行，Vercel Production/Preview 已配置 `AI_CREDENTIALS_ENCRYPTION_KEY`；代码尚未部署。本次执行器以稳定幂等键和 `queued → running` 原子领取防止重复创建，失败动作会暂停；不自动合并。
+当前本地已落地自动流程 AI 凭据、步骤级自动创建策略配置和规则快照、`025_workflow_automation_queue.sql` 对应的运行快照和幂等动作队列、`026_ai_automation_preferences.sql` 对应的服务端偏好，以及 webhook / cron / inbox reconciliation 的后台自动触发。`024`、`025`、`026` 已执行，Vercel Production/Preview 已配置 `AI_CREDENTIALS_ENCRYPTION_KEY`；代码尚未部署。本次执行器以稳定幂等键和 `queued → running` 原子领取防止重复创建，失败动作会暂停；AI 生成失败时用户可接管并确认后 Unpause 继续原动作；不自动合并。
+
+后续自动化 UI 需要在流程详情增加步骤级进度条：展示上一步、当前步骤、下一步、门禁等待、暂停原因和可执行操作。进度必须由服务端统一阶段决策与动作队列投影，不能只根据浏览器刷新结果计算；多路径汇聚只有所有前置路径成功后才解锁。
 
 在上述生产验收通过后，建议顺序为：
 
