@@ -1515,14 +1515,13 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const mergeStatus = detailStatus || laneMergeStatus(state);
   const mergeAction = mergeStatus && !recentlyCreatedPullNumbers.has(stageIndex) && canMergePull(mergeStatus) && canOperateWorkflow(flow, 'pull-merge') ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
   const recoveryActions = state?.checksState === 'failure' ? `<button class="ghost drawer-repair">${t('repair.codex')}</button>${canOperateWorkflow(flow, 'actions-rerun') ? `<button class="ghost drawer-retry-actions">${t('recovery.retryActions')}</button>` : ''}` : '';
-  const actions = `<div class="dialog-actions drawer-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button><button class="ghost drawer-close-action">${t('overview.board.close')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div>`;
+  const actions = `<div class="dialog-actions drawer-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div>`;
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
   dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p>${actions}<div class="drawer-status ${tone}"><b>${escape(statusText)}</b>${pull}${drawerChecks}${drawerActions}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${configurationWarnings}${deployments}${deploymentHistory}${stepTimeline}${history}</section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);
-  dialog.querySelector('.drawer-close-action')!.addEventListener('click', close);
   dialog.querySelector<HTMLButtonElement>('.drawer-create-pr')?.addEventListener('click', () => {
     active = flow;
     dialog.close();
@@ -1799,6 +1798,15 @@ function detail() {
   }
   document.querySelectorAll<HTMLButtonElement>('[data-create-pr]').forEach(button => button.addEventListener('click', () => showCreateDialog(Number(button.dataset.createPr))));
   document.querySelectorAll<HTMLButtonElement>('[data-execute-auto-create]').forEach(button => button.addEventListener('click', () => void executeAutoCreatePr(Number(button.dataset.executeAutoCreate))));
+  document.querySelectorAll<HTMLInputElement>('[data-detail-auto-create-stage]').forEach(input => input.addEventListener('change', () => {
+    if (!active) return;
+    const stageIndex = Number(input.dataset.detailAutoCreateStage);
+    const rule = defaultGenerationRule(generationRules);
+    if (input.checked && (!autoCreatePrerequisites() || !rule)) { input.checked = false; showToast(t('draft.autoCreatePrerequisites')); return; }
+    save(setStageAutoCreate(active, stageIndex, input.checked, rule ? { name: rule.name, content: rule.content } : undefined));
+    showToast(input.checked ? t('draft.autoCreateEnabled') : t('draft.autoCreateDisabled'));
+    render();
+  }));
   document.querySelectorAll<HTMLButtonElement>('[data-merge-pr]').forEach(button => button.addEventListener('click', () => showMergeDialog(Number(button.dataset.mergePr))));
   document.querySelectorAll<HTMLButtonElement>('[data-merge-menu-toggle]').forEach(button => button.addEventListener('click', () => {
     const menu = document.querySelector<HTMLElement>(`[data-merge-menu="${button.dataset.mergeMenuToggle}"]`)!;
@@ -1895,13 +1903,18 @@ function confirmAutoCreateExecution(source: string, target: string, ruleName: st
 }
 
 function stageTimeline(stage: Workflow['stages'][number], index: number) {
+  const autoEnabled = stage.automation?.autoCreatePullRequest === true;
+  const canEditAutomation = Boolean(active && canOperateWorkflow(active, 'workflow-edit'));
+  const autoDisabled = !canEditAutomation || !autoEnabled && !autoCreatePrerequisites();
+  const autoHint = !canEditAutomation ? t('detail.autoCreateReadonly') : autoDisabled ? t('draft.autoCreatePrerequisites') : t('detail.autoCreateDesc');
+  const autoControl = `<label class="timeline-auto-create"><input type="checkbox" data-detail-auto-create-stage="${index}" ${autoEnabled ? 'checked' : ''} ${autoDisabled ? 'disabled' : ''} /><span>${t('draft.autoCreate')}</span><small>${escape(autoHint)}</small></label>`;
   if (stage.source.includes('*')) {
     const states = active ? statesForStage(active, index) : [];
     const runs = states.map(state => `<button type="button" class="timeline-action" data-dynamic-stage="${index}" data-dynamic-source="${escape(state.source)}"><b>${escape(state.source)}</b><small>${escape(dynamicBranchStatusText(state))}</small></button>`).join('');
-    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p class="meta">${t('detail.dynamicRoute')}</p>${runs ? `<div class="timeline-actions dynamic-stage-actions">${runs}</div>` : `<p>${t('detail.timeline.placeholder')}</p>`}</div></article>`;
+    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p class="meta">${t('detail.dynamicRoute')}</p>${runs ? `<div class="timeline-actions dynamic-stage-actions">${runs}</div>` : `<p>${t('detail.timeline.placeholder')}</p>`}</div></article>`;
   }
   const status = statuses?.[index];
-  if (!status) return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p>${t('detail.timeline.placeholder')}</p></div></article>`;
+  if (!status) return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p>${t('detail.timeline.placeholder')}</p></div></article>`;
   if (status.kind === 'not-created') {
     const unlocked = canCreateWorkflowStage(index, active!.stages, statuses!);
     const hasNewCommits = Boolean(status.aheadBy);
@@ -1910,9 +1923,9 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
       ? `<p><b class="status neutral">${t('status.newCommits', { count: status.aheadBy || 0 })}</b> · ${unlocked ? t('status.newCommits.canCreate') : t('status.newCommits.waiting')}</p>`
       : unlocked ? `<p class="meta">${t('status.newCommits.waitingChanges')}</p>` : '';
     const autoCreate = canCreate && stage.automation?.autoCreatePullRequest && autoCreatePrerequisites() && defaultGenerationRule(generationRules) ? `<button class="timeline-action" data-execute-auto-create="${index}">${t('automation.executeCreate')}</button>` : '';
-    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${changeMessage}${unlocked ? `<div class="timeline-actions">${autoCreate}${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${lockedStageText(index)}</p>`}</div></article>`;
+    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${changeMessage}${unlocked ? `<div class="timeline-actions">${autoCreate}${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${lockedStageText(index)}</p>`}</div></article>`;
   }
-  if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status failure">${t('status.fetchFailed')}</b> · ${escape(status.message || '')}</p></div></article>`;
+  if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status failure">${t('status.fetchFailed')}</b> · ${escape(status.message || '')}</p></div></article>`;
   const checks = status.checks?.total ? gateDisclosure(t('status.checks.summary', { passed: status.checks.passed, total: status.checks.total, state: status.checks.state === 'success' ? t('status.checks.completed') : status.checks.state === 'failure' ? t('status.checks.failed') : t('status.checks.running') }), status.checkDetails, 'checks', stage.target) : '';
   const actions = status.actions?.total ? gateDisclosure(t('status.actions.runs.summary', { passed: status.actions.passed, total: status.actions.total, state: status.actions.state === 'success' ? t('status.actions.passed') : status.actions.state === 'failure' ? t('status.actions.failed') : t('status.actions.running') }), status.actionDetails, 'actions', stage.target) : '';
   const approvals = status.requiredApprovals ? t('status.approvals', { approvals: status.approvals || 0, required: status.requiredApprovals }) : '';
@@ -1934,7 +1947,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';
   const gateList = gates.filter(Boolean);
   const sourceBranchWarning = status.sourceBranchMissing ? `<p class="meta">${t('status.sourceBranchDeletedHint')}</p>` : '';
-  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong><p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
+  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
 }
 async function refreshDetailStatuses() {
   await refreshStatuses(false, false);
