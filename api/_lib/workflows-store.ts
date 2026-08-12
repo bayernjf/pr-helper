@@ -2,7 +2,7 @@ import postgres from 'postgres';
 import { installationRequest } from './github-api.js';
 import { parseGithubAppConfig } from './github-app.js';
 import { sendPushNotifications, type BrowserPushSubscription } from './push.js';
-import { assertTeamOperation, type TeamOperation, type TeamRole } from '../../src/lib/team-permissions.js';
+import { assertTeamOperation, type TeamOperation } from '../../src/lib/team-permissions.js';
 import { summarizeGitHubChecks } from '../../src/lib/domain.js';
 import { credentialKeyHint, decryptAiApiKey, encryptAiApiKey, maskAiApiKey } from './ai-credentials.js';
 import { buildPrPrompt, aiChatCompletionsUrl } from '../../src/lib/ai.js';
@@ -188,7 +188,7 @@ type WorkflowAccess = { ownerUserId: string; workflow: StoredWorkflow; team?: { 
 
 type WebhookDelivery = { deliveryId: string; eventName: string; action?: string; repository?: string; installationId?: string };
 export type PullRequestWebhook = { repository: string; source: string; target: string; number: number; state: string; mergedAt?: string | null };
-type Pull = { number: number; state: string; merged_at: string | null; merge_commit_sha?: string | null; mergeable?: boolean | null; mergeable_state?: string | null; head: { sha: string; ref?: string } };
+type Pull = { number: number; state: string; merged_at: string | null; merge_commit_sha?: string | null; mergeable?: boolean | null; mergeable_state?: string | null; html_url?: string; head: { sha: string; ref?: string } };
 type Branch = { name: string };
 type CheckRun = { status: string; conclusion: string | null };
 type CommitStatus = { state: string };
@@ -276,7 +276,7 @@ export function repairCommitSha(pull: Pick<Pull, 'merged_at' | 'merge_commit_sha
 
 export function selectRepairPullNumber(rows: readonly { pull_number: number | null }[], requestedPullNumber?: number) {
   const persisted = rows.find(row => Number.isInteger(row.pull_number) && (row.pull_number || 0) > 0)?.pull_number;
-  return persisted || (Number.isInteger(requestedPullNumber) && requestedPullNumber > 0 ? requestedPullNumber : null);
+  return persisted || (Number.isInteger(requestedPullNumber) && requestedPullNumber! > 0 ? requestedPullNumber! : null);
 }
 
 export function generateStageId() {
@@ -302,16 +302,18 @@ export function stageIdentity(workflow: StoredWorkflow, stageIndex: number) {
 export function findWorkflowStageIndexForRemoval(workflow: StoredWorkflow, stageId: string, stageIndex?: number, source?: string, target?: string) {
   const byId = workflow.stages.findIndex(stage => stage.stageId === stageId);
   if (byId !== -1) return byId;
-  if (!Number.isInteger(stageIndex) || stageIndex < 0 || stageIndex >= workflow.stages.length) return -1;
-  const candidate = workflow.stages[stageIndex];
-  return candidate?.source === source && candidate.target === target ? stageIndex : -1;
+  if (!Number.isInteger(stageIndex)) return -1;
+  const index = stageIndex as number;
+  if (index < 0 || index >= workflow.stages.length) return -1;
+  const candidate = workflow.stages[index];
+  return candidate?.source === source && candidate.target === target ? index : -1;
 }
 
 function stageForIndex(workflow: StoredWorkflow, stageIndex: number) {
   const normalized = ensureStageIds(workflow);
   const stage = normalized.stages[stageIndex];
   if (!stage?.stageId) throw new Error('未找到对应流程步骤');
-  return stage;
+  return stage as typeof stage & { stageId: string };
 }
 
 export function compactFailureDetails(parts: Array<string | undefined | null>) {
@@ -437,12 +439,12 @@ function query(environment: Record<string, string | undefined>) {
   return client;
 }
 
-async function recordWorkflowStageEvent(sql: ReturnType<typeof query>, userId: string, workflowId: string, stageIndex: number, source: string, eventKey: string, kind: string, message: string, stageId: string, target: string | null = null) {
+async function recordWorkflowStageEvent(sql: any, userId: string, workflowId: string, stageIndex: number, source: string, eventKey: string, kind: string, message: string, stageId: string, target: string | null = null) {
   await sql`INSERT INTO workflow_stage_events (user_id, workflow_id, stage_index, stage_id, source, target, event_key, kind, message) VALUES (${userId}, ${workflowId}, ${stageIndex}, ${stageId}, ${source}, ${target}, ${eventKey}, ${kind}, ${message}) ON CONFLICT (user_id, event_key) DO NOTHING`;
 }
 
-async function recordOperationAuditForUser(sql: ReturnType<typeof query>, userId: string, installationId: string | undefined, entry: OperationAuditInput) {
-  await sql`INSERT INTO workflow_operation_audit_logs (user_id, installation_id, action, outcome, repository, workflow_id, stage_id, source, target, pull_number, run_id, metadata, failure_reason) VALUES (${userId}, ${installationId || null}, ${entry.action}, ${entry.outcome}, ${entry.repository}, ${entry.workflowId}, ${entry.stageId}, ${entry.source}, ${entry.target}, ${entry.pullNumber}, ${entry.runId}, ${sql.json(entry.metadata)}, ${entry.failureReason?.slice(0, 800) || null})`;
+async function recordOperationAuditForUser(sql: any, userId: string, installationId: string | undefined, entry: OperationAuditInput) {
+  await sql`INSERT INTO workflow_operation_audit_logs (user_id, installation_id, action, outcome, repository, workflow_id, stage_id, source, target, pull_number, run_id, metadata, failure_reason) VALUES (${userId}, ${installationId || null}, ${entry.action}, ${entry.outcome}, ${entry.repository}, ${entry.workflowId}, ${entry.stageId}, ${entry.source}, ${entry.target}, ${entry.pullNumber}, ${entry.runId}, ${sql.json(JSON.parse(JSON.stringify(entry.metadata)))}, ${entry.failureReason?.slice(0, 800) || null})`;
 }
 
 export async function recordOperationAudit(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, entry: OperationAuditInput) {
@@ -751,7 +753,7 @@ export function workflowStageStateMatchesDefinition(workflow: StoredWorkflow, st
   return Boolean(stage && stage.target === state.target && branchRuleMatches(stage.source, state.source));
 }
 
-async function pruneStaleWorkflowStageData(sql: ReturnType<typeof query>, userId: string, workflow: StoredWorkflow) {
+async function pruneStaleWorkflowStageData(sql: any, userId: string, workflow: StoredWorkflow) {
   const states = await sql<{ stage_index: number; stage_id: string; source: string; target: string }[]>`SELECT stage_index, stage_id, source, target FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
   for (const state of states) {
     if (workflowStageStateMatchesDefinition(workflow, { stageIndex: state.stage_index, stageId: state.stage_id, source: state.source, target: state.target })) continue;
@@ -786,8 +788,8 @@ export function deriveStageDecision(workflow: StoredWorkflow, stageIndex: number
   if (unlocked) return { kind: 'waiting', actionable: false, message: '等待 GitHub 状态更新' };
   const dependencies = workflow.stages[stageIndex]?.waitFor?.length ? workflow.stages[stageIndex].waitFor : stageIndex > 0 ? [stageIndex - 1] : [];
   const dependencyIds = dependencies.map(index => workflow.stages[index]?.stageId).filter((id): id is string => Boolean(id));
-  const dependencyStates = allStates.filter(candidate => dependencyIds.includes(candidate.stage_id));
-  const checksConfigured = dependencyStates.some(candidate => candidate.checks_total > 0 || candidate.checks_state !== 'success');
+  const dependencyStates = allStates.filter(candidate => candidate.stage_id !== null && dependencyIds.includes(candidate.stage_id));
+  const checksConfigured = dependencyStates.some(candidate => (candidate.checks_total || 0) > 0 || candidate.checks_state !== 'success');
   return { kind: 'locked', actionable: false, message: checksConfigured ? '等待前序步骤合并且合并后 Actions 成功。' : '等待前序步骤合并。' };
 }
 
@@ -894,7 +896,8 @@ export async function removeWorkflowStage(environment: Record<string, string | u
     });
   });
   if (!savedWorkflow) throw new Error('删除流程步骤失败');
-  return access.team ? { ...savedWorkflow, team: access.team } : savedWorkflow;
+  const result = savedWorkflow as StoredWorkflow;
+  return access.team ? { ...result, team: access.team } : result;
 }
 
 export async function removeWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string) {
@@ -1054,7 +1057,7 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
     : [];
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
-  const comparison = await installationRequest<{ ahead_by: number; head_commit?: { id?: string }; commits?: { sha?: string }[] }>(config, row.github_installation_id, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`).catch(() => ({ ahead_by: 0 }));
+  const comparison = await installationRequest<{ ahead_by: number; head_commit?: { id?: string }; commits?: { sha?: string }[] }>(config, row.github_installation_id, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`).catch(() => ({ ahead_by: 0, head_commit: undefined, commits: undefined }));
   const comparisonHeadSha = comparison.head_commit?.id || comparison.commits?.at(-1)?.sha;
   if (!pull) {
     await sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`;
@@ -1259,7 +1262,7 @@ export async function listActionableStages(environment: Record<string, string | 
       routeStates.forEach(state => {
         const base = { workflowId: workflow.id, workflowName: workflow.name, repository: workflow.repository, stageIndex, source: state.source, target: stage.target, pullNumber: state.pull_number || null };
         const decision = deriveStageDecision(workflow, stageIndex, state, preceding);
-        if (decision.actionable && ['checks-failed', 'needs-approval', 'ready-to-merge', 'ready-to-create'].includes(decision.kind)) items.push({ ...base, kind: decision.kind, message: decision.message });
+        if (decision.actionable && decision.kind !== 'none' && decision.kind !== 'locked' && decision.kind !== 'waiting' && decision.kind !== 'merged') items.push({ ...base, kind: decision.kind, message: decision.message });
       });
       return items;
     }, []);
@@ -1302,7 +1305,7 @@ export async function listRecoveryStatuses(environment: Record<string, string | 
   });
 }
 
-async function saveWorkflowVersion(sql: ReturnType<typeof query>, userId: string, workflow: StoredWorkflow) {
+async function saveWorkflowVersion(sql: any, userId: string, workflow: StoredWorkflow) {
   const latest = await sql<{ version: number }[]>`SELECT version FROM workflow_versions WHERE user_id = ${userId} AND workflow_id = ${workflow.id} ORDER BY version DESC LIMIT 1`;
   const nextVersion = (latest[0]?.version || 0) + 1;
   await sql`INSERT INTO workflow_versions (user_id, workflow_id, version, snapshot) VALUES (${userId}, ${workflow.id}, ${nextVersion}, ${sql.json(workflow)})`;
@@ -1390,7 +1393,7 @@ export async function listWorkflowTimeline(environment: Record<string, string | 
     sql<{ workflow_id: string; stage_index: number; stage_id: string | null; source: string | null; target: string | null; kind: string; message: string; occurred_at: string }[]>`SELECT events.workflow_id, events.stage_index, events.stage_id, events.source, events.target, events.kind, events.message, events.occurred_at FROM workflow_stage_events events WHERE ${visibleWorkflowPredicate(sql, user.id, 'events.user_id', 'events.workflow_id')} ORDER BY events.occurred_at DESC LIMIT 200`,
     sql<{ workflow_id: string; stage_index: number; stage_id: string | null; source: string; target: string; pull_number: number | null; id: number; state: string; started_at: string; completed_at: string | null }[]>`SELECT runs.workflow_id, runs.stage_index, runs.stage_id, runs.source, runs.target, runs.pull_number, runs.id, runs.state, runs.started_at, runs.completed_at FROM workflow_runs runs WHERE ${visibleWorkflowPredicate(sql, user.id, 'runs.user_id', 'runs.workflow_id')} ORDER BY runs.started_at DESC LIMIT 100`,
   ]);
-  const workflows = await sql<WorkflowRow[]>`SELECT workflows.id, workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, user.id, 'workflows.user_id', 'workflows.id')}`;
+  const workflows = await sql<(WorkflowRow & { id: string })[]>`SELECT workflows.id, workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, user.id, 'workflows.user_id', 'workflows.id')}`;
   const workflowMap = new Map(workflows.map(row => {
     const wf = storedWorkflowFromPayload(row.payload);
     return [row.id, wf] as const;
