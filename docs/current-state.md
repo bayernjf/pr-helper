@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-12（PR #172 修复 Vercel Serverless TypeScript 编译；等待新 Preview Check）
+> 最后更新：2026-08-12（PR #172 已修复 Serverless TypeScript 编译与 Hobby 函数数量限制，Preview Checks 全部通过）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
