@@ -1,6 +1,6 @@
 # PR Helper Handoff
 
-> 最后更新：2026-08-12
+> 最后更新：2026-08-12（自动化 AI 诊断与接管方案已补充）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 
 ## 当前状态
@@ -9,6 +9,8 @@
 - 用户已确认本批代码已上线 Production。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
 - 当前本地验证已通过：`npm test`（24 个文件 / 205 项）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。后台自动创建 PR 代码未改变现有手动流程行为；浏览器 E2E 仍保持既有 API mock 覆盖范围。
+- 最近本地提交 `b61e2d3e` 新增“测试已保存配置”：服务端解密保存的 AI 凭据并实际调用模型连接测试，15 秒超时，只返回成功或脱敏错误，不返回 API Key；生产端已验证连接成功（`agnes-2.0-flash`）。
+- 最近本地提交 `510a63c9` 为自动 PR 动作增加 AI 请求 20 秒超时、输出上限和过期 `running/paused` 动作回收重试，避免一次超时永久阻塞幂等动作。
 - Supabase 迁移 `001`–`026` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
 - PR #172 的首个 Vercel Preview 失败原因为 Vercel 对 `api/` 完整 TypeScript 编译，而仓库原 `tsconfig.json` 仅包含 `src/`；随后又因 Hobby 计划 Serverless Function 数量限制在部署输出阶段失败。已将 `api/` 纳入本地检查、修复类型错误，并把自动化与 AI 凭据入口合并到 `/api/workflows` rewrite；提交 `93c00d41` 后 Vercel Preview、CI 和 Preview Comments 全部通过。
@@ -107,6 +109,8 @@ Production 已验证行为：
 后续自动化 UI 需要在流程详情增加步骤级进度条：展示上一步、当前步骤、下一步、门禁等待、暂停原因和可执行操作。进度必须由服务端统一阶段决策与动作队列投影，不能只根据浏览器刷新结果计算；多路径汇聚只有所有前置路径成功后才解锁。
 
 AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 PR”控件下方；点击 `paused` 节点打开接管弹窗，用户可重新生成或手动填写 PR 标题/描述，点击“确认并继续自动流程”后复用原动作 ID 恢复。内容确认不直接放行，必须等 PR 创建和全部 GitHub 门禁、合并后 Checks/Actions、部署及健康检查完成后节点才变绿并激活下一步。
+
+当前生产诊断结论：GitHub App 已勾选 Push，GitHub Actions 的 `PR_HELPER_CRON_SECRET` 已与 Vercel Production 重新同步；校准接口已通过鉴权，但最近一次校准因执行超过 30 秒超时。AI 保存凭据的服务端测试已成功，后续需部署包含 `510a63c9` 的版本后重新验证自动动作是否入队、执行或暂停，并记录具体失败原因。
 
 在上述生产验收通过后，建议顺序为：
 
