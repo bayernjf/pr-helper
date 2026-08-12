@@ -1149,6 +1149,29 @@ a.account-menu-item {
   margin-top: 10px;
 }
 
+.timeline-auto-create {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 10px;
+  color: var(--text-secondary);
+  font: 700 .78rem Manrope;
+}
+
+.timeline-auto-create input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--text-accent);
+}
+
+.timeline-auto-create small {
+  flex-basis: 100%;
+  color: var(--text-muted);
+  font: 500 .72rem Manrope;
+}
+
 .timeline-action {
   border: 0;
   background: none;
