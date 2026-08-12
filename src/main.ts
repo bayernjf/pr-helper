@@ -962,7 +962,6 @@ function goTo(target: Screen | 'back') {
 }
 
 function returnToSourceLane(workflowId: string) {
-  expandedLaneIds.add(workflowId);
   screen = 'overview';
   if (pollTimer) { window.clearInterval(pollTimer); pollTimer = undefined; }
   render();
