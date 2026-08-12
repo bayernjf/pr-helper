@@ -418,8 +418,26 @@ body {
   display: block;
 }
 
+.detail-header-row {
+  display: grid;
+  grid-template-columns: 1fr minmax(0, 1.6fr) 1fr;
+  align-items: center;
+  gap: 20px;
+}
+
 .detail-page-head-main {
   min-width: 0;
+  text-align: center;
+}
+
+.detail-page-head-main h1 {
+  margin: 0;
+  font-size: clamp(1.55rem, 3vw, 2.35rem);
+  overflow-wrap: anywhere;
+}
+
+.detail-page-head-main p:not(.eyebrow) {
+  overflow-wrap: anywhere;
 }
 
 .detail-page-actions {
@@ -1988,7 +2006,16 @@ a.account-menu-item {
     display: block;
   }
 
+  .detail-header-row {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 14px;
+  }
+
+  .detail-page-head-main { order: -1; }
   .detail-page-actions { flex-wrap: wrap; }
+  .detail-page-head-main h1 { font-size: 1.7rem; }
 
   .rules-sidebar {
     border-right: 0;
