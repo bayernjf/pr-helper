@@ -150,6 +150,15 @@ async function generateAutomationMessage(baseUrl: string, apiKey: string, model:
   return { title: parsed.title.trim().slice(0, 256), body: parsed.body.slice(0, 50_000) };
 }
 
+// An open pull request for the same route means the intent is already satisfied, and an empty
+// comparison means it can never be satisfied. Neither is a failure the operator should resume.
+export function automationCreateOutcome(openPulls: { number: number; html_url?: string }[], commitCount: number) {
+  const existing = openPulls.find(pull => Number.isInteger(pull.number) && pull.number > 0);
+  if (existing) return { kind: 'idempotent' as const, pullNumber: existing.number, pullUrl: existing.html_url || null };
+  if (commitCount <= 0) return { kind: 'cancelled' as const, reason: 'Source 分支没有可创建 PR 的新提交' };
+  return { kind: 'create' as const };
+}
+
 async function executeWorkflowAutomationActionForUser(environment: Record<string, string | undefined>, userId: string, installationId: string, actionId: number) {
   if (!Number.isInteger(actionId) || actionId <= 0 || !installationId) throw new Error('无效的自动化执行请求');
   const sql = query(environment);
@@ -177,9 +186,23 @@ async function executeWorkflowAutomationActionForUser(environment: Record<string
     const { owner, name } = ownerAndName(workflow.repository);
     const config = parseGithubAppConfig(environment);
     const openPulls = await installationRequest<Pull[]>(config, installationId, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(`${owner}:${action.source}`)}&base=${encodeURIComponent(action.target)}&per_page=10`);
-    if (openPulls[0]) throw new Error(`该分支已存在 PR #${openPulls[0].number}`);
-    const comparison = await installationRequest<{ commits: { commit: { message: string } }[] }>(config, installationId, `/repos/${owner}/${name}/compare/${encodeURIComponent(action.target)}...${encodeURIComponent(action.source)}`);
-    if (!comparison.commits.length) throw new Error('Source 分支没有可创建 PR 的新提交');
+    const comparison = openPulls[0] ? { commits: [] as { commit: { message: string } }[] } : await installationRequest<{ commits: { commit: { message: string } }[] }>(config, installationId, `/repos/${owner}/${name}/compare/${encodeURIComponent(action.target)}...${encodeURIComponent(action.source)}`);
+    const outcome = automationCreateOutcome(openPulls, comparison.commits.length);
+    if (outcome.kind === 'idempotent') {
+      await sql`UPDATE workflow_automation_actions SET state = 'succeeded', failure_reason = NULL, updated_at = now(), payload = ${sql.json({ ...(action.payload || {}), pullNumber: outcome.pullNumber })} WHERE user_id = ${userId} AND id = ${actionId}`;
+      await sql`UPDATE workflow_automation_runs SET state = 'succeeded', updated_at = now(), completed_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
+      await recordOperationAuditForUser(sql, userId, installationId, {
+        action: 'pull-created', outcome: 'success', repository: workflow.repository, workflowId: workflow.id,
+        stageId: action.stage_id, source: action.source, target: action.target, pullNumber: outcome.pullNumber, runId: action.run_id,
+        metadata: { via: 'workflow-automation', idempotent: true }, failureReason: null,
+      });
+      return { state: 'succeeded', pullNumber: outcome.pullNumber, pullUrl: outcome.pullUrl };
+    }
+    if (outcome.kind === 'cancelled') {
+      await sql`UPDATE workflow_automation_actions SET state = 'cancelled', failure_reason = ${outcome.reason}, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId}`;
+      await sql`UPDATE workflow_automation_runs SET state = 'cancelled', updated_at = now(), completed_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
+      return { state: 'cancelled', pullNumber: null };
+    }
     const message = await generateAutomationMessage(credential.baseUrl, credential.apiKey, credential.model, action.source, action.target, comparison.commits.map(item => item.commit.message), action.payload?.generationRule || '');
     const created = await installationRequest<Pull>(config, installationId, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify({ title: message.title, head: action.source, base: action.target, body: message.body }) });
     await sql`UPDATE workflow_automation_actions SET state = 'succeeded', updated_at = now(), payload = ${sql.json({ ...(action.payload || {}), pullNumber: created.number })} WHERE user_id = ${userId} AND id = ${actionId}`;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { actionableStageEntry, automationActionId, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { actionableStageEntry, automationActionId, automationCreateOutcome, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -424,5 +424,27 @@ describe('automation action identity', () => {
     expect(automationActionId('2.5')).toBeNull();
     expect(automationActionId('abc')).toBeNull();
     expect(automationActionId('')).toBeNull();
+  });
+});
+
+describe('automation create outcome', () => {
+  it('treats an already open pull request for the same route as an idempotent hit', () => {
+    expect(automationCreateOutcome([{ number: 7, html_url: 'https://github.com/o/r/pull/7' }], 3)).toEqual({ kind: 'idempotent', pullNumber: 7, pullUrl: 'https://github.com/o/r/pull/7' });
+  });
+
+  it('keeps the idempotent hit when GitHub omits the pull url', () => {
+    expect(automationCreateOutcome([{ number: 7 }], 0)).toEqual({ kind: 'idempotent', pullNumber: 7, pullUrl: null });
+  });
+
+  it('cancels the action when the source branch carries no new commits', () => {
+    expect(automationCreateOutcome([], 0)).toEqual({ kind: 'cancelled', reason: 'Source 分支没有可创建 PR 的新提交' });
+  });
+
+  it('creates the pull request when no open pull request exists and commits are ahead', () => {
+    expect(automationCreateOutcome([], 2)).toEqual({ kind: 'create' });
+  });
+
+  it('ignores an unusable pull number instead of reporting a false idempotent hit', () => {
+    expect(automationCreateOutcome([{ number: 0 }], 2)).toEqual({ kind: 'create' });
   });
 });
