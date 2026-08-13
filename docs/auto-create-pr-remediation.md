@@ -105,7 +105,7 @@
 
 提交按功能拆分，`api` 与 CI 配置分开，commit message 用英文。
 
-> 已知无关缺陷：`e2e/pr-helper.spec.ts` 的 9 个用例在 `b82698ee`（本批改动之前）就已全红，失败点是 `openWorkspace` 等不到 `项目流程看板` 标题。已用 `git stash` 在 HEAD 上复现，确认与本批无关；因此本批的回归验证只覆盖单元测试、`tsc` 与 `lint`，E2E 需要单独排查。
+> 附带修复（与自动创建链路无关，独立提交）：`e2e/pr-helper.spec.ts` 的 9 个用例此前全红，有两个原因。一是 Playwright 用 Vite 默认端口 4173，而本机另一个项目的 preview 服务占着该端口，`reuseExistingServer: !CI` 直接复用了它，测试打在了别的站点上——端口已改为 4373。二是看板卡片改为默认折叠、编辑按钮标签由「编辑流程」改为「编辑」后用例未同步，现已改为先展开再点 `[data-lane-step]`。修复后 9/9 通过。
 
 不需要 DDL：迁移基线保持 `001`–`026`，`019` 的 `workflow_stage_states_stage_identity_idx` 已覆盖 P3 新增子查询的前缀。若 P6 需要新的 `state` 枚举值，则新增有序迁移文件。
 
