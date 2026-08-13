@@ -1,7 +1,7 @@
 # 自动创建 PR 失效：诉求、问题与修复方案
 
 > 创建：2026-08-14。
-> 状态：`P1`–`P6` 已落代码并按原子规则提交（尚未 push，也未在生产验证）；`P7` 待查。
+> 状态：`P1`–`P6` 已落代码并按原子规则提交（尚未 push，也未在生产验证）；`P7` 已查清，不是缺陷，等一个数据清理决定。
 > 当前事实来源仍为 [`docs/current-state.md`](current-state.md)。本文只覆盖服务端自动创建 PR 链路，不改变自动合并/自动推进「默认关闭且本阶段不实现」的结论。
 > 方案与验收标准的上游文档为 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。
 
@@ -75,10 +75,15 @@
 - **根因**：入队依据是库里的 `ahead_by`，可能已过期；真正 compare 时新提交可能已被别的路径合走。此时动作是**已失去意义**，不是失败，不该要求人工接管。
 - **修法**：置为终态（不占用待处理队列），与 paused 区分开。终态命名需与现有 `state` 约束一致，若需要新枚举值则按新增有序迁移处理，不得修改已应用的迁移。
 
-### P7 沙盒路由会成为常驻待办（待查，不阻塞）
+### P7 沙盒路由会成为常驻待办（已查清：不是缺陷，属数据卫生）
 
-- 第二节那条 e2e 沙盒 dev → main 现在就已经是 merged + 全绿 + `ahead_by=2`，只是被队列过滤掉才看不见。修 P4 后队列显示它是**正确行为**；不正确的是这个沙盒 workflow 还留在库里。
-- store 内已有 `retentionCutoffs` 机制，需单独确认沙盒 workflow 未被回收的原因。属于状态卫生，独立于 P1–P6。
+- 第二节那条 e2e 沙盒 dev → main 现在就已经是 merged + 全绿 + `ahead_by=2`，只是被队列过滤掉才看不见。修 P4 后队列显示它是**正确行为**。
+- **原以为的根因不成立**：`cleanupRetainedData` 只清 `RETENTION_DAYS` 里那 6 张历史/日志表（`github_webhook_deliveries`、`pr_helper_encrypted_sync_history`、`reconciliation_runs`、`workflow_stage_events`、`workflow_stage_deployment_runs`、`workflow_operation_audit_logs`）。流程定义 `pr_helper_workflows` 与其实时状态 `workflow_stage_states` 从来不在保留清理范围内，所以「沙盒 workflow 未被回收」并不是机制失效。
+- **这个设计是对的**：流程定义是用户数据，按时间自动删除属于不可逆的破坏性操作，不应由后台任务代劳。唯一的删除入口是显式的 `removeWorkflow`（UI 的「删除整个流程」，二次确认 + 审计）。
+- **删除不会留孤儿**：`workflow_stage_states`(004)、`workflow_stage_events`(008)、`workflow_versions` / `workflow_runs`(015)、`pr_helper_workflow_team_shares`(023)、`workflow_automation_runs` / `workflow_automation_actions`(025) 都以 `(user_id, workflow_id)` 外键 `ON DELETE CASCADE` 挂在 `pr_helper_workflows` 上，删流程即连带清空。
+- **待你决定的动作**（二选一，都不需要改代码）：
+  1. 在 UI 里删掉沙盒流程 `pr-helper-e2e-sandbox-1785691296724-69q14`，队列即恢复干净；验收报告里引用的 GitHub 仓库与 PR 不受影响。
+  2. 保留它，接受收件箱长期多一条 `ready-to-create`。当前没有「归档 / 静音流程」的概念，若想保留又不想被提醒，那是一个新的产品需求，应单独设计。
 
 ## 四、需求决策
 
@@ -99,7 +104,7 @@
 | 3 | 动作队列入列条件与过滤条件改为显式判断，`merged` 且 `canCreateNext` 时以 `ready-to-create` 入列 | `api/_lib/workflows-store.ts` | 已提交 `933dfd79` |
 | 4 | 抽屉创建按钮改读 `decision.canCreateNext`，不再依赖现拉的 GitHub detail | `src/main.ts` | 已提交 `fa2696e7` |
 | 5 | 执行器幂等化：P5 记成功、P6 记终态 | `api/_lib/workflows-store.ts` | 已提交 `7a53c026` |
-| 6 | 沙盒回收（P7）单独排查后另行记录 | 待定 | 未开始 |
+| 6 | 沙盒回收（P7）排查 | — | 已查清：非缺陷，见第三节 P7 |
 
 步骤 5 的落地形态：新增纯函数 `automationCreateOutcome(openPulls, commitCount)` 作为可测接缝，`idempotent` 走与成功一致的收尾并在审计 `metadata` 打 `idempotent: true`；`cancelled` 写入 `workflow_automation_actions.state = 'cancelled'` 与 `workflow_automation_runs.state = 'cancelled'`，原因写在 `failure_reason`。两张表的 `CHECK` 约束在 `db/migrations/025` 中已包含 `cancelled`，因此**没有新增迁移**。命中已存在开放 PR 时不再请求 `compare`，少一次 GitHub 调用。
 
