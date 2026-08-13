@@ -107,6 +107,12 @@ async function openWorkspace(page: Page, fixture: ApiFixture = {}) {
   return api;
 }
 
+async function openStepDrawer(page: Page, index = 0) {
+  await page.getByRole('button', { name: '展开流程详情' }).click();
+  await page.locator('[data-lane-step]').nth(index).click();
+  return page.getByRole('dialog');
+}
+
 function githubRequests(api: MockApi, method: string, path: string) {
   return api.requests.filter(request => request.method === method
     && request.pathname === '/api/github/request'
@@ -170,7 +176,7 @@ test('编辑流程可重新排序步骤并保存新的顺序', async ({ page }) 
   };
   const api = await openWorkspace(page, { workflows: [workflow] });
 
-  await page.getByRole('button', { name: '编辑流程' }).click();
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
   await expect(page.getByRole('heading', { name: '编辑流程' })).toBeVisible();
   await page.getByRole('button', { name: '上移步骤：fix/urgent → dev' }).click();
 
@@ -195,8 +201,7 @@ test('失败步骤抽屉显示重跑入口并调用受保护的服务端重跑�
     states: [{ workflowId: workflow.id, stageIndex: 0, stageId: 'stage-failure', repository, source: 'fix/urgent', target: 'dev', pullNumber: 42, pullState: 'open', mergedAt: null, headSha: 'deadbeef', checksState: 'failure', checksPassed: 0, checksTotal: 1, approvals: 0, requiredApprovals: 0, mergeable: false, mergeableState: 'blocked', aheadBy: 1, lastEvent: 'Actions failed', updatedAt: '2026-08-03T00:00:00.000Z', decision: { kind: 'checks-failed', actionable: true, message: '第 1 步 Actions 失败' } }],
   });
 
-  await page.locator('[data-lane-step]').click();
-  const drawer = page.getByRole('dialog');
+  const drawer = await openStepDrawer(page);
   await expect(drawer).toContainText('Actions 失败');
   await drawer.getByRole('button', { name: '重新触发 Actions' }).click();
 
@@ -217,8 +222,7 @@ test('抽屉创建 PR 仅在确认后通过 GitHub 代理提交准确负载', as
     states: [{ workflowId: workflow.id, stageIndex: 0, stageId: 'stage-create', repository, source: 'feature/e2e', target: 'dev', pullNumber: null, pullState: 'none', mergedAt: null, headSha: null, checksState: 'none', checksPassed: 0, checksTotal: 0, approvals: 0, requiredApprovals: 0, mergeable: null, mergeableState: null, aheadBy: 1, lastEvent: null, updatedAt: '2026-08-03T00:00:00.000Z', decision: { kind: 'ready-to-create', actionable: true, message: '等待创建 PR' } }],
   });
 
-  await page.locator('[data-lane-step]').click();
-  const drawer = page.getByRole('dialog');
+  const drawer = await openStepDrawer(page);
   await drawer.getByRole('button', { name: '创建 PR' }).click();
   const createDialog = page.getByRole('dialog');
   await createDialog.locator('#create-title').fill('新增 E2E 覆盖');
@@ -248,7 +252,7 @@ test('抽屉合并 PR 仅在确认后通过 GitHub 代理使用当前 head SHA',
     states: [{ workflowId: workflow.id, stageIndex: 0, stageId: 'stage-merge', repository, source: 'feature/e2e', target: 'dev', pullNumber: 42, pullState: 'open', mergedAt: null, headSha: 'head-sha-42', checksState: 'success', checksPassed: 1, checksTotal: 1, approvals: 0, requiredApprovals: 0, mergeable: true, mergeableState: 'clean', aheadBy: 0, lastEvent: null, updatedAt: '2026-08-03T00:00:00.000Z', decision: { kind: 'ready-to-merge', actionable: true, message: '可以合并' } }],
   });
 
-  await page.locator('[data-lane-step]').click();
+  await openStepDrawer(page);
   await page.getByRole('dialog').getByRole('button', { name: '合并 PR' }).click();
   const mergeDialog = page.getByRole('dialog');
   await expect(mergeDialog.getByRole('heading', { name: '合并 PR #42' })).toBeVisible();
@@ -268,7 +272,7 @@ test('删除流程需要确认，并且确认后才从云端删除', async ({ pa
   };
   const api = await openWorkspace(page, { workflows: [workflow] });
 
-  await page.getByRole('button', { name: '编辑流程' }).click();
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.getByRole('button', { name: '删除整个流程' }).click();
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByRole('heading', { name: '删除整个流程？' })).toBeVisible();
@@ -293,8 +297,7 @@ test('部署回滚要求二次确认，并向服务端传递不可变运行标�
     deploymentRuns: [{ workflowId: workflow.id, stageIndex: 0, stageId: 'stage-rollback', source: 'feature/e2e', provider: 'vercel', environment: 'production', runId: 84, runName: 'Deploy frontend', runUrl: 'https://github.com/acme/demo/actions/runs/84', deploymentUrl: 'https://deployment.example.com', state: 'success', conclusion: 'success', failureSummary: null, failureJobUrl: null, healthState: 'success', healthUrl: 'https://deployment.example.com/health', healthDetail: null, updatedAt: '2026-08-03T00:00:00.000Z', firstSeenAt: '2026-08-03T00:00:00.000Z' }],
   });
 
-  await page.locator('[data-lane-step]').click();
-  const drawer = page.getByRole('dialog');
+  const drawer = await openStepDrawer(page);
   await drawer.getByRole('button', { name: '回滚到此版本' }).click();
   const rollbackDialog = page.getByRole('dialog');
   await expect(rollbackDialog.getByRole('heading', { name: '确认回滚这个部署？' })).toBeVisible();
