@@ -1,14 +1,15 @@
 # PR Helper Handoff
 
-> 最后更新：2026-08-12（自动化 AI 诊断与接管方案已补充）
+> 最后更新：2026-08-14（自动创建 PR 失效的诉求、问题清单与修复方案已单独沉淀）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
+> 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
 
 ## 当前状态
 
 - 当前分支：`feature/20260722`。
 - 用户已确认本批代码已上线 Production。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地验证已通过：`npm test`（24 个文件 / 205 项）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。后台自动创建 PR 代码未改变现有手动流程行为；浏览器 E2E 仍保持既有 API mock 覆盖范围。
+- 当前本地验证已通过：`npm test`（24 个文件 / 213 项，含工作区未提交的 cron 分批与自动化身份归一化用例）、`npx tsc --noEmit`、`npm run lint`、`git diff --check`。后台自动创建 PR 代码未改变现有手动流程行为；浏览器 E2E 仍保持既有 API mock 覆盖范围。
 - 最近本地提交 `b61e2d3e` 新增“测试已保存配置”：服务端解密保存的 AI 凭据并实际调用模型连接测试，15 秒超时，只返回成功或脱敏错误，不返回 API Key；生产端已验证连接成功（`agnes-2.0-flash`）。
 - 最近本地提交 `510a63c9` 为自动 PR 动作增加 AI 请求 20 秒超时、输出上限和过期 `running/paused` 动作回收重试，避免一次超时永久阻塞幂等动作。
 - Supabase 迁移 `001`–`026` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
@@ -110,7 +111,9 @@ Production 已验证行为：
 
 AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 PR”控件下方；点击 `paused` 节点打开接管弹窗，用户可重新生成或手动填写 PR 标题/描述，点击“确认并继续自动流程”后复用原动作 ID 恢复。内容确认不直接放行，必须等 PR 创建和全部 GitHub 门禁、合并后 Checks/Actions、部署及健康检查完成后节点才变绿并激活下一步。
 
-当前生产诊断结论：GitHub App 已勾选 Push，GitHub Actions 的 `PR_HELPER_CRON_SECRET` 已与 Vercel Production 重新同步；校准接口已通过鉴权，但最近一次校准因执行超过 30 秒超时。AI 保存凭据的服务端测试已成功，后续需部署包含 `510a63c9` 的版本后重新验证自动动作是否入队、执行或暂停，并记录具体失败原因。
+当前生产诊断结论：GitHub App 已勾选 Push，GitHub Actions 的 `PR_HELPER_CRON_SECRET` 已与 Vercel Production 重新同步。2026-08-13 的生产库查询已定位自动创建 PR 不工作的完整原因链，并确认与凭据、偏好和规则快照配置无关：动作能入队但从未被领取（`queued` / `attempts=0` / `failure_reason=null`），根因是 `BIGSERIAL` 身份被 postgres.js 返回为字符串后未归一化，以及一处空 `catch` 吞掉了失败；cron 校准实际是跑完的（`51/51` 阶段，约 160 秒），Actions 报红只是 `curl --max-time 30` 提前放弃，`--retry 2` 还派生了重叠的全量 sweep。另外 `deriveStageDecision` 用单个枚举同时承担展示状态和可执行性，导致「已合并 + 全绿 + 有新提交」永远无法进入自动创建门禁。
+
+诉求、问题清单、修复方案、修复后影响和回归测试清单见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。已确认的需求决策：合并后门禁为红时不自动向下游创建 PR。已在工作区完成但未提交的是身份归一化、失败留痕和 cron 分批三项；统一决策模型和执行器幂等化尚未落代码。
 
 在上述生产验收通过后，建议顺序为：
 
