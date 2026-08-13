@@ -213,7 +213,7 @@ export async function listWorkflowAutomationActions(environment: Record<string, 
 
 type DatabaseUser = { id: string };
 type WorkflowRow = { payload: unknown; version?: number };
-type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string; github_installation_id?: string | null };
+type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string; github_installation_id?: string | null; last_reconciled_at?: string | null };
 type WorkflowAccess = { ownerUserId: string; workflow: StoredWorkflow; team?: { id: string; name: string; role: TeamRole } };
 
 type WebhookDelivery = { deliveryId: string; eventName: string; action?: string; repository?: string; installationId?: string };
@@ -1172,14 +1172,37 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
   }
 }
 
+export const RECONCILE_WORKFLOW_BATCH_SIZE = 8;
+
+export function reconciliationBatchSize(environment: Record<string, string | undefined>) {
+  const configured = Number(environment.CRON_RECONCILE_BATCH_SIZE);
+  return Number.isInteger(configured) && configured >= 0 ? configured : RECONCILE_WORKFLOW_BATCH_SIZE;
+}
+
+function reconciliationStaleness(lastReconciledAt: string | null) {
+  return (lastReconciledAt ? Date.parse(lastReconciledAt) : 0) || 0;
+}
+
+export function selectReconciliationBatch<T extends { lastReconciledAt: string | null }>(candidates: readonly T[], limit: number): T[] {
+  if (limit <= 0 || candidates.length <= limit) return [...candidates];
+  return candidates
+    .map((candidate, index) => ({ candidate, index }))
+    .sort((left, right) => reconciliationStaleness(left.candidate.lastReconciledAt) - reconciliationStaleness(right.candidate.lastReconciledAt) || left.index - right.index)
+    .slice(0, limit)
+    .map(item => item.candidate);
+}
+
 export async function reconcileWorkflowStages(environment: Record<string, string | undefined>, filter: { repository?: string; installationId?: string; eventName?: string } = {}, trigger: ReconciliationTrigger = 'cron') {
   const sql = query(environment);
-  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
-  const workflowsToReconcile = rows.flatMap(row => {
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, (SELECT max(states.updated_at) FROM workflow_stage_states states WHERE states.user_id = workflows.user_id AND states.workflow_id = workflows.id) AS last_reconciled_at FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
+  const candidates = rows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
     if (!workflow || (filter.repository && workflow.repository !== filter.repository) || (filter.installationId && row.github_installation_id !== filter.installationId)) return [];
-    return [{ row, workflow: ensureStageIds(workflow) }];
+    return [{ row, workflow: ensureStageIds(workflow), lastReconciledAt: row.last_reconciled_at ?? null }];
   });
+  // A scheduled sweep must answer within one request timeout, so it reconciles the stalest
+  // workflows only and relies on its 10 minute cadence to rotate through the rest.
+  const workflowsToReconcile = trigger === 'cron' ? selectReconciliationBatch(candidates, reconciliationBatchSize(environment)) : candidates;
   const byUser = new Map<string, { row: TrackedWorkflowRow; workflow: StoredWorkflow }[]>();
   for (const item of workflowsToReconcile) byUser.set(item.row.user_id, [...(byUser.get(item.row.user_id) || []), item]);
   let reconciledTotal = 0;

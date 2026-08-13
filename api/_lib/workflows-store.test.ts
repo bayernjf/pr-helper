@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { automationActionId, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { automationActionId, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -220,6 +220,50 @@ describe('reconciliation state', () => {
     expect(reconciliationState(0, 3)).toBe('success');
     expect(reconciliationState(1, 2)).toBe('degraded');
     expect(reconciliationState(3, 0)).toBe('failure');
+  });
+});
+
+describe('cron reconciliation batch', () => {
+  const candidate = (id: string, lastReconciledAt: string | null) => ({ id, lastReconciledAt });
+
+  it('keeps the scheduled sweep bounded so it can answer within the request timeout', () => {
+    expect(RECONCILE_WORKFLOW_BATCH_SIZE).toBe(8);
+  });
+
+  it('reconciles never-reconciled workflows first, then the stalest ones', () => {
+    const batch = selectReconciliationBatch([
+      candidate('fresh', '2026-08-13T10:00:00.000Z'),
+      candidate('stale', '2026-08-13T08:00:00.000Z'),
+      candidate('never', null),
+    ], 2);
+    expect(batch.map(item => item.id)).toEqual(['never', 'stale']);
+  });
+
+  it('rotates through every workflow across consecutive runs', () => {
+    const candidates = [
+      candidate('a', '2026-08-13T09:00:00.000Z'),
+      candidate('b', '2026-08-13T09:01:00.000Z'),
+      candidate('c', '2026-08-13T09:02:00.000Z'),
+    ];
+    expect(selectReconciliationBatch(candidates, 2).map(item => item.id)).toEqual(['a', 'b']);
+    expect(selectReconciliationBatch([
+      candidate('a', '2026-08-13T09:10:00.000Z'),
+      candidate('b', '2026-08-13T09:10:00.000Z'),
+      candidates[2],
+    ], 2).map(item => item.id)).toEqual(['c', 'a']);
+  });
+
+  it('reconciles everything when the batch cannot be exceeded or is disabled', () => {
+    const candidates = [candidate('a', null), candidate('b', '2026-08-13T09:00:00.000Z')];
+    expect(selectReconciliationBatch(candidates, 2)).toEqual(candidates);
+    expect(selectReconciliationBatch(candidates, 0)).toEqual(candidates);
+  });
+
+  it('reads a deployment specific batch size and ignores unusable values', () => {
+    expect(reconciliationBatchSize({ CRON_RECONCILE_BATCH_SIZE: '3' })).toBe(3);
+    expect(reconciliationBatchSize({ CRON_RECONCILE_BATCH_SIZE: '0' })).toBe(0);
+    expect(reconciliationBatchSize({ CRON_RECONCILE_BATCH_SIZE: 'many' })).toBe(RECONCILE_WORKFLOW_BATCH_SIZE);
+    expect(reconciliationBatchSize({})).toBe(RECONCILE_WORKFLOW_BATCH_SIZE);
   });
 });
 
