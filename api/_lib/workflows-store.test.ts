@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { actionableStageEntry, automationActionId, automationCreateOutcome, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -223,6 +223,50 @@ describe('reconciliation state', () => {
   });
 });
 
+describe('cron reconciliation batch', () => {
+  const candidate = (id: string, lastReconciledAt: string | null) => ({ id, lastReconciledAt });
+
+  it('keeps the scheduled sweep bounded so it can answer within the request timeout', () => {
+    expect(RECONCILE_WORKFLOW_BATCH_SIZE).toBe(8);
+  });
+
+  it('reconciles never-reconciled workflows first, then the stalest ones', () => {
+    const batch = selectReconciliationBatch([
+      candidate('fresh', '2026-08-13T10:00:00.000Z'),
+      candidate('stale', '2026-08-13T08:00:00.000Z'),
+      candidate('never', null),
+    ], 2);
+    expect(batch.map(item => item.id)).toEqual(['never', 'stale']);
+  });
+
+  it('rotates through every workflow across consecutive runs', () => {
+    const candidates = [
+      candidate('a', '2026-08-13T09:00:00.000Z'),
+      candidate('b', '2026-08-13T09:01:00.000Z'),
+      candidate('c', '2026-08-13T09:02:00.000Z'),
+    ];
+    expect(selectReconciliationBatch(candidates, 2).map(item => item.id)).toEqual(['a', 'b']);
+    expect(selectReconciliationBatch([
+      candidate('a', '2026-08-13T09:10:00.000Z'),
+      candidate('b', '2026-08-13T09:10:00.000Z'),
+      candidates[2],
+    ], 2).map(item => item.id)).toEqual(['c', 'a']);
+  });
+
+  it('reconciles everything when the batch cannot be exceeded or is disabled', () => {
+    const candidates = [candidate('a', null), candidate('b', '2026-08-13T09:00:00.000Z')];
+    expect(selectReconciliationBatch(candidates, 2)).toEqual(candidates);
+    expect(selectReconciliationBatch(candidates, 0)).toEqual(candidates);
+  });
+
+  it('reads a deployment specific batch size and ignores unusable values', () => {
+    expect(reconciliationBatchSize({ CRON_RECONCILE_BATCH_SIZE: '3' })).toBe(3);
+    expect(reconciliationBatchSize({ CRON_RECONCILE_BATCH_SIZE: '0' })).toBe(0);
+    expect(reconciliationBatchSize({ CRON_RECONCILE_BATCH_SIZE: 'many' })).toBe(RECONCILE_WORKFLOW_BATCH_SIZE);
+    expect(reconciliationBatchSize({})).toBe(RECONCILE_WORKFLOW_BATCH_SIZE);
+  });
+});
+
 describe('recovery policy validation', () => {
   const baseWorkflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main' }] };
 
@@ -302,5 +346,105 @@ describe('stable stage identity', () => {
       { stage_index: 1, stage_id: 'stage-dev', pull_state: 'none', checks_state: 'unknown' },
     ]);
     expect(decision).toMatchObject({ kind: 'locked', message: '等待前序步骤合并。' });
+  });
+});
+
+describe('stage decision affordances', () => {
+  const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature', target: 'dev', stageId: 'stage-feature' }, { source: 'dev', target: 'main', stageId: 'stage-dev' }] };
+  const state = (overrides: Record<string, unknown>) => ({ stage_id: 'stage-feature', pull_state: 'none', checks_state: 'unknown', approvals: 0, required_approvals: 0, mergeable: null, mergeable_state: null, ahead_by: 0, ...overrides }) as Parameters<typeof deriveStageDecision>[2];
+  const allStates = [{ stage_index: 0, stage_id: 'stage-feature', pull_state: 'none', checks_state: 'unknown' }];
+
+  it('reports a merged route with new commits as still creatable without losing its merged state', () => {
+    const decision = deriveStageDecision(workflow, 0, state({ pull_state: 'merged', checks_state: 'success', ahead_by: 2 }), allStates);
+    expect(decision).toMatchObject({ kind: 'merged', canCreateNext: true, actionable: true });
+  });
+
+  it('keeps a merged route without new commits terminal', () => {
+    expect(deriveStageDecision(workflow, 0, state({ pull_state: 'merged', checks_state: 'success' }), allStates)).toMatchObject({ kind: 'merged', canCreateNext: false, actionable: false });
+  });
+
+  it('does not advance past a failing post-merge gate', () => {
+    expect(deriveStageDecision(workflow, 0, state({ pull_state: 'merged', checks_state: 'failure', ahead_by: 2 }), allStates)).toMatchObject({ kind: 'checks-failed', canCreateNext: false });
+  });
+
+  it('reports a never created route with new commits as creatable', () => {
+    expect(deriveStageDecision(workflow, 0, state({ ahead_by: 1 }), allStates)).toMatchObject({ kind: 'ready-to-create', canCreateNext: true });
+  });
+
+  it('refuses to create while an open pull request is still in flight', () => {
+    expect(deriveStageDecision(workflow, 0, state({ pull_state: 'open', ahead_by: 3 }), allStates)).toMatchObject({ canCreateNext: false });
+  });
+
+  it('refuses to create a locked stage even when its source moved ahead', () => {
+    const locked = deriveStageDecision(workflow, 1, state({ stage_id: 'stage-dev', ahead_by: 4 }), [
+      { stage_index: 0, stage_id: 'stage-feature', pull_state: 'open', checks_state: 'pending' },
+      { stage_index: 1, stage_id: 'stage-dev', pull_state: 'none', checks_state: 'unknown' },
+    ]);
+    expect(locked).toMatchObject({ kind: 'locked', canCreateNext: false });
+  });
+
+  it('refuses to create when the state does not belong to the stage', () => {
+    expect(deriveStageDecision(workflow, 0, state({ stage_id: 'stage-dev', ahead_by: 5 }), allStates)).toMatchObject({ kind: 'none', canCreateNext: false });
+  });
+});
+
+describe('actionable stage projection', () => {
+  const decision = (overrides: Record<string, unknown>) => ({ kind: 'merged', actionable: false, canCreateNext: false, message: '已合并且门禁通过', ...overrides }) as Parameters<typeof actionableStageEntry>[0];
+
+  it('lists a merged route that can create the next pull request', () => {
+    expect(actionableStageEntry(decision({ actionable: true, canCreateNext: true, message: '已合并，有新提交可以创建新 PR' }))).toEqual({ kind: 'ready-to-create', message: '已合并，有新提交可以创建新 PR' });
+  });
+
+  it('omits a merged route with nothing left to do', () => {
+    expect(actionableStageEntry(decision({}))).toBeNull();
+  });
+
+  it('lists a failing gate once and does not also offer creation', () => {
+    expect(actionableStageEntry(decision({ kind: 'checks-failed', actionable: true, message: '第 1 步 Actions 失败' }))).toEqual({ kind: 'checks-failed', message: '第 1 步 Actions 失败' });
+  });
+
+  it('omits states that carry no operation', () => {
+    expect(actionableStageEntry(decision({ kind: 'waiting', message: '等待 GitHub 状态更新' }))).toBeNull();
+    expect(actionableStageEntry(decision({ kind: 'locked', message: '等待前序步骤合并。' }))).toBeNull();
+    expect(actionableStageEntry(decision({ kind: 'none', message: '暂无状态' }))).toBeNull();
+  });
+});
+
+describe('automation action identity', () => {
+  it('accepts a bigint identity returned as a string by the database driver', () => {
+    expect(automationActionId('2')).toBe(2);
+    expect(automationActionId(2)).toBe(2);
+  });
+
+  it('rejects values that cannot identify a queued action', () => {
+    expect(automationActionId(null)).toBeNull();
+    expect(automationActionId(undefined)).toBeNull();
+    expect(automationActionId('0')).toBeNull();
+    expect(automationActionId('-1')).toBeNull();
+    expect(automationActionId('2.5')).toBeNull();
+    expect(automationActionId('abc')).toBeNull();
+    expect(automationActionId('')).toBeNull();
+  });
+});
+
+describe('automation create outcome', () => {
+  it('treats an already open pull request for the same route as an idempotent hit', () => {
+    expect(automationCreateOutcome([{ number: 7, html_url: 'https://github.com/o/r/pull/7' }], 3)).toEqual({ kind: 'idempotent', pullNumber: 7, pullUrl: 'https://github.com/o/r/pull/7' });
+  });
+
+  it('keeps the idempotent hit when GitHub omits the pull url', () => {
+    expect(automationCreateOutcome([{ number: 7 }], 0)).toEqual({ kind: 'idempotent', pullNumber: 7, pullUrl: null });
+  });
+
+  it('cancels the action when the source branch carries no new commits', () => {
+    expect(automationCreateOutcome([], 0)).toEqual({ kind: 'cancelled', reason: 'Source 分支没有可创建 PR 的新提交' });
+  });
+
+  it('creates the pull request when no open pull request exists and commits are ahead', () => {
+    expect(automationCreateOutcome([], 2)).toEqual({ kind: 'create' });
+  });
+
+  it('ignores an unusable pull number instead of reporting a false idempotent hit', () => {
+    expect(automationCreateOutcome([{ number: 0 }], 2)).toEqual({ kind: 'create' });
   });
 });

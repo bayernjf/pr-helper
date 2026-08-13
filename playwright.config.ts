@@ -7,15 +7,15 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? 'github' : 'list',
   use: {
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL: 'http://127.0.0.1:4373',
     locale: 'zh-CN',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
-    command: 'VITE_AUTH_ORIGIN=http://127.0.0.1:4174 npm run dev -- --port 4173',
-    url: 'http://127.0.0.1:4173',
+    command: 'VITE_AUTH_ORIGIN=http://127.0.0.1:4174 npm run dev -- --port 4373',
+    url: 'http://127.0.0.1:4373',
     reuseExistingServer: !process.env.CI,
   },
 });
