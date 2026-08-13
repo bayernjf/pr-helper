@@ -1,7 +1,7 @@
 # 自动创建 PR 失效：诉求、问题与修复方案
 
 > 创建：2026-08-14。
-> 状态：诉求与方案已确认；`P1`–`P3` 代码已在工作区完成但未提交，`P4`–`P6` 未落代码，`P7` 待查。
+> 状态：`P1`–`P6` 已落代码并按原子规则提交（尚未 push，也未在生产验证）；`P7` 待查。
 > 当前事实来源仍为 [`docs/current-state.md`](current-state.md)。本文只覆盖服务端自动创建 PR 链路，不改变自动合并/自动推进「默认关闭且本阶段不实现」的结论。
 > 方案与验收标准的上游文档为 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。
 
@@ -92,16 +92,20 @@
 
 按 `AGENTS.md` 的要求，每步先写失败的单元测试，再实现最小通过改动。`deriveStageDecision`、`src/lib/domain.ts`、`src/lib/workflow.ts`、`src/lib/workflow-run.ts` 属于事实来源，改动前必须有测试钉住。
 
-| 步骤 | 内容 | 涉及文件 |
-| --- | --- | --- |
-| 1 | `canCreateNext` 推导 + `actionable` 修正；`unlocked` 计算上移到函数顶部，使三处提前返回也能带上该字段 | `api/_lib/workflows-store.ts` |
-| 2 | 入队闸门与执行复查改判同一字段，消除 P4 的自毁竞态 | `api/_lib/workflows-store.ts` |
-| 3 | 动作队列入列条件与过滤条件改为显式判断，`merged` 且 `canCreateNext` 时以 `ready-to-create` 入列 | `api/_lib/workflows-store.ts` |
-| 4 | 抽屉创建按钮改读 `decision.canCreateNext`，不再依赖现拉的 GitHub detail | `src/main.ts` |
-| 5 | 执行器幂等化：P5 记成功、P6 记终态 | `api/_lib/workflows-store.ts` |
-| 6 | 沙盒回收（P7）单独排查后另行记录 | 待定 |
+| 步骤 | 内容 | 涉及文件 | 状态 |
+| --- | --- | --- | --- |
+| 1 | `canCreateNext` 推导 + `actionable` 修正；`unlocked` 计算上移到函数顶部，使三处提前返回也能带上该字段 | `api/_lib/workflows-store.ts` | 已提交 `933dfd79` |
+| 2 | 入队闸门与执行复查改判同一字段，消除 P4 的自毁竞态 | `api/_lib/workflows-store.ts` | 已提交 `933dfd79` |
+| 3 | 动作队列入列条件与过滤条件改为显式判断，`merged` 且 `canCreateNext` 时以 `ready-to-create` 入列 | `api/_lib/workflows-store.ts` | 已提交 `933dfd79` |
+| 4 | 抽屉创建按钮改读 `decision.canCreateNext`，不再依赖现拉的 GitHub detail | `src/main.ts` | 已提交 `fa2696e7` |
+| 5 | 执行器幂等化：P5 记成功、P6 记终态 | `api/_lib/workflows-store.ts` | 已提交 `7a53c026` |
+| 6 | 沙盒回收（P7）单独排查后另行记录 | 待定 | 未开始 |
+
+步骤 5 的落地形态：新增纯函数 `automationCreateOutcome(openPulls, commitCount)` 作为可测接缝，`idempotent` 走与成功一致的收尾并在审计 `metadata` 打 `idempotent: true`；`cancelled` 写入 `workflow_automation_actions.state = 'cancelled'` 与 `workflow_automation_runs.state = 'cancelled'`，原因写在 `failure_reason`。两张表的 `CHECK` 约束在 `db/migrations/025` 中已包含 `cancelled`，因此**没有新增迁移**。命中已存在开放 PR 时不再请求 `compare`，少一次 GitHub 调用。
 
 提交按功能拆分，`api` 与 CI 配置分开，commit message 用英文。
+
+> 已知无关缺陷：`e2e/pr-helper.spec.ts` 的 9 个用例在 `b82698ee`（本批改动之前）就已全红，失败点是 `openWorkspace` 等不到 `项目流程看板` 标题。已用 `git stash` 在 HEAD 上复现，确认与本批无关；因此本批的回归验证只覆盖单元测试、`tsc` 与 `lint`，E2E 需要单独排查。
 
 不需要 DDL：迁移基线保持 `001`–`026`，`019` 的 `workflow_stage_states_stage_identity_idx` 已覆盖 P3 新增子查询的前缀。若 P6 需要新的 `state` 枚举值，则新增有序迁移文件。
 
