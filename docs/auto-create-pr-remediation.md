@@ -83,7 +83,7 @@
 - **删除不会留孤儿**：`workflow_stage_states`(004)、`workflow_stage_events`(008)、`workflow_versions` / `workflow_runs`(015)、`pr_helper_workflow_team_shares`(023)、`workflow_automation_runs` / `workflow_automation_actions`(025) 都以 `(user_id, workflow_id)` 外键 `ON DELETE CASCADE` 挂在 `pr_helper_workflows` 上，删流程即连带清空。
 - **待你决定的动作**（二选一，都不需要改代码）：
   1. 在 UI 里删掉沙盒流程 `pr-helper-e2e-sandbox-1785691296724-69q14`，队列即恢复干净；验收报告里引用的 GitHub 仓库与 PR 不受影响。
-  2. 保留它，接受收件箱长期多一条 `ready-to-create`。当前没有「归档 / 静音流程」的概念，若想保留又不想被提醒，那是一个新的产品需求，应单独设计。
+  2. 保留它，接受收件箱长期多一条 `ready-to-create`。当前没有「归档 / 静音流程」的概念，若想保留又不想被提醒，那是一个新的产品需求，已记入 [`docs/current-state.md`](current-state.md) 的「八、非验收类后续开发」，后续单独设计开发。
 
 ## 四、需求决策
 
