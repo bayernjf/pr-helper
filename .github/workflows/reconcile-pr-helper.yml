@@ -33,6 +33,6 @@ jobs:
       - name: Calibrate active workflows
         if: steps.config.outputs.configured == 'true'
         run: |
-          curl --fail-with-body --silent --show-error --max-time 30 --retry 2 \
+          curl --fail-with-body --silent --show-error --max-time 90 \
             --header "Authorization: Bearer ${CRON_SECRET}" \
             "$RECONCILE_URL"
