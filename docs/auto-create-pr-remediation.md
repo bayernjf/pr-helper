@@ -1,7 +1,7 @@
 # 自动创建 PR 失效：诉求、问题与修复方案
 
 > 创建：2026-08-14。
-> 状态：`P1`–`P6` 已落代码并按原子规则提交（尚未 push，也未在生产验证）；`P7` 已查清，不是缺陷，等一个数据清理决定。
+> 状态：`P1`–`P6` 已落代码并合入 `main`，生产已部署；`P3` 生产验收通过；`P7` 已查清，不是缺陷，等一个数据清理决定。生产验收过程中查出 `P8`（`workflow_automation_actions` 缺列导致执行器必然抛错），**这是自动创建至今从未成功过的真正根因，尚未修**。
 > 当前事实来源仍为 [`docs/current-state.md`](current-state.md)。本文只覆盖服务端自动创建 PR 链路，不改变自动合并/自动推进「默认关闭且本阶段不实现」的结论。
 > 方案与验收标准的上游文档为 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。
 
@@ -49,6 +49,9 @@
 - **修法**：按 `max(workflow_stage_states.updated_at)` 取最陈旧的 8 个 workflow 分批（仅 `trigger === 'cron'` 生效，webhook/inbox 作用域不截断），可用 `CRON_RECONCILE_BATCH_SIZE` 覆盖，`0` 关闭；`--max-time` 提到 90 秒并**移除 `--retry 2`**。
 - **位置**：`api/_lib/workflows-store.ts`、`.github/workflows/reconcile-pr-helper.yml`。
 - **代价**：全量轮转周期由 10 分钟变为约 60 分钟。这个代价成立的前提是 webhook 能承担实时性，而 webhook 目前被截断（见第八节），所以 P3 的最终定案依赖 webhook 修复。
+- **生产验收通过**：上线前的定时运行以三次 `curl: (28)` 超时失败（旧的 `--max-time 30 --retry 2`）；上线后三次 `workflow_dispatch` 均成功，返回 `{"reconciled":8}`、`{"reconciled":8}`、`{"reconciled":15}`，耗时 21.5 / 21.5 / 36.5 秒，对比旧的 155–163 秒。
+- **实测轮转周期远大于设计值**：GitHub 对 `*/10` 的 schedule 有节流，实际约**一小时**才落地一次(上线后 24 小时内只有一次 schedule 成功)。34 条流程按 8 条一轮需 4 轮，因此最坏反应延迟约 4 小时而非 1 小时。这不是分批逻辑的缺陷（分批排序经真实数据验证正确），但把 webhook 修复的优先级进一步抬高。
+- **排查中曾两次误判分批引入回归，均已否证**：一是怀疑 `max(workflow_stage_states.updated_at)` 为 NULL 的流程被饿死——实际 NULL 折成 0 会排在**最前**，而新建的一批 landing 流程当时正是 NULL，它们连续占满了前几轮，看起来像是老流程被跳过；二是怀疑 payload 校验把流程剔出候选集、或 `JOIN pr_helper_users` 产生孤儿——生产 SQL 确认 34 行全部 JOIN 命中、payload 的 `automation` / `waitFor` / `independent` / `recoveryPolicy` 全为「键不存在」而非显式 `null`，两条都不成立。`bayjf-…cjtnq` 最终在 23:24:34 被正常校准。
 
 ### P4 `StageDecision.kind` 一个枚举承担两种语义（未落代码）
 
@@ -85,6 +88,17 @@
   1. 在 UI 里删掉沙盒流程 `pr-helper-e2e-sandbox-1785691296724-69q14`，队列即恢复干净；验收报告里引用的 GitHub 仓库与 PR 不受影响。
   2. 保留它，接受收件箱长期多一条 `ready-to-create`。当前没有「归档 / 静音流程」的概念，若想保留又不想被提醒，那是一个新的产品需求，已记入 [`docs/current-state.md`](current-state.md) 的「八、非验收类后续开发」，后续单独设计开发。
 
+### P8 执行器查询了不存在的列（未落代码，**自动创建从未成功的真正根因**）
+
+- **现象**：动作停在 `state='queued'`、`attempts=0`，`failure_reason` 为 `column "stage_index" does not exist`。
+- **根因**：`workflow_automation_actions` 表**没有** `stage_index` 列——`db/migrations/025_workflow_automation_queue.sql` 只把它建在 `workflow_automation_runs` 上，后续迁移也没有补。但有两条查询在 SELECT 它：
+  - `executeWorkflowAutomationActionForUser` 的第一条语句。它在 `UPDATE ... state = 'running', attempts = attempts + 1` **之前**就抛错，所以动作既不被领取、`attempts` 也不自增，错误由 `scheduleServerAutoCreate` 的 catch（P2 修好的那个）写进 `failure_reason`。
+  - `listWorkflowAutomationActions`，即 UI 的自动化队列面板，同样会 500。
+- **为何一直没被发现**：`api/workflows.ts` 的手动执行入口调用的是另一条路径，不经过这条 SELECT；而在 P2 之前失败是完全静默的，队列看起来只是空闲。P1 修好身份归一化、P2 修好静默失败之后，这条错误才第一次被写进库里。
+- **修法**：不加迁移，把这两条查询改为 JOIN `workflow_automation_runs` 取 `stage_index`。该列已存在于 runs 表，动作与 run 是多对一且必然有 run，JOIN 是最小改动。另一条路是加迁移在 actions 表冗余一列，但需要 NOT NULL 回填、且数据重复，代价更大。
+- **测试形态**：这里无法 mock SQL，因此按 `AGENTS.md` 第 2 条先写一条**静态一致性守卫**：从 `db/migrations/` 解析出 `workflow_automation_actions` 的真实列集合，再从 `api/_lib/workflows-store.ts` 抽出所有针对该表的 SELECT 列名，断言前者包含后者。当前会因 `stage_index` 失败，修完转绿，此后任何「查了不存在的列」都会在 CI 被拦住。
+- **位置**：`api/_lib/workflows-store.ts`。
+
 ## 四、需求决策
 
 **`pull_state='merged'` + 合并后门禁失败 + `ahead_by > 0` 时，`canCreateNext = false`。**
@@ -105,6 +119,7 @@
 | 4 | 抽屉创建按钮改读 `decision.canCreateNext`，不再依赖现拉的 GitHub detail | `src/main.ts` | 已提交 `fa2696e7` |
 | 5 | 执行器幂等化：P5 记成功、P6 记终态 | `api/_lib/workflows-store.ts` | 已提交 `7a53c026` |
 | 6 | 沙盒回收（P7）排查 | — | 已查清：非缺陷，见第三节 P7 |
+| 7 | 执行器与队列列表改为 JOIN `workflow_automation_runs` 取 `stage_index`（P8），并加迁移列与 SELECT 的静态一致性守卫 | `api/_lib/workflows-store.ts`、`api/_lib/workflows-store.test.ts` | 未落代码 |
 
 步骤 5 的落地形态：新增纯函数 `automationCreateOutcome(openPulls, commitCount)` 作为可测接缝，`idempotent` 走与成功一致的收尾并在审计 `metadata` 打 `idempotent: true`；`cancelled` 写入 `workflow_automation_actions.state = 'cancelled'` 与 `workflow_automation_runs.state = 'cancelled'`，原因写在 `failure_reason`。两张表的 `CHECK` 约束在 `db/migrations/025` 中已包含 `cancelled`，因此**没有新增迁移**。命中已存在开放 PR 时不再请求 `compare`，少一次 GitHub 调用。
 
@@ -158,12 +173,26 @@
 6. 门禁为红的路由确认**没有**触发自动创建。
 7. 幂等验证：连续两次触发同一 `source → target`，确认第二次记为成功幂等命中而非 paused。
 
+**已执行结果（2026-08-13 至 08-14，`main` = `bc23f642`）**
+
+| 项 | 结果 |
+| --- | --- |
+| 1 校准任务转绿、无重叠 | **通过**，见第三节 P3 |
+| 2 无 `stages_total=0` 孤儿 running 行 | cron 一路 `success`；webhook 仍全部停在 running（本就在第八节例外内） |
+| 3 滞留动作不再停在 `queued`+`attempts=0` | **未通过，但暴露了 P8**：动作 3 拿到了可读原因 `column "stage_index" does not exist`（`updated_at = 23:24:37`），说明 P1/P2 生效、执行确实被触发，卡点在 P8。动作 1、2 的 `headSha` 已过期，不会再被执行 |
+| 4 自动创建在一个轮转周期内触发且只建一个 PR | **未通过**，`bayernjf/bayjf` 没有新 PR，被 P8 阻断 |
+| 5 收件箱与抽屉判断一致 | 待你在浏览器确认 |
+| 6 门禁为红不触发自动创建 | 待验，需先修 P8 |
+| 7 幂等命中记成功 | 待验，需先修 P8 |
+
+链路上除 P8 之外的前置条件均已在生产核实：`pr_helper_ai_automation_credentials` 有一行且 `auto_generate_pr_message` / `auto_confirm_pr_creation` 均为 true；`bayjf-…cjtnq` 的 stage 0 为 `merged` / `checks=pending` / `ahead_by=3`、阈值 1、`executionMode='server'`，GitHub 侧确认 `ahead_by=3 behind=15 diverged` 且无开放 PR。也就是说 `canCreateNext` 与入队闸门都已放行，动作被真实领取执行，只是执行器第一条 SELECT 就抛错。
+
 ### 回滚方式
 
 本批为纯代码改动、无 DDL，回滚等价于回退提交。P3 的批量大小可通过 `CRON_RECONCILE_BATCH_SIZE=0` 在不发版的情况下关闭分批。
 
 ## 八、不在本批
 
-- **Webhook 与 inbox 的 fire-and-forget 截断**：`api/github/webhook.ts` 在返回 202 之后才 `void reconcileWorkflowStages(...)`，Vercel 随即冻结函数，因此每一条 `trigger='webhook'` 的 reconciliation 都停在 `running` / `stages_total=0`。全仓没有任何 `waitUntil`。这是 P3 代价成立的前提，也是自动创建实时性的关键，优先级应高于 P7。
+- **Webhook 与 inbox 的 fire-and-forget 截断**：`api/github/webhook.ts` 在返回 202 之后才 `void reconcileWorkflowStages(...)`，Vercel 随即冻结函数，因此每一条 `trigger='webhook'` 的 reconciliation 都停在 `running` / `stages_total=0`。全仓没有任何 `waitUntil`。这是 P3 代价成立的前提，也是自动创建实时性的关键，优先级应高于 P7。新增证据：2026-08-13 23:24 有一条 webhook 行以 `canceling statement due to statement timeout` 失败，`duration_ms=171876`，同时另有 6 条并发 webhook 行停在 running——`query()` 用 `max: 1` 连接池，被截断的 sweep 之间会互相挤压，所以修复形态需要同时考虑并发抑制，而不只是补 `waitUntil`。
 - 泳道徽标与 `workflowRunSummary` 当前步指针（见第六节）。
 - 自动合并、自动推进、无人值守代码修改。

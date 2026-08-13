@@ -113,7 +113,9 @@ AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 P
 
 当前生产诊断结论：GitHub App 已勾选 Push，GitHub Actions 的 `PR_HELPER_CRON_SECRET` 已与 Vercel Production 重新同步。2026-08-13 的生产库查询已定位自动创建 PR 不工作的完整原因链，并确认与凭据、偏好和规则快照配置无关：动作能入队但从未被领取（`queued` / `attempts=0` / `failure_reason=null`），根因是 `BIGSERIAL` 身份被 postgres.js 返回为字符串后未归一化，以及一处空 `catch` 吞掉了失败；cron 校准实际是跑完的（`51/51` 阶段，约 160 秒），Actions 报红只是 `curl --max-time 30` 提前放弃，`--retry 2` 还派生了重叠的全量 sweep。另外 `deriveStageDecision` 用单个枚举同时承担展示状态和可执行性，导致「已合并 + 全绿 + 有新提交」永远无法进入自动创建门禁。
 
-诉求、问题清单、修复方案、修复后影响和回归测试清单见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。已确认的需求决策：合并后门禁为红时不自动向下游创建 PR。已在工作区完成但未提交的是身份归一化、失败留痕和 cron 分批三项；统一决策模型和执行器幂等化尚未落代码。
+诉求、问题清单、修复方案、修复后影响和回归测试清单见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。已确认的需求决策：合并后门禁为红时不自动向下游创建 PR。`P1`–`P6` 已全部提交并合入 `main`、生产已部署，`P3`（cron 分批 + curl 超时）生产验收通过。
+
+生产验收查出仍未修的真正根因 `P8`：`workflow_automation_actions` 表没有 `stage_index` 列（`025` 只把它建在 `workflow_automation_runs` 上），而执行器 `executeWorkflowAutomationActionForUser` 和队列列表 `listWorkflowAutomationActions` 都在 SELECT 它。执行器在原子领取动作**之前**就抛 `column "stage_index" does not exist`，所以动作永远停在 `queued` / `attempts=0`——这是自动创建至今从未成功过的原因。修法是把两条查询改为 JOIN `workflow_automation_runs` 取该列，不需要迁移；配套加一条「迁移列集合 ⊇ SELECT 列名」的静态一致性守卫测试。P1/P2 的价值在于让这条错误第一次被写进 `failure_reason` 而不是继续静默。
 
 在上述生产验收通过后，建议顺序为：
 
