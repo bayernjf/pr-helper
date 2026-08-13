@@ -1,3 +1,8 @@
+import { readFileSync, readdirSync } from 'node:fs';
+
+const MIGRATIONS_DIR = new URL('../../db/migrations/', import.meta.url);
+const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
+
 import { describe, expect, it } from 'vitest';
 
 import { actionableStageEntry, automationActionId, automationCreateOutcome, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
@@ -447,4 +452,51 @@ describe('automation create outcome', () => {
   it('ignores an unusable pull number instead of reporting a false idempotent hit', () => {
     expect(automationCreateOutcome([{ number: 0 }], 2)).toEqual({ kind: 'create' });
   });
+});
+
+// The store speaks SQL that unit tests cannot execute, so the only guard against selecting a
+// column no migration ever created is to compare the two texts directly.
+function migrationSql() {
+  return readdirSync(MIGRATIONS_DIR).filter(file => file.endsWith('.sql')).sort()
+    .map(file => readFileSync(new URL(file, MIGRATIONS_DIR), 'utf8')).join('\n');
+}
+
+function declaredColumns(sqlText: string, table: string) {
+  const columns = new Set<string>();
+  const create = new RegExp(`CREATE TABLE (?:IF NOT EXISTS )?${table}\\s*\\(([\\s\\S]*?)\\n\\);`, 'i').exec(sqlText);
+  for (const line of create?.[1].split('\n') || []) {
+    const declaration = /^\s+([a-z_][a-z0-9_]*)\s+[A-Za-z]/.exec(line);
+    if (declaration && !['unique', 'primary', 'foreign', 'check', 'constraint'].includes(declaration[1])) columns.add(declaration[1]);
+  }
+  for (const altered of sqlText.matchAll(new RegExp(`ALTER TABLE ${table}\\b([\\s\\S]*?);`, 'gi'))) {
+    for (const added of altered[1].matchAll(/ADD COLUMN (?:IF NOT EXISTS )?([a-z_][a-z0-9_]*)/gi)) columns.add(added[1]);
+  }
+  return columns;
+}
+
+function selectedColumns(source: string, table: string) {
+  const selected = new Set<string>();
+  for (const statement of source.matchAll(new RegExp(`SELECT\\s+((?:(?!\\bFROM\\b)[\\s\\S])*?)\\s+FROM\\s+${table}(?:\\s+([a-z_][a-z0-9_]*))?`, 'gi'))) {
+    const alias = statement[2];
+    for (const expression of statement[1].split(',')) {
+      const column = expression.trim().replace(/\s+AS\s+[a-z_][a-z0-9_]*$/i, '').trim();
+      const qualified = /^([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)$/.exec(column);
+      if (qualified) { if (qualified[1] === alias) selected.add(qualified[2]); continue; }
+      if (/^[a-z_][a-z0-9_]*$/.test(column)) selected.add(column);
+    }
+  }
+  return selected;
+}
+
+describe('store queries against the migration schema', () => {
+  const schema = migrationSql();
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+
+  for (const table of ['workflow_automation_actions', 'workflow_automation_runs', 'workflow_stage_states'] as const) {
+    it(`only selects columns that ${table} actually declares`, () => {
+      const declared = declaredColumns(schema, table);
+      expect(declared.size).toBeGreaterThan(0);
+      expect([...selectedColumns(source, table)].filter(column => !declared.has(column))).toEqual([]);
+    });
+  }
 });
