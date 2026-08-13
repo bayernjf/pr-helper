@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { automationActionId, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { actionableStageEntry, automationActionId, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -346,6 +346,67 @@ describe('stable stage identity', () => {
       { stage_index: 1, stage_id: 'stage-dev', pull_state: 'none', checks_state: 'unknown' },
     ]);
     expect(decision).toMatchObject({ kind: 'locked', message: '等待前序步骤合并。' });
+  });
+});
+
+describe('stage decision affordances', () => {
+  const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature', target: 'dev', stageId: 'stage-feature' }, { source: 'dev', target: 'main', stageId: 'stage-dev' }] };
+  const state = (overrides: Record<string, unknown>) => ({ stage_id: 'stage-feature', pull_state: 'none', checks_state: 'unknown', approvals: 0, required_approvals: 0, mergeable: null, mergeable_state: null, ahead_by: 0, ...overrides }) as Parameters<typeof deriveStageDecision>[2];
+  const allStates = [{ stage_index: 0, stage_id: 'stage-feature', pull_state: 'none', checks_state: 'unknown' }];
+
+  it('reports a merged route with new commits as still creatable without losing its merged state', () => {
+    const decision = deriveStageDecision(workflow, 0, state({ pull_state: 'merged', checks_state: 'success', ahead_by: 2 }), allStates);
+    expect(decision).toMatchObject({ kind: 'merged', canCreateNext: true, actionable: true });
+  });
+
+  it('keeps a merged route without new commits terminal', () => {
+    expect(deriveStageDecision(workflow, 0, state({ pull_state: 'merged', checks_state: 'success' }), allStates)).toMatchObject({ kind: 'merged', canCreateNext: false, actionable: false });
+  });
+
+  it('does not advance past a failing post-merge gate', () => {
+    expect(deriveStageDecision(workflow, 0, state({ pull_state: 'merged', checks_state: 'failure', ahead_by: 2 }), allStates)).toMatchObject({ kind: 'checks-failed', canCreateNext: false });
+  });
+
+  it('reports a never created route with new commits as creatable', () => {
+    expect(deriveStageDecision(workflow, 0, state({ ahead_by: 1 }), allStates)).toMatchObject({ kind: 'ready-to-create', canCreateNext: true });
+  });
+
+  it('refuses to create while an open pull request is still in flight', () => {
+    expect(deriveStageDecision(workflow, 0, state({ pull_state: 'open', ahead_by: 3 }), allStates)).toMatchObject({ canCreateNext: false });
+  });
+
+  it('refuses to create a locked stage even when its source moved ahead', () => {
+    const locked = deriveStageDecision(workflow, 1, state({ stage_id: 'stage-dev', ahead_by: 4 }), [
+      { stage_index: 0, stage_id: 'stage-feature', pull_state: 'open', checks_state: 'pending' },
+      { stage_index: 1, stage_id: 'stage-dev', pull_state: 'none', checks_state: 'unknown' },
+    ]);
+    expect(locked).toMatchObject({ kind: 'locked', canCreateNext: false });
+  });
+
+  it('refuses to create when the state does not belong to the stage', () => {
+    expect(deriveStageDecision(workflow, 0, state({ stage_id: 'stage-dev', ahead_by: 5 }), allStates)).toMatchObject({ kind: 'none', canCreateNext: false });
+  });
+});
+
+describe('actionable stage projection', () => {
+  const decision = (overrides: Record<string, unknown>) => ({ kind: 'merged', actionable: false, canCreateNext: false, message: '已合并且门禁通过', ...overrides }) as Parameters<typeof actionableStageEntry>[0];
+
+  it('lists a merged route that can create the next pull request', () => {
+    expect(actionableStageEntry(decision({ actionable: true, canCreateNext: true, message: '已合并，有新提交可以创建新 PR' }))).toEqual({ kind: 'ready-to-create', message: '已合并，有新提交可以创建新 PR' });
+  });
+
+  it('omits a merged route with nothing left to do', () => {
+    expect(actionableStageEntry(decision({}))).toBeNull();
+  });
+
+  it('lists a failing gate once and does not also offer creation', () => {
+    expect(actionableStageEntry(decision({ kind: 'checks-failed', actionable: true, message: '第 1 步 Actions 失败' }))).toEqual({ kind: 'checks-failed', message: '第 1 步 Actions 失败' });
+  });
+
+  it('omits states that carry no operation', () => {
+    expect(actionableStageEntry(decision({ kind: 'waiting', message: '等待 GitHub 状态更新' }))).toBeNull();
+    expect(actionableStageEntry(decision({ kind: 'locked', message: '等待前序步骤合并。' }))).toBeNull();
+    expect(actionableStageEntry(decision({ kind: 'none', message: '暂无状态' }))).toBeNull();
   });
 });
 

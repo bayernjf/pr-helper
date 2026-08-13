@@ -128,7 +128,7 @@ async function enqueueServerAutoCreate(environment: Record<string, string | unde
 async function scheduleServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string) {
   const states = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`;
   const current = states.find(state => state.stage_id === workflow.stages[stageIndex]?.stageId && state.source === source);
-  if (!current || deriveStageDecision(workflow, stageIndex, current, states).kind !== 'ready-to-create') return;
+  if (!current || !deriveStageDecision(workflow, stageIndex, current, states).canCreateNext) return;
   const actionId = await enqueueServerAutoCreate(environment, sql, row, workflow, stageIndex, source, headSha, current.ahead_by);
   if (!actionId) return;
   try { await executeWorkflowAutomationActionForUser(environment, row.user_id, row.github_installation_id!, actionId); }
@@ -169,7 +169,7 @@ async function executeWorkflowAutomationActionForUser(environment: Record<string
     if (!action.payload?.generationRule?.trim()) throw new Error('自动化动作缺少生成规则快照');
     const currentStates = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
     const current = currentStates.find(state => state.stage_id === action.stage_id && state.source === action.source);
-    if (!current || deriveStageDecision(workflow, action.stage_index, current, currentStates).kind !== 'ready-to-create') throw new Error('当前步骤尚未满足自动创建 PR 的门禁');
+    if (!current || !deriveStageDecision(workflow, action.stage_index, current, currentStates).canCreateNext) throw new Error('当前步骤尚未满足自动创建 PR 的门禁');
     const triggerMinCommits = typeof stage.automation.triggerMinCommits === 'number' && Number.isInteger(stage.automation.triggerMinCommits) ? Math.min(20, Math.max(1, stage.automation.triggerMinCommits)) : 1;
     if (current.ahead_by < triggerMinCommits) throw new Error(`新提交数未达到自动创建阈值（需要 ${triggerMinCommits} 个）`);
     const credential = await readAiAutomationCredentialForUser(environment, userId);
@@ -362,7 +362,7 @@ export type ActionableStage = {
   message: string;
 };
 export type StageDecisionKind = 'none' | 'locked' | 'waiting' | 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create' | 'merged';
-export type StageDecision = { kind: StageDecisionKind; actionable: boolean; message: string };
+export type StageDecision = { kind: StageDecisionKind; actionable: boolean; canCreateNext: boolean; message: string };
 export type ReconciliationTrigger = 'cron' | 'webhook' | 'inbox_refresh' | 'manual';
 export type ReconciliationRun = { id: number; trigger: ReconciliationTrigger; state: 'running' | 'success' | 'degraded' | 'failure'; stagesTotal: number; stagesReconciled: number; stagesFailed: number; durationMs: number | null; errorMessage: string | null; repository: string | null; startedAt: string; finishedAt: string | null };
 export type StageSyncHealth = { workflowId: string; stageIndex: number; stageId: string | null; source: string; target: string; updatedAt: string; ageSeconds: number; stale: boolean };
@@ -806,21 +806,30 @@ function stageIsUnlocked(workflow: StoredWorkflow, stageIndex: number, states: {
 
 export function deriveStageDecision(workflow: StoredWorkflow, stageIndex: number, state: Pick<StageStateRow, 'stage_id' | 'pull_state' | 'checks_state' | 'approvals' | 'required_approvals' | 'mergeable' | 'mergeable_state' | 'ahead_by'>, allStates: readonly (Pick<StageStateRow, 'stage_index' | 'stage_id' | 'pull_state' | 'checks_state'> & { checks_total?: number })[]): StageDecision {
   const stage = workflow.stages[stageIndex];
-  if (!stage || !state.stage_id || state.stage_id !== stage.stageId) return { kind: 'none', actionable: false, message: '暂无状态' };
-  if (state.checks_state === 'failure') return { kind: 'checks-failed', actionable: true, message: `第 ${stageIndex + 1} 步 Actions 失败` };
-  if (state.pull_state === 'open' && state.approvals < state.required_approvals) return { kind: 'needs-approval', actionable: true, message: `PR 还需要 ${state.required_approvals - state.approvals} 个 Approval` };
-  if (state.pull_state === 'open' && state.checks_state === 'success' && state.approvals >= state.required_approvals && state.mergeable === true && state.mergeable_state === 'clean') return { kind: 'ready-to-merge', actionable: true, message: 'PR 已满足合并条件' };
-  if (state.pull_state === 'merged' && state.checks_state === 'success') return { kind: 'merged', actionable: false, message: '已合并且门禁通过' };
+  if (!stage || !state.stage_id || state.stage_id !== stage.stageId) return { kind: 'none', actionable: false, canCreateNext: false, message: '暂无状态' };
   const comparableStates = allStates.filter(candidate => Boolean(candidate.stage_id)).map(candidate => ({ ...candidate, stage_id: candidate.stage_id! }));
   const unlocked = stageIsUnlocked(workflow, stageIndex, comparableStates);
-  if (unlocked && state.pull_state === 'none' && state.ahead_by > 0) return { kind: 'ready-to-create', actionable: true, message: '可以创建下一步 PR' };
-  if (unlocked && state.pull_state === 'merged' && state.ahead_by > 0) return { kind: 'ready-to-create', actionable: true, message: '有新提交，可以创建新 PR' };
-  if (unlocked) return { kind: 'waiting', actionable: false, message: '等待 GitHub 状态更新' };
+  // `kind` is the display state and cannot also carry the affordance: a merged route with new
+  // commits is both. A red post-merge gate withholds it so nothing is pushed downstream unattended.
+  const canCreateNext = unlocked && state.ahead_by > 0 && state.checks_state !== 'failure' && (state.pull_state === 'none' || state.pull_state === 'merged');
+  if (state.checks_state === 'failure') return { kind: 'checks-failed', actionable: true, canCreateNext, message: `第 ${stageIndex + 1} 步 Actions 失败` };
+  if (state.pull_state === 'open' && state.approvals < state.required_approvals) return { kind: 'needs-approval', actionable: true, canCreateNext, message: `PR 还需要 ${state.required_approvals - state.approvals} 个 Approval` };
+  if (state.pull_state === 'open' && state.checks_state === 'success' && state.approvals >= state.required_approvals && state.mergeable === true && state.mergeable_state === 'clean') return { kind: 'ready-to-merge', actionable: true, canCreateNext, message: 'PR 已满足合并条件' };
+  if (state.pull_state === 'merged' && state.checks_state === 'success') return { kind: 'merged', actionable: canCreateNext, canCreateNext, message: canCreateNext ? '已合并，有新提交可以创建新 PR' : '已合并且门禁通过' };
+  if (canCreateNext && state.pull_state === 'none') return { kind: 'ready-to-create', actionable: true, canCreateNext, message: '可以创建下一步 PR' };
+  if (canCreateNext) return { kind: 'ready-to-create', actionable: true, canCreateNext, message: '有新提交，可以创建新 PR' };
+  if (unlocked) return { kind: 'waiting', actionable: false, canCreateNext, message: '等待 GitHub 状态更新' };
   const dependencies = workflow.stages[stageIndex]?.waitFor?.length ? workflow.stages[stageIndex].waitFor : stageIndex > 0 ? [stageIndex - 1] : [];
   const dependencyIds = dependencies.map(index => workflow.stages[index]?.stageId).filter((id): id is string => Boolean(id));
   const dependencyStates = allStates.filter(candidate => candidate.stage_id !== null && dependencyIds.includes(candidate.stage_id));
   const checksConfigured = dependencyStates.some(candidate => (candidate.checks_total || 0) > 0 || candidate.checks_state !== 'success');
-  return { kind: 'locked', actionable: false, message: checksConfigured ? '等待前序步骤合并且合并后 Actions 成功。' : '等待前序步骤合并。' };
+  return { kind: 'locked', actionable: false, canCreateNext, message: checksConfigured ? '等待前序步骤合并且合并后 Actions 成功。' : '等待前序步骤合并。' };
+}
+
+export function actionableStageEntry(decision: StageDecision): { kind: ActionableStage['kind']; message: string } | null {
+  if (decision.kind === 'merged') return decision.canCreateNext ? { kind: 'ready-to-create', message: decision.message } : null;
+  if (!decision.actionable || decision.kind === 'none' || decision.kind === 'locked' || decision.kind === 'waiting') return null;
+  return { kind: decision.kind, message: decision.message };
 }
 
 export function initialWebhookChecksState(mergedAt?: string | null) {
@@ -1256,7 +1265,7 @@ export async function listWorkflowStageStates(environment: Record<string, string
     updatedAt: row.updated_at,
     decision: workflowById.has(row.workflow_id)
       ? deriveStageDecision(workflowById.get(row.workflow_id)!, row.stage_index, row, rows.filter(candidate => candidate.workflow_id === row.workflow_id))
-      : { kind: 'none' as const, actionable: false, message: '暂无状态' },
+      : { kind: 'none' as const, actionable: false, canCreateNext: false, message: '暂无状态' },
   }));
 }
 
@@ -1314,8 +1323,8 @@ export async function listActionableStages(environment: Record<string, string | 
       const preceding = states.filter(state => state.workflow_id === workflow.id);
       routeStates.forEach(state => {
         const base = { workflowId: workflow.id, workflowName: workflow.name, repository: workflow.repository, stageIndex, source: state.source, target: stage.target, pullNumber: state.pull_number || null };
-        const decision = deriveStageDecision(workflow, stageIndex, state, preceding);
-        if (decision.actionable && decision.kind !== 'none' && decision.kind !== 'locked' && decision.kind !== 'waiting' && decision.kind !== 'merged') items.push({ ...base, kind: decision.kind, message: decision.message });
+        const entry = actionableStageEntry(deriveStageDecision(workflow, stageIndex, state, preceding));
+        if (entry) items.push({ ...base, ...entry });
       });
       return items;
     }, []);
