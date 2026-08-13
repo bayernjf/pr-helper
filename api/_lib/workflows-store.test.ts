@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { automationActionId, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -302,5 +302,22 @@ describe('stable stage identity', () => {
       { stage_index: 1, stage_id: 'stage-dev', pull_state: 'none', checks_state: 'unknown' },
     ]);
     expect(decision).toMatchObject({ kind: 'locked', message: '等待前序步骤合并。' });
+  });
+});
+
+describe('automation action identity', () => {
+  it('accepts a bigint identity returned as a string by the database driver', () => {
+    expect(automationActionId('2')).toBe(2);
+    expect(automationActionId(2)).toBe(2);
+  });
+
+  it('rejects values that cannot identify a queued action', () => {
+    expect(automationActionId(null)).toBeNull();
+    expect(automationActionId(undefined)).toBeNull();
+    expect(automationActionId('0')).toBeNull();
+    expect(automationActionId('-1')).toBeNull();
+    expect(automationActionId('2.5')).toBeNull();
+    expect(automationActionId('abc')).toBeNull();
+    expect(automationActionId('')).toBeNull();
   });
 });

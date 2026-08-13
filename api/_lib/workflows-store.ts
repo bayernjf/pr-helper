@@ -90,7 +90,14 @@ export async function enqueueWorkflowAutomationAction(environment: Record<string
 
 type AutomationActionRow = { id: number; run_id: number; workflow_id: string; stage_id: string; stage_index: number; source: string; target: string; kind: WorkflowAutomationAction['kind']; state: WorkflowAutomationAction['state']; attempts: number; payload: { generationRule?: string } | null };
 
-async function enqueueServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string, aheadBy: number) {
+// BIGSERIAL identities arrive as strings from postgres.js, so every queue identity
+// crosses back into the executor through this normalization.
+export function automationActionId(value: unknown) {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN;
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function enqueueServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string, aheadBy: number): Promise<number | null> {
   const stage = stageForIndex(workflow, stageIndex);
   const automation = stage?.automation;
   if (!stage || !stage.stageId || !row.github_installation_id || automation?.autoCreatePullRequest !== true || automation.executionMode !== 'server' || !automation.generationRule.content.trim()) return null;
@@ -104,18 +111,18 @@ async function enqueueServerAutoCreate(environment: Record<string, string | unde
     const stale = ['running', 'paused'].includes(existing[0].state) && Date.now() - Date.parse(existing[0].updated_at) > 120_000;
     if (stale) {
       const reset = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'queued', failure_reason = NULL, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${existing[0].id} AND state IN ('running', 'paused') RETURNING id`;
-      return reset[0]?.id || null;
+      return automationActionId(reset[0]?.id);
     }
-    return existing[0].state === 'queued' ? existing[0].id : null;
+    return existing[0].state === 'queued' ? automationActionId(existing[0].id) : null;
   }
   const version = (await sql<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`)[0]?.version || workflow.version || 1;
   const snapshot = { ...workflow, stages: workflow.stages.map(item => ({ ...item })) };
   const run = await sql<{ id: number }[]>`INSERT INTO workflow_automation_runs (user_id, workflow_id, workflow_version, stage_index, stage_id, source, target, workflow_snapshot) VALUES (${row.user_id}, ${workflow.id}, ${version}, ${stageIndex}, ${stage.stageId}, ${source}, ${stage.target}, ${sql.json(snapshot)}) RETURNING id`;
   const actions = await sql<{ id: number }[]>`INSERT INTO workflow_automation_actions (user_id, run_id, workflow_id, stage_id, source, target, kind, idempotency_key, payload) VALUES (${row.user_id}, ${run[0].id}, ${workflow.id}, ${stage.stageId}, ${source}, ${stage.target}, 'create-pr', ${idempotencyKey}, ${sql.json({ generationRule: automation.generationRule.content })}) ON CONFLICT (user_id, idempotency_key) DO NOTHING RETURNING id`;
-  if (actions[0]) return actions[0].id;
+  if (actions[0]) return automationActionId(actions[0].id);
   await sql`DELETE FROM workflow_automation_runs WHERE user_id = ${row.user_id} AND id = ${run[0].id}`;
   const concurrent = await sql<{ id: number; state: WorkflowAutomationAction['state'] }[]>`SELECT id, state FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
-  return concurrent[0]?.state === 'queued' ? concurrent[0].id : null;
+  return concurrent[0]?.state === 'queued' ? automationActionId(concurrent[0].id) : null;
 }
 
 async function scheduleServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string) {
@@ -125,7 +132,12 @@ async function scheduleServerAutoCreate(environment: Record<string, string | und
   const actionId = await enqueueServerAutoCreate(environment, sql, row, workflow, stageIndex, source, headSha, current.ahead_by);
   if (!actionId) return;
   try { await executeWorkflowAutomationActionForUser(environment, row.user_id, row.github_installation_id!, actionId); }
-  catch { /* The action is paused with a user-visible reason; reconciliation must keep running. */ }
+  catch (error) {
+    // Reconciliation must keep running, but an action that was never claimed keeps its
+    // queued state, so without this the queue looks idle instead of blocked.
+    const reason = error instanceof Error ? error.message : '自动创建 PR 失败';
+    await sql`UPDATE workflow_automation_actions SET failure_reason = ${reason.slice(0, 800)}, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${actionId} AND state = 'queued'`.catch(() => undefined);
+  }
 }
 
 async function generateAutomationMessage(baseUrl: string, apiKey: string, model: string, source: string, target: string, commits: string[], generationRule: string) {
