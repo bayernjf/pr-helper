@@ -510,6 +510,35 @@ describe('store queries against the migration schema', () => {
   }
 });
 
+// `import.meta.env` only exists in the Vite browser bundle. A server function that reaches a module
+// using it crashes while loading, before any handler can catch, so every route in that bundle 500s.
+function importedSourcePaths(dir: URL, suffix: '.ts'): URL[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+    const child = new URL(entry.name + (entry.isDirectory() ? '/' : ''), dir);
+    if (entry.isDirectory()) return importedSourcePaths(child, suffix);
+    return entry.name.endsWith(suffix) && !entry.name.endsWith('.test.ts') ? [child] : [];
+  });
+}
+
+function browserOnlyModulesReachableFrom(entry: URL, seen = new Set<string>()): string[] {
+  if (seen.has(entry.href)) return [];
+  seen.add(entry.href);
+  const source = readFileSync(entry, 'utf8');
+  const offenders = /import\.meta\.env/.test(source) ? [entry.pathname.replace(/^.*\/(src|api)\//, '$1/')] : [];
+  for (const statement of source.matchAll(/from '(\.[^']*)\.js'/g)) {
+    offenders.push(...browserOnlyModulesReachableFrom(new URL(`${statement[1]}.ts`, entry), seen));
+  }
+  return offenders;
+}
+
+describe('server bundle boundaries', () => {
+  for (const entry of importedSourcePaths(new URL('../', import.meta.url), '.ts')) {
+    it(`keeps browser-only modules out of ${entry.pathname.replace(/^.*\/api\//, 'api/')}`, () => {
+      expect(browserOnlyModulesReachableFrom(entry)).toEqual([]);
+    });
+  }
+});
+
 describe('jsonFromModelText', () => {
   it('returns bare JSON untouched', () => {
     expect(jsonFromModelText('{"title":"a","body":"b"}')).toBe('{"title":"a","body":"b"}');
