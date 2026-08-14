@@ -867,6 +867,44 @@ export function branchRuleMatches(rule: string, branch: string) {
   return isBranchRule(rule) ? branch.startsWith(rule.slice(0, -1)) : rule === branch;
 }
 
+type WebhookEventPayload = {
+  [key: string]: unknown;
+  ref?: unknown;
+  branches?: { name?: unknown }[];
+  pull_request?: { head?: { ref?: unknown }; base?: { ref?: unknown } };
+  check_run?: { check_suite?: { head_branch?: unknown } };
+  check_suite?: { head_branch?: unknown };
+  workflow_run?: { head_branch?: unknown };
+};
+
+// Narrowing a delivery to the branches it touched is what keeps a webhook sweep small enough to
+// finish inside one request. `null` means the event carries no branch at all, so the caller must
+// fall back to the full sweep instead of silently dropping the update.
+export function webhookBranchesForEvent(eventName: string, payload: WebhookEventPayload): string[] | null {
+  const candidates = ((): unknown[] | null => {
+    switch (eventName) {
+      case 'push': {
+        const ref = typeof payload.ref === 'string' ? payload.ref : '';
+        return ref.startsWith('refs/heads/') ? [ref.slice('refs/heads/'.length)] : [];
+      }
+      case 'pull_request': return [payload.pull_request?.head?.ref, payload.pull_request?.base?.ref];
+      case 'check_run': return [payload.check_run?.check_suite?.head_branch];
+      case 'check_suite': return [payload.check_suite?.head_branch];
+      case 'workflow_run': return [payload.workflow_run?.head_branch];
+      case 'status': return (Array.isArray(payload.branches) ? payload.branches : []).map(branch => branch?.name);
+      default: return null;
+    }
+  })();
+  return candidates && [...new Set(candidates.filter((branch): branch is string => typeof branch === 'string' && branch.length > 0))];
+}
+
+// A moved target invalidates every source route into it, while a moved source only concerns its own
+// route, so the two cases cannot collapse into one boolean.
+export function reconciliationBranchScope(stage: { source: string; target: string }, branches: readonly string[]): 'all' | 'matching' | 'none' {
+  if (branches.includes(stage.target)) return 'all';
+  return branches.some(branch => branchRuleMatches(stage.source, branch)) ? 'matching' : 'none';
+}
+
 export function branchSourcesForRule(rule: string, candidates: readonly string[]) {
   return [...new Set(candidates.filter(source => branchRuleMatches(rule, source)))];
 }
@@ -1308,7 +1346,7 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   return true;
 }
 
-async function reconcileWorkflowScope(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, workflowsToReconcile: { row: TrackedWorkflowRow; workflow: StoredWorkflow }[], filter: { repository?: string; eventName?: string }, trigger: ReconciliationTrigger) {
+async function reconcileWorkflowScope(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, workflowsToReconcile: { row: TrackedWorkflowRow; workflow: StoredWorkflow }[], filter: ReconciliationFilter, trigger: ReconciliationTrigger) {
   const startedAt = Date.now();
   const userId = workflowsToReconcile[0]?.row.user_id;
   if (!userId) return 0;
@@ -1319,7 +1357,18 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
   try {
     for (const item of workflowsToReconcile) await pruneStaleWorkflowStageData(sql, item.row.user_id, item.workflow);
     const tracked = workflowsToReconcile.flatMap(({ row, workflow }) => workflow.stages.map((_, stageIndex) => ({ row, workflow, stageIndex })));
-    const routeTasks = await Promise.all(tracked.map(async item => (await routeSourcesForStage(environment, sql, item.row, item.workflow, item.stageIndex)).map(source => ({ ...item, source }))));
+    // Resolving a stage costs GitHub calls, so a branch-scoped sweep drops out-of-scope stages first
+    // and keeps only the routes the moved branches can actually reach.
+    const scoped = tracked.flatMap(item => {
+      const stage = item.workflow.stages[item.stageIndex];
+      const scope = filter.branches ? reconciliationBranchScope(stage, filter.branches) : 'all';
+      return scope === 'none' ? [] : [{ ...item, scope }];
+    });
+    const routeTasks = await Promise.all(scoped.map(async item => {
+      const sources = await routeSourcesForStage(environment, sql, item.row, item.workflow, item.stageIndex);
+      const inScope = item.scope === 'matching' && filter.branches ? sources.filter(source => filter.branches!.includes(source)) : sources;
+      return inScope.map(source => ({ ...item, source }));
+    }));
     const flatTasks = routeTasks.flat();
     const results = await Promise.allSettled(flatTasks.map(item => reconcileOneStage(environment, item.row, item.workflow, item.stageIndex, item.source, filter.eventName)));
     const reconciled = results.filter(result => result.status === 'fulfilled' && result.value).length;
@@ -1336,6 +1385,15 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     await sql`UPDATE reconciliation_runs SET state = 'failure', duration_ms = ${durationMs}, error_message = ${String(error instanceof Error ? error.message : error).slice(0, 800)}, finished_at = now() WHERE id = ${runId}`.catch(() => undefined);
     throw error;
   }
+}
+
+// A truncated serverless instance leaves its run row at 'running' forever, so a run older than the
+// grace period is reported as interrupted rather than in flight.
+export const RECONCILIATION_RUN_GRACE_SECONDS = 5 * 60;
+
+export function reconciliationRunIsAbandoned(startedAt: string, now: number) {
+  const started = Date.parse(startedAt);
+  return Number.isFinite(started) && now - started > RECONCILIATION_RUN_GRACE_SECONDS * 1000;
 }
 
 export const RECONCILE_WORKFLOW_BATCH_SIZE = 8;
@@ -1358,12 +1416,15 @@ export function selectReconciliationBatch<T extends { lastReconciledAt: string |
     .map(item => item.candidate);
 }
 
-export async function reconcileWorkflowStages(environment: Record<string, string | undefined>, filter: { repository?: string; installationId?: string; eventName?: string } = {}, trigger: ReconciliationTrigger = 'cron') {
+export type ReconciliationFilter = { repository?: string; installationId?: string; eventName?: string; branches?: readonly string[] };
+
+export async function reconcileWorkflowStages(environment: Record<string, string | undefined>, filter: ReconciliationFilter = {}, trigger: ReconciliationTrigger = 'cron') {
   const sql = query(environment);
   const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, (SELECT max(states.updated_at) FROM workflow_stage_states states WHERE states.user_id = workflows.user_id AND states.workflow_id = workflows.id) AS last_reconciled_at FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
   const candidates = rows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
     if (!workflow || (filter.repository && workflow.repository !== filter.repository) || (filter.installationId && row.github_installation_id !== filter.installationId)) return [];
+    if (filter.branches && !workflow.stages.some(stage => reconciliationBranchScope(stage, filter.branches!) !== 'none')) return [];
     return [{ row, workflow: ensureStageIds(workflow), lastReconciledAt: row.last_reconciled_at ?? null }];
   });
   // A scheduled sweep must answer within one request timeout, so it reconciles the stalest
