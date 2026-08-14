@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withReconciliationBudget, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -749,20 +749,30 @@ describe('realtimeReconcileBudgetMs', () => {
   });
 });
 
-describe('withReconciliationBudget', () => {
-  it('reports the reconciled count when the sweep lands inside the budget', async () => {
-    await expect(withReconciliationBudget(Promise.resolve(3), 50)).resolves.toEqual({ outcome: 'completed', reconciled: 3 });
+describe('withStageDeadline', () => {
+  it('reports the value when the work lands inside the deadline', async () => {
+    await expect(withStageDeadline(Promise.resolve(3), 50)).resolves.toEqual({ outcome: 'completed', value: 3 });
   });
 
-  // The response must go out even if the sweep is still running, otherwise the platform kills the
+  // The response must go out even if stages are still resolving, otherwise the platform kills the
   // request and GitHub records a failed delivery.
-  it('defers a sweep that outlives the budget', async () => {
+  it('defers work that outlives the deadline', async () => {
     const slow = new Promise<number>(resolve => { setTimeout(() => resolve(1), 200); });
-    await expect(withReconciliationBudget(slow, 5)).resolves.toEqual({ outcome: 'deferred', reconciled: 0 });
+    await expect(withStageDeadline(slow, 5)).resolves.toEqual({ outcome: 'deferred' });
+  });
+});
+
+describe('deferredRunState', () => {
+  // Running out of budget after every stage landed is a complete sweep: the deadline fired while the
+  // bookkeeping was still in flight, and reporting that as degraded would cry wolf.
+  it('reports a sweep whose stages all landed by its own result', () => {
+    expect(deferredRunState(2, 0, 2)).toBe('success');
+    expect(deferredRunState(1, 1, 2)).toBe('degraded');
   });
 
-  it('turns a failed sweep into an outcome instead of rejecting the request', async () => {
-    await expect(withReconciliationBudget(Promise.reject(new Error('boom')), 50)).resolves.toEqual({ outcome: 'failed', reconciled: 0 });
+  it('reports an unfinished sweep as degraded so the row is never left running', () => {
+    expect(deferredRunState(1, 0, 4)).toBe('degraded');
+    expect(deferredRunState(0, 0, 4)).toBe('degraded');
   });
 });
 
