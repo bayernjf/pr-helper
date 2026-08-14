@@ -1,13 +1,23 @@
 export type WorkflowStageAutomation = {
   autoCreatePullRequest: true;
+  autoMergePullRequest?: true;
   executionMode: 'server';
   triggerMinCommits?: number;
   generationRule: { name: string; content: string; capturedAt: string };
 } | {
   // Legacy browser-only policies are intentionally not promoted automatically.
   autoCreatePullRequest: true;
+  autoMergePullRequest?: undefined;
   executionMode: 'browser-session';
   triggerMinCommits?: number;
+  generationRule?: undefined;
+} | {
+  // Auto-merge stands alone: merging needs no model, so a stage may automate it without auto-create.
+  autoCreatePullRequest?: undefined;
+  autoMergePullRequest: true;
+  executionMode: 'server';
+  triggerMinCommits?: undefined;
+  generationRule?: undefined;
 };
 export type WorkflowStage = { source: string; target: string; independent?: boolean; waitFor?: number[]; stageId?: string; automation?: WorkflowStageAutomation };
 export type DeploymentProvider = 'vercel' | 'cloudflare';
@@ -119,7 +129,26 @@ export function setStageAutoCreate(workflow: Workflow, stageIndex: number, enabl
   if (!Number.isInteger(stageIndex) || !workflow.stages[stageIndex]) return workflow;
   if (enabled && (!generationRule?.name.trim() || !generationRule.content.trim())) return workflow;
   const threshold = Number.isInteger(triggerMinCommits) ? Math.min(20, Math.max(1, triggerMinCommits)) : 1;
-  return { ...workflow, stages: workflow.stages.map((stage, index) => index === stageIndex ? { ...stage, ...(enabled ? { automation: { autoCreatePullRequest: true, executionMode: 'server' as const, triggerMinCommits: threshold, generationRule: { name: generationRule!.name.trim(), content: generationRule!.content, capturedAt: new Date().toISOString() } } } : { automation: undefined }) } : stage) };
+  return { ...workflow, stages: workflow.stages.map((stage, index) => {
+    if (index !== stageIndex) return stage;
+    const merging = stage.automation?.autoMergePullRequest === true;
+    if (!enabled) return { ...stage, automation: merging ? { autoMergePullRequest: true as const, executionMode: 'server' as const } : undefined };
+    return { ...stage, automation: { autoCreatePullRequest: true as const, ...(merging ? { autoMergePullRequest: true as const } : {}), executionMode: 'server' as const, triggerMinCommits: threshold, generationRule: { name: generationRule!.name.trim(), content: generationRule!.content, capturedAt: new Date().toISOString() } } };
+  }) };
+}
+
+export function setStageAutoMerge(workflow: Workflow, stageIndex: number, enabled: boolean): Workflow {
+  const stage = Number.isInteger(stageIndex) ? workflow.stages[stageIndex] : undefined;
+  if (!stage) return workflow;
+  // Merging is a server-side action, so a legacy browser-session policy cannot carry it.
+  if (stage.automation && stage.automation.executionMode !== 'server') return workflow;
+  const creating = stage.automation?.autoCreatePullRequest === true ? stage.automation : undefined;
+  if (!enabled && !creating) return { ...workflow, stages: workflow.stages.map((current, index) => index === stageIndex ? { ...current, automation: undefined } : current) };
+  const automation = creating
+    ? { ...creating, ...(enabled ? { autoMergePullRequest: true as const } : {}) }
+    : { autoMergePullRequest: true as const, executionMode: 'server' as const };
+  if (creating && !enabled) delete (automation as { autoMergePullRequest?: true }).autoMergePullRequest;
+  return { ...workflow, stages: workflow.stages.map((current, index) => index === stageIndex ? { ...current, automation } : current) };
 }
 
 export function removeStage(workflow: Workflow, index: number): Workflow {

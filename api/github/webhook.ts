@@ -1,7 +1,7 @@
 import { type ApiRequest, type ApiResponse } from '../_lib/http.js';
 import { verifyGithubWebhookSignature } from '../_lib/github-webhook.js';
 import { recordWebhookDelivery } from '../_lib/workflows-store.js';
-import { projectPullRequestWebhook, reconcileWorkflowStages } from '../_lib/workflows-store.js';
+import { projectPullRequestWebhook, realtimeReconcileBudgetMs, reconcileWorkflowStages, webhookBranchesForEvent, withReconciliationBudget } from '../_lib/workflows-store.js';
 
 export const config = { api: { bodyParser: false } };
 
@@ -32,12 +32,17 @@ export default async function handler(request: ApiRequest, response: ApiResponse
       ? await projectPullRequestWebhook(process.env, { repository: payload.repository.full_name, source: pull.head.ref, target: pull.base.ref, number: pull.number, state: pull.state, mergedAt: pull.merged_at })
       : 0;
     const shouldReconcile = accepted && Boolean(payload.repository?.full_name && payload.installation?.id);
-    // A GitHub webhook must acknowledge quickly. Full reconciliation can take
-    // minutes, so let the scheduler compensate after the delivery is recorded.
-    response.status(202).json({ accepted, duplicate: !accepted, projectedStages, reconciliationScheduled: shouldReconcile });
-    if (shouldReconcile) {
-      void reconcileWorkflowStages(process.env, { repository: payload.repository!.full_name, installationId: String(payload.installation!.id), eventName }, 'webhook').catch(() => undefined);
-    }
+    // Narrowing the sweep to the branches this delivery touched makes it small enough to run inline,
+    // so the effect is visible immediately instead of waiting for the next scheduled sweep. The wait
+    // is capped because GitHub records a failed delivery if the request is killed mid-flight.
+    const branches = shouldReconcile ? webhookBranchesForEvent(eventName, payload) : null;
+    const reconciliation = shouldReconcile
+      ? await withReconciliationBudget(
+          reconcileWorkflowStages(process.env, { repository: payload.repository!.full_name, installationId: String(payload.installation!.id), eventName, ...(branches ? { branches } : {}) }, 'webhook'),
+          realtimeReconcileBudgetMs(process.env),
+        )
+      : null;
+    response.status(202).json({ accepted, duplicate: !accepted, projectedStages, reconciliationScheduled: shouldReconcile, reconciliation });
   } catch (error) {
     response.status(401).json({ message: error instanceof Error ? error.message : 'GitHub Webhook 处理失败' });
   }

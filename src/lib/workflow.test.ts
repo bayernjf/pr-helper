@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
+import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -56,6 +56,34 @@ describe('workflow configuration', () => {
     const enabled = setStageAutoCreate(workflow, 1, true, { name: 'Default', content: '# Rule' });
     expect(enabled.stages[1].automation).toMatchObject({ autoCreatePullRequest: true, executionMode: 'server', generationRule: { name: 'Default', content: '# Rule', capturedAt: expect.any(String) } });
     expect(setStageAutoCreate(enabled, 1, false).stages[1].automation).toBeUndefined();
+  });
+
+  it('sets and removes a per-stage auto-merge policy without a generation rule', () => {
+    const workflow = addStage(createWorkflow('octo/app', 'feature/a', 'dev'), 'dev', 'main');
+    const enabled = setStageAutoMerge(workflow, 1, true);
+    expect(enabled.stages[1].automation).toEqual({ autoMergePullRequest: true, executionMode: 'server' });
+    expect(setStageAutoMerge(enabled, 1, false).stages[1].automation).toBeUndefined();
+  });
+
+  it('keeps auto-merge enabled when auto-create is turned off', () => {
+    const workflow = addStage(createWorkflow('octo/app', 'feature/a', 'dev'), 'dev', 'main');
+    const both = setStageAutoMerge(setStageAutoCreate(workflow, 1, true, { name: 'Default', content: '# Rule' }), 1, true);
+    expect(both.stages[1].automation).toMatchObject({ autoCreatePullRequest: true, autoMergePullRequest: true });
+    expect(setStageAutoCreate(both, 1, false).stages[1].automation).toEqual({ autoMergePullRequest: true, executionMode: 'server' });
+  });
+
+  it('keeps auto-create enabled when auto-merge is turned off', () => {
+    const workflow = addStage(createWorkflow('octo/app', 'feature/a', 'dev'), 'dev', 'main');
+    const both = setStageAutoMerge(setStageAutoCreate(workflow, 1, true, { name: 'Default', content: '# Rule' }), 1, true);
+    const merged = setStageAutoMerge(both, 1, false);
+    expect(merged.stages[1].automation).toMatchObject({ autoCreatePullRequest: true, executionMode: 'server' });
+    expect(merged.stages[1].automation).not.toHaveProperty('autoMergePullRequest');
+  });
+
+  it('does not enable auto-merge on a legacy browser-session policy', () => {
+    const workflow = createWorkflow('octo/app', 'feature/a', 'dev');
+    const legacy = { ...workflow, stages: [{ ...workflow.stages[0], automation: { autoCreatePullRequest: true as const, executionMode: 'browser-session' as const } }] };
+    expect(setStageAutoMerge(legacy, 0, true)).toEqual(legacy);
   });
 
   it('does not enable auto-create without a generation rule snapshot', () => {

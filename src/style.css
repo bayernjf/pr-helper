@@ -1187,17 +1187,24 @@ a.account-menu-item {
   margin-top: 10px;
 }
 
-.timeline-auto-create {
+.timeline-automation {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 6px 16px;
   margin: 8px 0 10px;
   color: var(--text-secondary);
   font: 700 .78rem Manrope;
 }
 
-.timeline-auto-create input {
+.timeline-auto-create,
+.timeline-auto-merge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.timeline-automation input {
   width: 15px;
   height: 15px;
   margin: 0;
@@ -1205,11 +1212,11 @@ a.account-menu-item {
   cursor: pointer;
 }
 
-.timeline-auto-create input:disabled {
+.timeline-automation input:disabled {
   cursor: not-allowed;
 }
 
-.timeline-auto-create small {
+.timeline-automation small {
   flex-basis: 100%;
   color: var(--text-muted);
   font: 500 .72rem Manrope;
