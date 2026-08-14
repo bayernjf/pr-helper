@@ -439,3 +439,23 @@ test('部署门禁默认收起表单并把配置警告落到对应行', async ({
   await expect(page.locator('.deployment-config-warnings')).toContainText('有 5 项需要在保存前检查');
   await expect(page.locator('.deployment-config-warnings ul')).toHaveCount(0);
 });
+
+test('移除部署门禁可从提示条撤销，恢复的行会高亮', async ({ page }) => {
+  await openWorkspace(page, { workflows: [{ id: 'flow-gate', name: '门禁流程', repository, createdAt: '2026-08-01T00:00:00.000Z', stages: [{ source: 'feature/e2e', target: 'dev', stageId: 'stage-dev' }], deployments: [{ target: 'dev', provider: 'vercel', workflowName: 'Deploy frontend to Vercel', environment: 'preview', githubEnvironment: 'preview-vercel' }, { target: 'main', provider: 'cloudflare', workflowName: 'Deploy worker', environment: 'production', githubEnvironment: 'production' }] } as Workflow] });
+  await page.locator('[data-edit-project="flow-gate"]').click();
+  await expect(page.locator('.deployment-config-list > div')).toHaveCount(2);
+
+  await page.locator('[data-remove-deployment="0"]').click();
+  await expect(page.locator('.deployment-config-list > div')).toHaveCount(1);
+  await expect(page.locator('.deployment-config-list > div').first()).toContainText('main');
+
+  await page.locator('.toast-undo').click();
+  await expect(page.locator('.deployment-config-list > div')).toHaveCount(2);
+  await expect(page.locator('.deployment-config-list > div.is-new')).toHaveCount(1);
+  await expect(page.locator('.deployment-config-list > div.is-new')).toContainText('Deploy frontend to Vercel');
+  const restored = await page.evaluate(() => JSON.parse(localStorage.getItem('pr-helper-workflows') || '[]') as { deployments?: unknown[] }[]);
+  expect(restored[0]?.deployments).toHaveLength(2);
+
+  await page.locator('#toggle-deployment-form').click();
+  await expect(page.locator('.deployment-config-list > div.is-new')).toHaveCount(0);
+});
