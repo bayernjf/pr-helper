@@ -954,6 +954,44 @@ describe('reconciliation lease timing', () => {
   });
 });
 
+describe('reaped run rows', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const reaper = source.slice(source.indexOf("state = 'failure', error_message = coalesce"));
+
+  // The reaper runs on the next scheduled sweep, which GitHub delivers 25 to 60 minutes apart, so
+  // now() - started_at measures how long the row waited to be noticed rather than how long the sweep
+  // ran. A row reaped 6 minutes late read as a 391-second sweep and sent a diagnosis down the wrong
+  // path entirely; a duration nobody measured is better left unset.
+  it('never reports the delay before reaping as the duration of the sweep', () => {
+    expect(reaper).not.toContain('extract(epoch from now() - started_at)');
+  });
+});
+
+describe('sweep GitHub call accounting', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+
+  // The installation quota is 5,000 requests an hour and it is what stalled automation for 95 minutes.
+  // Every stage already counts its own calls, but the count only reached the platform log, so
+  // attributing a burn meant guessing from stage counts instead of reading it back.
+  it('records the calls a sweep spent so a quota burn can be attributed', () => {
+    const scope = source.slice(source.indexOf('async function reconcileWorkflowScope'), source.indexOf('async function reconcileWorkflowStages'));
+    expect(scope).toContain('github_calls =');
+    expect(scope.match(/github_calls =/g)!.length).toBeGreaterThan(1);
+  });
+
+  it('accumulates the per-stage count the tracker already produces', () => {
+    const stage = source.slice(source.indexOf('async function reconcileOneStage'), source.indexOf('async function reconcileStageWork'));
+    expect(stage).toContain('tracked.stats.calls');
+    expect(stage).toMatch(/budget\.calls \+=/);
+  });
+
+  it('declares the columns it writes', () => {
+    const declared = declaredColumns(migrationSql(), 'reconciliation_runs');
+    expect(declared.has('github_calls')).toBe(true);
+    expect(declared.has('github_ms')).toBe(true);
+  });
+});
+
 describe('reconciliationRunInterrupted', () => {
   const now = Date.parse('2026-08-14T10:10:00.000Z');
 
