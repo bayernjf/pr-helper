@@ -6,7 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, g
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, selectWorkflowAfterCloudLoad, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
+import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
@@ -1104,11 +1104,11 @@ function deploymentCards(workflowId: string, stageIndex: number, source?: string
     const primaryUrl = deployment.deploymentUrl || deployment.runUrl;
     const link = primaryUrl ? `<a href="${escape(primaryUrl)}" target="_blank" rel="noreferrer">${deployment.deploymentUrl ? t('overview.deployment.openSite') : t('overview.deployment.openLogs')} ↗</a>` : '';
     const logLink = deployment.deploymentUrl && deployment.runUrl ? `<a href="${escape(deployment.runUrl)}" target="_blank" rel="noreferrer">${t('overview.deployment.openLogs')} ↗</a>` : '';
-    const failure = deployment.state === 'failure' && deployment.failureSummary ? `<p>${escape(deployment.failureSummary)}</p>` : '';
+    const failure = (deployment.state === 'failure' || deployment.runId === null) && deployment.failureSummary ? `<p>${escape(deployment.failureSummary)}</p>` : '';
     const health = deployment.healthState ? `<small>${t('overview.deployment.health')} · ${deployment.healthState === 'success' ? t('overview.deployment.healthPassed') : t('overview.deployment.healthFailed')}${deployment.healthDetail ? ` (${escape(deployment.healthDetail)})` : ''}</small>` : '';
     const jobLink = deployment.failureJobUrl ? `<a href="${escape(deployment.failureJobUrl)}" target="_blank" rel="noreferrer">${t('overview.deployment.openFailedJob')} ↗</a>` : '';
     const retry = deployment.state === 'failure' && deployment.runId && flow && canOperateWorkflow(flow, 'actions-rerun') ? `<button class="ghost deployment-retry" data-deployment-run="${deployment.runId}" data-deployment-provider="${deployment.provider}">${t('overview.deployment.retry')}</button>` : '';
-    return `<article class="deployment-card ${deployment.state}"><div><b>${deploymentProviderName(deployment.provider)}</b><small>${t(`overview.deployment.${deployment.environment}`)} · ${deploymentStateText(deployment.state)}</small>${health}${failure}</div><span>${retry}${jobLink}${link}${logLink}</span></article>`;
+    return `<article class="deployment-card ${deployment.state}"><div><b>${deploymentProviderName(deployment.provider)}</b><small>${t(`overview.deployment.${deployment.environment}`)} · ${deployment.runId === null ? t('overview.deployment.missing') : deploymentStateText(deployment.state)}</small>${health}${failure}</div><span>${retry}${jobLink}${link}${logLink}</span></article>`;
   }).join('')}</div></section>`;
 }
 function deploymentRunHistory(flow: Workflow, stageIndex: number, source?: string) {
@@ -1917,6 +1917,11 @@ function lockedStageText(index: number) {
   if (!active || !statuses || index === 0) return t('status.locked');
   const dependencies = active.stages[index]?.waitFor?.length ? active.stages[index].waitFor : [index - 1];
   const dependencyStatuses = dependencies.map(dependency => statuses?.[dependency]);
+  const blocking = dependencies.flatMap(dependency => missingDeploymentWorkflowNames(
+    workflowStageDeployments.filter(deployment => deployment.workflowId === active!.id),
+    { stageId: active!.stages[dependency]?.stageId, stageIndex: dependency },
+  ));
+  if (blocking.length) return t('status.locked.deployment', { workflow: blocking[0] });
   const hasChecks = dependencyStatuses.every(status => status?.kind === 'merged') && dependencyStatuses.some(status => Boolean(status?.checks?.total));
   return hasChecks ? t('status.locked') : t('status.locked.noChecks');
 }
