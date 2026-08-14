@@ -199,7 +199,10 @@ async function scheduleServerAutoCreate(environment: Record<string, string | und
   const current = states.find(state => state.stage_id === workflow.stages[stageIndex]?.stageId && state.source === source);
   const decision = current ? deriveStageDecision(workflow, stageIndex, current, states) : null;
   if (!current || !decision?.canCreateNext) {
-    console.info(automationSkipLine({ kind: 'create-pr', repository: workflow.repository, route: `${source} → ${workflow.stages[stageIndex]?.target || '?'}`, reason: 'not-creatable', decision: decision?.kind || 'no-state', pullState: current?.pull_state, checks: current?.checks_state, aheadBy: current?.ahead_by }));
+    // A run-less deployment row is the one blocker that never resolves on its own, so name it here:
+    // without it the skip line only ever says checks=pending and the real cause stays invisible.
+    const missing = await sql<{ run_name: string }[]>`SELECT run_name FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND run_id IS NULL`;
+    console.info(automationSkipLine({ kind: 'create-pr', repository: workflow.repository, route: `${source} → ${workflow.stages[stageIndex]?.target || '?'}`, reason: 'not-creatable', decision: decision?.kind || 'no-state', pullState: current?.pull_state, checks: current?.checks_state, aheadBy: current?.ahead_by, missingDeployments: missing.length ? missing.map(deployment => deployment.run_name).join(',') : undefined }));
     return;
   }
   const actionId = await enqueueServerAutoCreate(environment, sql, row, workflow, stageIndex, source, headSha, current.ahead_by);
@@ -1204,6 +1207,13 @@ export async function projectPullRequestWebhook(environment: Record<string, stri
   return matches.length;
 }
 
+// A configured deployment whose Actions workflow does not exist can never produce a run, so the gate
+// it holds is permanent. It stays shut — a typo must not open a production gate — but reconciliation
+// records the name it looked for, because otherwise the whole pipeline locks with no stated reason.
+export function missingDeploymentSummary(workflowName: string) {
+  return `仓库中找不到名为「${workflowName}」的 Actions 工作流，该部署门禁会一直停在进行中`;
+}
+
 export function mergeChecksWithDeployments<T extends { state: string }>(checks: T, deployments: readonly DeploymentState[]) {
   if (checks.state === 'failure') return checks;
   if (deployments.includes('failure')) return { ...checks, state: 'failure' };
@@ -1310,6 +1320,9 @@ async function reconcileStageDeployments(environment: Record<string, string | un
       await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:deployment:${provider}:${run.id}:${state}`, kind: notification.kind, title: notification.title, body: `${workflow.repository} · ${source} → ${target} · ${notification.message}`, url: run.html_url || '/' });
     }
   }));
+  await Promise.all(configurations
+    .filter(configuration => !latestByProvider.has(configuration.provider))
+    .map(configuration => sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, stage_id, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${source}, ${configuration.provider}, ${configuration.environment}, ${null}, ${configuration.workflowName}, ${null}, ${null}, 'pending', ${null}, ${missingDeploymentSummary(configuration.workflowName)}, ${null}, ${null}, ${null}, ${null}) ON CONFLICT (user_id, workflow_id, stage_id, source, provider) DO UPDATE SET stage_index = EXCLUDED.stage_index, environment = EXCLUDED.environment, run_id = NULL, run_name = EXCLUDED.run_name, run_url = NULL, deployment_url = NULL, state = EXCLUDED.state, conclusion = NULL, failure_summary = EXCLUDED.failure_summary, failure_job_url = NULL, health_state = NULL, health_url = NULL, health_detail = NULL, updated_at = now()`));
   return configurations.map(configuration => {
     const run = latestByProvider.get(configuration.provider);
     return run ? deploymentRunState(run) : 'pending';

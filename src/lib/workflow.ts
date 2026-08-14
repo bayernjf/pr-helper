@@ -94,6 +94,17 @@ export function deploymentConfigsForTarget(workflow: object, target: string) {
   return deploymentConfigs(workflow).filter(deployment => deployment.target === target);
 }
 
+// Reconciliation records a run-less row for a configured deployment whose workflow it never found.
+// That row is the only evidence available downstream: the gate it holds shut looks exactly like a
+// deployment that has not started, so the stage it locks has to be able to name it.
+export function missingDeploymentWorkflowNames(deployments: readonly { stageId: string | null; stageIndex: number; source: string; runId: number | null; runName: string }[], stage: { stageId?: string; stageIndex: number; source?: string }) {
+  return deployments
+    .filter(deployment => (stage.stageId ? deployment.stageId === stage.stageId : deployment.stageIndex === stage.stageIndex))
+    .filter(deployment => stage.source === undefined || deployment.source === stage.source)
+    .filter(deployment => deployment.runId === null)
+    .map(deployment => deployment.runName);
+}
+
 export function deploymentConfigurationWarnings(workflow: Workflow, context: { actionsLoaded: boolean; actionWorkflows: readonly { name: string; path: string }[]; environmentsLoaded: boolean; environments: readonly string[] }): DeploymentConfigurationWarning[] {
   const configured = deploymentConfigs(workflow);
   if (!configured.length) return [{ code: 'no-deployments' }];
