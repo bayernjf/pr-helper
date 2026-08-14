@@ -1368,10 +1368,12 @@ export function reconciliationLeaseRenewIntervalMs(ttlSeconds: number) {
   return Math.max(1000, Math.floor((ttlSeconds * 1000) / 3));
 }
 
-async function reconcileWorkflowScope(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, workflowsToReconcile: { row: TrackedWorkflowRow; workflow: StoredWorkflow }[], filter: ReconciliationFilter, trigger: ReconciliationTrigger) {
+type ScopeOutcome = { reconciled: number; outcome: 'completed' | 'deferred' | 'skipped' };
+
+async function reconcileWorkflowScope(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, workflowsToReconcile: { row: TrackedWorkflowRow; workflow: StoredWorkflow }[], filter: ReconciliationFilter, trigger: ReconciliationTrigger, deadlineMs?: number): Promise<ScopeOutcome> {
   const startedAt = Date.now();
   const userId = workflowsToReconcile[0]?.row.user_id;
-  if (!userId) return 0;
+  if (!userId) return { reconciled: 0, outcome: 'completed' };
   const repositories = [...new Set(workflowsToReconcile.map(item => item.workflow.repository))];
   const repository = filter.repository || (repositories.length === 1 ? repositories[0] : null);
   const lockKey = reconciliationLockKey(userId, repository);
@@ -1389,7 +1391,7 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     // Queueing behind the holder would only burn the request budget: the running sweep reads the same
     // rows and will publish the same result.
     await sql`INSERT INTO reconciliation_runs (user_id, trigger, state, repository, stages_total, stages_reconciled, stages_failed, duration_ms, finished_at) VALUES (${userId}, ${trigger}, 'skipped', ${repository}, 0, 0, 0, ${Date.now() - startedAt}, now())`.catch(() => undefined);
-    return 0;
+    return { reconciled: 0, outcome: 'skipped' };
   }
   // Renewal is what separates a slow sweep from a dead one: a frozen instance stops renewing, so its
   // lease lapses on its own instead of waiting for the connection to die.
@@ -1420,16 +1422,28 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     // Recording the intent before the work means a sweep that is killed mid-flight still shows how
     // much it meant to do, instead of looking like a sweep that found nothing.
     await sql`UPDATE reconciliation_runs SET stages_total = ${flatTasks.length} WHERE id = ${runId}`;
-    const results = await Promise.allSettled(flatTasks.map(item => reconcileOneStage(environment, item.row, item.workflow, item.stageIndex, item.source, filter.eventName)));
-    const reconciled = results.filter(result => result.status === 'fulfilled' && result.value).length;
-    const failed = results.filter(result => result.status === 'rejected').length;
+    let reconciled = 0;
+    let failed = 0;
+    let firstFailure: unknown;
+    // Counting as each stage settles is what lets a deferred sweep report the work it did finish; the
+    // aggregate from allSettled is only available if we wait for every stage.
+    const stageWork = Promise.allSettled(flatTasks.map(item => reconcileOneStage(environment, item.row, item.workflow, item.stageIndex, item.source, filter.eventName).then(
+      value => { if (value) reconciled += 1; return value; },
+      error => { failed += 1; firstFailure ||= error; throw error; },
+    )));
+    const raced = deadlineMs === undefined ? { outcome: 'completed' as const } : await withStageDeadline(stageWork, deadlineMs);
     const durationMs = Date.now() - startedAt;
+    const errorMessage = firstFailure ? String(firstFailure instanceof Error ? firstFailure.message : firstFailure).slice(0, 800) : null;
+    if (raced.outcome === 'deferred') {
+      // Closing the row here is the whole point: a deferred sweep used to stay 'running' until the
+      // scheduled sweep reaped it, which read as in flight for minutes and hid the deferral.
+      await sql`UPDATE reconciliation_runs SET state = ${deferredRunState(reconciled, failed, flatTasks.length)}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, error_message = ${errorMessage || RECONCILIATION_DEFERRED_MESSAGE}, finished_at = now() WHERE id = ${runId}`;
+      return { reconciled, outcome: 'deferred' as const };
+    }
     const finalState = reconciliationState(failed, reconciled);
-    const firstError = results.find(result => result.status === 'rejected');
-    const errorMessage = firstError?.status === 'rejected' ? String(firstError.reason instanceof Error ? firstError.reason.message : firstError.reason).slice(0, 800) : null;
     await sql`UPDATE reconciliation_runs SET state = ${finalState}, stages_total = ${flatTasks.length}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, error_message = ${errorMessage}, finished_at = now() WHERE id = ${runId}`;
-    if (failed > 0 && reconciled === 0) throw firstError?.status === 'rejected' ? firstError.reason : new Error('Reconciliation failed');
-    return reconciled;
+    if (failed > 0 && reconciled === 0) throw firstFailure || new Error('Reconciliation failed');
+    return { reconciled, outcome: 'completed' as const };
   } catch (error) {
     const durationMs = Date.now() - startedAt;
     await sql`UPDATE reconciliation_runs SET state = 'failure', duration_ms = ${durationMs}, error_message = ${String(error instanceof Error ? error.message : error).slice(0, 800)}, finished_at = now() WHERE id = ${runId}`.catch(() => undefined);
@@ -1465,17 +1479,22 @@ export function realtimeReconcileBudgetMs(environment: Record<string, string | u
   return Number.isFinite(configured) && configured > 0 ? configured : REALTIME_RECONCILE_BUDGET_MS;
 }
 
-export async function withReconciliationBudget(sweep: Promise<number>, budgetMs: number): Promise<{ outcome: 'completed' | 'failed' | 'deferred'; reconciled: number }> {
+export async function withStageDeadline<T>(work: Promise<T>, deadlineMs: number): Promise<{ outcome: 'completed'; value: T } | { outcome: 'deferred' }> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const deferred = new Promise<{ outcome: 'deferred'; reconciled: number }>(resolve => {
-    timer = setTimeout(() => resolve({ outcome: 'deferred', reconciled: 0 }), budgetMs);
+  const deferred = new Promise<{ outcome: 'deferred' }>(resolve => {
+    timer = setTimeout(() => resolve({ outcome: 'deferred' }), deadlineMs);
   });
-  const settled = sweep.then(reconciled => ({ outcome: 'completed' as const, reconciled })).catch(() => ({ outcome: 'failed' as const, reconciled: 0 }));
   try {
-    return await Promise.race([settled, deferred]);
+    return await Promise.race([work.then(value => ({ outcome: 'completed' as const, value })), deferred]);
   } finally {
     clearTimeout(timer);
   }
+}
+
+// A deadline that fires once every stage has landed describes a complete sweep, so the recorded state
+// still comes from the results; anything less is partial and must say so.
+export function deferredRunState(reconciled: number, failed: number, total: number): 'success' | 'degraded' | 'failure' {
+  return reconciled + failed >= total ? reconciliationState(failed, reconciled) : 'degraded';
 }
 
 export const RECONCILE_WORKFLOW_BATCH_SIZE = 8;
@@ -1502,7 +1521,9 @@ export function selectReconciliationBatch<T extends { lastAttemptAt: string | nu
 
 export type ReconciliationFilter = { repository?: string; installationId?: string; eventName?: string; branches?: readonly string[] };
 
-export async function reconcileWorkflowStages(environment: Record<string, string | undefined>, filter: ReconciliationFilter = {}, trigger: ReconciliationTrigger = 'cron') {
+export const RECONCILIATION_DEFERRED_MESSAGE = '校准未在预算内完成，已让给下一次触发';
+
+export async function reconcileWorkflowStages(environment: Record<string, string | undefined>, filter: ReconciliationFilter = {}, trigger: ReconciliationTrigger = 'cron', options: { deadlineMs?: number } = {}): Promise<{ reconciled: number; outcome: 'completed' | 'deferred' }> {
   const sql = query(environment);
   // The scheduled sweep is the only trigger guaranteed to come back, so it closes out the rows left
   // behind by instances that were killed before they could finish.
@@ -1522,16 +1543,33 @@ export async function reconcileWorkflowStages(environment: Record<string, string
   const byUser = new Map<string, { row: TrackedWorkflowRow; workflow: StoredWorkflow }[]>();
   for (const item of workflowsToReconcile) byUser.set(item.row.user_id, [...(byUser.get(item.row.user_id) || []), item]);
   let reconciledTotal = 0;
+  let deferred = false;
   let firstError: unknown;
+  // The deadline covers the whole sweep, so each scope gets whatever is left of it rather than a fresh
+  // copy: otherwise a user with many scopes would blow past the request limit one scope at a time.
+  const deadlineAt = options.deadlineMs === undefined ? undefined : Date.now() + options.deadlineMs;
   for (const scopedWorkflows of byUser.values()) {
     try {
-      reconciledTotal += await reconcileWorkflowScope(environment, sql, scopedWorkflows, filter, trigger);
+      const remaining = deadlineAt === undefined ? undefined : Math.max(0, deadlineAt - Date.now());
+      const scope = await reconcileWorkflowScope(environment, sql, scopedWorkflows, filter, trigger, remaining);
+      reconciledTotal += scope.reconciled;
+      deferred ||= scope.outcome === 'deferred';
     } catch (error) {
       firstError ||= error;
     }
   }
   if (firstError && reconciledTotal === 0) throw firstError;
-  return reconciledTotal;
+  return { reconciled: reconciledTotal, outcome: deferred ? 'deferred' : 'completed' };
+}
+
+// Both realtime routes want the same thing: reconcile within the request budget, and never fail the
+// request over it, because GitHub records a failed delivery and retries the whole webhook.
+export async function reconcileRealtime(environment: Record<string, string | undefined>, filter: ReconciliationFilter, trigger: ReconciliationTrigger): Promise<{ outcome: 'completed' | 'deferred' | 'failed'; reconciled: number }> {
+  try {
+    return await reconcileWorkflowStages(environment, filter, trigger, { deadlineMs: realtimeReconcileBudgetMs(environment) });
+  } catch {
+    return { outcome: 'failed', reconciled: 0 };
+  }
 }
 
 type StageStateRow = { workflow_id: string; stage_index: number; stage_id: string | null; repository: string; source: string; target: string; pull_number: number | null; pull_state: string; merged_at: string | null; head_sha: string | null; checks_state: string; checks_passed: number; checks_total: number; approvals: number; required_approvals: number; mergeable: boolean | null; mergeable_state: string | null; ahead_by: number; last_event: string | null; updated_at: string };

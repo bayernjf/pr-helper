@@ -1,6 +1,6 @@
 import { requestErrorStatus, type ApiRequest, type ApiResponse } from './_lib/http.js';
 import { currentGitHubIdentity } from './_lib/session.js';
-import { codexRepairContext, listActionableStages, listOperationAuditLogs, listRecentWorkflowStageEvents, listRecoveryStatuses, listSyncHealth, listWorkflowConfigurationWarnings, listWorkflowStageDeploymentRuns, listWorkflowStageDeployments, listWorkflowStageStates, listWorkflowRuns, listWorkflowTimeline, realtimeReconcileBudgetMs, reconcileWorkflowStages, withReconciliationBudget, recordOperationAudit, recordRecoveryEvent, rerunFailedActions, requestDeploymentRollback, type DeploymentProvider } from './_lib/workflows-store.js';
+import { codexRepairContext, listActionableStages, listOperationAuditLogs, listRecentWorkflowStageEvents, listRecoveryStatuses, listSyncHealth, listWorkflowConfigurationWarnings, listWorkflowStageDeploymentRuns, listWorkflowStageDeployments, listWorkflowStageStates, listWorkflowRuns, listWorkflowTimeline, reconcileRealtime, recordOperationAudit, recordRecoveryEvent, rerunFailedActions, requestDeploymentRollback, type DeploymentProvider } from './_lib/workflows-store.js';
 import { runPreflightChecks } from './_lib/preflight.js';
 
 function action(request: ApiRequest) {
@@ -39,13 +39,10 @@ async function inbox(request: ApiRequest, response: ApiResponse) {
     // inline within a budget so the response already reflects GitHub, and leaves the remainder to the
     // scheduled sweep when the budget runs out.
     let reconciliationScheduled = false;
-    let reconciliation: Awaited<ReturnType<typeof withReconciliationBudget>> | null = null;
+    let reconciliation: Awaited<ReturnType<typeof reconcileRealtime>> | null = null;
     if (session.installationId && shouldReconcileInbox(request)) {
       reconciliationScheduled = true;
-      reconciliation = await withReconciliationBudget(
-        reconcileWorkflowStages(process.env, { installationId: session.installationId, repository: reconciliationRepository(request), eventName: 'inbox_refresh' }, 'inbox_refresh'),
-        realtimeReconcileBudgetMs(process.env),
-      );
+      reconciliation = await reconcileRealtime(process.env, { installationId: session.installationId, repository: reconciliationRepository(request), eventName: 'inbox_refresh' }, 'inbox_refresh');
     }
     const identity = { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId };
     const [items, states, events, deployments, deploymentRuns, configurationWarnings, syncHealth, runs, timeline, recoveryStatuses] = await Promise.all([listActionableStages(process.env, identity), listWorkflowStageStates(process.env, identity), listRecentWorkflowStageEvents(process.env, identity), listWorkflowStageDeployments(process.env, identity), listWorkflowStageDeploymentRuns(process.env, identity), listWorkflowConfigurationWarnings(process.env, identity), listSyncHealth(process.env, identity), listWorkflowRuns(process.env, identity), listWorkflowTimeline(process.env, identity), listRecoveryStatuses(process.env, identity)]);
