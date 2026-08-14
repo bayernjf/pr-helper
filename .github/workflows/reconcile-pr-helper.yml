@@ -32,7 +32,30 @@ jobs:
 
       - name: Calibrate active workflows
         if: steps.config.outputs.configured == 'true'
+        env:
+          SWEEPS: '6'
+          SWEEP_INTERVAL_SECONDS: '75'
         run: |
-          curl --fail-with-body --silent --show-error --max-time 90 \
-            --header "Authorization: Bearer ${CRON_SECRET}" \
-            "$RECONCILE_URL"
+          # GitHub throttles scheduled deliveries, so a */10 schedule arrives every 30-60 minutes in
+          # practice. Each sweep covers one batch of workflows, so relying on the schedule alone left a
+          # fleet larger than a batch waiting hours to have its automation evaluated. Sweeping several
+          # times per delivery makes coverage depend on this job rather than on the scheduler.
+          failures=0
+          for sweep in $(seq 1 "$SWEEPS"); do
+            if [[ "$sweep" -gt 1 ]]; then sleep "$SWEEP_INTERVAL_SECONDS"; fi
+            echo "::group::sweep $sweep/$SWEEPS"
+            if curl --fail-with-body --silent --show-error --max-time 90 \
+              --header "Authorization: Bearer ${CRON_SECRET}" \
+              "$RECONCILE_URL"; then
+              echo ""
+            else
+              failures=$((failures + 1))
+              echo "::warning title=Reconcile sweep failed::Sweep $sweep of $SWEEPS did not complete."
+            fi
+            echo "::endgroup::"
+          done
+          # One bad sweep is what the next sweep is for; every sweep failing is a real outage.
+          if [[ "$failures" -eq "$SWEEPS" ]]; then
+            echo "::error title=Reconcile failed::All $SWEEPS sweeps failed."
+            exit 1
+          fi

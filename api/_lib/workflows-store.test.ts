@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -736,6 +736,29 @@ describe('automationRetryIsExhausted', () => {
     expect(automationRetryIsExhausted(DEFAULT_RECOVERY_POLICY.maxRetries, undefined)).toBe(true);
     expect(automationRetryIsExhausted(DEFAULT_RECOVERY_POLICY.maxRetries - 1, undefined)).toBe(false);
     expect(automationRetryIsExhausted(DEFAULT_RECOVERY_POLICY.maxRetries, { maxRetries: 0, cooldownSeconds: 0 })).toBe(true);
+  });
+});
+
+// The retry budget exists for verdicts GitHub actually reached: a conflict, a closed pull request, a
+// gate that will not go green. A provider refusal never got that far, so counting it spends the
+// allowance on nothing — three rate-limited sweeps used to retire an auto-merge permanently.
+describe('automationAttemptWasReached', () => {
+  it('does not spend the retry budget on a refusal that never reached a verdict', () => {
+    expect(automationAttemptWasReached('API rate limit exceeded for installation ID 149185475')).toBe(false);
+    expect(automationAttemptWasReached('GitHub 请求超时，请稍后重试')).toBe(false);
+    expect(automationAttemptWasReached('The operation was aborted due to timeout')).toBe(false);
+  });
+
+  it('spends it on a verdict GitHub did reach, so a conflict still retires', () => {
+    expect(automationAttemptWasReached('GitHub 合并状态为 dirty')).toBe(true);
+    expect(automationAttemptWasReached('分支落后于目标分支，需要先在 GitHub 更新分支')).toBe(true);
+    expect(automationAttemptWasReached('流程步骤自动化策略已失效')).toBe(true);
+  });
+
+  it('rolls the attempt back at the pause site rather than only classifying it', () => {
+    const source = readFileSync(new URL('./workflows-store.ts', import.meta.url), 'utf8');
+    expect(source).toContain('automationAttemptWasReached(reason)');
+    expect(source).toContain('GREATEST(attempts - 1, 0)');
   });
 });
 
