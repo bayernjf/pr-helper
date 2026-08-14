@@ -1720,11 +1720,13 @@ export async function reconcileWorkflowStages(environment: Record<string, string
 // Both realtime routes want the same thing: reconcile within the request budget, and never fail the
 // request over it, because GitHub records a failed delivery and retries the whole webhook.
 export async function reconcileRealtime(environment: Record<string, string | undefined>, filter: ReconciliationFilter, trigger: ReconciliationTrigger): Promise<{ outcome: 'completed' | 'deferred' | 'failed'; reconciled: number }> {
-  try {
-    return await reconcileWorkflowStages(environment, filter, trigger, { deadlineMs: realtimeReconcileBudgetMs(environment) });
-  } catch {
-    return { outcome: 'failed', reconciled: 0 };
-  }
+  const budgetMs = realtimeReconcileBudgetMs(environment);
+  // The stage budget covers stage work only: lease waits and the queries around it sit outside it, so a
+  // contended sweep still ran for minutes. A save waits for this call before it answers, which turned a
+  // slow sweep into a lost toggle. Bound the whole sweep and let the next trigger finish what is left.
+  const sweep = reconcileWorkflowStages(environment, filter, trigger, { deadlineMs: budgetMs }).catch(() => ({ outcome: 'failed' as const, reconciled: 0 }));
+  const raced = await withStageDeadline(sweep, budgetMs * 2);
+  return raced.outcome === 'completed' ? raced.value : { outcome: 'deferred', reconciled: 0 };
 }
 
 type StageStateRow = { workflow_id: string; stage_index: number; stage_id: string | null; repository: string; source: string; target: string; pull_number: number | null; pull_state: string; merged_at: string | null; head_sha: string | null; checks_state: string; checks_passed: number; checks_total: number; approvals: number; required_approvals: number; mergeable: boolean | null; mergeable_state: string | null; ahead_by: number; last_event: string | null; updated_at: string };

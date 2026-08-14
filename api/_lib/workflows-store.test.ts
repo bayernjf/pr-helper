@@ -1027,6 +1027,16 @@ describe('workflow save route', () => {
     expect(trigger).toContain('saved.automationActivated.create || saved.automationActivated.merge');
     expect(trigger).not.toContain('autoCreateActivated');
   });
+
+  // The save response waits for this sweep, so its duration is the duration of ticking a switch.
+  // The stage budget bounds only the stage work — lease waits and the surrounding queries are outside
+  // it — which is how a batch of toggles pushed saves from 5s to over 400s and lost the writes.
+  it('bounds the whole realtime sweep so a slow one cannot take the save down with it', () => {
+    const store = readFileSync(new URL('./workflows-store.ts', import.meta.url), 'utf8');
+    const body = store.slice(store.indexOf('export async function reconcileRealtime'), store.indexOf('type StageStateRow'));
+    expect(body).toContain('withStageDeadline(');
+    expect(body).toContain("outcome: 'deferred'");
+  });
 });
 
 describe('missing deployment workflows', () => {

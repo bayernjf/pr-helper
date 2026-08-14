@@ -101,8 +101,15 @@ body {
 
 .connect-topbar {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 24px;
+}
+
+.connect-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .connect-onboarding {
@@ -215,9 +222,17 @@ body {
 }
 
 .brand {
+  display: inline-flex;
+  align-items: center;
   color: var(--text-primary);
   text-decoration: none;
   font: 800 1.05rem 'DM Mono';
+}
+
+.brand-mark {
+  display: block;
+  border-radius: 7px;
+  margin-right: 8px;
 }
 
 .brand span {
