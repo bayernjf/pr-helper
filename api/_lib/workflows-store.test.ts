@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { actionableStageEntry, automationActionId, automationCreateOutcome, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { actionableStageEntry, automationActionId, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -563,6 +563,26 @@ describe('automationMergeOutcome', () => {
     for (const mergeableState of ['dirty', 'blocked', 'unstable', 'unknown', 'draft']) {
       expect(automationMergeOutcome(pull, { ...green, mergeableState }).kind).toBe('paused');
     }
+  });
+});
+
+describe('automationIdempotencyKey', () => {
+  const route = { workflowId: 'w-1', stageId: 's-1', source: 'feature/a', target: 'dev', headSha: 'abc123' };
+
+  it('keeps create and merge intents on separate keys for the same route and head sha', () => {
+    expect(automationIdempotencyKey({ ...route, kind: 'create-pr' })).not.toBe(automationIdempotencyKey({ ...route, kind: 'merge-pr' }));
+  });
+
+  it('is stable for the same route, head sha and kind', () => {
+    expect(automationIdempotencyKey({ ...route, kind: 'merge-pr' })).toBe(automationIdempotencyKey({ ...route, kind: 'merge-pr' }));
+  });
+
+  it('changes when the head sha moves so a new commit gets a new merge attempt', () => {
+    expect(automationIdempotencyKey({ ...route, kind: 'merge-pr' })).not.toBe(automationIdempotencyKey({ ...route, headSha: 'def456', kind: 'merge-pr' }));
+  });
+
+  it('keeps the existing create key format so deployed rows stay idempotent', () => {
+    expect(automationIdempotencyKey({ ...route, kind: 'create-pr' })).toBe('w-1:s-1:feature/a:dev:abc123:create-pr');
   });
 });
 
