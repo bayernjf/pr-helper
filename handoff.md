@@ -16,6 +16,12 @@
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
 - PR #172 的首个 Vercel Preview 失败原因为 Vercel 对 `api/` 完整 TypeScript 编译，而仓库原 `tsconfig.json` 仅包含 `src/`；随后又因 Hobby 计划 Serverless Function 数量限制在部署输出阶段失败。已将 `api/` 纳入本地检查、修复类型错误，并把自动化与 AI 凭据入口合并到 `/api/workflows` rewrite；提交 `93c00d41` 后 Vercel Preview、CI 和 Preview Comments 全部通过。
 
+## 2026-08-14 实时校准修复（本地已落地待部署验收）
+
+- 自动创建长时间不触发的根因不在自动化闸门，而在校准链路：webhook 与收件箱刷新在返回响应之后才 `void reconcileWorkflowStages(...)`，函数随即被冻结，`trigger='webhook'` 的行全部停在 `running` / `stages_total=0`；一次 push 触发 5 条投递同时抢 `max: 1` 连接池；定时校准的批量排序按阶段数据取最新值，解析不出路由的工作流永久占用名额，轮转最坏 4–5 小时。
+- 本地已落地：按事件分支收窄校准范围、在预算内 `await` 校准后再返回、`pg_try_advisory_lock` 抑制同仓并发、提前写入 `stages_total` 并回收中断行、按尝试时间轮转。计划与证据见 [`docs/superpowers/plans/2026-08-14-realtime-reconciliation.md`](docs/superpowers/plans/2026-08-14-realtime-reconciliation.md)，实现清单见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md) 第十节。
+- 部署前置：Supabase 需执行迁移 `027`（`reconciliation_runs.state` 允许 `skipped`、`pr_helper_workflows.last_reconcile_attempt_at`）。
+
 ## 2026-08-12 刷新链路最新结论
 
 - 详情页、步骤抽屉及创建/合并/重试/回滚/删除后的刷新按当前仓库触发；流程总览手动“刷新队列”和定时 reconciliation 仍为全量。

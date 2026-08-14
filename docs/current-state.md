@@ -107,7 +107,8 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - 私有仓库 `bayernjf/pr-helper-e2e-sandbox-private` 的 PR #1 已验证 `1/1` 门禁通过；后台同步最近实测约 26 秒，具体慢请求仍待日志定位。
 - 已修复并 Production 复验：Actions 未全绿时不显示应用内“合并 PR”；发布运行在合并后终态出现时会从“进行中”更新为“发布完成”。
 - 已修复并 Production 复验：动态来源 `feature/* → dev` 在 PR #9 已合并后可由完整 reconciliation 发现并投影至 Lane 与步骤抽屉。
-- GitHub App 已订阅 Pull request、Pull request review、Check run、Check suite、Status 与 Workflow run 事件。沙箱 PR #11 重开事件在 GitHub Recent Deliveries 返回 `202`（2.73 秒）；生产详情页未手动刷新，在下一个轮询周期自动展示 `feature/webhook-live-e2e-2 · PR #11`，Webhook 自动投影验收通过。
+- 2026-08-14 本地已落地（待部署验收）：webhook 与收件箱刷新改为在预算内 `await` 校准后再返回，按事件分支收窄范围，`pg_try_advisory_lock` 抑制同仓并发 sweep，中断的校准会被定时校准收尾并在界面提示，定时校准按 `last_reconcile_attempt_at` 公平轮转（需先执行迁移 `027`）。
+- GitHub App 已订阅 Push、Pull request、Pull request review、Check run、Check suite、Status 与 Workflow run 事件。沙箱 PR #11 重开事件在 GitHub Recent Deliveries 返回 `202`（2.73 秒）；生产详情页未手动刷新，在下一个轮询周期自动展示 `feature/webhook-live-e2e-2 · PR #11`，Webhook 自动投影验收通过。
 - “重新同步”在真实全量 reconciliation 下约需 150 秒；当前以 180 秒超时保障结果正确，后台同步和局部更新体验仍是后续优化项。
 
 ## 数据边界
