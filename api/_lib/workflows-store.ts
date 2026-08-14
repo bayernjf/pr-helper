@@ -140,12 +140,23 @@ async function scheduleServerAutoCreate(environment: Record<string, string | und
   }
 }
 
+// Models routinely wrap the JSON in a markdown fence and sometimes prepend a blank line, which
+// anchored stripping misses. The closing fence is searched from the end so a fenced snippet inside
+// the pull request body survives.
+export function jsonFromModelText(content: string) {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith('```')) return trimmed;
+  const withoutOpening = trimmed.slice(trimmed.indexOf('\n') + 1);
+  const closing = withoutOpening.lastIndexOf('```');
+  return (closing >= 0 ? withoutOpening.slice(0, closing) : withoutOpening).trim();
+}
+
 async function generateAutomationMessage(baseUrl: string, apiKey: string, model: string, source: string, target: string, commits: string[], generationRule: string) {
   const response = await fetch(aiChatCompletionsUrl(baseUrl), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model, messages: [{ role: 'user', content: buildPrPrompt(source, target, commits, generationRule) }], temperature: 0.2, max_tokens: 1200 }), signal: AbortSignal.timeout(20_000) });
   if (!response.ok) throw new Error(`AI 生成失败 (${response.status})`);
   const payload = await response.json() as { choices?: { message?: { content?: string } }[] };
   const content = payload.choices?.[0]?.message?.content || '';
-  const parsed = JSON.parse(content.replace(/^```json\s*|\s*```$/g, '').trim()) as { title?: unknown; body?: unknown };
+  const parsed = JSON.parse(jsonFromModelText(content)) as { title?: unknown; body?: unknown };
   if (typeof parsed.title !== 'string' || !parsed.title.trim() || typeof parsed.body !== 'string') throw new Error('AI 返回的 PR 内容格式无效');
   return { title: parsed.title.trim().slice(0, 256), body: parsed.body.slice(0, 50_000) };
 }

@@ -1,7 +1,7 @@
 # 自动创建 PR 失效：诉求、问题与修复方案
 
 > 创建：2026-08-14。
-> 状态：`P1`–`P6` 已落代码并合入 `main`，生产已部署；`P3` 生产验收通过；`P7` 已查清，不是缺陷，等一个数据清理决定。生产验收过程中查出 `P8`（`workflow_automation_actions` 缺列导致执行器必然抛错），**这是自动创建至今从未成功过的真正根因，尚未修**。
+> 状态：`P1`–`P8` 已落代码，`P1`–`P8` 中 `P1`–`P6` 已部署生产、`P8` 亦已由用户部署生产并验证生效；`P3` 生产验收通过；`P7` 已查清，不是缺陷，等一个数据清理决定。`P8` 上线后执行器首次真正领取动作（`attempts` 由 0 变 1），随即暴露 `P9`（AI 响应的 markdown 围栏未被剥离），**`P9` 已落代码，待部署验收**。
 > 当前事实来源仍为 [`docs/current-state.md`](current-state.md)。本文只覆盖服务端自动创建 PR 链路，不改变自动合并/自动推进「默认关闭且本阶段不实现」的结论。
 > 方案与验收标准的上游文档为 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。
 
@@ -99,6 +99,15 @@
 - **测试形态**：这里无法 mock SQL，因此按 `AGENTS.md` 第 2 条先写一条**静态一致性守卫**：从 `db/migrations/` 解析出 `workflow_automation_actions` 的真实列集合，再从 `api/_lib/workflows-store.ts` 抽出所有针对该表的 SELECT 列名，断言前者包含后者。当前会因 `stage_index` 失败，修完转绿，此后任何「查了不存在的列」都会在 CI 被拦住。
 - **位置**：`api/_lib/workflows-store.ts`。
 
+### P9 AI 响应的 markdown 围栏未被剥离（已落代码，待部署验收）
+
+- **现象**：`P8` 部署后动作 3 变为 `state='paused'`、`attempts=1`、`failure_reason` 为 `` Unexpected token '`', "```json\n{\n"... is not valid JSON ``（`updated_at = 2026-08-14 00:01:14`）。
+- **根因**：`generateAutomationMessage` 原本写的是 `content.replace(/^```json\s*|\s*```$/g, '').trim()`——`trim()` 在 `replace()` **之后**执行，所以模型只要在围栏前多输出一个换行，`^` 锚点就匹配不上，围栏被原样送进 `JSON.parse`。收尾同理：围栏后带一个换行时 `\s*```$` 也匹配不上。
+- **为何直到现在才暴露**：这条代码路径必须先通过 `P8` 才会被执行到，`P8` 之前执行器在第一条 SELECT 就抛错，从未走到 AI 解析。
+- **修法**：抽出可单测的 `jsonFromModelText`，先 `trim()` 再判断是否以围栏开头；剥离开头那一行，并**从末尾**查找收尾围栏，这样 PR 正文里自带的代码块不会被误截。
+- **不是永久卡死**：`paused` 超过 120 秒会被 `enqueueServerAutoCreate` 的 stale 重置逻辑放回 `queued`，所以每个轮转周期都会重试同一处失败，修完即可自愈，无需人工干预。
+- **位置**：`api/_lib/workflows-store.ts`、`api/_lib/workflows-store.test.ts`。
+
 ## 四、需求决策
 
 **`pull_state='merged'` + 合并后门禁失败 + `ahead_by > 0` 时，`canCreateNext = false`。**
@@ -119,7 +128,8 @@
 | 4 | 抽屉创建按钮改读 `decision.canCreateNext`，不再依赖现拉的 GitHub detail | `src/main.ts` | 已提交 `fa2696e7` |
 | 5 | 执行器幂等化：P5 记成功、P6 记终态 | `api/_lib/workflows-store.ts` | 已提交 `7a53c026` |
 | 6 | 沙盒回收（P7）排查 | — | 已查清：非缺陷，见第三节 P7 |
-| 7 | 执行器与队列列表改为 JOIN `workflow_automation_runs` 取 `stage_index`（P8），并加迁移列与 SELECT 的静态一致性守卫 | `api/_lib/workflows-store.ts`、`api/_lib/workflows-store.test.ts` | 未落代码 |
+| 7 | 执行器与队列列表改为 JOIN `workflow_automation_runs` 取 `stage_index`（P8），并加迁移列与 SELECT 的静态一致性守卫 | `api/_lib/workflows-store.ts`、`api/_lib/workflows-store.test.ts` | 已落代码，已部署生产并验证生效 |
+| 8 | 抽出 `jsonFromModelText` 正确剥离 AI 响应的 markdown 围栏（P9） | `api/_lib/workflows-store.ts`、`api/_lib/workflows-store.test.ts` | 已落代码，待部署 |
 
 步骤 5 的落地形态：新增纯函数 `automationCreateOutcome(openPulls, commitCount)` 作为可测接缝，`idempotent` 走与成功一致的收尾并在审计 `metadata` 打 `idempotent: true`；`cancelled` 写入 `workflow_automation_actions.state = 'cancelled'` 与 `workflow_automation_runs.state = 'cancelled'`，原因写在 `failure_reason`。两张表的 `CHECK` 约束在 `db/migrations/025` 中已包含 `cancelled`，因此**没有新增迁移**。命中已存在开放 PR 时不再请求 `compare`，少一次 GitHub 调用。
 
@@ -179,11 +189,11 @@
 | --- | --- |
 | 1 校准任务转绿、无重叠 | **通过**，见第三节 P3 |
 | 2 无 `stages_total=0` 孤儿 running 行 | cron 一路 `success`；webhook 仍全部停在 running（本就在第八节例外内） |
-| 3 滞留动作不再停在 `queued`+`attempts=0` | **未通过，但暴露了 P8**：动作 3 拿到了可读原因 `column "stage_index" does not exist`（`updated_at = 23:24:37`），说明 P1/P2 生效、执行确实被触发，卡点在 P8。动作 1、2 的 `headSha` 已过期，不会再被执行 |
-| 4 自动创建在一个轮转周期内触发且只建一个 PR | **未通过**，`bayernjf/bayjf` 没有新 PR，被 P8 阻断 |
+| 3 滞留动作不再停在 `queued`+`attempts=0` | **P8 部署后通过**：动作 3 变为 `paused` / `attempts=1`，执行器首次真正越过原子领取。原始记录（P8 之前）如下——**未通过，但暴露了 P8**：动作 3 拿到了可读原因 `column "stage_index" does not exist`（`updated_at = 23:24:37`），说明 P1/P2 生效、执行确实被触发，卡点在 P8。动作 1、2 的 `headSha` 已过期，不会再被执行 |
+| 4 自动创建在一个轮转周期内触发且只建一个 PR | **仍未通过**：P8 部署后连跑 5 轮 `workflow_dispatch`（reconciled 8/13/11/10/15），`bayernjf/bayjf` 仍无新 PR，卡点已从 P8 前移到 P9 |
 | 5 收件箱与抽屉判断一致 | 待你在浏览器确认 |
-| 6 门禁为红不触发自动创建 | 待验，需先修 P8 |
-| 7 幂等命中记成功 | 待验，需先修 P8 |
+| 6 门禁为红不触发自动创建 | 待验，需先部署 P9 |
+| 7 幂等命中记成功 | 待验，需先部署 P9 |
 
 链路上除 P8 之外的前置条件均已在生产核实：`pr_helper_ai_automation_credentials` 有一行且 `auto_generate_pr_message` / `auto_confirm_pr_creation` 均为 true；`bayjf-…cjtnq` 的 stage 0 为 `merged` / `checks=pending` / `ahead_by=3`、阈值 1、`executionMode='server'`，GitHub 侧确认 `ahead_by=3 behind=15 diverged` 且无开放 PR。也就是说 `canCreateNext` 与入队闸门都已放行，动作被真实领取执行，只是执行器第一条 SELECT 就抛错。
 
