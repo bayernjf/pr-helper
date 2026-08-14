@@ -22,6 +22,14 @@
 - 本地已落地：按事件分支收窄校准范围、在预算内 `await` 校准后再返回、`pg_try_advisory_lock` 抑制同仓并发、提前写入 `stages_total` 并回收中断行、按尝试时间轮转。计划与证据见 [`docs/superpowers/plans/2026-08-14-realtime-reconciliation.md`](docs/superpowers/plans/2026-08-14-realtime-reconciliation.md)，实现清单见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md) 第十节。
 - 部署前置：Supabase 需执行迁移 `027`（`reconciliation_runs.state` 允许 `skipped`、`pr_helper_workflows.last_reconcile_attempt_at`）。
 
+## 2026-08-14 校准租约与待校准接力（本地已落地待部署验收）
+
+- 上一批部署后由生产数据暴露三个残留缺陷：会话级 advisory lock 在实例被冻结后不会释放（一条 cron 行挡了同仓 8.7 分钟）；超预算的 sweep 直接返回不收尾，`trigger='webhook'` 至今没有一条到达 `success`；GitHub Actions 的 `*/10` 计划在生产实际间隔 50–100 分钟，「交给 cron 兜底」不成立。
+- 本地已落地：`reconciliation_leases` 自过期租约（TTL 30 秒、TTL/3 心跳续租、holder 守卫释放）替换 advisory lock；`withStageDeadline` 让出预算时按当前计数写终态并落 `finished_at`；`reconcile_pending_since` 标记推迟或失败的工作流，实时触发优先接力最多 4 个，不再等 cron。计划与证据见 [`docs/superpowers/plans/2026-08-14-reconciliation-lease.md`](docs/superpowers/plans/2026-08-14-reconciliation-lease.md)，实现清单见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md) 第十一节。
+- 生产事故已修复并上线：`api/_lib/workflows-store.ts` 从浏览器模块 `src/lib/github.ts` 引入函数，该模块顶层读 `import.meta.env`，在 Node 下模块加载即崩，`/api/github/session` 返回 `FUNCTION_INVOCATION_FAILED`。已内联该调用并新增源码守卫测试，覆盖整类越界。
+- 部署前置：Supabase 需执行迁移 `028`（`reconciliation_leases` 表、`pr_helper_workflows.reconcile_pending_since`）。未执行前所有 sweep 会在抢租约时报错。
+- 部署后验收四项：一条 `webhook` 行到达 `success`/`degraded` 且 `finished_at` 非空、无行长期停在 `running`；一次 push 的非首条投递记 `skipped`；`reconciliation_leases` 无已过期却仍阻塞后继的行；一次 `degraded` sweep 由紧随其后的触发在秒级接走。
+
 ## 2026-08-12 刷新链路最新结论
 
 - 详情页、步骤抽屉及创建/合并/重试/回滚/删除后的刷新按当前仓库触发；流程总览手动“刷新队列”和定时 reconciliation 仍为全量。
