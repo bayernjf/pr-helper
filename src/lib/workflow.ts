@@ -76,6 +76,32 @@ export const defaultDeployments: DeploymentConfig[] = [
   { target: 'main', provider: 'cloudflare', workflowName: 'Deploy frontend to Cloudflare Pages', environment: 'production', githubEnvironment: 'production-cloudflare-pages' },
 ];
 
+const providerKeywords: Record<DeploymentConfig['provider'], RegExp> = { vercel: /vercel/i, cloudflare: /cloudflare|pages/i };
+
+// The hardcoded default workflow names only exist in some repositories. Where they do not, a configured
+// deployment can never match a run, and the gate it holds shuts the pipeline permanently with no run to
+// point at. So a new workflow is seeded from what the repository actually has: an existing default is
+// kept, a single unambiguous provider match is adopted, and anything else is dropped rather than guessed.
+export function deploymentsForRepository(actionWorkflows: readonly { name: string }[], environments: readonly string[]): DeploymentConfig[] {
+  if (!actionWorkflows.length) return defaultDeployments.map(deployment => ({ ...deployment }));
+  const workflowNameFor = (deployment: DeploymentConfig) => {
+    if (actionWorkflows.some(candidate => candidate.name === deployment.workflowName)) return deployment.workflowName;
+    const matches = actionWorkflows.filter(candidate => providerKeywords[deployment.provider].test(candidate.name));
+    return matches.length === 1 ? matches[0].name : null;
+  };
+  const environmentFor = (deployment: DeploymentConfig) => {
+    if (deployment.githubEnvironment && environments.includes(deployment.githubEnvironment)) return deployment.githubEnvironment;
+    const matches = environments.filter(candidate => candidate.toLowerCase().startsWith(deployment.environment) && providerKeywords[deployment.provider].test(candidate));
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+  return defaultDeployments.flatMap(deployment => {
+    const workflowName = workflowNameFor(deployment);
+    if (!workflowName) return [];
+    const githubEnvironment = environmentFor(deployment);
+    return [{ ...deployment, workflowName, githubEnvironment }];
+  });
+}
+
 const bundledRollbackRepository = 'bayernjf/pr-helper';
 const bundledRollbackWorkflow = 'Rollback frontend deployment';
 
@@ -92,6 +118,17 @@ export function deploymentConfigs(workflow: object): DeploymentConfig[] {
 
 export function deploymentConfigsForTarget(workflow: object, target: string) {
   return deploymentConfigs(workflow).filter(deployment => deployment.target === target);
+}
+
+// Reconciliation records a run-less row for a configured deployment whose workflow it never found.
+// That row is the only evidence available downstream: the gate it holds shut looks exactly like a
+// deployment that has not started, so the stage it locks has to be able to name it.
+export function missingDeploymentWorkflowNames(deployments: readonly { stageId: string | null; stageIndex: number; source: string; runId: number | null; runName: string }[], stage: { stageId?: string; stageIndex: number; source?: string }) {
+  return deployments
+    .filter(deployment => (stage.stageId ? deployment.stageId === stage.stageId : deployment.stageIndex === stage.stageIndex))
+    .filter(deployment => stage.source === undefined || deployment.source === stage.source)
+    .filter(deployment => deployment.runId === null)
+    .map(deployment => deployment.runName);
 }
 
 export function deploymentConfigurationWarnings(workflow: Workflow, context: { actionsLoaded: boolean; actionWorkflows: readonly { name: string; path: string }[]; environmentsLoaded: boolean; environments: readonly string[] }): DeploymentConfigurationWarning[] {
@@ -117,8 +154,8 @@ export function removeDeployment(workflow: Workflow, index: number): Workflow {
   return { ...workflow, deployments: deploymentConfigs(workflow).filter((_, deploymentIndex) => deploymentIndex !== index) };
 }
 
-export function createWorkflow(repository: string, source: string, target: string, name = repository): Workflow {
-  return { id: `${repository}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, repository, createdAt: new Date().toISOString(), stages: [{ source, target, stageId: generateStageId() }], deployments: defaultDeployments };
+export function createWorkflow(repository: string, source: string, target: string, name = repository, deployments: DeploymentConfig[] = defaultDeployments): Workflow {
+  return { id: `${repository}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, repository, createdAt: new Date().toISOString(), stages: [{ source, target, stageId: generateStageId() }], deployments };
 }
 
 export function addStage(workflow: Workflow, source: string, target: string, independent = false, waitFor: number[] = []): Workflow {
