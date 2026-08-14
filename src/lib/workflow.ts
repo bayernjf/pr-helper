@@ -293,6 +293,17 @@ export function reorderWorkflows(workflows: readonly Workflow[], draggedId: stri
   return reordered.map((workflow, position) => ({ ...workflow, position }));
 }
 
+// A reorder is computed from a snapshot of the board, so a save that lands mid-drag leaves that
+// snapshot holding the version it replaced. Adopting it wholesale rolls the version back and the
+// server rejects the next save as a conflict, so carry only the order over the records held now.
+export function applyWorkflowOrder(current: readonly Workflow[], ordered: readonly Workflow[]): Workflow[] {
+  const positions = new Map(ordered.map((workflow, position) => [workflow.id, position]));
+  return sortWorkflows(current.map(workflow => {
+    const position = positions.get(workflow.id);
+    return position === undefined ? workflow : { ...workflow, position };
+  }));
+}
+
 export function moveWorkflowToPosition(workflows: readonly Workflow[], workflowId: string, position: number): Workflow[] {
   const fromIndex = workflows.findIndex(workflow => workflow.id === workflowId);
   if (!Number.isInteger(position) || fromIndex === -1 || position < 1 || position > workflows.length) return [...workflows];

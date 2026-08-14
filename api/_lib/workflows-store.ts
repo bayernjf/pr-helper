@@ -1120,6 +1120,14 @@ export function serverAutomationActivated(previous: StoredWorkflow | null, next:
   };
 }
 
+// A row written before versioning has no version history, so an incoming save has nothing to
+// conflict with. Requiring the client to echo a version it was never given left those rows
+// permanently unsaveable, which failed every reorder — a reorder saves every workflow.
+export function workflowSaveConflicts(hasPrevious: boolean, latestVersion: number, version: unknown) {
+  if (!hasPrevious || latestVersion === 0) return false;
+  return typeof version !== 'number' || version !== latestVersion;
+}
+
 export async function upsertWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflow: StoredWorkflow) {
   if (!isStoredWorkflow(workflow)) throw new Error('流程数据无效');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
@@ -1135,7 +1143,7 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
     await transaction`SELECT pg_advisory_xact_lock(hashtext(${`${ownerUserId}:${withIds.id}`}))`;
     const latestRows = await transaction<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${ownerUserId} AND workflow_id = ${withIds.id}`;
     const latestVersion = latestRows[0]?.version || 0;
-    if (previous && (typeof workflow.version !== 'number' || workflow.version !== latestVersion)) throw new Error('流程已被其他窗口更新，请刷新后再保存。');
+    if (workflowSaveConflicts(Boolean(previous), latestVersion, workflow.version)) throw new Error('流程已被其他窗口更新，请刷新后再保存。');
     savedWorkflow = { ...withIds, version: latestVersion + 1 };
     await transaction`INSERT INTO pr_helper_workflows (id, user_id, payload) VALUES (${savedWorkflow.id}, ${ownerUserId}, ${transaction.json(savedWorkflow)}) ON CONFLICT (user_id, id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`;
     if (previous) {

@@ -6,7 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, g
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, selectWorkflowAfterCloudLoad, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
+import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
@@ -218,7 +218,7 @@ async function persistWorkflowOrder(next: Workflow[]) {
     const workflowId = lane.dataset.projectLane;
     if (workflowId) previousPositions.set(workflowId, lane.getBoundingClientRect());
   });
-  workflows = next;
+  workflows = applyWorkflowOrder(workflows, next);
   persistWorkflowsLocally();
   render();
   requestAnimationFrame(() => {
@@ -238,7 +238,11 @@ async function persistWorkflowOrder(next: Workflow[]) {
   });
   if (!cloudWorkflowStorage) { showToast(t('toast.order.saved')); return; }
   try {
-    const saved = await Promise.all(next.map(workflow => workflowSaveQueue.enqueue(workflow.id)));
+    // Each save carries its own version, so firing the whole board at once lets one response land
+    // after the next request has already read the version it replaces. Ordering only moves lanes, so
+    // a few extra seconds is cheaper than a rejected save that drops the new order.
+    const saved: boolean[] = [];
+    for (const workflow of next) saved.push(await workflowSaveQueue.enqueue(workflow.id));
     if (saved.some(result => !result)) throw new Error(cloudWorkflowSyncError || t('toast.saved.cloudFail'));
     cloudWorkflowSyncError = '';
     showToast(t('toast.order.saved'));
