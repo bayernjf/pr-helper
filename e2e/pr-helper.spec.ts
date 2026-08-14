@@ -459,3 +459,20 @@ test('移除部署门禁可从提示条撤销，恢复的行会高亮', async ({
   await page.locator('#toggle-deployment-form').click();
   await expect(page.locator('.deployment-config-list > div.is-new')).toHaveCount(0);
 });
+
+test('从流程详情返回时目标泳道先高亮再自行褪去', async ({ page }) => {
+  await openWorkspace(page, { workflows: [{ id: 'flow-a', name: '流程 A', repository, createdAt: '2026-08-01T00:00:00.000Z', stages: [{ source: 'feature/e2e', target: 'dev', stageId: 'stage-a' }], deployments: [] } as Workflow] });
+  await page.locator('.lane-actions [data-open="flow-a"]').click();
+  await page.locator('#back-from-detail').click();
+
+  const lane = page.locator('[data-project-lane="flow-a"]');
+  // The sweeping sheen and the edge bar are pseudo-elements, so the effect is only complete if both
+  // run alongside the lane's own ring decay.
+  await expect.poll(() => lane.evaluate(element => ({
+    highlighted: element.classList.contains('is-return-highlight'),
+    ring: getComputedStyle(element).animationName,
+    bar: getComputedStyle(element, '::before').animationName,
+    sheen: getComputedStyle(element, '::after').animationName,
+  }))).toEqual({ highlighted: true, ring: 'lane-return-highlight', bar: 'lane-return-bar', sheen: 'lane-return-sheen' });
+  await expect(lane).not.toHaveClass(/is-return-highlight/);
+});
