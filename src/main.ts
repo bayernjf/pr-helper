@@ -6,7 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, g
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, selectWorkflowAfterCloudLoad, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
+import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
@@ -1819,6 +1819,15 @@ function detail() {
     showToast(input.checked ? t('draft.autoCreateEnabled') : t('draft.autoCreateDisabled'));
     render();
   }));
+  document.querySelectorAll<HTMLInputElement>('[data-detail-auto-merge-stage]').forEach(input => input.addEventListener('change', () => {
+    if (!active) return;
+    const stageIndex = Number(input.dataset.detailAutoMergeStage);
+    const updated = setStageAutoMerge(active, stageIndex, input.checked);
+    if (updated === active) { input.checked = !input.checked; showToast(t('detail.autoMergeLegacyPolicy')); return; }
+    save(updated);
+    showToast(input.checked ? t('draft.autoMergeEnabled') : t('draft.autoMergeDisabled'));
+    render();
+  }));
   document.querySelectorAll<HTMLInputElement>('[data-detail-auto-create-threshold]').forEach(input => input.addEventListener('change', () => {
     if (!active) return;
     const stageIndex = Number(input.dataset.detailAutoCreateThreshold);
@@ -1935,13 +1944,20 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const autoHint = !canEditAutomation ? t('detail.autoCreateReadonly') : autoDisabled ? t('draft.autoCreatePrerequisites') : t('detail.autoCreateDesc');
   const threshold = stage.automation?.triggerMinCommits || 1;
   const autoControl = `<label class="timeline-auto-create"><input type="checkbox" data-detail-auto-create-stage="${index}" ${autoEnabled ? 'checked' : ''} ${autoDisabled ? 'disabled' : ''} /><span>${t('draft.autoCreate')}</span><span>${t('draft.autoCreateThreshold')}</span><input class="auto-create-threshold" type="number" min="1" max="20" step="1" value="${threshold}" data-detail-auto-create-threshold="${index}" aria-label="${escape(t('draft.autoCreateThreshold'))}" title="${escape(t('draft.autoCreateThresholdTooltip'))}" ${autoDisabled ? 'disabled' : ''} /><small>${escape(autoHint)}</small></label>`;
+  const mergeEnabled = stage.automation?.autoMergePullRequest === true;
+  // Merging is a server-side action, so a legacy browser-session policy cannot carry it.
+  const mergeLegacyPolicy = stage.automation?.executionMode === 'browser-session';
+  const canMergeAutomation = Boolean(active && canOperateWorkflow(active, 'pull-merge'));
+  const mergeDisabled = !canEditAutomation || !canMergeAutomation || mergeLegacyPolicy;
+  const mergeHint = !canEditAutomation ? t('detail.autoCreateReadonly') : !canMergeAutomation ? t('detail.autoMergeReadonly') : mergeLegacyPolicy ? t('detail.autoMergeLegacyPolicy') : t('detail.autoMergeDesc');
+  const mergeControl = `<label class="timeline-auto-create timeline-auto-merge"><input type="checkbox" data-detail-auto-merge-stage="${index}" ${mergeEnabled ? 'checked' : ''} ${mergeDisabled ? 'disabled' : ''} /><span>${t('draft.autoMerge')}</span><small>${escape(mergeHint)}</small></label>`;
   if (stage.source.includes('*')) {
     const states = active ? statesForStage(active, index) : [];
     const runs = states.map(state => `<button type="button" class="timeline-action" data-dynamic-stage="${index}" data-dynamic-source="${escape(state.source)}"><b>${escape(state.source)}</b><small>${escape(dynamicBranchStatusText(state))}</small></button>`).join('');
-    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p class="meta">${t('detail.dynamicRoute')}</p>${runs ? `<div class="timeline-actions dynamic-stage-actions">${runs}</div>` : `<p>${t('detail.timeline.placeholder')}</p>`}</div></article>`;
+    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}${mergeControl}<p class="meta">${t('detail.dynamicRoute')}</p>${runs ? `<div class="timeline-actions dynamic-stage-actions">${runs}</div>` : `<p>${t('detail.timeline.placeholder')}</p>`}</div></article>`;
   }
   const status = statuses?.[index];
-  if (!status) return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p>${t('detail.timeline.placeholder')}</p></div></article>`;
+  if (!status) return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}${mergeControl}<p>${t('detail.timeline.placeholder')}</p></div></article>`;
   if (status.kind === 'not-created') {
     const unlocked = canCreateWorkflowStage(index, active!.stages, statuses!);
     const hasNewCommits = Boolean(status.aheadBy);
@@ -1950,9 +1966,9 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
       ? `<p><b class="status neutral">${t('status.newCommits', { count: status.aheadBy || 0 })}</b> · ${unlocked ? t('status.newCommits.canCreate') : t('status.newCommits.waiting')}</p>`
       : unlocked ? `<p class="meta">${t('status.newCommits.waitingChanges')}</p>` : '';
     const autoCreate = '';
-    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${changeMessage}${unlocked ? `<div class="timeline-actions">${autoCreate}${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${lockedStageText(index)}</p>`}</div></article>`;
+    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}${mergeControl}<p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${changeMessage}${unlocked ? `<div class="timeline-actions">${autoCreate}${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${lockedStageText(index)}</p>`}</div></article>`;
   }
-  if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status failure">${t('status.fetchFailed')}</b> · ${escape(status.message || '')}</p></div></article>`;
+  if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}${mergeControl}<p><b class="status failure">${t('status.fetchFailed')}</b> · ${escape(status.message || '')}</p></div></article>`;
   const checks = status.checks?.total ? gateDisclosure(t('status.checks.summary', { passed: status.checks.passed, total: status.checks.total, state: status.checks.state === 'success' ? t('status.checks.completed') : status.checks.state === 'failure' ? t('status.checks.failed') : t('status.checks.running') }), status.checkDetails, 'checks', stage.target) : '';
   const actions = status.actions?.total ? gateDisclosure(t('status.actions.runs.summary', { passed: status.actions.passed, total: status.actions.total, state: status.actions.state === 'success' ? t('status.actions.passed') : status.actions.state === 'failure' ? t('status.actions.failed') : t('status.actions.running') }), status.actionDetails, 'actions', stage.target) : '';
   const approvals = status.requiredApprovals ? t('status.approvals', { approvals: status.approvals || 0, required: status.requiredApprovals }) : '';
@@ -1974,7 +1990,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';
   const gateList = gates.filter(Boolean);
   const sourceBranchWarning = status.sourceBranchMissing ? `<p class="meta">${t('status.sourceBranchDeletedHint')}</p>` : '';
-  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
+  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}${mergeControl}<p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
 }
 async function refreshDetailStatuses() {
   await refreshStatuses(false, false);

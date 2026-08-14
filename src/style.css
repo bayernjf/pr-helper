@@ -1215,6 +1215,10 @@ a.account-menu-item {
   font: 500 .72rem Manrope;
 }
 
+.timeline-auto-create + .timeline-auto-merge {
+  margin-top: 0;
+}
+
 .auto-create-threshold {
   width: 42px !important;
   height: 30px !important;
