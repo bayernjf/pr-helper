@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { actionableStageEntry, automationActionId, automationCreateOutcome, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { actionableStageEntry, automationActionId, automationCreateOutcome, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -516,5 +516,99 @@ describe('jsonFromModelText', () => {
 
   it('keeps a fenced block that the pull request body itself contains', () => {
     expect(jsonFromModelText('```json\n{"body":"see ```ts\\ncode\\n``` above"}\n```')).toBe('{"body":"see ```ts\\ncode\\n``` above"}');
+  });
+});
+
+describe('automationMergeOutcome', () => {
+  const green = { checksState: 'success', approvals: 1, requiredApprovals: 1, mergeable: true, mergeableState: 'clean' };
+  const pull = { number: 42, state: 'open', merged: false, html_url: 'https://github.com/o/r/pull/42' };
+
+  it('merges when GitHub reports a clean verdict', () => {
+    expect(automationMergeOutcome(pull, green)).toEqual({ kind: 'merge', pullNumber: 42 });
+  });
+
+  it('records an already merged pull request as an idempotent success', () => {
+    expect(automationMergeOutcome({ ...pull, state: 'closed', merged: true }, green)).toEqual({ kind: 'idempotent', pullNumber: 42, pullUrl: 'https://github.com/o/r/pull/42' });
+  });
+
+  it('cancels when the pull request was closed without merging', () => {
+    expect(automationMergeOutcome({ ...pull, state: 'closed' }, green).kind).toBe('cancelled');
+  });
+
+  it('pauses instead of merging when no pull request exists', () => {
+    expect(automationMergeOutcome(undefined, green).kind).toBe('paused');
+  });
+
+  it('pauses while checks are not green', () => {
+    expect(automationMergeOutcome(pull, { ...green, checksState: 'pending' }).kind).toBe('paused');
+    expect(automationMergeOutcome(pull, { ...green, checksState: 'failure' }).kind).toBe('paused');
+  });
+
+  it('pauses while approvals are missing', () => {
+    expect(automationMergeOutcome(pull, { ...green, approvals: 0, requiredApprovals: 2 }).kind).toBe('paused');
+  });
+
+  it('pauses when GitHub does not report the pull request as mergeable', () => {
+    expect(automationMergeOutcome(pull, { ...green, mergeable: false }).kind).toBe('paused');
+    expect(automationMergeOutcome(pull, { ...green, mergeable: null }).kind).toBe('paused');
+  });
+
+  it('pauses on a behind branch instead of updating it', () => {
+    const outcome = automationMergeOutcome(pull, { ...green, mergeableState: 'behind' });
+    expect(outcome.kind).toBe('paused');
+    expect(outcome.kind === 'paused' && outcome.reason).toContain('更新分支');
+  });
+
+  it('pauses on any other mergeable state', () => {
+    for (const mergeableState of ['dirty', 'blocked', 'unstable', 'unknown', 'draft']) {
+      expect(automationMergeOutcome(pull, { ...green, mergeableState }).kind).toBe('paused');
+    }
+  });
+});
+
+describe('automationRetryIsExhausted', () => {
+  it('allows retries below the policy limit', () => {
+    expect(automationRetryIsExhausted(2, { maxRetries: 3, cooldownSeconds: 300 })).toBe(false);
+  });
+
+  it('stops retrying once the policy limit is reached', () => {
+    expect(automationRetryIsExhausted(3, { maxRetries: 3, cooldownSeconds: 300 })).toBe(true);
+    expect(automationRetryIsExhausted(4, { maxRetries: 3, cooldownSeconds: 300 })).toBe(true);
+  });
+
+  it('honours a stricter policy', () => {
+    expect(automationRetryIsExhausted(1, { maxRetries: 1, cooldownSeconds: 60 })).toBe(true);
+  });
+
+  it('falls back to the default policy when the workflow has none or an invalid one', () => {
+    expect(automationRetryIsExhausted(DEFAULT_RECOVERY_POLICY.maxRetries, undefined)).toBe(true);
+    expect(automationRetryIsExhausted(DEFAULT_RECOVERY_POLICY.maxRetries - 1, undefined)).toBe(false);
+    expect(automationRetryIsExhausted(DEFAULT_RECOVERY_POLICY.maxRetries, { maxRetries: 0, cooldownSeconds: 0 })).toBe(true);
+  });
+});
+
+describe('stored automation policies', () => {
+  const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature/payments', target: 'dev', stageId: 's-1' }] };
+  const withAutomation = (automation: unknown) => isStoredWorkflow({ ...workflow, stages: [{ ...workflow.stages[0], automation }] });
+
+  it('accepts a step that only automates merging', () => {
+    expect(withAutomation({ autoMergePullRequest: true, executionMode: 'server' })).toBe(true);
+  });
+
+  it('accepts a step that automates both creating and merging', () => {
+    expect(withAutomation({ autoCreatePullRequest: true, autoMergePullRequest: true, executionMode: 'server', generationRule: { name: 'Default', content: '# Rule', capturedAt: '2026-08-12T00:00:00.000Z' } })).toBe(true);
+  });
+
+  it('does not require a generation rule for merge-only automation because it never calls the model', () => {
+    expect(withAutomation({ autoMergePullRequest: true, executionMode: 'server', generationRule: undefined })).toBe(true);
+  });
+
+  it('rejects merge automation outside server execution', () => {
+    expect(withAutomation({ autoMergePullRequest: true, executionMode: 'browser-session' })).toBe(false);
+  });
+
+  it('still rejects a policy that automates nothing', () => {
+    expect(withAutomation({ executionMode: 'server' })).toBe(false);
+    expect(withAutomation({ autoCreatePullRequest: false, autoMergePullRequest: false, executionMode: 'server' })).toBe(false);
   });
 });
