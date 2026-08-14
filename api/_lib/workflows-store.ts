@@ -1396,6 +1396,29 @@ export function reconciliationRunIsAbandoned(startedAt: string, now: number) {
   return Number.isFinite(started) && now - started > RECONCILIATION_RUN_GRACE_SECONDS * 1000;
 }
 
+// A realtime trigger reconciles inline so the user sees the effect immediately, but a serverless
+// request is killed at a hard platform limit, so the wait is bounded and the scheduled sweep is the
+// safety net for whatever did not finish.
+export const REALTIME_RECONCILE_BUDGET_MS = 8000;
+
+export function realtimeReconcileBudgetMs(environment: Record<string, string | undefined>) {
+  const configured = Number(environment.REALTIME_RECONCILE_BUDGET_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : REALTIME_RECONCILE_BUDGET_MS;
+}
+
+export async function withReconciliationBudget(sweep: Promise<number>, budgetMs: number): Promise<{ outcome: 'completed' | 'failed' | 'deferred'; reconciled: number }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deferred = new Promise<{ outcome: 'deferred'; reconciled: number }>(resolve => {
+    timer = setTimeout(() => resolve({ outcome: 'deferred', reconciled: 0 }), budgetMs);
+  });
+  const settled = sweep.then(reconciled => ({ outcome: 'completed' as const, reconciled })).catch(() => ({ outcome: 'failed' as const, reconciled: 0 }));
+  try {
+    return await Promise.race([settled, deferred]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export const RECONCILE_WORKFLOW_BATCH_SIZE = 8;
 
 export function reconciliationBatchSize(environment: Record<string, string | undefined>) {
