@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
+import { addDeployment, defaultDeployments, deploymentsForRepository, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -356,4 +356,72 @@ describe('immediateAutomationEffect', () => {
     expect(immediateAutomationEffect({ toggle: 'create', enabling: false, stage, status: { kind: 'not-created', aheadBy: 9 }, unlocked: true })).toEqual({ kind: 'none' });
     expect(immediateAutomationEffect({ toggle: 'merge', enabling: false, stage, status: { kind: 'open', pr: { number: 42 } }, unlocked: true })).toEqual({ kind: 'none' });
   });
+});
+
+describe('missingDeploymentWorkflowNames', () => {
+  const deployment = (overrides: Partial<{ stageId: string | null; stageIndex: number; source: string; runId: number | null; runName: string }> = {}) => ({ stageId: 's-1', stageIndex: 0, source: 'dev', runId: 1234, runName: 'Deploy frontend to Cloudflare Pages', ...overrides });
+
+  it('names a configured deployment whose workflow run was never observed, because that gate never opens on its own', () => {
+    const deployments = [deployment(), deployment({ provider: 'vercel', runId: null, runName: 'Deploy frontend to Vercel' } as never)];
+    expect(missingDeploymentWorkflowNames(deployments, { stageId: 's-1', stageIndex: 0, source: 'dev' })).toEqual(['Deploy frontend to Vercel']);
+  });
+
+  it('stays empty when every configured deployment matched a run', () => {
+    expect(missingDeploymentWorkflowNames([deployment()], { stageId: 's-1', stageIndex: 0, source: 'dev' })).toEqual([]);
+  });
+
+  it('ignores deployments belonging to another stage, so a lock is never blamed on an unrelated route', () => {
+    const other = deployment({ stageId: 's-2', stageIndex: 1, runId: null, runName: 'Deploy frontend to Vercel' });
+    expect(missingDeploymentWorkflowNames([other], { stageId: 's-1', stageIndex: 0, source: 'dev' })).toEqual([]);
+  });
+
+  it('falls back to the stage index when the stage has no identity yet', () => {
+    const legacy = deployment({ stageId: null, runId: null, runName: 'Deploy frontend to Vercel' });
+    expect(missingDeploymentWorkflowNames([legacy], { stageIndex: 0, source: 'dev' })).toEqual(['Deploy frontend to Vercel']);
+  });
+});
+
+describe('deploymentsForRepository', () => {
+  const bayjf = [{ name: 'CI' }, { name: 'Deploy Hono API to Vercel' }, { name: 'Deploy frontend to Cloudflare Pages' }, { name: 'E2E (manual)' }];
+  const bayjfEnvironments = ['preview-cloudflare-pages', 'preview-vercel-api', 'Production', 'production-cloudflare-pages', 'production-vercel-api'];
+
+  it('keeps the defaults when the repository workflows are unknown, because dropping a real gate is worse than keeping a guess', () => {
+    expect(deploymentsForRepository([], [])).toEqual(defaultDeployments);
+  });
+
+  it('keeps a default entry whose workflow really exists', () => {
+    const configured = deploymentsForRepository([{ name: 'Deploy frontend to Vercel' }, { name: 'Deploy frontend to Cloudflare Pages' }], ['preview-vercel', 'production-vercel', 'preview-cloudflare-pages', 'production-cloudflare-pages']);
+    expect(configured).toEqual(defaultDeployments);
+  });
+
+  it('adopts the repository’s own Vercel workflow instead of the default name that does not exist there', () => {
+    const configured = deploymentsForRepository(bayjf, bayjfEnvironments);
+    expect(configured.filter(deployment => deployment.provider === 'vercel').map(deployment => deployment.workflowName)).toEqual(['Deploy Hono API to Vercel', 'Deploy Hono API to Vercel']);
+  });
+
+  it('points each adopted entry at a GitHub environment that exists, so the gate is not warned about on creation', () => {
+    const configured = deploymentsForRepository(bayjf, bayjfEnvironments);
+    expect(configured.map(deployment => deployment.githubEnvironment)).toEqual(['preview-vercel-api', 'preview-cloudflare-pages', 'production-vercel-api', 'production-cloudflare-pages']);
+  });
+
+  it('drops a provider the repository has no workflow for, because an unreachable gate locks the pipeline forever', () => {
+    const configured = deploymentsForRepository([{ name: 'Deploy frontend to Cloudflare Pages' }], ['preview-cloudflare-pages', 'production-cloudflare-pages']);
+    expect(configured.every(deployment => deployment.provider === 'cloudflare')).toBe(true);
+    expect(configured).toHaveLength(2);
+  });
+
+  it('leaves the environment unset rather than inventing one, so the editor asks instead of guessing', () => {
+    const configured = deploymentsForRepository(bayjf, []);
+    expect(configured.map(deployment => deployment.githubEnvironment)).toEqual([undefined, undefined, undefined, undefined]);
+  });
+
+  it('ignores an ambiguous provider match, because picking one of two deploy workflows would be a coin flip', () => {
+    const configured = deploymentsForRepository([{ name: 'Deploy API to Vercel' }, { name: 'Deploy web to Vercel' }], []);
+    expect(configured).toEqual([]);
+  });
+});
+
+it('seeds a new workflow with the deployments derived from its repository', () => {
+  const seeded = deploymentsForRepository([{ name: 'Deploy frontend to Cloudflare Pages' }], ['preview-cloudflare-pages', 'production-cloudflare-pages']);
+  expect(createWorkflow('a/b', 'dev', 'main', 'a/b', seeded).deployments).toEqual(seeded);
 });

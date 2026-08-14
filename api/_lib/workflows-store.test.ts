@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { serverAutomationActivated, reconcileTimingLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -901,6 +901,34 @@ describe('reconcileTimingLine', () => {
   });
 });
 
+describe('automationSkipLine', () => {
+  it('names the gate that declined so the queue stops being silent', () => {
+    const line = automationSkipLine({ kind: 'create-pr', repository: 'a/b', route: 'dev → main', reason: 'below-threshold', aheadBy: 1, threshold: 3 });
+    expect(line).toBe('[automation-skip] kind=create-pr repository=a/b route="dev → main" reason=below-threshold aheadBy=1 threshold=3');
+  });
+
+  it('keeps the line single so log truncation cannot split a reason', () => {
+    expect(automationSkipLine({ kind: 'create-pr', repository: 'a/b', route: 'dev → main', reason: 'duplicate', state: 'failed' }).includes('\n')).toBe(false);
+  });
+});
+
+describe('auto create enqueue gates', () => {
+  const source = readFileSync(new URL('./workflows-store.ts', import.meta.url), 'utf8');
+  const body = source.slice(source.indexOf('async function enqueueServerAutoCreate'), source.indexOf('async function enqueueServerAutoMerge'));
+
+  it('reports every declined enqueue, because a silent return null is indistinguishable from a working queue', () => {
+    expect(body.match(/return null;/g)).toHaveLength(1);
+    expect(body).toContain('console.info(automationSkipLine(');
+    expect(body.match(/skip\('/g)?.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('reports a route that reconciliation judged uncreatable, because that gate declines before the queue is reached', () => {
+    const schedule = source.slice(source.indexOf('async function scheduleServerAutoCreate'), source.indexOf('// Models routinely wrap'));
+    expect(schedule).toContain('automationSkipLine');
+    expect(schedule).toContain("reason: 'not-creatable'");
+  });
+});
+
 describe('serverAutomationActivated', () => {
   const stage = (stageId: string, automation?: Record<string, unknown>) => ({ source: 'feature/x', target: 'dev', stageId, ...(automation ? { automation } : {}) });
   const workflow = (stages: ReturnType<typeof stage>[]) => ({ id: 'w1', repository: 'acme/app', stages }) as never;
@@ -953,5 +981,31 @@ describe('workflow save route', () => {
     const trigger = source.slice(source.indexOf('const reconciliation'), source.indexOf('response.status(200).json({ ok: true, workflow: saved.workflow'));
     expect(trigger).toContain('saved.automationActivated.create || saved.automationActivated.merge');
     expect(trigger).not.toContain('autoCreateActivated');
+  });
+});
+
+describe('missing deployment workflows', () => {
+  it('names the workflow that was never found, because a silent pending gate is what locks the whole pipeline', () => {
+    const summary = missingDeploymentSummary('Deploy frontend to Vercel');
+    expect(summary).toContain('Deploy frontend to Vercel');
+    expect(summary.includes('\n')).toBe(false);
+  });
+
+  it('records a configured deployment with no matching run, because its absence used to be invisible', () => {
+    const source = readFileSync(new URL('./workflows-store.ts', import.meta.url), 'utf8');
+    const body = source.slice(source.indexOf('async function reconcileStageDeployments'), source.indexOf('export function reconcileTimingLine'));
+    expect(body).toContain('latestByProvider.has(configuration.provider)');
+    expect(body).toContain('missingDeploymentSummary(');
+  });
+
+  it('keeps the gate closed for a deployment that was never observed, because a typo must not open production', () => {
+    expect(mergeChecksWithDeployments({ state: 'success' }, ['pending'])).toEqual({ state: 'pending' });
+  });
+
+  it('names the blocking deployment in the auto-create skip line, because checks=pending alone never explained the lock', () => {
+    const source = readFileSync(new URL('./workflows-store.ts', import.meta.url), 'utf8');
+    const body = source.slice(source.indexOf('async function scheduleServerAutoCreate'), source.indexOf('export function jsonFromModelText'));
+    expect(body).toContain('run_id IS NULL');
+    expect(body).toContain('missingDeployments:');
   });
 });

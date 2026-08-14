@@ -8,3 +8,4 @@ test-results/
 .worktrees/
 .codegraph/
 .env*
+.claude/settings.local.json
