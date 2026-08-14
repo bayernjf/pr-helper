@@ -4,7 +4,6 @@ import { parseGithubAppConfig } from './github-app.js';
 import { sendPushNotifications, type BrowserPushSubscription } from './push.js';
 import { assertTeamOperation, type TeamOperation } from '../../src/lib/team-permissions.js';
 import { summarizeGitHubChecks } from '../../src/lib/domain.js';
-import { mergePullRequestPayload } from '../../src/lib/github.js';
 import { credentialKeyHint, decryptAiApiKey, encryptAiApiKey, maskAiApiKey } from './ai-credentials.js';
 import { buildPrPrompt, aiChatCompletionsUrl, testAiConnection } from '../../src/lib/ai.js';
 
@@ -276,7 +275,7 @@ async function runAutomationMergeAction(environment: Record<string, string | und
   if (outcome.kind === 'merge') {
     // The sha pins the merge to the commit this gate verdict was computed for, so a push that lands
     // between the check and the call makes GitHub reject with 409 instead of merging unreviewed code.
-    await installationRequest(config, installationId, `/repos/${owner}/${name}/pulls/${pullNumber}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) });
+    await installationRequest(config, installationId, `/repos/${owner}/${name}/pulls/${pullNumber}/merge`, { method: 'PUT', body: JSON.stringify({ merge_method: 'merge', sha: pull.head.sha }) });
   }
   await sql`UPDATE workflow_automation_actions SET state = 'succeeded', failure_reason = NULL, updated_at = now(), payload = ${sql.json({ ...(action.payload || {}), pullNumber })} WHERE user_id = ${userId} AND id = ${actionId}`;
   await sql`UPDATE workflow_automation_runs SET state = 'succeeded', updated_at = now(), completed_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
