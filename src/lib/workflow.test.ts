@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
+import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -309,5 +309,51 @@ describe('workflow configuration', () => {
     const workflow = { ...createWorkflow('octo/app', 'dev', 'main'), deployments: [] };
     expect(deploymentConfigurationWarnings(workflow, { actionsLoaded: true, actionWorkflows: [], environmentsLoaded: true, environments: [] }).map(warning => warning.code)).toEqual(['no-deployments']);
     expect(deploymentConfigurationWarnings({ ...workflow, deployments: [{ target: 'main', provider: 'vercel', workflowName: 'Deploy', environment: 'production' }] }, { actionsLoaded: false, actionWorkflows: [], environmentsLoaded: false, environments: [] }).map(warning => warning.code)).toEqual(['actions-unavailable', 'environment-missing']);
+  });
+});
+
+describe('immediateAutomationEffect', () => {
+  const stage = { source: 'feature/a', target: 'dev' };
+
+  it('reports a create when the stage is unlocked and enough commits already landed', () => {
+    expect(immediateAutomationEffect({ toggle: 'create', enabling: true, stage, status: { kind: 'not-created', aheadBy: 3 }, unlocked: true, triggerMinCommits: 2 }))
+      .toEqual({ kind: 'create-pr', source: 'feature/a', target: 'dev', aheadBy: 3 });
+  });
+
+  it('reports a create after a merged stage received new commits', () => {
+    expect(immediateAutomationEffect({ toggle: 'create', enabling: true, stage, status: { kind: 'merged', aheadBy: 1 }, unlocked: true }))
+      .toEqual({ kind: 'create-pr', source: 'feature/a', target: 'dev', aheadBy: 1 });
+  });
+
+  it('stays quiet when the commits do not reach the threshold', () => {
+    expect(immediateAutomationEffect({ toggle: 'create', enabling: true, stage, status: { kind: 'not-created', aheadBy: 1 }, unlocked: true, triggerMinCommits: 2 })).toEqual({ kind: 'none' });
+  });
+
+  it('stays quiet when the stage is still locked by its dependencies', () => {
+    expect(immediateAutomationEffect({ toggle: 'create', enabling: true, stage, status: { kind: 'not-created', aheadBy: 5 }, unlocked: false })).toEqual({ kind: 'none' });
+  });
+
+  it('stays quiet for auto-create while a pull request is already open', () => {
+    expect(immediateAutomationEffect({ toggle: 'create', enabling: true, stage, status: { kind: 'open', aheadBy: 5, pr: { number: 7 } }, unlocked: true })).toEqual({ kind: 'none' });
+  });
+
+  it('reports a merge when a pull request is open on the stage', () => {
+    expect(immediateAutomationEffect({ toggle: 'merge', enabling: true, stage, status: { kind: 'open', pr: { number: 42 } }, unlocked: true }))
+      .toEqual({ kind: 'merge-pr', source: 'feature/a', target: 'dev', pullNumber: 42 });
+  });
+
+  it('stays quiet for auto-merge when no pull request is open', () => {
+    expect(immediateAutomationEffect({ toggle: 'merge', enabling: true, stage, status: { kind: 'not-created', aheadBy: 4 }, unlocked: true })).toEqual({ kind: 'none' });
+    expect(immediateAutomationEffect({ toggle: 'merge', enabling: true, stage, status: { kind: 'merged' }, unlocked: true })).toEqual({ kind: 'none' });
+  });
+
+  it('stays quiet when the status has not loaded yet, because the server gates every action anyway', () => {
+    expect(immediateAutomationEffect({ toggle: 'create', enabling: true, stage, status: null, unlocked: true })).toEqual({ kind: 'none' });
+    expect(immediateAutomationEffect({ toggle: 'merge', enabling: true, stage, unlocked: true })).toEqual({ kind: 'none' });
+  });
+
+  it('never reports an effect for unticking, which only ever removes future work', () => {
+    expect(immediateAutomationEffect({ toggle: 'create', enabling: false, stage, status: { kind: 'not-created', aheadBy: 9 }, unlocked: true })).toEqual({ kind: 'none' });
+    expect(immediateAutomationEffect({ toggle: 'merge', enabling: false, stage, status: { kind: 'open', pr: { number: 42 } }, unlocked: true })).toEqual({ kind: 'none' });
   });
 });
