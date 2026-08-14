@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { actionableStageEntry, automationActionId, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { actionableStageEntry, automationActionId, realtimeReconcileBudgetMs, withReconciliationBudget, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -690,5 +690,34 @@ describe('reconciliationRunIsAbandoned', () => {
 
   it('never reports an unparsable timestamp as interrupted', () => {
     expect(reconciliationRunIsAbandoned('not-a-timestamp', Date.parse('2026-08-14T23:00:00.000Z'))).toBe(false);
+  });
+});
+
+describe('realtimeReconcileBudgetMs', () => {
+  it('falls back to the packaged budget when the environment says nothing', () => {
+    expect(realtimeReconcileBudgetMs({})).toBe(REALTIME_RECONCILE_BUDGET_MS);
+    expect(realtimeReconcileBudgetMs({ REALTIME_RECONCILE_BUDGET_MS: 'soon' })).toBe(REALTIME_RECONCILE_BUDGET_MS);
+    expect(realtimeReconcileBudgetMs({ REALTIME_RECONCILE_BUDGET_MS: '0' })).toBe(REALTIME_RECONCILE_BUDGET_MS);
+  });
+
+  it('honours a configured budget so a slower plan can wait longer', () => {
+    expect(realtimeReconcileBudgetMs({ REALTIME_RECONCILE_BUDGET_MS: '20000' })).toBe(20000);
+  });
+});
+
+describe('withReconciliationBudget', () => {
+  it('reports the reconciled count when the sweep lands inside the budget', async () => {
+    await expect(withReconciliationBudget(Promise.resolve(3), 50)).resolves.toEqual({ outcome: 'completed', reconciled: 3 });
+  });
+
+  // The response must go out even if the sweep is still running, otherwise the platform kills the
+  // request and GitHub records a failed delivery.
+  it('defers a sweep that outlives the budget', async () => {
+    const slow = new Promise<number>(resolve => { setTimeout(() => resolve(1), 200); });
+    await expect(withReconciliationBudget(slow, 5)).resolves.toEqual({ outcome: 'deferred', reconciled: 0 });
+  });
+
+  it('turns a failed sweep into an outcome instead of rejecting the request', async () => {
+    await expect(withReconciliationBudget(Promise.reject(new Error('boom')), 50)).resolves.toEqual({ outcome: 'failed', reconciled: 0 });
   });
 });
