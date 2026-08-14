@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -229,7 +229,7 @@ describe('reconciliation state', () => {
 });
 
 describe('cron reconciliation batch', () => {
-  const candidate = (id: string, lastAttemptAt: string | null) => ({ id, lastAttemptAt });
+  const candidate = (id: string, lastAttemptAt: string | null, pendingSince: string | null = null) => ({ id, lastAttemptAt, pendingSince });
 
   it('keeps the scheduled sweep bounded so it can answer within the request timeout', () => {
     expect(RECONCILE_WORKFLOW_BATCH_SIZE).toBe(8);
@@ -271,11 +271,51 @@ describe('cron reconciliation batch', () => {
     expect(selectReconciliationBatch(candidates, 0)).toEqual(candidates);
   });
 
+  // A workflow the previous sweep could not finish is the one most likely to be showing a stale state
+  // to its user, so it outranks fair rotation.
+  it('reconciles workflows left pending by an unfinished sweep before anything else', () => {
+    const batch = selectReconciliationBatch([
+      candidate('never', null),
+      candidate('pending', '2026-08-13T10:00:00.000Z', '2026-08-13T10:00:05.000Z'),
+    ], 1);
+    expect(batch.map(item => item.id)).toEqual(['pending']);
+  });
+
+  it('reconciles the longest pending workflow first', () => {
+    const batch = selectReconciliationBatch([
+      candidate('recent', null, '2026-08-13T10:00:00.000Z'),
+      candidate('waiting', null, '2026-08-13T09:00:00.000Z'),
+    ], 1);
+    expect(batch.map(item => item.id)).toEqual(['waiting']);
+  });
+
   it('reads a deployment specific batch size and ignores unusable values', () => {
     expect(reconciliationBatchSize({ CRON_RECONCILE_BATCH_SIZE: '3' })).toBe(3);
     expect(reconciliationBatchSize({ CRON_RECONCILE_BATCH_SIZE: '0' })).toBe(0);
     expect(reconciliationBatchSize({ CRON_RECONCILE_BATCH_SIZE: 'many' })).toBe(RECONCILE_WORKFLOW_BATCH_SIZE);
     expect(reconciliationBatchSize({})).toBe(RECONCILE_WORKFLOW_BATCH_SIZE);
+  });
+});
+
+describe('mergeCatchUpCandidates', () => {
+  const item = (key: string, pendingSince: string | null = null) => ({ key, pendingSince });
+
+  // GitHub delivers the */10 schedule 50 to 100 minutes apart in practice, so deferred work has to ride
+  // along with whatever trigger comes next instead of waiting for the sweep that was supposed to fix it.
+  it('appends pending workflows the current scope does not already cover', () => {
+    expect(mergeCatchUpCandidates([item('a')], [item('b', '2026-08-13T09:00:00.000Z')], 4).map(entry => entry.key)).toEqual(['a', 'b']);
+  });
+
+  it('never reconciles the same workflow twice in one sweep', () => {
+    expect(mergeCatchUpCandidates([item('a')], [item('a', '2026-08-13T09:00:00.000Z')], 4).map(entry => entry.key)).toEqual(['a']);
+  });
+
+  // The catch-up shares the request budget with the work the trigger actually asked for, so a backlog
+  // must not be allowed to crowd it out.
+  it('takes the longest pending workflows up to the limit', () => {
+    const pending = [item('newer', '2026-08-13T10:00:00.000Z'), item('older', '2026-08-13T08:00:00.000Z'), item('oldest', '2026-08-13T07:00:00.000Z')];
+    expect(mergeCatchUpCandidates([], pending, 2).map(entry => entry.key)).toEqual(['oldest', 'older']);
+    expect(mergeCatchUpCandidates([], pending, 0).map(entry => entry.key)).toEqual([]);
   });
 });
 
