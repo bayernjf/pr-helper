@@ -10,6 +10,8 @@ type ApiFixture = {
   deploymentRuns?: unknown[];
   auditEntries?: unknown[];
   automationReady?: boolean;
+  openPull?: { number: number; headSha: string; mergeable?: boolean; mergeableState?: string };
+  compareAheadBy?: number;
 };
 
 type MockApi = {
@@ -55,7 +57,20 @@ async function mockApi(page: Page, fixture: ApiFixture = {}): Promise<MockApi> {
       if (path.startsWith('/repos/acme/demo/branches')) return json(route, 200, branches.map(name => ({ name })));
       if (path.startsWith('/repos/acme/demo/actions/workflows')) return json(route, 200, { workflows: [{ name: 'PR gate', state: 'active', path: '.github/workflows/pr-gate.yml' }] });
       if (path.startsWith('/repos/acme/demo/environments')) return json(route, 200, { environments: [{ name: 'preview-vercel' }, { name: 'production-vercel' }] });
-      if (path.startsWith('/repos/acme/demo/pulls?state=open')) return json(route, 200, []);
+      const openPull = fixture.openPull;
+      if (path.startsWith('/repos/acme/demo/pulls?state=open')) return json(route, 200, openPull
+        ? [{ number: openPull.number, state: 'open', merged_at: null, html_url: `https://github.com/acme/demo/pull/${openPull.number}`, head: { ref: 'feature/e2e', sha: openPull.headSha } }]
+        : []);
+      if (path.startsWith('/repos/acme/demo/pulls?state=closed')) return json(route, 200, []);
+      if (path.startsWith('/repos/acme/demo/compare/')) return json(route, 200, { ahead_by: fixture.compareAheadBy ?? 0 });
+      if (openPull && path === `/repos/acme/demo/pulls/${openPull.number}`) return json(route, 200, {
+        number: openPull.number, state: 'open', merged_at: null, html_url: `https://github.com/acme/demo/pull/${openPull.number}`,
+        head: { ref: 'feature/e2e', sha: openPull.headSha }, mergeable: openPull.mergeable ?? true, mergeable_state: openPull.mergeableState ?? 'clean',
+      });
+      if (openPull && path === `/repos/acme/demo/pulls/${openPull.number}/reviews?per_page=100`) return json(route, 200, []);
+      if (path.includes('/check-runs')) return json(route, 200, { check_runs: [] });
+      if (/\/commits\/[^/]+\/status$/.test(path)) return json(route, 200, { statuses: [] });
+      if (path.startsWith('/repos/acme/demo/actions/runs?head_sha=')) return json(route, 200, { workflow_runs: [] });
       if (path === '/repos/acme/demo/pulls' && request.method() === 'POST') return json(route, 201, {
         number: 43,
         state: 'open',
@@ -296,6 +311,40 @@ test('流程详情页可为单个步骤开启自动合并且不影响自动创�
 
   await mergeToggles.first().uncheck();
   await expect.poll(() => api.workflows[0]?.stages[0]?.automation).toBeUndefined();
+});
+
+test('勾选自动合并会在已有开启的 PR 时先要求确认，取消则不保存', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-auto-merge-confirm',
+    name: '自动合并确认流程',
+    repository,
+    version: 3,
+    stages: [{ stageId: 'stage-merge', source: 'feature/e2e', target: 'dev' }],
+  };
+  const api = await openWorkspace(page, {
+    workflows: [workflow],
+    automationReady: true,
+    openPull: { number: 42, headSha: 'head-sha-42' },
+    items: [{ workflowId: workflow.id, workflowName: workflow.name, repository, stageIndex: 0, source: 'feature/e2e', target: 'dev', pullNumber: 42, kind: 'ready-to-merge', message: '可以合并' }],
+    states: [{ workflowId: workflow.id, stageIndex: 0, stageId: 'stage-merge', repository, source: 'feature/e2e', target: 'dev', pullNumber: 42, pullState: 'open', mergedAt: null, headSha: 'head-sha-42', checksState: 'success', checksPassed: 1, checksTotal: 1, approvals: 0, requiredApprovals: 0, mergeable: true, mergeableState: 'clean', aheadBy: 0, lastEvent: null, updatedAt: '2026-08-03T00:00:00.000Z', decision: { kind: 'ready-to-merge', actionable: true, message: '可以合并' } }],
+  });
+
+  const drawer = await openStepDrawer(page);
+  await drawer.getByRole('button', { name: '查看完整流程' }).click();
+
+  const mergeToggle = page.locator('[data-detail-auto-merge-stage]').first();
+  await mergeToggle.check();
+  const confirm = page.getByRole('dialog');
+  await expect(confirm.getByRole('heading', { name: '保存后会立即执行' })).toBeVisible();
+  await expect(confirm.getByText('PR #42')).toBeVisible();
+
+  await confirm.getByRole('button', { name: '先不保存' }).click();
+  await expect(mergeToggle).not.toBeChecked();
+  expect(api.workflows[0]?.stages[0]?.automation).toBeUndefined();
+
+  await mergeToggle.check();
+  await page.getByRole('dialog').getByRole('button', { name: '确认并保存' }).click();
+  await expect.poll(() => api.workflows[0]?.stages[0]?.automation).toEqual({ autoMergePullRequest: true, executionMode: 'server' });
 });
 
 test('缺少自动化前置条件时自动合并勾选框与自动创建一起禁用', async ({ page }) => {

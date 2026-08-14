@@ -617,7 +617,10 @@ let clientUrl = '';
 function query(environment: Record<string, string | undefined>) {
   const url = databaseUrl(environment);
   if (!client || clientUrl !== url) {
-    client = postgres(url, { max: 1, prepare: false, idle_timeout: 20, connect_timeout: 10, ssl: 'require' });
+    // A sweep runs its stages concurrently, so a single connection serialized every statement — the
+    // measured cost was seconds of queueing per stage, and even the run row's closing UPDATE waited
+    // behind the work it was reporting on. The lease already caps concurrent sweeps per repository.
+    client = postgres(url, { max: 4, prepare: false, idle_timeout: 20, connect_timeout: 10, ssl: 'require' });
     clientUrl = url;
   }
   return client;
@@ -1062,6 +1065,21 @@ export async function listWorkflows(environment: Record<string, string | undefin
   return sortStoredWorkflows([...owned, ...sharedByWorkflow.values()]);
 }
 
+// Enabling a toggle is a change of intent, so the work that is already waiting should be picked up
+// without waiting for the next push. Auto-merge counts too: it acts on a pull request that already
+// exists, so deferring it to the next event removes no consequence, it only moves the merge to a
+// moment the user has stopped watching. Authorization comes from the confirmation shown at tick time.
+export function serverAutomationActivated(previous: StoredWorkflow | null, next: StoredWorkflow) {
+  const serverMode = (stage: StoredWorkflowStage | undefined) => stage?.automation?.executionMode === 'server';
+  const create = (stage: StoredWorkflowStage | undefined) => serverMode(stage) && stage!.automation!.autoCreatePullRequest === true;
+  const merge = (stage: StoredWorkflowStage | undefined) => serverMode(stage) && stage!.automation!.autoMergePullRequest === true;
+  const before = new Map((previous?.stages || []).map(stage => [stage.stageId, stage]));
+  return {
+    create: next.stages.some(stage => create(stage) && !create(before.get(stage.stageId))),
+    merge: next.stages.some(stage => merge(stage) && !merge(before.get(stage.stageId))),
+  };
+}
+
 export async function upsertWorkflow(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflow: StoredWorkflow) {
   if (!isStoredWorkflow(workflow)) throw new Error('流程数据无效');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
@@ -1095,7 +1113,11 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
       metadata: { version: savedWorkflow.version, stageCount: savedWorkflow.stages.length }, failureReason: null,
     });
   });
-  return existingAccess?.team ? { ...savedWorkflow, team: existingAccess.team } : savedWorkflow;
+  const activated = serverAutomationActivated(previous ?? null, savedWorkflow);
+  // The marker is what makes the activation survive a sweep that runs out of budget: the next trigger
+  // picks the workflow up first instead of waiting for the schedule.
+  if (activated.create || activated.merge) await sql`UPDATE pr_helper_workflows SET reconcile_pending_since = coalesce(reconcile_pending_since, now()) WHERE user_id = ${ownerUserId} AND id = ${savedWorkflow.id}`.catch(() => undefined);
+  return { workflow: existingAccess?.team ? { ...savedWorkflow, team: existingAccess.team } : savedWorkflow, automationActivated: activated };
 }
 
 export async function removeWorkflowStage(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string, stageId: string, stageIndex?: number, source?: string, target?: string) {
