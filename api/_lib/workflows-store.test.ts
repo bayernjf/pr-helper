@@ -547,6 +547,13 @@ describe('store queries against the migration schema', () => {
     expect(source).not.toMatch(/pg_(try_)?advisory_(un)?lock\b/);
   });
 
+  it('stamps the pending marker when a sweep owes work and only clears it on an unnarrowed sweep', () => {
+    expect(source).toMatch(/reconcile_pending_since = coalesce\(reconcile_pending_since, now\(\)\)/);
+    expect(source).toMatch(/else if \(!filter\.branches\) await sql`UPDATE pr_helper_workflows SET reconcile_pending_since = NULL/);
+    expect(source).toMatch(/await markPending\(true\);\s*\n\s*return \{ reconciled, outcome: 'deferred'/);
+    expect(source).toMatch(/await markPending\(failed > 0\);/);
+  });
+
   for (const table of ['workflow_automation_actions', 'workflow_automation_runs', 'workflow_stage_states'] as const) {
     it(`only selects columns that ${table} actually declares`, () => {
       const declared = declaredColumns(schema, table);
