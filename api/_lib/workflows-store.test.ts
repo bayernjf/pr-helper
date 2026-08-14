@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { reconcileTimingLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { autoCreateActivated, reconcileTimingLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -543,6 +543,13 @@ describe('store queries against the migration schema', () => {
 
   // The pool runs in transaction mode, so a session-level advisory lock outlives the sweep that took
   // it: the unlock can land on a different backend, and a frozen instance never reaches it at all.
+  it('opens the connection pool beyond a single connection, which serialized every sweep', () => {
+    const pool = source.match(/postgres\(url, \{([^}]*)\}\)/);
+    expect(pool).not.toBeNull();
+    expect(Number(pool![1].match(/max:\s*(\d+)/)?.[1])).toBeGreaterThan(1);
+    expect(pool![1]).toContain('prepare: false');
+  });
+
   it('never guards a sweep with a session-level advisory lock', () => {
     expect(source).not.toMatch(/pg_(try_)?advisory_(un)?lock\b/);
   });
@@ -891,5 +898,39 @@ describe('reconcileTimingLine', () => {
 
   it('omits phases the caller did not measure', () => {
     expect(reconcileTimingLine({ scope: 'sweep', total: 12 })).toBe('[reconcile-timing] scope=sweep total=12');
+  });
+});
+
+describe('autoCreateActivated', () => {
+  const stage = (stageId: string, automation?: Record<string, unknown>) => ({ source: 'feature/x', target: 'dev', stageId, ...(automation ? { automation } : {}) });
+  const workflow = (stages: ReturnType<typeof stage>[]) => ({ id: 'w1', repository: 'acme/app', stages }) as never;
+  const serverCreate = { autoCreatePullRequest: true, executionMode: 'server', triggerMinCommits: 1 };
+
+  it('reports an activation when a stage turns server auto-create on', () => {
+    expect(autoCreateActivated(workflow([stage('s1')]), workflow([stage('s1', serverCreate)]))).toBe(true);
+  });
+
+  it('reports an activation for a newly saved workflow that already has it on', () => {
+    expect(autoCreateActivated(null, workflow([stage('s1', serverCreate)]))).toBe(true);
+  });
+
+  it('stays quiet when auto-create was already on', () => {
+    expect(autoCreateActivated(workflow([stage('s1', serverCreate)]), workflow([stage('s1', serverCreate)]))).toBe(false);
+  });
+
+  it('never treats an auto-merge toggle as an activation, because saving a toggle is not merge authorization', () => {
+    const merge = { autoMergePullRequest: true, executionMode: 'server' };
+    expect(autoCreateActivated(workflow([stage('s1')]), workflow([stage('s1', merge)]))).toBe(false);
+    expect(autoCreateActivated(workflow([stage('s1', serverCreate)]), workflow([stage('s1', { ...serverCreate, autoMergePullRequest: true })]))).toBe(false);
+  });
+
+  it('ignores browser-mode automation, which the server never executes', () => {
+    expect(autoCreateActivated(workflow([stage('s1')]), workflow([stage('s1', { autoCreatePullRequest: true, executionMode: 'browser' })]))).toBe(false);
+  });
+
+  it('matches stages by id, so reordering a stage is not an activation', () => {
+    const before = workflow([stage('s1'), stage('s2', serverCreate)]);
+    const after = workflow([stage('s2', serverCreate), stage('s1')]);
+    expect(autoCreateActivated(before, after)).toBe(false);
   });
 });
