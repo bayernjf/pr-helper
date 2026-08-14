@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
+import { addDeployment, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -355,5 +355,28 @@ describe('immediateAutomationEffect', () => {
   it('never reports an effect for unticking, which only ever removes future work', () => {
     expect(immediateAutomationEffect({ toggle: 'create', enabling: false, stage, status: { kind: 'not-created', aheadBy: 9 }, unlocked: true })).toEqual({ kind: 'none' });
     expect(immediateAutomationEffect({ toggle: 'merge', enabling: false, stage, status: { kind: 'open', pr: { number: 42 } }, unlocked: true })).toEqual({ kind: 'none' });
+  });
+});
+
+describe('missingDeploymentWorkflowNames', () => {
+  const deployment = (overrides: Partial<{ stageId: string | null; stageIndex: number; source: string; runId: number | null; runName: string }> = {}) => ({ stageId: 's-1', stageIndex: 0, source: 'dev', runId: 1234, runName: 'Deploy frontend to Cloudflare Pages', ...overrides });
+
+  it('names a configured deployment whose workflow run was never observed, because that gate never opens on its own', () => {
+    const deployments = [deployment(), deployment({ provider: 'vercel', runId: null, runName: 'Deploy frontend to Vercel' } as never)];
+    expect(missingDeploymentWorkflowNames(deployments, { stageId: 's-1', stageIndex: 0, source: 'dev' })).toEqual(['Deploy frontend to Vercel']);
+  });
+
+  it('stays empty when every configured deployment matched a run', () => {
+    expect(missingDeploymentWorkflowNames([deployment()], { stageId: 's-1', stageIndex: 0, source: 'dev' })).toEqual([]);
+  });
+
+  it('ignores deployments belonging to another stage, so a lock is never blamed on an unrelated route', () => {
+    const other = deployment({ stageId: 's-2', stageIndex: 1, runId: null, runName: 'Deploy frontend to Vercel' });
+    expect(missingDeploymentWorkflowNames([other], { stageId: 's-1', stageIndex: 0, source: 'dev' })).toEqual([]);
+  });
+
+  it('falls back to the stage index when the stage has no identity yet', () => {
+    const legacy = deployment({ stageId: null, runId: null, runName: 'Deploy frontend to Vercel' });
+    expect(missingDeploymentWorkflowNames([legacy], { stageIndex: 0, source: 'dev' })).toEqual(['Deploy frontend to Vercel']);
   });
 });
