@@ -226,3 +226,14 @@ AI 生成的正文严格按生成规则模板输出（Overview / Changes / Relat
 - **轮转公平**：迁移 `027` 增加 `pr_helper_workflows.last_reconcile_attempt_at`，批量选择改按尝试时间排序并在执行前落戳，解析不出路由的工作流不再永久占用名额。
 
 待部署验收：`skipped` 状态与 `last_reconcile_attempt_at` 需要先在生产执行迁移 `027`。
+
+## 十一、校准租约与待校准接力（2026-08-14，本地已落地待部署验收）
+
+第十节部署后由生产数据暴露的三个残留缺陷，计划与证据见 [`docs/superpowers/plans/2026-08-14-reconciliation-lease.md`](superpowers/plans/2026-08-14-reconciliation-lease.md)。
+
+- **自过期租约**：新表 `reconciliation_leases` 取代 `pg_try_advisory_lock`。会话级锁随连接生死而非任务生死，被冻结的实例永远不会执行自己的 unlock——生产上一条 cron 行因此把同仓 sweep 挡了 8.7 分钟。租约以单条 `INSERT ... ON CONFLICT ... WHERE expires_at < now() RETURNING holder` 抢占，TTL 默认 30 秒（`RECONCILIATION_LEASE_TTL_SECONDS` 可调），持有期间按 TTL/3 心跳续租，释放带 holder 条件；过期行由保留清理顺手回收。
+- **让出预算时收尾**：`withReconciliationBudget` 换成 `withStageDeadline`，deadline 由 `reconcileWorkflowScope` 自己持有，`reconciled` / `failed` 随每个 stage settle 递增，到点即按当前计数写终态并落 `finished_at`。`trigger='webhook'` 的行从此可以到达 `success` / `degraded`，不再停在 `running` 等 5 分钟宽限期收成 `failure`。
+- **待校准接力**：迁移 `028` 增加 `pr_helper_workflows.reconcile_pending_since`。推迟或失败的 sweep 打戳，未按分支收窄的 sweep 完整成功时清戳；`selectReconciliationBatch` 改为 pending 优先，实时触发额外捎带最多 4 个同用户的 pending 工作流且不受本次分支过滤影响。前提是 GitHub Actions 的 `*/10` 计划在生产实际间隔 50–100 分钟，「交给 cron 兜底」并不成立。
+- **服务端边界守卫**：`api/_lib/workflows-store.ts` 曾从浏览器模块 `src/lib/github.ts` 引入 `mergePullRequestPayload`，该模块顶层读 `import.meta.env`，在 Node 下模块加载即崩，导致 `/api/github/session` 返回 `FUNCTION_INVOCATION_FAILED`。已改为在调用点内联两个字段，并新增源码守卫测试：从 `api/**` 可达的相对导入链上不允许出现任何读 `import.meta.env` 的模块。
+
+待部署验收：需先在生产执行迁移 `028`，未执行前所有 sweep 会在抢租约时报错。

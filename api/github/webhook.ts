@@ -1,7 +1,7 @@
 import { type ApiRequest, type ApiResponse } from '../_lib/http.js';
 import { verifyGithubWebhookSignature } from '../_lib/github-webhook.js';
 import { recordWebhookDelivery } from '../_lib/workflows-store.js';
-import { projectPullRequestWebhook, realtimeReconcileBudgetMs, reconcileWorkflowStages, webhookBranchesForEvent, withReconciliationBudget } from '../_lib/workflows-store.js';
+import { projectPullRequestWebhook, reconcileRealtime, webhookBranchesForEvent } from '../_lib/workflows-store.js';
 
 export const config = { api: { bodyParser: false } };
 
@@ -37,10 +37,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     // is capped because GitHub records a failed delivery if the request is killed mid-flight.
     const branches = shouldReconcile ? webhookBranchesForEvent(eventName, payload) : null;
     const reconciliation = shouldReconcile
-      ? await withReconciliationBudget(
-          reconcileWorkflowStages(process.env, { repository: payload.repository!.full_name, installationId: String(payload.installation!.id), eventName, ...(branches ? { branches } : {}) }, 'webhook'),
-          realtimeReconcileBudgetMs(process.env),
-        )
+      ? await reconcileRealtime(process.env, { repository: payload.repository!.full_name, installationId: String(payload.installation!.id), eventName, ...(branches ? { branches } : {}) }, 'webhook')
       : null;
     response.status(202).json({ accepted, duplicate: !accepted, projectedStages, reconciliationScheduled: shouldReconcile, reconciliation });
   } catch (error) {

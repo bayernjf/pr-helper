@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { actionableStageEntry, automationActionId, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withReconciliationBudget, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -229,7 +229,7 @@ describe('reconciliation state', () => {
 });
 
 describe('cron reconciliation batch', () => {
-  const candidate = (id: string, lastAttemptAt: string | null) => ({ id, lastAttemptAt });
+  const candidate = (id: string, lastAttemptAt: string | null, pendingSince: string | null = null) => ({ id, lastAttemptAt, pendingSince });
 
   it('keeps the scheduled sweep bounded so it can answer within the request timeout', () => {
     expect(RECONCILE_WORKFLOW_BATCH_SIZE).toBe(8);
@@ -271,11 +271,51 @@ describe('cron reconciliation batch', () => {
     expect(selectReconciliationBatch(candidates, 0)).toEqual(candidates);
   });
 
+  // A workflow the previous sweep could not finish is the one most likely to be showing a stale state
+  // to its user, so it outranks fair rotation.
+  it('reconciles workflows left pending by an unfinished sweep before anything else', () => {
+    const batch = selectReconciliationBatch([
+      candidate('never', null),
+      candidate('pending', '2026-08-13T10:00:00.000Z', '2026-08-13T10:00:05.000Z'),
+    ], 1);
+    expect(batch.map(item => item.id)).toEqual(['pending']);
+  });
+
+  it('reconciles the longest pending workflow first', () => {
+    const batch = selectReconciliationBatch([
+      candidate('recent', null, '2026-08-13T10:00:00.000Z'),
+      candidate('waiting', null, '2026-08-13T09:00:00.000Z'),
+    ], 1);
+    expect(batch.map(item => item.id)).toEqual(['waiting']);
+  });
+
   it('reads a deployment specific batch size and ignores unusable values', () => {
     expect(reconciliationBatchSize({ CRON_RECONCILE_BATCH_SIZE: '3' })).toBe(3);
     expect(reconciliationBatchSize({ CRON_RECONCILE_BATCH_SIZE: '0' })).toBe(0);
     expect(reconciliationBatchSize({ CRON_RECONCILE_BATCH_SIZE: 'many' })).toBe(RECONCILE_WORKFLOW_BATCH_SIZE);
     expect(reconciliationBatchSize({})).toBe(RECONCILE_WORKFLOW_BATCH_SIZE);
+  });
+});
+
+describe('mergeCatchUpCandidates', () => {
+  const item = (key: string, pendingSince: string | null = null) => ({ key, pendingSince });
+
+  // GitHub delivers the */10 schedule 50 to 100 minutes apart in practice, so deferred work has to ride
+  // along with whatever trigger comes next instead of waiting for the sweep that was supposed to fix it.
+  it('appends pending workflows the current scope does not already cover', () => {
+    expect(mergeCatchUpCandidates([item('a')], [item('b', '2026-08-13T09:00:00.000Z')], 4).map(entry => entry.key)).toEqual(['a', 'b']);
+  });
+
+  it('never reconciles the same workflow twice in one sweep', () => {
+    expect(mergeCatchUpCandidates([item('a')], [item('a', '2026-08-13T09:00:00.000Z')], 4).map(entry => entry.key)).toEqual(['a']);
+  });
+
+  // The catch-up shares the request budget with the work the trigger actually asked for, so a backlog
+  // must not be allowed to crowd it out.
+  it('takes the longest pending workflows up to the limit', () => {
+    const pending = [item('newer', '2026-08-13T10:00:00.000Z'), item('older', '2026-08-13T08:00:00.000Z'), item('oldest', '2026-08-13T07:00:00.000Z')];
+    expect(mergeCatchUpCandidates([], pending, 2).map(entry => entry.key)).toEqual(['oldest', 'older']);
+    expect(mergeCatchUpCandidates([], pending, 0).map(entry => entry.key)).toEqual([]);
   });
 });
 
@@ -500,6 +540,19 @@ function selectedColumns(source: string, table: string) {
 describe('store queries against the migration schema', () => {
   const schema = migrationSql();
   const source = readFileSync(STORE_SOURCE, 'utf8');
+
+  // The pool runs in transaction mode, so a session-level advisory lock outlives the sweep that took
+  // it: the unlock can land on a different backend, and a frozen instance never reaches it at all.
+  it('never guards a sweep with a session-level advisory lock', () => {
+    expect(source).not.toMatch(/pg_(try_)?advisory_(un)?lock\b/);
+  });
+
+  it('stamps the pending marker when a sweep owes work and only clears it on an unnarrowed sweep', () => {
+    expect(source).toMatch(/reconcile_pending_since = coalesce\(reconcile_pending_since, now\(\)\)/);
+    expect(source).toMatch(/else if \(!filter\.branches\) await sql`UPDATE pr_helper_workflows SET reconcile_pending_since = NULL/);
+    expect(source).toMatch(/await markPending\(true\);\s*\n\s*return \{ reconciled, outcome: 'deferred'/);
+    expect(source).toMatch(/await markPending\(failed > 0\);/);
+  });
 
   for (const table of ['workflow_automation_actions', 'workflow_automation_runs', 'workflow_stage_states'] as const) {
     it(`only selects columns that ${table} actually declares`, () => {
@@ -743,20 +796,30 @@ describe('realtimeReconcileBudgetMs', () => {
   });
 });
 
-describe('withReconciliationBudget', () => {
-  it('reports the reconciled count when the sweep lands inside the budget', async () => {
-    await expect(withReconciliationBudget(Promise.resolve(3), 50)).resolves.toEqual({ outcome: 'completed', reconciled: 3 });
+describe('withStageDeadline', () => {
+  it('reports the value when the work lands inside the deadline', async () => {
+    await expect(withStageDeadline(Promise.resolve(3), 50)).resolves.toEqual({ outcome: 'completed', value: 3 });
   });
 
-  // The response must go out even if the sweep is still running, otherwise the platform kills the
+  // The response must go out even if stages are still resolving, otherwise the platform kills the
   // request and GitHub records a failed delivery.
-  it('defers a sweep that outlives the budget', async () => {
+  it('defers work that outlives the deadline', async () => {
     const slow = new Promise<number>(resolve => { setTimeout(() => resolve(1), 200); });
-    await expect(withReconciliationBudget(slow, 5)).resolves.toEqual({ outcome: 'deferred', reconciled: 0 });
+    await expect(withStageDeadline(slow, 5)).resolves.toEqual({ outcome: 'deferred' });
+  });
+});
+
+describe('deferredRunState', () => {
+  // Running out of budget after every stage landed is a complete sweep: the deadline fired while the
+  // bookkeeping was still in flight, and reporting that as degraded would cry wolf.
+  it('reports a sweep whose stages all landed by its own result', () => {
+    expect(deferredRunState(2, 0, 2)).toBe('success');
+    expect(deferredRunState(1, 1, 2)).toBe('degraded');
   });
 
-  it('turns a failed sweep into an outcome instead of rejecting the request', async () => {
-    await expect(withReconciliationBudget(Promise.reject(new Error('boom')), 50)).resolves.toEqual({ outcome: 'failed', reconciled: 0 });
+  it('reports an unfinished sweep as degraded so the row is never left running', () => {
+    expect(deferredRunState(1, 0, 4)).toBe('degraded');
+    expect(deferredRunState(0, 0, 4)).toBe('degraded');
   });
 });
 
@@ -773,6 +836,25 @@ describe('reconciliationLockKey', () => {
   it('falls back to a per-user key when no single repository is in scope', () => {
     expect(reconciliationLockKey('user-1', null)).toBe(reconciliationLockKey('user-1', null));
     expect(reconciliationLockKey('user-1', null)).not.toBe(reconciliationLockKey('user-1', 'acme/web'));
+  });
+});
+
+describe('reconciliation lease timing', () => {
+  it('keeps the TTL longer than the realtime budget so a live sweep is never evicted mid-flight', () => {
+    expect(reconciliationLeaseTtlSeconds({}) * 1000).toBeGreaterThan(realtimeReconcileBudgetMs({}));
+  });
+
+  it('takes the TTL from the environment when the platform limit changes', () => {
+    expect(reconciliationLeaseTtlSeconds({ RECONCILIATION_LEASE_TTL_SECONDS: '45' })).toBe(45);
+    expect(reconciliationLeaseTtlSeconds({ RECONCILIATION_LEASE_TTL_SECONDS: '0' })).toBe(RECONCILIATION_LEASE_TTL_SECONDS);
+  });
+
+  // A cron sweep outlives the TTL, so it renews. Renewing at the TTL would race the expiry it is
+  // trying to push out, and a frozen holder must still lapse within roughly one TTL.
+  it('renews several times inside one TTL', () => {
+    const ttl = reconciliationLeaseTtlSeconds({});
+    expect(reconciliationLeaseRenewIntervalMs(ttl)).toBeLessThan((ttl * 1000) / 2);
+    expect(reconciliationLeaseRenewIntervalMs(ttl)).toBeGreaterThan(0);
   });
 });
 

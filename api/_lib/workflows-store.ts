@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { installationRequest } from './github-api.js';
 import { parseGithubAppConfig } from './github-app.js';
@@ -366,7 +367,7 @@ export async function listWorkflowAutomationActions(environment: Record<string, 
 
 type DatabaseUser = { id: string };
 type WorkflowRow = { payload: unknown; version?: number };
-type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string; github_installation_id?: string | null; last_reconcile_attempt_at?: string | null };
+type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string; github_installation_id?: string | null; last_reconcile_attempt_at?: string | null; reconcile_pending_since?: string | null };
 type WorkflowAccess = { ownerUserId: string; workflow: StoredWorkflow; team?: { id: string; name: string; role: TeamRole } };
 
 type WebhookDelivery = { deliveryId: string; eventName: string; action?: string; repository?: string; installationId?: string };
@@ -1352,33 +1353,74 @@ export function reconciliationLockKey(userId: string, repository: string | null)
   return `pr-helper:reconcile:${userId}:${repository || '*'}`;
 }
 
-async function reconcileWorkflowScope(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, workflowsToReconcile: { row: TrackedWorkflowRow; workflow: StoredWorkflow }[], filter: ReconciliationFilter, trigger: ReconciliationTrigger) {
+// The lease must outlive a realtime sweep's whole budget, or a live sweep would be evicted by the
+// next delivery; it must also be short, because a frozen holder blocks the scope until it lapses.
+export const RECONCILIATION_LEASE_TTL_SECONDS = 30;
+
+export function reconciliationLeaseTtlSeconds(environment: Record<string, string | undefined>) {
+  const configured = Number(environment.RECONCILIATION_LEASE_TTL_SECONDS);
+  return Number.isFinite(configured) && configured > 0 ? configured : RECONCILIATION_LEASE_TTL_SECONDS;
+}
+
+// A cron sweep runs longer than one TTL, so it renews. Renewing at a third of the TTL leaves two
+// missed renewals of slack before a live sweep loses its lease.
+export function reconciliationLeaseRenewIntervalMs(ttlSeconds: number) {
+  return Math.max(1000, Math.floor((ttlSeconds * 1000) / 3));
+}
+
+type ScopeOutcome = { reconciled: number; outcome: 'completed' | 'deferred' | 'skipped' };
+type ScopedWorkflow = { row: TrackedWorkflowRow; workflow: StoredWorkflow; branchScoped?: boolean };
+
+async function reconcileWorkflowScope(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, workflowsToReconcile: ScopedWorkflow[], filter: ReconciliationFilter, trigger: ReconciliationTrigger, deadlineMs?: number): Promise<ScopeOutcome> {
   const startedAt = Date.now();
   const userId = workflowsToReconcile[0]?.row.user_id;
-  if (!userId) return 0;
+  if (!userId) return { reconciled: 0, outcome: 'completed' };
   const repositories = [...new Set(workflowsToReconcile.map(item => item.workflow.repository))];
   const repository = filter.repository || (repositories.length === 1 ? repositories[0] : null);
   const lockKey = reconciliationLockKey(userId, repository);
-  const lock = await sql<{ locked: boolean }[]>`SELECT pg_try_advisory_lock(hashtext(${lockKey})) AS locked`;
-  if (!lock[0]?.locked) {
+  const ttlSeconds = reconciliationLeaseTtlSeconds(environment);
+  const holder = randomUUID();
+  // One statement decides the winner: the insert wins an unheld lease, and the conflict branch only
+  // takes over a lease whose holder let it lapse. A frozen holder therefore blocks for one TTL.
+  const lease = await sql<{ holder: string }[]>`
+    INSERT INTO reconciliation_leases (lock_key, holder, trigger, acquired_at, expires_at)
+    VALUES (${lockKey}, ${holder}, ${trigger}, now(), now() + (${ttlSeconds} * interval '1 second'))
+    ON CONFLICT (lock_key) DO UPDATE SET holder = EXCLUDED.holder, trigger = EXCLUDED.trigger, acquired_at = now(), expires_at = EXCLUDED.expires_at
+    WHERE reconciliation_leases.expires_at < now()
+    RETURNING holder`;
+  if (lease[0]?.holder !== holder) {
     // Queueing behind the holder would only burn the request budget: the running sweep reads the same
     // rows and will publish the same result.
     await sql`INSERT INTO reconciliation_runs (user_id, trigger, state, repository, stages_total, stages_reconciled, stages_failed, duration_ms, finished_at) VALUES (${userId}, ${trigger}, 'skipped', ${repository}, 0, 0, 0, ${Date.now() - startedAt}, now())`.catch(() => undefined);
-    return 0;
+    return { reconciled: 0, outcome: 'skipped' };
   }
+  // Renewal is what separates a slow sweep from a dead one: a frozen instance stops renewing, so its
+  // lease lapses on its own instead of waiting for the connection to die.
+  const renewal = setInterval(() => {
+    void sql`UPDATE reconciliation_leases SET expires_at = now() + (${ttlSeconds} * interval '1 second') WHERE lock_key = ${lockKey} AND holder = ${holder}`.catch(() => undefined);
+  }, reconciliationLeaseRenewIntervalMs(ttlSeconds));
   const runRow = await sql<{ id: number }[]>`INSERT INTO reconciliation_runs (user_id, trigger, state, repository) VALUES (${userId}, ${trigger}, 'running', ${repository}) RETURNING id`;
   const runId = runRow[0].id;
   // The turn is given up before the work runs, so a workflow that fails or resolves to no route still
   // rotates to the back of the queue instead of being picked again in every sweep.
   await sql`UPDATE pr_helper_workflows SET last_reconcile_attempt_at = now() WHERE user_id = ${userId} AND id IN ${sql(workflowsToReconcile.map(item => item.row.id))}`.catch(() => undefined);
+  const workflowIds = workflowsToReconcile.map(item => item.row.id);
+  // Marking is per sweep, not per stage: the marker only answers "does this workflow still owe work",
+  // which is what the next trigger needs to know to pick it up without waiting for the schedule.
+  const markPending = async (pending: boolean) => {
+    if (pending) await sql`UPDATE pr_helper_workflows SET reconcile_pending_since = coalesce(reconcile_pending_since, now()) WHERE user_id = ${userId} AND id IN ${sql(workflowIds)}`.catch(() => undefined);
+    // A branch-narrowed sweep only looked at some of the routes, so it may not clear a marker another
+    // sweep set; the unnarrowed scheduled sweep is what retires it.
+    else if (!filter.branches) await sql`UPDATE pr_helper_workflows SET reconcile_pending_since = NULL WHERE user_id = ${userId} AND id IN ${sql(workflowIds)}`.catch(() => undefined);
+  };
   try {
     for (const item of workflowsToReconcile) await pruneStaleWorkflowStageData(sql, item.row.user_id, item.workflow);
-    const tracked = workflowsToReconcile.flatMap(({ row, workflow }) => workflow.stages.map((_, stageIndex) => ({ row, workflow, stageIndex })));
+    const tracked = workflowsToReconcile.flatMap(({ row, workflow, branchScoped }) => workflow.stages.map((_, stageIndex) => ({ row, workflow, branchScoped, stageIndex })));
     // Resolving a stage costs GitHub calls, so a branch-scoped sweep drops out-of-scope stages first
     // and keeps only the routes the moved branches can actually reach.
     const scoped = tracked.flatMap(item => {
       const stage = item.workflow.stages[item.stageIndex];
-      const scope = filter.branches ? reconciliationBranchScope(stage, filter.branches) : 'all';
+      const scope = filter.branches && item.branchScoped ? reconciliationBranchScope(stage, filter.branches) : 'all';
       return scope === 'none' ? [] : [{ ...item, scope }];
     });
     const routeTasks = await Promise.all(scoped.map(async item => {
@@ -1390,22 +1432,40 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     // Recording the intent before the work means a sweep that is killed mid-flight still shows how
     // much it meant to do, instead of looking like a sweep that found nothing.
     await sql`UPDATE reconciliation_runs SET stages_total = ${flatTasks.length} WHERE id = ${runId}`;
-    const results = await Promise.allSettled(flatTasks.map(item => reconcileOneStage(environment, item.row, item.workflow, item.stageIndex, item.source, filter.eventName)));
-    const reconciled = results.filter(result => result.status === 'fulfilled' && result.value).length;
-    const failed = results.filter(result => result.status === 'rejected').length;
+    let reconciled = 0;
+    let failed = 0;
+    let firstFailure: unknown;
+    // Counting as each stage settles is what lets a deferred sweep report the work it did finish; the
+    // aggregate from allSettled is only available if we wait for every stage.
+    const stageWork = Promise.allSettled(flatTasks.map(item => reconcileOneStage(environment, item.row, item.workflow, item.stageIndex, item.source, filter.eventName).then(
+      value => { if (value) reconciled += 1; return value; },
+      error => { failed += 1; firstFailure ||= error; throw error; },
+    )));
+    const raced = deadlineMs === undefined ? { outcome: 'completed' as const } : await withStageDeadline(stageWork, deadlineMs);
     const durationMs = Date.now() - startedAt;
+    const errorMessage = firstFailure ? String(firstFailure instanceof Error ? firstFailure.message : firstFailure).slice(0, 800) : null;
+    if (raced.outcome === 'deferred') {
+      // Closing the row here is the whole point: a deferred sweep used to stay 'running' until the
+      // scheduled sweep reaped it, which read as in flight for minutes and hid the deferral.
+      await sql`UPDATE reconciliation_runs SET state = ${deferredRunState(reconciled, failed, flatTasks.length)}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, error_message = ${errorMessage || RECONCILIATION_DEFERRED_MESSAGE}, finished_at = now() WHERE id = ${runId}`;
+      await markPending(true);
+      return { reconciled, outcome: 'deferred' as const };
+    }
     const finalState = reconciliationState(failed, reconciled);
-    const firstError = results.find(result => result.status === 'rejected');
-    const errorMessage = firstError?.status === 'rejected' ? String(firstError.reason instanceof Error ? firstError.reason.message : firstError.reason).slice(0, 800) : null;
     await sql`UPDATE reconciliation_runs SET state = ${finalState}, stages_total = ${flatTasks.length}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, error_message = ${errorMessage}, finished_at = now() WHERE id = ${runId}`;
-    if (failed > 0 && reconciled === 0) throw firstError?.status === 'rejected' ? firstError.reason : new Error('Reconciliation failed');
-    return reconciled;
+    await markPending(failed > 0);
+    if (failed > 0 && reconciled === 0) throw firstFailure || new Error('Reconciliation failed');
+    return { reconciled, outcome: 'completed' as const };
   } catch (error) {
     const durationMs = Date.now() - startedAt;
+    await markPending(true);
     await sql`UPDATE reconciliation_runs SET state = 'failure', duration_ms = ${durationMs}, error_message = ${String(error instanceof Error ? error.message : error).slice(0, 800)}, finished_at = now() WHERE id = ${runId}`.catch(() => undefined);
     throw error;
   } finally {
-    await sql`SELECT pg_advisory_unlock(hashtext(${lockKey}))`.catch(() => undefined);
+    clearInterval(renewal);
+    // The holder guard matters: without it a sweep that already lost its lease would delete the row a
+    // successor is relying on.
+    await sql`DELETE FROM reconciliation_leases WHERE lock_key = ${lockKey} AND holder = ${holder}`.catch(() => undefined);
   }
 }
 
@@ -1432,17 +1492,22 @@ export function realtimeReconcileBudgetMs(environment: Record<string, string | u
   return Number.isFinite(configured) && configured > 0 ? configured : REALTIME_RECONCILE_BUDGET_MS;
 }
 
-export async function withReconciliationBudget(sweep: Promise<number>, budgetMs: number): Promise<{ outcome: 'completed' | 'failed' | 'deferred'; reconciled: number }> {
+export async function withStageDeadline<T>(work: Promise<T>, deadlineMs: number): Promise<{ outcome: 'completed'; value: T } | { outcome: 'deferred' }> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const deferred = new Promise<{ outcome: 'deferred'; reconciled: number }>(resolve => {
-    timer = setTimeout(() => resolve({ outcome: 'deferred', reconciled: 0 }), budgetMs);
+  const deferred = new Promise<{ outcome: 'deferred' }>(resolve => {
+    timer = setTimeout(() => resolve({ outcome: 'deferred' }), deadlineMs);
   });
-  const settled = sweep.then(reconciled => ({ outcome: 'completed' as const, reconciled })).catch(() => ({ outcome: 'failed' as const, reconciled: 0 }));
   try {
-    return await Promise.race([settled, deferred]);
+    return await Promise.race([work.then(value => ({ outcome: 'completed' as const, value })), deferred]);
   } finally {
     clearTimeout(timer);
   }
+}
+
+// A deadline that fires once every stage has landed describes a complete sweep, so the recorded state
+// still comes from the results; anything less is partial and must say so.
+export function deferredRunState(reconciled: number, failed: number, total: number): 'success' | 'degraded' | 'failure' {
+  return reconciled + failed >= total ? reconciliationState(failed, reconciled) : 'degraded';
 }
 
 export const RECONCILE_WORKFLOW_BATCH_SIZE = 8;
@@ -1456,49 +1521,90 @@ function reconciliationStaleness(lastAttemptAt: string | null) {
   return (lastAttemptAt ? Date.parse(lastAttemptAt) : 0) || 0;
 }
 
+// The catch-up rides on someone else's request budget, so it stays small enough to leave room for the
+// work that request actually asked for.
+export const REALTIME_CATCH_UP_LIMIT = 4;
+
+export function mergeCatchUpCandidates<T extends { key: string; pendingSince: string | null }>(inScope: readonly T[], pending: readonly T[], limit: number): T[] {
+  const covered = new Set(inScope.map(item => item.key));
+  const catchUp = pending
+    .filter(item => !covered.has(item.key))
+    .sort((left, right) => reconciliationStaleness(left.pendingSince) - reconciliationStaleness(right.pendingSince))
+    .slice(0, Math.max(0, limit));
+  return [...inScope, ...catchUp];
+}
+
 // Ordering on the attempt rather than on the resulting stage data is what keeps rotation fair: a
 // workflow that resolves to no route still advances its turn instead of holding a slot forever.
-export function selectReconciliationBatch<T extends { lastAttemptAt: string | null }>(candidates: readonly T[], limit: number): T[] {
+export function selectReconciliationBatch<T extends { lastAttemptAt: string | null; pendingSince?: string | null }>(candidates: readonly T[], limit: number): T[] {
   if (limit <= 0 || candidates.length <= limit) return [...candidates];
+  // A workflow an unfinished sweep left behind is the one most likely to be showing a stale state, so
+  // it jumps the rotation; among those, the one waiting longest goes first.
   return candidates
     .map((candidate, index) => ({ candidate, index }))
-    .sort((left, right) => reconciliationStaleness(left.candidate.lastAttemptAt) - reconciliationStaleness(right.candidate.lastAttemptAt) || left.index - right.index)
+    .sort((left, right) =>
+      Number(Boolean(right.candidate.pendingSince)) - Number(Boolean(left.candidate.pendingSince))
+      || (left.candidate.pendingSince && right.candidate.pendingSince ? reconciliationStaleness(left.candidate.pendingSince) - reconciliationStaleness(right.candidate.pendingSince) : 0)
+      || reconciliationStaleness(left.candidate.lastAttemptAt) - reconciliationStaleness(right.candidate.lastAttemptAt) || left.index - right.index)
     .slice(0, limit)
     .map(item => item.candidate);
 }
 
 export type ReconciliationFilter = { repository?: string; installationId?: string; eventName?: string; branches?: readonly string[] };
 
-export async function reconcileWorkflowStages(environment: Record<string, string | undefined>, filter: ReconciliationFilter = {}, trigger: ReconciliationTrigger = 'cron') {
+export const RECONCILIATION_DEFERRED_MESSAGE = '校准未在预算内完成，已让给下一次触发';
+
+export async function reconcileWorkflowStages(environment: Record<string, string | undefined>, filter: ReconciliationFilter = {}, trigger: ReconciliationTrigger = 'cron', options: { deadlineMs?: number } = {}): Promise<{ reconciled: number; outcome: 'completed' | 'deferred' }> {
   const sql = query(environment);
   // The scheduled sweep is the only trigger guaranteed to come back, so it closes out the rows left
   // behind by instances that were killed before they could finish.
   if (trigger === 'cron') {
     await sql`UPDATE reconciliation_runs SET state = 'failure', error_message = coalesce(error_message, '校准中断：函数实例在完成前被回收'), duration_ms = coalesce(duration_ms, (extract(epoch from now() - started_at) * 1000)::int), finished_at = now() WHERE state = 'running' AND started_at < now() - (${RECONCILIATION_RUN_GRACE_SECONDS} * interval '1 second')`.catch(() => undefined);
   }
-  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, workflows.last_reconcile_attempt_at FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
-  const candidates = rows.flatMap(row => {
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, workflows.last_reconcile_attempt_at, workflows.reconcile_pending_since FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
+  const tracked = rows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
     if (!workflow || (filter.repository && workflow.repository !== filter.repository) || (filter.installationId && row.github_installation_id !== filter.installationId)) return [];
-    if (filter.branches && !workflow.stages.some(stage => reconciliationBranchScope(stage, filter.branches!) !== 'none')) return [];
-    return [{ row, workflow: ensureStageIds(workflow), lastAttemptAt: row.last_reconcile_attempt_at ?? null }];
+    return [{ row, workflow: ensureStageIds(workflow), lastAttemptAt: row.last_reconcile_attempt_at ?? null, pendingSince: row.reconcile_pending_since ?? null, key: `${row.user_id}:${row.id}`, branchScoped: Boolean(filter.branches) }];
   });
+  const candidates = tracked.filter(item => !filter.branches || item.workflow.stages.some(stage => reconciliationBranchScope(stage, filter.branches!) !== 'none'));
   // A scheduled sweep must answer within one request timeout, so it reconciles the stalest
-  // workflows only and relies on its 10 minute cadence to rotate through the rest.
-  const workflowsToReconcile = trigger === 'cron' ? selectReconciliationBatch(candidates, reconciliationBatchSize(environment)) : candidates;
-  const byUser = new Map<string, { row: TrackedWorkflowRow; workflow: StoredWorkflow }[]>();
+  // workflows only and relies on its 10 minute cadence to rotate through the rest. A realtime sweep
+  // carries whatever an earlier sweep left pending, because the schedule may be an hour away; that
+  // work is not branch-narrowed, since the branches of this delivery are not why it is pending.
+  const workflowsToReconcile = trigger === 'cron'
+    ? selectReconciliationBatch(candidates, reconciliationBatchSize(environment))
+    : mergeCatchUpCandidates(candidates, tracked.filter(item => item.pendingSince).map(item => ({ ...item, branchScoped: false })), REALTIME_CATCH_UP_LIMIT);
+  const byUser = new Map<string, ScopedWorkflow[]>();
   for (const item of workflowsToReconcile) byUser.set(item.row.user_id, [...(byUser.get(item.row.user_id) || []), item]);
   let reconciledTotal = 0;
+  let deferred = false;
   let firstError: unknown;
+  // The deadline covers the whole sweep, so each scope gets whatever is left of it rather than a fresh
+  // copy: otherwise a user with many scopes would blow past the request limit one scope at a time.
+  const deadlineAt = options.deadlineMs === undefined ? undefined : Date.now() + options.deadlineMs;
   for (const scopedWorkflows of byUser.values()) {
     try {
-      reconciledTotal += await reconcileWorkflowScope(environment, sql, scopedWorkflows, filter, trigger);
+      const remaining = deadlineAt === undefined ? undefined : Math.max(0, deadlineAt - Date.now());
+      const scope = await reconcileWorkflowScope(environment, sql, scopedWorkflows, filter, trigger, remaining);
+      reconciledTotal += scope.reconciled;
+      deferred ||= scope.outcome === 'deferred';
     } catch (error) {
       firstError ||= error;
     }
   }
   if (firstError && reconciledTotal === 0) throw firstError;
-  return reconciledTotal;
+  return { reconciled: reconciledTotal, outcome: deferred ? 'deferred' : 'completed' };
+}
+
+// Both realtime routes want the same thing: reconcile within the request budget, and never fail the
+// request over it, because GitHub records a failed delivery and retries the whole webhook.
+export async function reconcileRealtime(environment: Record<string, string | undefined>, filter: ReconciliationFilter, trigger: ReconciliationTrigger): Promise<{ outcome: 'completed' | 'deferred' | 'failed'; reconciled: number }> {
+  try {
+    return await reconcileWorkflowStages(environment, filter, trigger, { deadlineMs: realtimeReconcileBudgetMs(environment) });
+  } catch {
+    return { outcome: 'failed', reconciled: 0 };
+  }
 }
 
 type StageStateRow = { workflow_id: string; stage_index: number; stage_id: string | null; repository: string; source: string; target: string; pull_number: number | null; pull_state: string; merged_at: string | null; head_sha: string | null; checks_state: string; checks_passed: number; checks_total: number; approvals: number; required_approvals: number; mergeable: boolean | null; mergeable_state: string | null; ahead_by: number; last_event: string | null; updated_at: string };
@@ -1841,6 +1947,7 @@ export async function cleanupRetainedData(environment: Record<string, string | u
       sql`WITH stale AS (SELECT ctid FROM workflow_stage_deployment_runs WHERE updated_at < ${cutoffs.deploymentRuns} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM workflow_stage_deployment_runs USING stale WHERE workflow_stage_deployment_runs.ctid = stale.ctid RETURNING 1`,
       sql`WITH stale AS (SELECT ctid FROM workflow_operation_audit_logs WHERE occurred_at < ${cutoffs.operationAudit} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM workflow_operation_audit_logs USING stale WHERE workflow_operation_audit_logs.ctid = stale.ctid RETURNING 1`,
     ]);
+    await sql`DELETE FROM reconciliation_leases WHERE expires_at < now() - interval '1 hour'`.catch(() => undefined);
     const deleted = { webhooks: webhooks.length, encryptedSyncHistory: history.length, reconciliationRuns: reconciliation.length, stageEvents: events.length, deploymentRuns: deployments.length, operationAudit: audit.length };
     await sql`UPDATE data_retention_runs SET state = 'success', finished_at = now(), deleted_counts = ${sql.json(deleted)} WHERE id = ${runId}`;
     return deleted;
