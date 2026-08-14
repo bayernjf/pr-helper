@@ -4,14 +4,28 @@ import { parseGithubAppConfig } from './github-app.js';
 import { sendPushNotifications, type BrowserPushSubscription } from './push.js';
 import { assertTeamOperation, type TeamOperation } from '../../src/lib/team-permissions.js';
 import { summarizeGitHubChecks } from '../../src/lib/domain.js';
+import { mergePullRequestPayload } from '../../src/lib/github.js';
 import { credentialKeyHint, decryptAiApiKey, encryptAiApiKey, maskAiApiKey } from './ai-credentials.js';
 import { buildPrPrompt, aiChatCompletionsUrl, testAiConnection } from '../../src/lib/ai.js';
+
+// Mirrors `WorkflowStageAutomation` in src/lib/workflow.ts. Auto-merge stands alone because merging
+// calls no model, so a stage may automate it without automating creation.
+export type StoredWorkflowStage = {
+  source: string;
+  target: string;
+  independent?: boolean;
+  waitFor?: number[];
+  stageId?: string;
+  automation?: { autoCreatePullRequest: true; autoMergePullRequest?: undefined; executionMode: 'browser-session'; triggerMinCommits?: number; generationRule?: undefined }
+    | { autoCreatePullRequest: true; autoMergePullRequest?: true; executionMode: 'server'; triggerMinCommits?: number; generationRule: { name: string; content: string; capturedAt: string } }
+    | { autoCreatePullRequest?: undefined; autoMergePullRequest: true; executionMode: 'server'; triggerMinCommits?: undefined; generationRule?: undefined };
+};
 
 export type StoredWorkflow = {
   id: string;
   name: string;
   repository: string;
-  stages: { source: string; target: string; independent?: boolean; waitFor?: number[]; stageId?: string; automation?: { autoCreatePullRequest: true; executionMode: 'browser-session'; triggerMinCommits?: number } | { autoCreatePullRequest: true; executionMode: 'server'; triggerMinCommits?: number; generationRule: { name: string; content: string; capturedAt: string } } }[];
+  stages: StoredWorkflowStage[];
   createdAt?: string;
   deployments?: DeploymentConfig[];
   position?: number;
@@ -88,13 +102,19 @@ export async function enqueueWorkflowAutomationAction(environment: Record<string
   return { id: Number(row.id), runId: Number(row.run_id), workflowId: row.workflow_id, stageId: row.stage_id, stageIndex: input.stageIndex, source: row.source, target: row.target, kind: row.kind, idempotencyKey: row.idempotency_key, state: row.state, attempts: row.attempts, failureReason: row.failure_reason, createdAt: row.created_at, updatedAt: row.updated_at } satisfies WorkflowAutomationAction;
 }
 
-type AutomationActionRow = { id: number; run_id: number; workflow_id: string; stage_id: string; stage_index: number; source: string; target: string; kind: WorkflowAutomationAction['kind']; state: WorkflowAutomationAction['state']; attempts: number; payload: { generationRule?: string } | null };
+type AutomationActionRow = { id: number; run_id: number; workflow_id: string; stage_id: string; stage_index: number; source: string; target: string; kind: WorkflowAutomationAction['kind']; state: WorkflowAutomationAction['state']; attempts: number; payload: { generationRule?: string; pullNumber?: number | string; headSha?: string } | null };
 
 // BIGSERIAL identities arrive as strings from postgres.js, so every queue identity
 // crosses back into the executor through this normalization.
 export function automationActionId(value: unknown) {
   const parsed = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN;
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+// The key pins an intent to one head sha, so a new commit earns a fresh attempt while a retry of the
+// same commit collapses onto the existing row. Create and merge are distinct intents on the same route.
+export function automationIdempotencyKey(route: { workflowId: string; stageId: string; source: string; target: string; headSha: string; kind: WorkflowAutomationAction['kind'] }) {
+  return `${route.workflowId}:${route.stageId}:${route.source}:${route.target}:${route.headSha}:${route.kind}`;
 }
 
 async function enqueueServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string, aheadBy: number): Promise<number | null> {
@@ -105,7 +125,7 @@ async function enqueueServerAutoCreate(environment: Record<string, string | unde
   if (!credentialRows[0]) return null;
   const triggerMinCommits = typeof automation.triggerMinCommits === 'number' && Number.isInteger(automation.triggerMinCommits) ? Math.min(20, Math.max(1, automation.triggerMinCommits)) : 1;
   if (aheadBy < triggerMinCommits) return null;
-  const idempotencyKey = `${workflow.id}:${stage.stageId}:${source}:${stage.target}:${headSha}:create-pr`;
+  const idempotencyKey = automationIdempotencyKey({ workflowId: workflow.id, stageId: stage.stageId, source, target: stage.target, headSha, kind: 'create-pr' });
   const existing = await sql<{ id: number; state: WorkflowAutomationAction['state']; updated_at: string }[]>`SELECT id, state, updated_at FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
   if (existing[0]) {
     const stale = ['running', 'paused'].includes(existing[0].state) && Date.now() - Date.parse(existing[0].updated_at) > 120_000;
@@ -123,6 +143,42 @@ async function enqueueServerAutoCreate(environment: Record<string, string | unde
   await sql`DELETE FROM workflow_automation_runs WHERE user_id = ${row.user_id} AND id = ${run[0].id}`;
   const concurrent = await sql<{ id: number; state: WorkflowAutomationAction['state'] }[]>`SELECT id, state FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
   return concurrent[0]?.state === 'queued' ? automationActionId(concurrent[0].id) : null;
+}
+
+async function enqueueServerAutoMerge(sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, pullNumber: number, headSha: string): Promise<number | null> {
+  const stage = stageForIndex(workflow, stageIndex);
+  const automation = stage?.automation;
+  if (!stage || !stage.stageId || !row.github_installation_id || !Number.isInteger(pullNumber) || pullNumber <= 0) return null;
+  // Merging calls no model, so it needs neither AI credentials nor a generation rule snapshot.
+  if (automation?.autoMergePullRequest !== true || automation.executionMode !== 'server') return null;
+  const idempotencyKey = automationIdempotencyKey({ workflowId: workflow.id, stageId: stage.stageId, source, target: stage.target, headSha, kind: 'merge-pr' });
+  const existing = await sql<{ id: number; state: WorkflowAutomationAction['state']; attempts: number; updated_at: string }[]>`SELECT id, state, attempts, updated_at FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
+  if (existing[0]) {
+    if (existing[0].state === 'queued') return automationActionId(existing[0].id);
+    const stale = ['running', 'paused'].includes(existing[0].state) && Date.now() - Date.parse(existing[0].updated_at) > 120_000;
+    // Without the cap a conflicted merge would be re-queued every rotation and write a failure row each time.
+    if (!stale || automationRetryIsExhausted(existing[0].attempts, workflow.recoveryPolicy)) return null;
+    const reset = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'queued', failure_reason = NULL, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${existing[0].id} AND state IN ('running', 'paused') RETURNING id`;
+    return automationActionId(reset[0]?.id);
+  }
+  const version = (await sql<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`)[0]?.version || workflow.version || 1;
+  const snapshot = { ...workflow, stages: workflow.stages.map(item => ({ ...item })) };
+  const run = await sql<{ id: number }[]>`INSERT INTO workflow_automation_runs (user_id, workflow_id, workflow_version, stage_index, stage_id, source, target, workflow_snapshot) VALUES (${row.user_id}, ${workflow.id}, ${version}, ${stageIndex}, ${stage.stageId}, ${source}, ${stage.target}, ${sql.json(snapshot)}) RETURNING id`;
+  const actions = await sql<{ id: number }[]>`INSERT INTO workflow_automation_actions (user_id, run_id, workflow_id, stage_id, source, target, kind, idempotency_key, payload) VALUES (${row.user_id}, ${run[0].id}, ${workflow.id}, ${stage.stageId}, ${source}, ${stage.target}, 'merge-pr', ${idempotencyKey}, ${sql.json({ pullNumber, headSha })}) ON CONFLICT (user_id, idempotency_key) DO NOTHING RETURNING id`;
+  if (actions[0]) return automationActionId(actions[0].id);
+  await sql`DELETE FROM workflow_automation_runs WHERE user_id = ${row.user_id} AND id = ${run[0].id}`;
+  const concurrent = await sql<{ id: number; state: WorkflowAutomationAction['state'] }[]>`SELECT id, state FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
+  return concurrent[0]?.state === 'queued' ? automationActionId(concurrent[0].id) : null;
+}
+
+async function scheduleServerAutoMerge(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, pullNumber: number, headSha: string) {
+  const actionId = await enqueueServerAutoMerge(sql, row, workflow, stageIndex, source, pullNumber, headSha);
+  if (!actionId) return;
+  try { await executeWorkflowAutomationActionForUser(environment, row.user_id, row.github_installation_id!, actionId); }
+  catch (error) {
+    const reason = error instanceof Error ? error.message : '自动合并 PR 失败';
+    await sql`UPDATE workflow_automation_actions SET failure_reason = ${reason.slice(0, 800)}, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${actionId} AND state = 'queued'`.catch(() => undefined);
+  }
 }
 
 async function scheduleServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string) {
@@ -193,6 +249,45 @@ export function automationRetryIsExhausted(attempts: number, policy: { maxRetrie
   return attempts >= maxRetries;
 }
 
+// Runs inside the caller's claim and try/catch, so a throw here lands the action in `paused` with the
+// reason preserved. GitHub stays the authority: a non-clean verdict pauses instead of forcing a merge.
+async function runAutomationMergeAction(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, userId: string, installationId: string, actionId: number, action: AutomationActionRow, workflow: StoredWorkflow, stage: StoredWorkflowStage) {
+  if (stage.automation?.autoMergePullRequest !== true || stage.automation.executionMode !== 'server') throw new Error('流程步骤自动合并策略已失效');
+  const pullNumber = automationActionId(action.payload?.pullNumber);
+  if (!pullNumber) throw new Error('自动化动作缺少要合并的 PR 编号');
+  const states = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
+  const current = states.find(state => state.stage_id === action.stage_id && state.source === action.source);
+  if (!current || current.pull_number !== pullNumber) throw new Error('步骤状态与要合并的 PR 不一致');
+  const { owner, name } = ownerAndName(workflow.repository);
+  const config = parseGithubAppConfig(environment);
+  const pull = await installationRequest<Pull>(config, installationId, `/repos/${owner}/${name}/pulls/${pullNumber}`);
+  // `checks_state` comes from the reconciled row because it already folds deployment results in, which
+  // the pull request payload alone does not carry. Mergeability is read live from GitHub.
+  const outcome = automationMergeOutcome(
+    { number: pull.number, state: pull.state, merged: Boolean(pull.merged_at), html_url: pull.html_url },
+    { checksState: current.checks_state, approvals: current.approvals, requiredApprovals: current.required_approvals, mergeable: pull.mergeable ?? null, mergeableState: pull.mergeable_state || 'unknown' },
+  );
+  if (outcome.kind === 'paused') throw new Error(outcome.reason);
+  if (outcome.kind === 'cancelled') {
+    await sql`UPDATE workflow_automation_actions SET state = 'cancelled', failure_reason = ${outcome.reason}, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId}`;
+    await sql`UPDATE workflow_automation_runs SET state = 'cancelled', updated_at = now(), completed_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
+    return { state: 'cancelled' as const, pullNumber: null };
+  }
+  if (outcome.kind === 'merge') {
+    // The sha pins the merge to the commit this gate verdict was computed for, so a push that lands
+    // between the check and the call makes GitHub reject with 409 instead of merging unreviewed code.
+    await installationRequest(config, installationId, `/repos/${owner}/${name}/pulls/${pullNumber}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) });
+  }
+  await sql`UPDATE workflow_automation_actions SET state = 'succeeded', failure_reason = NULL, updated_at = now(), payload = ${sql.json({ ...(action.payload || {}), pullNumber })} WHERE user_id = ${userId} AND id = ${actionId}`;
+  await sql`UPDATE workflow_automation_runs SET state = 'succeeded', updated_at = now(), completed_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
+  await recordOperationAuditForUser(sql, userId, installationId, {
+    action: 'pull-merged', outcome: 'success', repository: workflow.repository, workflowId: workflow.id,
+    stageId: action.stage_id, source: action.source, target: action.target, pullNumber, runId: action.run_id,
+    metadata: { via: 'workflow-automation', ...(outcome.kind === 'idempotent' ? { idempotent: true } : {}) }, failureReason: null,
+  });
+  return { state: 'succeeded' as const, pullNumber };
+}
+
 async function executeWorkflowAutomationActionForUser(environment: Record<string, string | undefined>, userId: string, installationId: string, actionId: number) {
   if (!Number.isInteger(actionId) || actionId <= 0 || !installationId) throw new Error('无效的自动化执行请求');
   const sql = query(environment);
@@ -201,14 +296,16 @@ async function executeWorkflowAutomationActionForUser(environment: Record<string
   if (!action) throw new Error('未找到自动化动作');
   if (action.state === 'succeeded') return { state: action.state, pullNumber: null };
   if (action.state !== 'queued') throw new Error(`当前动作状态为 ${action.state}，不能执行`);
-  if (action.kind !== 'create-pr') throw new Error('当前仅支持执行自动创建 PR 动作');
+  if (action.kind !== 'create-pr' && action.kind !== 'merge-pr') throw new Error('当前仅支持执行自动创建和自动合并 PR 动作');
   const claimed = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'running', attempts = attempts + 1, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId} AND state = 'queued' RETURNING id`;
   if (!claimed.length) throw new Error('动作已被其他执行请求领取');
   try {
     const workflowRows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${userId} AND id = ${action.workflow_id}`;
     const workflow = storedWorkflowFromPayload(workflowRows[0]?.payload);
     const stage = workflow ? stageForIndex(workflow, action.stage_index) : undefined;
-    if (!workflow || !stage || stage.stageId !== action.stage_id || stage.automation?.autoCreatePullRequest !== true || stage.automation.executionMode !== 'server') throw new Error('流程步骤自动创建策略已失效');
+    if (!workflow || !stage || stage.stageId !== action.stage_id) throw new Error('流程步骤自动化策略已失效');
+    if (action.kind === 'merge-pr') return await runAutomationMergeAction(environment, sql, userId, installationId, actionId, action, workflow, stage);
+    if (stage.automation?.autoCreatePullRequest !== true || stage.automation.executionMode !== 'server') throw new Error('流程步骤自动创建策略已失效');
     if (!action.payload?.generationRule?.trim()) throw new Error('自动化动作缺少生成规则快照');
     const currentStates = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
     const current = currentStates.find(state => state.stage_id === action.stage_id && state.source === action.source);
@@ -1206,6 +1303,8 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
     await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:${pull.number}`, kind: 'new-pr-ready', title: '有新提交，可以创建新 PR', body: `${workflow.repository} · ${route}`, url: '/' });
   }
   if (comparison.ahead_by > 0 && comparisonHeadSha) await scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha);
+  // Only an open pull request can be merged, and the gate verdict is pinned to the head sha just stored.
+  if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await scheduleServerAutoMerge(environment, sql, row, workflow, stageIndex, source, pull.number, pull.head.sha);
   return true;
 }
 
