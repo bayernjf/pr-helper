@@ -59,6 +59,7 @@ let active: Workflow | null = workflows[0] || null;
 let editorDraft: { repository: string; name: string; source: string; target: string } = { repository: '', name: '', source: '', target: '' };
 let deploymentFormOpen = false;
 let deploymentAdvancedOpen = false;
+let deploymentHighlight: string | null = null;
 let workflowMutationRevision = 0;
 let screen: Screen = 'overview';
 let branches: string[] = [];
@@ -631,7 +632,7 @@ async function syncLocalWorkflows() {
     pendingLocalWorkflowSync = false; render(); showToast(t('sync.success'));
   } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : t('sync.fail.short'); render(); showToast(t('sync.fail', { error: cloudWorkflowSyncError })); }
 }
-function showToast(message: string) {
+function showToast(message: string, undo?: { label: string; onUndo: () => void }) {
   const previous = document.querySelector<HTMLElement>('.toast');
   previous?.hidePopover?.();
   previous?.remove();
@@ -652,10 +653,13 @@ function showToast(message: string) {
   close.type = 'button';
   close.textContent = t('toastAction.close');
   close.setAttribute('aria-label', t('toastAction.closeLabel'));
-  toast.append(content, copy, close);
+  const undoButton = undo ? document.createElement('button') : null;
+  if (undoButton && undo) { undoButton.className = 'toast-action toast-undo'; undoButton.type = 'button'; undoButton.textContent = undo.label; }
+  toast.append(content, ...(undoButton ? [undoButton] : []), copy, close);
   document.body.append(toast);
   toast.showPopover?.();
-  let remaining = 3_200;
+  // An undo affordance the reader cannot reach in time is worse than none, so it gets a longer window.
+  let remaining = undo ? 7_000 : 3_200;
   let deadline = Date.now() + remaining;
   let timer: number | undefined;
   let hovering = false;
@@ -672,6 +676,7 @@ function showToast(message: string) {
     catch { copy.textContent = t('toastAction.copyFailed'); }
   });
   close.addEventListener('click', dismiss);
+  undoButton?.addEventListener('click', () => { dismiss(); undo?.onUndo(); });
   resume();
 }
 function persistPullRequestDrafts(next: typeof pullRequestDrafts) { pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); draftStorageSynchronized = true; } catch { draftStorageSynchronized = false; showToast(t('connect.draft.saveError')); } }
@@ -1738,7 +1743,7 @@ function renderStepForm(repository: string) {
     document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } const isNew = active?.repository !== repository; if (isNew && workflows.some(workflow => workflow.repository === repository)) { showToast(t('editor.error.repoUsed')); return; } if (active?.repository === repository && active.stages.some(stage => stage.source === source && stage.target === target)) { showToast(t('editor.error.duplicateRoute')); return; } const name = value('flow-name') || repository; const independent = document.querySelector<HTMLInputElement>('#independent-route')!.checked; const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="wait-for-route"]:checked')].map(input => Number(input.value)); const next = active?.repository === repository ? { ...addStage(active, source, target, independent, waitFor), name } : createWorkflow(repository, source, target, name, deploymentsForRepository(repositoryActionWorkflows, repositoryEnvironments)); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); bindDraftActions(); bindDraftStepSorting(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.routeSaved', { source, target })); renderStepForm(repository); });
   document.querySelector<HTMLButtonElement>('#toggle-deployment-form')?.addEventListener('click', () => {
     deploymentFormOpen = !deploymentFormOpen;
-    renderStepForm(repository);
+    rerenderStepForm(repository);
     if (deploymentFormOpen) document.querySelector<HTMLInputElement>('#deployment-workflow')?.focus();
   });
   document.querySelector<HTMLDetailsElement>('.deployment-advanced')?.addEventListener('toggle', event => { deploymentAdvancedOpen = (event.currentTarget as HTMLDetailsElement).open; });
@@ -1751,14 +1756,23 @@ function renderStepForm(repository: string) {
     if (deploymentConfigs(active).some(item => item.target === deployment.target && item.provider === deployment.provider)) { showToast(t('editor.deployments.duplicate')); return; }
     save(addDeployment(active, deployment));
     deploymentFormOpen = false;
+    deploymentHighlight = deploymentKey(deployment);
     showToast(t('editor.deployments.saved'));
-    renderStepForm(repository);
+    rerenderStepForm(repository);
+    deploymentHighlight = null;
   });
   document.querySelectorAll<HTMLButtonElement>('[data-remove-deployment]').forEach(button => button.addEventListener('click', () => {
     if (!active) return;
-    save(removeDeployment(active, Number(button.dataset.removeDeployment)));
-    showToast(t('editor.deployments.removed'));
-    renderStepForm(repository);
+    const restored = active;
+    const removed = deploymentConfigs(restored)[Number(button.dataset.removeDeployment)];
+    save(removeDeployment(restored, Number(button.dataset.removeDeployment)));
+    showToast(t('editor.deployments.removed'), { label: t('editor.deployments.undo'), onUndo: () => {
+      save(restored);
+      deploymentHighlight = removed ? deploymentKey(removed) : null;
+      rerenderStepForm(repository);
+      deploymentHighlight = null;
+    } });
+    rerenderStepForm(repository);
   }));
   document.querySelector<HTMLButtonElement>('#save-recovery-policy')?.addEventListener('click', () => {
     if (!active) return;
@@ -1767,8 +1781,14 @@ function renderStepForm(repository: string) {
     const policy: RecoveryPolicy = { maxRetries, cooldownSeconds };
     save({ ...active, recoveryPolicy: policy });
     showToast(t('editor.recoveryPolicy.saved'));
-    renderStepForm(repository);
+    rerenderStepForm(repository);
   });
+}
+function deploymentKey(deployment: DeploymentConfig) { return `${deployment.target}|${deployment.provider}`; }
+function rerenderStepForm(repository: string) {
+  const top = window.scrollY;
+  renderStepForm(repository);
+  window.scrollTo({ top });
 }
 function renderDeploymentSettings() {
   if (!active) return '';
@@ -1786,7 +1806,7 @@ function renderDeploymentSettings() {
       const chips = `<span class="deployment-chips"><span class="deployment-chip provider">${deployment.provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages'}</span><span class="deployment-chip env-${deployment.environment}">${t(`editor.deployments.${deployment.environment}`)}</span>${deployment.healthCheckPath ? `<span class="deployment-chip flag" title="${escape(deployment.healthCheckPath)}">♥ ${escape(deployment.healthCheckPath)}</span>` : ''}${deployment.rollbackWorkflowName ? `<span class="deployment-chip flag" title="${escape(deployment.rollbackWorkflowName)}">↩ ${t('editor.deployments.rollbackSummary', { workflow: escape(deployment.rollbackWorkflowName) })}</span>` : ''}</span>`;
       const detail = `<small>${escape(deployment.workflowName)}${deployment.githubEnvironment ? ` · ${escape(deployment.githubEnvironment)}` : ''}</small>`;
       const inline = warnings.length ? `<ul class="deployment-row-warnings">${warnings.map(warning => `<li>${warningText(warning)}</li>`).join('')}</ul>` : '';
-      return `<div class="${warnings.length ? 'has-warning' : ''}"><b>${escape(deployment.target)}</b>${chips}${detail}${inline}<button class="ghost" type="button" data-remove-deployment="${index}">${t('editor.deployments.remove')}</button></div>`;
+      return `<div class="${[warnings.length ? 'has-warning' : '', deploymentHighlight === deploymentKey(deployment) ? 'is-new' : ''].filter(Boolean).join(' ')}"><b>${escape(deployment.target)}</b>${chips}${detail}${inline}<button class="ghost" type="button" data-remove-deployment="${index}">${t('editor.deployments.remove')}</button></div>`;
     }).join('')
     : `<p class="meta">${t('editor.deployments.empty')}</p>`;
   const toggle = `<button id="toggle-deployment-form" type="button" class="ghost deployment-add-toggle" aria-expanded="${deploymentFormOpen}">${deploymentFormOpen ? t('editor.deployments.cancel') : t('editor.deployments.add')}</button>`;
