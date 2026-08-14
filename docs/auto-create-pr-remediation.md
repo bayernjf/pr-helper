@@ -237,3 +237,12 @@ AI 生成的正文严格按生成规则模板输出（Overview / Changes / Relat
 - **服务端边界守卫**：`api/_lib/workflows-store.ts` 曾从浏览器模块 `src/lib/github.ts` 引入 `mergePullRequestPayload`，该模块顶层读 `import.meta.env`，在 Node 下模块加载即崩，导致 `/api/github/session` 返回 `FUNCTION_INVOCATION_FAILED`。已改为在调用点内联两个字段，并新增源码守卫测试：从 `api/**` 可达的相对导入链上不允许出现任何读 `import.meta.env` 的模块。
 
 待部署验收：需先在生产执行迁移 `028`，未执行前所有 sweep 会在抢租约时报错。
+
+## 十二、连接池与勾选即校准（2026-08-14，本地已落地待部署验收）
+
+生产埋点（`[reconcile-timing]`）给出的实测：单个 stage 总耗时 5867–6702 ms，其中 11 次 GitHub 调用只占 2339–2536 ms，最慢单次 289–453 ms；`deploy` 阶段独占 3187–4567 ms，`dbRead` 两条普通 SELECT 就要 744 ms。两条 `outcome=deferred` 的 sweep 总耗时 11359 / 11535 ms，超出 8000 ms 预算的部分正是收尾 UPDATE 在等连接。结论：瓶颈不是 GitHub 往返，而是并发 stage 与收尾语句争抢 `max: 1` 的唯一连接。
+
+- **连接池放开到 4**：租约已保证同仓同时只有一个 sweep，Supabase 事务模式 pooler（`prepare: false`）承受得住。守卫测试固定「池宽必须大于 1」，避免回退。
+- **勾选自动创建后立即校准一次**：`autoCreateActivated` 按 `stageId` 比对保存前后，只在服务端模式的自动创建从关变开时返回 true；保存路径打上 `reconcile_pending_since` 并触发一次 `manual` 校准。已落地的行为是「先有提交、后勾选」也会被算上，此前要等下一次 push、手动刷新或定时校准（生产间隔 50–100 分钟）。
+- **自动合并刻意排除**：步骤可能以 `main` 为目标，保存一个勾选不等于授权合并生产（`AGENTS.md` 第 5 条）。自动合并仍只由真实 GitHub 事件驱动。
+- **耗时埋点保留**：每个 stage 与每次 sweep 各输出一行 `[reconcile-timing]`，字段含各阶段毫秒数、GitHub 调用次数与最慢 path，便于放开连接池后复量对比。

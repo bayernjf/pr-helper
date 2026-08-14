@@ -28,6 +28,7 @@
 - 本地已落地：`reconciliation_leases` 自过期租约（TTL 30 秒、TTL/3 心跳续租、holder 守卫释放）替换 advisory lock；`withStageDeadline` 让出预算时按当前计数写终态并落 `finished_at`；`reconcile_pending_since` 标记推迟或失败的工作流，实时触发优先接力最多 4 个，不再等 cron。计划与证据见 [`docs/superpowers/plans/2026-08-14-reconciliation-lease.md`](docs/superpowers/plans/2026-08-14-reconciliation-lease.md)，实现清单见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md) 第十一节。
 - 生产事故已修复并上线：`api/_lib/workflows-store.ts` 从浏览器模块 `src/lib/github.ts` 引入函数，该模块顶层读 `import.meta.env`，在 Node 下模块加载即崩，`/api/github/session` 返回 `FUNCTION_INVOCATION_FAILED`。已内联该调用并新增源码守卫测试，覆盖整类越界。
 - 部署前置：Supabase 需执行迁移 `028`（`reconciliation_leases` 表、`pr_helper_workflows.reconcile_pending_since`）。未执行前所有 sweep 会在抢租约时报错。
+- 后续本地已落地（同样待部署）：生产埋点证明校准的瓶颈是 `max: 1` 连接池而非 GitHub 往返（单个 stage 6 秒里 GitHub 只占 2.4 秒，`deploy` 阶段独占 3.2–4.6 秒，让出预算的收尾 UPDATE 还要再等 3.4 秒），连接池已放开到 4；勾选服务端自动创建后会立即触发一次 `manual` 校准，先有提交后勾选不再等下一次 push。自动合并刻意不参与即时触发——步骤可能以 `main` 为目标，保存勾选不等于授权合并生产。详见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md) 第十二节。
 - 部署后验收四项：一条 `webhook` 行到达 `success`/`degraded` 且 `finished_at` 非空、无行长期停在 `running`；一次 push 的非首条投递记 `skipped`；`reconciliation_leases` 无已过期却仍阻塞后继的行；一次 `degraded` sweep 由紧随其后的触发在秒级接走。
 
 ## 2026-08-12 刷新链路最新结论
