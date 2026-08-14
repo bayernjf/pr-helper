@@ -275,6 +275,7 @@ const en: TranslationDict = {
   'editor.deployments.advanced': 'Advanced options',
   'editor.deployments.remove': 'Remove',
   'editor.deployments.saved': 'Deployment gate saved.',
+  'editor.deployments.undo': 'Undo',
   'editor.deployments.removed': 'Deployment gate removed.',
   'editor.deployments.workflowRequired': 'Enter the GitHub Actions workflow name.',
   'editor.deployments.duplicate': 'Only one deployment platform may be configured for a target branch.',

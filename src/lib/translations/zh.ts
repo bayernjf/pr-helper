@@ -275,6 +275,7 @@ const zh: TranslationDict = {
   'editor.deployments.advanced': '高级选项',
   'editor.deployments.remove': '移除',
   'editor.deployments.saved': '部署门禁已保存。',
+  'editor.deployments.undo': '撤销',
   'editor.deployments.removed': '部署门禁已移除。',
   'editor.deployments.workflowRequired': '请填写 GitHub Actions 工作流名称。',
   'editor.deployments.duplicate': '同一目标分支不能重复配置同一部署平台。',
