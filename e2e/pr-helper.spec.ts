@@ -263,6 +263,34 @@ test('抽屉合并 PR 仅在确认后通过 GitHub 代理使用当前 head SHA',
   expect(githubRequests(api, 'PUT', '/repos/acme/demo/pulls/42/merge')[0]?.body).toEqual({ merge_method: 'merge', sha: 'head-sha-42' });
 });
 
+test('流程详情页可为单个步骤开启自动合并且不影响自动创建策略', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-auto-merge',
+    name: '自动合并回归流程',
+    repository,
+    version: 2,
+    stages: [
+      { stageId: 'stage-1', source: 'feature/e2e', target: 'dev' },
+      { stageId: 'stage-2', source: 'dev', target: 'main' },
+    ],
+  };
+  const api = await openWorkspace(page, { workflows: [workflow] });
+
+  const drawer = await openStepDrawer(page);
+  await drawer.getByRole('button', { name: '查看完整流程' }).click();
+
+  const mergeToggles = page.locator('[data-detail-auto-merge-stage]');
+  await expect(mergeToggles).toHaveCount(2);
+  await mergeToggles.first().check();
+
+  // Merging needs no model, so the stage carries a merge-only server policy with no generation rule.
+  await expect.poll(() => api.workflows[0]?.stages[0]?.automation).toEqual({ autoMergePullRequest: true, executionMode: 'server' });
+  await expect.poll(() => api.workflows[0]?.stages[1]?.automation).toBeUndefined();
+
+  await mergeToggles.first().uncheck();
+  await expect.poll(() => api.workflows[0]?.stages[0]?.automation).toBeUndefined();
+});
+
 test('删除流程需要确认，并且确认后才从云端删除', async ({ page }) => {
   const workflow: Workflow = {
     id: 'flow-delete',
