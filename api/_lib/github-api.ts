@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import { createGithubAppJwt, type GitHubAppConfig } from './github-app.js';
 
 const githubApi = 'https://api.github.com';
@@ -9,6 +11,18 @@ type CachedInstallationToken = { token: string; expiresAt: number };
 
 const installationTokenCache = new Map<string, CachedInstallationToken>();
 const installationTokenRequests = new Map<string, Promise<string>>();
+
+export type GitHubCallStats = { calls: number; totalMs: number; slowest: { path: string; ms: number } | null };
+
+const callStats = new AsyncLocalStorage<GitHubCallStats>();
+
+// Attribution has to follow the async context, not a module-level counter: a sweep runs many stages
+// concurrently, so a shared counter would report one stage's latency as another's.
+export async function trackGitHubCalls<T>(run: () => Promise<T>): Promise<{ value: T; stats: GitHubCallStats }> {
+  const stats: GitHubCallStats = { calls: 0, totalMs: 0, slowest: null };
+  const value = await callStats.run(stats, run);
+  return { value, stats };
+}
 
 export class GitHubApiError extends Error {
   constructor(public readonly status: number, message: string) {
@@ -23,6 +37,21 @@ function requestSignal(signal?: AbortSignal | null) {
 }
 
 async function githubResponse<T>(path: string, token: string, init?: RequestInit): Promise<T> {
+  const stats = callStats.getStore();
+  const startedAt = stats ? performance.now() : 0;
+  try {
+    return await githubFetch<T>(path, token, init);
+  } finally {
+    if (stats) {
+      const ms = Math.round(performance.now() - startedAt);
+      stats.calls += 1;
+      stats.totalMs += ms;
+      if (!stats.slowest || ms > stats.slowest.ms) stats.slowest = { path, ms };
+    }
+  }
+}
+
+async function githubFetch<T>(path: string, token: string, init?: RequestInit): Promise<T> {
   const { timeout, signal } = requestSignal(init?.signal);
   let response: Response;
   try {
