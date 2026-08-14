@@ -367,7 +367,7 @@ export async function listWorkflowAutomationActions(environment: Record<string, 
 
 type DatabaseUser = { id: string };
 type WorkflowRow = { payload: unknown; version?: number };
-type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string; github_installation_id?: string | null; last_reconciled_at?: string | null };
+type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string; github_installation_id?: string | null; last_reconcile_attempt_at?: string | null };
 type WorkflowAccess = { ownerUserId: string; workflow: StoredWorkflow; team?: { id: string; name: string; role: TeamRole } };
 
 type WebhookDelivery = { deliveryId: string; eventName: string; action?: string; repository?: string; installationId?: string };
@@ -1369,6 +1369,9 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
   }
   const runRow = await sql<{ id: number }[]>`INSERT INTO reconciliation_runs (user_id, trigger, state, repository) VALUES (${userId}, ${trigger}, 'running', ${repository}) RETURNING id`;
   const runId = runRow[0].id;
+  // The turn is given up before the work runs, so a workflow that fails or resolves to no route still
+  // rotates to the back of the queue instead of being picked again in every sweep.
+  await sql`UPDATE pr_helper_workflows SET last_reconcile_attempt_at = now() WHERE user_id = ${userId} AND id IN ${sql(workflowsToReconcile.map(item => item.row.id))}`.catch(() => undefined);
   try {
     for (const item of workflowsToReconcile) await pruneStaleWorkflowStageData(sql, item.row.user_id, item.workflow);
     const tracked = workflowsToReconcile.flatMap(({ row, workflow }) => workflow.stages.map((_, stageIndex) => ({ row, workflow, stageIndex })));
@@ -1450,15 +1453,17 @@ export function reconciliationBatchSize(environment: Record<string, string | und
   return Number.isInteger(configured) && configured >= 0 ? configured : RECONCILE_WORKFLOW_BATCH_SIZE;
 }
 
-function reconciliationStaleness(lastReconciledAt: string | null) {
-  return (lastReconciledAt ? Date.parse(lastReconciledAt) : 0) || 0;
+function reconciliationStaleness(lastAttemptAt: string | null) {
+  return (lastAttemptAt ? Date.parse(lastAttemptAt) : 0) || 0;
 }
 
-export function selectReconciliationBatch<T extends { lastReconciledAt: string | null }>(candidates: readonly T[], limit: number): T[] {
+// Ordering on the attempt rather than on the resulting stage data is what keeps rotation fair: a
+// workflow that resolves to no route still advances its turn instead of holding a slot forever.
+export function selectReconciliationBatch<T extends { lastAttemptAt: string | null }>(candidates: readonly T[], limit: number): T[] {
   if (limit <= 0 || candidates.length <= limit) return [...candidates];
   return candidates
     .map((candidate, index) => ({ candidate, index }))
-    .sort((left, right) => reconciliationStaleness(left.candidate.lastReconciledAt) - reconciliationStaleness(right.candidate.lastReconciledAt) || left.index - right.index)
+    .sort((left, right) => reconciliationStaleness(left.candidate.lastAttemptAt) - reconciliationStaleness(right.candidate.lastAttemptAt) || left.index - right.index)
     .slice(0, limit)
     .map(item => item.candidate);
 }
@@ -1472,12 +1477,12 @@ export async function reconcileWorkflowStages(environment: Record<string, string
   if (trigger === 'cron') {
     await sql`UPDATE reconciliation_runs SET state = 'failure', error_message = coalesce(error_message, '校准中断：函数实例在完成前被回收'), duration_ms = coalesce(duration_ms, (extract(epoch from now() - started_at) * 1000)::int), finished_at = now() WHERE state = 'running' AND started_at < now() - (${RECONCILIATION_RUN_GRACE_SECONDS} * interval '1 second')`.catch(() => undefined);
   }
-  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, (SELECT max(states.updated_at) FROM workflow_stage_states states WHERE states.user_id = workflows.user_id AND states.workflow_id = workflows.id) AS last_reconciled_at FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, workflows.last_reconcile_attempt_at FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
   const candidates = rows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
     if (!workflow || (filter.repository && workflow.repository !== filter.repository) || (filter.installationId && row.github_installation_id !== filter.installationId)) return [];
     if (filter.branches && !workflow.stages.some(stage => reconciliationBranchScope(stage, filter.branches!) !== 'none')) return [];
-    return [{ row, workflow: ensureStageIds(workflow), lastReconciledAt: row.last_reconciled_at ?? null }];
+    return [{ row, workflow: ensureStageIds(workflow), lastAttemptAt: row.last_reconcile_attempt_at ?? null }];
   });
   // A scheduled sweep must answer within one request timeout, so it reconciles the stalest
   // workflows only and relies on its 10 minute cadence to rotate through the rest.
