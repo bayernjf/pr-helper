@@ -408,3 +408,34 @@ test('部署回滚要求二次确认，并向服务端传递不可变运行标�
   await expect.poll(() => api.requests.filter(request => request.pathname === '/api/deployment-rollback')).toHaveLength(1);
   expect(api.requests.find(request => request.pathname === '/api/deployment-rollback')?.body).toEqual({ workflowId: workflow.id, stageIndex: 0, source: 'feature/e2e', provider: 'vercel', runId: 84 });
 });
+
+test('部署门禁默认收起表单并把配置警告落到对应行', async ({ page }) => {
+  await openWorkspace(page, { workflows: [{ id: 'flow-gate', name: '门禁流程', repository, createdAt: '2026-08-01T00:00:00.000Z', stages: [{ source: 'feature/e2e', target: 'dev', stageId: 'stage-dev' }], deployments: [{ target: 'dev', provider: 'vercel', workflowName: 'Deploy frontend to Vercel', environment: 'preview', githubEnvironment: 'preview-vercel', healthCheckPath: '/health' }, { target: 'main', provider: 'cloudflare', workflowName: 'Missing workflow', environment: 'production' }] } as Workflow] });
+  await page.locator('[data-edit-project="flow-gate"]').click();
+  await expect(page.locator('.deployment-settings')).toBeVisible();
+  await expect(page.locator('#deployment-workflow')).toHaveCount(0);
+  await page.locator('#toggle-deployment-form').click();
+  await expect(page.locator('#deployment-workflow')).toBeFocused();
+  await page.locator('.deployment-advanced summary').click();
+  await page.locator('#deployment-workflow').fill('Deploy api');
+  await page.locator('#deployment-target').selectOption('main');
+  await page.locator('#deployment-health-path').fill('/healthz');
+  await page.getByRole('button', { name: '保存门禁' }).click();
+  await expect(page.locator('#deployment-workflow')).toHaveCount(0);
+  await expect(page.locator('.deployment-config-list > div')).toHaveCount(3);
+  await expect(page.locator('.deployment-config-list > div.has-warning')).toHaveCount(3);
+  const geometry = await page.locator('.deployment-config-list > div').first().evaluate(row => {
+    const rect = row.getBoundingClientRect();
+    const chips = row.querySelector('.deployment-chips')!.getBoundingClientRect();
+    const warnings = row.querySelector('.deployment-row-warnings')!.getBoundingClientRect();
+    const button = row.querySelector('button')!.getBoundingClientRect();
+    return { rowRight: rect.right, rowBottom: rect.bottom, chipsRight: chips.right, chipsBottom: chips.bottom, warningsTop: warnings.top, warningsBottom: warnings.bottom, buttonLeft: button.left, buttonRight: button.right };
+  });
+  expect(geometry.buttonLeft).toBeGreaterThan(geometry.chipsRight);
+  expect(geometry.buttonRight).toBeLessThanOrEqual(geometry.rowRight);
+  expect(geometry.warningsTop).toBeGreaterThan(geometry.chipsBottom);
+  expect(geometry.warningsBottom).toBeLessThanOrEqual(geometry.rowBottom);
+  await expect(page.locator('.deployment-config-list > div').first().locator('.deployment-chip.env-preview')).toBeVisible();
+  await expect(page.locator('.deployment-config-warnings')).toContainText('有 5 项需要在保存前检查');
+  await expect(page.locator('.deployment-config-warnings ul')).toHaveCount(0);
+});
