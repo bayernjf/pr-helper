@@ -4,7 +4,7 @@ type WorkflowSaveQueueOptions<T extends VersionedWorkflow> = {
   current: (workflowId: string) => T | undefined;
   persist: (workflow: T) => Promise<T>;
   onSaved: (workflow: T) => void;
-  onError: (error: unknown) => void;
+  onError: (error: unknown, workflowId: string) => void;
 };
 
 /** Serializes saves per workflow while coalescing edits made during an in-flight request. */
@@ -27,6 +27,11 @@ export class WorkflowSaveQueue<T extends VersionedWorkflow> {
     await this.runners.get(workflowId);
   }
 
+  /** True while an edit is still waiting for its own request. */
+  hasPendingEdits(workflowId: string): boolean {
+    return this.dirty.has(workflowId);
+  }
+
   private async drain(workflowId: string): Promise<boolean> {
     while (this.dirty.delete(workflowId)) {
       const workflow = this.options.current(workflowId);
@@ -34,7 +39,11 @@ export class WorkflowSaveQueue<T extends VersionedWorkflow> {
       try {
         this.options.onSaved(await this.options.persist(workflow));
       } catch (error) {
-        this.options.onError(error);
+        // Edits coalesced onto this request never reach the server. Clearing the flag keeps them from
+        // being resurrected by an unrelated later save, and naming the workflow lets the caller
+        // realign what it shows with what was actually stored.
+        this.dirty.delete(workflowId);
+        this.options.onError(error, workflowId);
         return false;
       }
     }
