@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { actionableStageEntry, automationActionId, reconciliationLockKey, realtimeReconcileBudgetMs, withReconciliationBudget, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { actionableStageEntry, automationActionId, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withReconciliationBudget, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -737,5 +737,25 @@ describe('reconciliationLockKey', () => {
   it('falls back to a per-user key when no single repository is in scope', () => {
     expect(reconciliationLockKey('user-1', null)).toBe(reconciliationLockKey('user-1', null));
     expect(reconciliationLockKey('user-1', null)).not.toBe(reconciliationLockKey('user-1', 'acme/web'));
+  });
+});
+
+describe('reconciliationRunInterrupted', () => {
+  const now = Date.parse('2026-08-14T10:10:00.000Z');
+
+  // A killed serverless instance never updates its row, so a stale 'running' row is the only trace of
+  // a sweep that silently died; reporting it as in flight is what hid the broken webhook path.
+  it('reports a running row that outlived the grace period', () => {
+    expect(reconciliationRunInterrupted({ state: 'running', startedAt: '2026-08-14T10:00:00.000Z' }, now)).toBe(true);
+  });
+
+  it('leaves a fresh running row reported as in flight', () => {
+    expect(reconciliationRunInterrupted({ state: 'running', startedAt: '2026-08-14T10:09:00.000Z' }, now)).toBe(false);
+  });
+
+  it('never reports a finished row as interrupted', () => {
+    for (const state of ['success', 'degraded', 'failure', 'skipped']) {
+      expect(reconciliationRunInterrupted({ state, startedAt: '2026-08-14T09:00:00.000Z' }, now)).toBe(false);
+    }
   });
 });
