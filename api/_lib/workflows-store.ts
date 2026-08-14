@@ -274,6 +274,13 @@ export function automationRetryIsExhausted(attempts: number, policy: { maxRetrie
   return attempts >= maxRetries;
 }
 
+// The cap above is for verdicts GitHub reached. A refusal that never got to one — an exhausted rate
+// limit, a request that timed out — leaves nothing to decide, so charging it retires an action that
+// was never actually attempted.
+export function automationAttemptWasReached(reason: string) {
+  return !/rate limit|请求超时|timed? ?out|aborted/i.test(reason);
+}
+
 // Runs inside the caller's claim and try/catch, so a throw here lands the action in `paused` with the
 // reason preserved. GitHub stays the authority: a non-clean verdict pauses instead of forcing a merge.
 async function runAutomationMergeAction(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, userId: string, installationId: string, actionId: number, action: AutomationActionRow, workflow: StoredWorkflow, stage: StoredWorkflowStage) {
@@ -379,7 +386,7 @@ async function executeWorkflowAutomationActionForUser(environment: Record<string
     return { state: 'succeeded', pullNumber: created.number, pullUrl: created.html_url };
   } catch (error) {
     const reason = error instanceof Error ? error.message : '自动创建 PR 失败';
-    await sql`UPDATE workflow_automation_actions SET state = 'paused', failure_reason = ${reason.slice(0, 800)}, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId}`;
+    await sql`UPDATE workflow_automation_actions SET state = 'paused', failure_reason = ${reason.slice(0, 800)}, attempts = ${automationAttemptWasReached(reason) ? sql`attempts` : sql`GREATEST(attempts - 1, 0)`}, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId}`;
     await sql`UPDATE workflow_automation_runs SET state = 'paused', updated_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
     throw error;
   }
