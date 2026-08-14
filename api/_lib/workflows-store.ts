@@ -1701,7 +1701,11 @@ export async function reconcileWorkflowStages(environment: Record<string, string
   // The scheduled sweep is the only trigger guaranteed to come back, so it closes out the rows left
   // behind by instances that were killed before they could finish.
   if (trigger === 'cron') {
-    await sql`UPDATE reconciliation_runs SET state = 'failure', error_message = coalesce(error_message, '校准中断：函数实例在完成前被回收'), duration_ms = coalesce(duration_ms, (extract(epoch from now() - started_at) * 1000)::int), finished_at = now() WHERE state = 'running' AND started_at < now() - (${RECONCILIATION_RUN_GRACE_SECONDS} * interval '1 second')`.catch(() => undefined);
+    // The reap runs on the next scheduled sweep, 25 to 60 minutes later, so now() - started_at is the
+    // delay before anyone noticed rather than how long the sweep ran. Reporting it as a duration made
+    // a row reaped 6 minutes late read as a 391-second sweep, which sent a diagnosis down the wrong
+    // path; the sweep died before it could measure itself, so nothing here is a measurement.
+    await sql`UPDATE reconciliation_runs SET state = 'failure', error_message = coalesce(error_message, '校准中断：函数实例在完成前被回收'), finished_at = now() WHERE state = 'running' AND started_at < now() - (${RECONCILIATION_RUN_GRACE_SECONDS} * interval '1 second')`.catch(() => undefined);
   }
   const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, workflows.last_reconcile_attempt_at, workflows.reconcile_pending_since FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
   const tracked = rows.flatMap(row => {
