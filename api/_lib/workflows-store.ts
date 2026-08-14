@@ -249,15 +249,20 @@ export function automationCreateOutcome(openPulls: { number: number; html_url?: 
 // Merging is irreversible, so anything short of a clean GitHub verdict pauses rather than guessing.
 // `behind` deliberately pauses instead of updating the branch, which would write to the source
 // branch, start another CI round and invalidate the head sha this merge is pinned to.
+// A pause is retryable when the gate resolves without anyone touching the branch: checks that are
+// still running, a review that has not landed, a mergeability GitHub has not computed. Those clear on
+// their own, and the event that proves they cleared is the next reconciliation — so the action has to
+// still be runnable then. A red check, a conflict or a behind branch need a new commit or a human, and
+// the new commit brings a new head sha and therefore a new action, so re-attempting those is waste.
 export function automationMergeOutcome(pull: { number: number; state: string; merged?: boolean; html_url?: string } | undefined, gate: { checksState: string; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string }) {
   if (!pull || !Number.isInteger(pull.number) || pull.number <= 0) return { kind: 'paused' as const, reason: '没有可合并的 PR' };
   if (pull.merged === true) return { kind: 'idempotent' as const, pullNumber: pull.number, pullUrl: pull.html_url || null };
   if (pull.state !== 'open') return { kind: 'cancelled' as const, reason: 'PR 已关闭且未合并' };
-  if (gate.checksState !== 'success') return { kind: 'paused' as const, reason: `门禁尚未全绿（当前 ${gate.checksState}）` };
-  if (gate.approvals < gate.requiredApprovals) return { kind: 'paused' as const, reason: `PR 还需要 ${gate.requiredApprovals - gate.approvals} 个 Approval` };
-  if (gate.mergeable !== true) return { kind: 'paused' as const, reason: 'GitHub 未判定该 PR 可合并' };
+  if (gate.checksState !== 'success') return { kind: 'paused' as const, reason: `门禁尚未全绿（当前 ${gate.checksState}）`, ...(gate.checksState === 'pending' ? { retryable: true } : {}) };
+  if (gate.approvals < gate.requiredApprovals) return { kind: 'paused' as const, reason: `PR 还需要 ${gate.requiredApprovals - gate.approvals} 个 Approval`, retryable: true };
+  if (gate.mergeable !== true) return { kind: 'paused' as const, reason: 'GitHub 未判定该 PR 可合并', ...(gate.mergeable === null ? { retryable: true } : {}) };
   if (gate.mergeableState === 'behind') return { kind: 'paused' as const, reason: '分支落后于目标分支，需要先在 GitHub 更新分支' };
-  if (gate.mergeableState !== 'clean') return { kind: 'paused' as const, reason: `GitHub 合并状态为 ${gate.mergeableState}` };
+  if (gate.mergeableState !== 'clean') return { kind: 'paused' as const, reason: `GitHub 合并状态为 ${gate.mergeableState}`, ...(gate.mergeableState === 'unknown' || gate.mergeableState === 'blocked' ? { retryable: true } : {}) };
   return { kind: 'merge' as const, pullNumber: pull.number };
 }
 
@@ -287,6 +292,14 @@ async function runAutomationMergeAction(environment: Record<string, string | und
     { number: pull.number, state: pull.state, merged: Boolean(pull.merged_at), html_url: pull.html_url },
     { checksState: current.checks_state, approvals: current.approvals, requiredApprovals: current.required_approvals, mergeable: pull.mergeable ?? null, mergeableState: pull.mergeable_state || 'unknown' },
   );
+  if (outcome.kind === 'paused' && outcome.retryable === true) {
+    // Staying queued is what keeps the action alive for the event that clears the gate. Pausing would
+    // hand it to the staleness timer, and the check-completion webhook lands inside that window.
+    await sql`UPDATE workflow_automation_actions SET state = 'queued', failure_reason = ${outcome.reason.slice(0, 800)}, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId}`;
+    await sql`UPDATE workflow_automation_runs SET state = 'waiting-gates', updated_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
+    console.info(automationSkipLine({ kind: 'merge-pr', repository: workflow.repository, route: `${action.source} → ${action.target}`, reason: 'gate-not-ready', gate: outcome.reason, pullNumber, attempts: action.attempts + 1 }));
+    return { state: 'queued' as const, pullNumber: null };
+  }
   if (outcome.kind === 'paused') throw new Error(outcome.reason);
   if (outcome.kind === 'cancelled') {
     await sql`UPDATE workflow_automation_actions SET state = 'cancelled', failure_reason = ${outcome.reason}, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId}`;

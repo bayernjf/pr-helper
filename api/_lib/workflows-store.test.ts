@@ -662,6 +662,40 @@ describe('automationMergeOutcome', () => {
       expect(automationMergeOutcome(pull, { ...green, mergeableState }).kind).toBe('paused');
     }
   });
+
+  // A gate that has not resolved yet is not a failure: it clears on its own, and the event that proves
+  // it cleared is the very next reconciliation. Marking it retryable is what lets that event act.
+  it('marks a gate that is still resolving as retryable, because the next trigger is what clears it', () => {
+    const retryable = (gate: Partial<Omit<typeof green, 'mergeable'>> & { mergeable?: boolean | null }) => {
+      const outcome = automationMergeOutcome(pull, { ...green, ...gate });
+      return outcome.kind === 'paused' && outcome.retryable === true;
+    };
+    expect(retryable({ checksState: 'pending' })).toBe(true);
+    expect(retryable({ approvals: 0, requiredApprovals: 2 })).toBe(true);
+    expect(retryable({ mergeable: null })).toBe(true);
+    expect(retryable({ mergeableState: 'unknown' })).toBe(true);
+    expect(retryable({ mergeableState: 'blocked' })).toBe(true);
+  });
+
+  it('leaves a pause only a human can clear non-retryable, so a conflict is not re-attempted on every event', () => {
+    const retryable = (gate: Partial<Omit<typeof green, 'mergeable'>> & { mergeable?: boolean | null }) => {
+      const outcome = automationMergeOutcome(pull, { ...green, ...gate });
+      return outcome.kind === 'paused' && outcome.retryable === true;
+    };
+    expect(retryable({ checksState: 'failure' })).toBe(false);
+    expect(retryable({ mergeable: false })).toBe(false);
+    expect(retryable({ mergeableState: 'dirty' })).toBe(false);
+    expect(retryable({ mergeableState: 'behind' })).toBe(false);
+    expect(automationMergeOutcome(undefined, green)).toEqual({ kind: 'paused', reason: '没有可合并的 PR' });
+  });
+
+  it('requeues a retryable gate pause instead of pausing it, because a paused action waits out a dead window', () => {
+    const source = readFileSync(new URL('./workflows-store.ts', import.meta.url), 'utf8');
+    const body = source.slice(source.indexOf('async function runAutomationMergeAction'), source.indexOf('async function executeWorkflowAutomationActionForUser'));
+    expect(body).toContain("outcome.retryable");
+    expect(body).toContain("state = 'queued'");
+    expect(body).toContain("'waiting-gates'");
+  });
 });
 
 describe('automationIdempotencyKey', () => {
