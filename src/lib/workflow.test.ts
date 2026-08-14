@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, defaultDeployments, deploymentsForRepository, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
+import { addDeployment, defaultDeployments, deploymentsForRepository, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -212,6 +212,32 @@ describe('workflow configuration', () => {
 
     expect(reorderWorkflows([first, second], 'missing', 'second', 'before')).toEqual([first, second]);
     expect(reorderWorkflows([first, second], 'first', 'missing', 'before')).toEqual([first, second]);
+  });
+
+  // A reorder is computed from a snapshot of the board. A save that lands while the user is dragging
+  // leaves that snapshot holding the version it replaced, so adopting the snapshot wholesale rolls the
+  // version back and the server rejects the next save as a conflict — losing the new order.
+  it('carries a new order across the records currently held rather than adopting the snapshot', () => {
+    const snapshot = [
+      { ...createWorkflow('octo/first', 'feature/first', 'main'), id: 'first', version: 45 },
+      { ...createWorkflow('octo/second', 'feature/second', 'main'), id: 'second', version: 12 },
+    ];
+    const current = [{ ...snapshot[0], version: 46 }, snapshot[1]];
+
+    const applied = applyWorkflowOrder(current, reorderWorkflows(snapshot, 'second', 'first', 'before'));
+
+    expect(applied.map(workflow => workflow.id)).toEqual(['second', 'first']);
+    expect(applied.map(workflow => workflow.version)).toEqual([12, 46]);
+  });
+
+  it('leaves a workflow the reorder never saw in place', () => {
+    const first = { ...createWorkflow('octo/first', 'feature/first', 'main'), id: 'first', position: 0 };
+    const second = { ...createWorkflow('octo/second', 'feature/second', 'main'), id: 'second', position: 1 };
+    const unseen = { ...createWorkflow('octo/third', 'feature/third', 'main'), id: 'third', position: 9 };
+
+    const applied = applyWorkflowOrder([first, second, unseen], [second, first]);
+
+    expect(applied.map(workflow => workflow.id)).toEqual(['second', 'first', 'third']);
   });
 
   it('moves a project lane to its requested one-based custom position', () => {
