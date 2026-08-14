@@ -229,7 +229,7 @@ describe('reconciliation state', () => {
 });
 
 describe('cron reconciliation batch', () => {
-  const candidate = (id: string, lastReconciledAt: string | null) => ({ id, lastReconciledAt });
+  const candidate = (id: string, lastAttemptAt: string | null) => ({ id, lastAttemptAt });
 
   it('keeps the scheduled sweep bounded so it can answer within the request timeout', () => {
     expect(RECONCILE_WORKFLOW_BATCH_SIZE).toBe(8);
@@ -256,6 +256,13 @@ describe('cron reconciliation batch', () => {
       candidate('b', '2026-08-13T09:10:00.000Z'),
       candidates[2],
     ], 2).map(item => item.id)).toEqual(['c', 'a']);
+  });
+
+  // A workflow whose branch rule currently matches nothing writes no stage state, so ordering on stage
+  // data kept selecting it in every sweep and starved the rest of the queue.
+  it('rotates past a workflow that produced no stage data', () => {
+    const attempted = [candidate('barren', '2026-08-13T09:05:00.000Z'), candidate('waiting', '2026-08-13T09:00:00.000Z')];
+    expect(selectReconciliationBatch(attempted, 1).map(item => item.id)).toEqual(['waiting']);
   });
 
   it('reconciles everything when the batch cannot be exceeded or is disabled', () => {
