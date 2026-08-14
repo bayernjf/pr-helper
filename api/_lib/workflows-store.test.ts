@@ -848,6 +848,17 @@ describe('withStageDeadline', () => {
     const slow = new Promise<number>(resolve => { setTimeout(() => resolve(1), 200); });
     await expect(withStageDeadline(slow, 5)).resolves.toEqual({ outcome: 'deferred' });
   });
+
+  // A sweep with no budget is the scheduled one, and it owns the whole request: it has to wait for its
+  // stages instead of reporting completion while they are still in flight and then letting the platform
+  // freeze them. Callers used to skip this helper entirely in that case, which is how every cron sweep
+  // came to record zero reconciled stages.
+  it('waits for unbudgeted work instead of reporting completion before it lands', async () => {
+    let settled = false;
+    const slow = new Promise<number>(resolve => { setTimeout(() => { settled = true; resolve(7); }, 20); });
+    await expect(withStageDeadline(slow, undefined)).resolves.toEqual({ outcome: 'completed', value: 7 });
+    expect(settled).toBe(true);
+  });
 });
 
 describe('deferredRunState', () => {
