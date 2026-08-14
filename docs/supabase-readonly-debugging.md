@@ -10,6 +10,40 @@
 2. **凭据文件放在仓库外。** 全程放 `~/.config/pr-helper/db.env`，权限 600。仓库里出现任何数据库密码都是事故。
 3. **用一个新建的只读角色，不要用 `postgres` 超级用户。** 超级用户拿来查询，一次手滑就是生产事故。
 
+### 这份文档不用你一步步照做
+
+下面一到五节的每一步，**都可以直接让 AI 替你做**。把需求说出来就行，例如：
+
+> 「照 `docs/supabase-readonly-debugging.md` 帮我把只读查询通道配好」
+
+AI 能直接完成的：写 `~/.local/bin/prh-sql.mjs`、写 `~/.config/pr-helper/db.env` 并 `chmod 600`、跑连通性验证、之后所有的排查查询。
+
+只有两件事必须**你自己**在 Supabase 控制台的 SQL Editor 里点 Run，因为它们是 DDL 且需要超级用户权限——AI 的只读通道执行不了，也不该能执行：
+
+- 第一节的 `create role prh_readonly ...`
+- 第六节的 `alter role prh_readonly bypassrls`
+
+同时你需要提供两样 AI 拿不到的信息：你自己设的角色密码、以及 Supabase 控制台上的 Host 和项目 ref。**密码请贴在对话里而不是让 AI 猜**，贴完注意第十节的轮换纪律。
+
+### 装上 Supabase 官方技能包（推荐）
+
+在仓库根目录执行一次：
+
+```bash
+npx skills add supabase/agent-skills
+```
+
+装两个技能，AI 会在相关任务上自动加载：
+
+| 技能 | 覆盖什么 |
+| --- | --- |
+| `supabase` | Supabase 全线产品排查：RLS 意外、permission denied、schema cache、超时、Auth/JWT/session、Edge Functions、Realtime、Storage、日志查询 |
+| `supabase-postgres-best-practices` | Postgres 本体：索引与查询优化、EXPLAIN 分析、连接池与预处理语句、锁与死锁、schema 与迁移、RLS 性能 |
+
+装完的落点：真实文件在 `.agents/skills/`，`.claude/skills/` 和 `.trae/skills/` 是指向它的符号链接，版本由 `skills-lock.json` 按内容哈希锁定。这几处都已入库，clone 下来就带着，无需每人重装。
+
+为什么值得装：本文档第六节那个"查得通但什么都查不到"的 RLS 陷阱，正是 `supabase` 技能里明确列出的坑之一。技能包能让 AI 少走一轮弯路，也会提醒 Supabase 的 API 与配置项版本变动频繁、不要凭记忆作答。
+
 ---
 
 ## 一、在 Supabase 建只读角色
