@@ -886,7 +886,7 @@ describe('reconcileTimingLine', () => {
     expect(line).toContain('scope=stage');
     expect(line).toContain('route="feature/x → dev"');
     expect(line).toContain('total=5048');
-    expect(line).toContain('slowest="/repos/a/b/branches/dev/protection"');
+    expect(line).toContain('slowest=/repos/a/b/branches/dev/protection');
   });
 
   it('omits phases the caller did not measure', () => {
