@@ -117,6 +117,8 @@ AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 P
 
 生产验收查出仍未修的真正根因 `P8`：`workflow_automation_actions` 表没有 `stage_index` 列（`025` 只把它建在 `workflow_automation_runs` 上），而执行器 `executeWorkflowAutomationActionForUser` 和队列列表 `listWorkflowAutomationActions` 都在 SELECT 它。执行器在原子领取动作**之前**就抛 `column "stage_index" does not exist`，所以动作永远停在 `queued` / `attempts=0`——这是自动创建至今从未成功过的原因。修法是把两条查询改为 JOIN `workflow_automation_runs` 取该列，不需要迁移；配套加一条「迁移列集合 ⊇ SELECT 列名」的静态一致性守卫测试。P1/P2 的价值在于让这条错误第一次被写进 `failure_reason` 而不是继续静默。
 
+`P8` 已按上述修法落代码并由用户部署到生产，验证生效：动作首次被真正领取，`attempts` 由 0 变 1。随即暴露 `P9`——`generateAutomationMessage` 的围栏剥离把 `trim()` 写在 `replace()` 之后，模型只要在 ```` ```json ```` 前多一个换行，`^` 锚点就失配，围栏原样进 `JSON.parse`，动作落到 `paused` / `attempts=1`。已抽出可单测的 `jsonFromModelText`（先 trim、再判断是否以围栏开头、从末尾找收尾围栏以免误截 PR 正文里的代码块），`P9` 已落代码待部署。`paused` 超 120 秒会被 stale 重置回 `queued`，所以部署后会自愈重试，不需要人工干预。
+
 在上述生产验收通过后，建议顺序为：
 
 1. 后台自动创建 PR：部署 Preview 后用测试仓库验证规则快照、Webhook/Cron 触发、幂等去重和失败暂停，再决定是否进入 Production。
