@@ -60,6 +60,7 @@ let editorDraft: { repository: string; name: string; source: string; target: str
 let deploymentFormOpen = false;
 let deploymentAdvancedOpen = false;
 let deploymentHighlight: string | null = null;
+let returnHighlight: string | null = null;
 let workflowMutationRevision = 0;
 let screen: Screen = 'overview';
 let branches: string[] = [];
@@ -983,18 +984,31 @@ function returnToSourceLane(workflowId: string) {
   if (pollTimer) { window.clearInterval(pollTimer); pollTimer = undefined; }
   render();
   window.requestAnimationFrame(() => {
-    const lane = [...document.querySelectorAll<HTMLElement>('[data-project-lane]')]
+    const findLane = () => [...document.querySelectorAll<HTMLElement>('[data-project-lane]')]
       .find(element => element.dataset.projectLane === workflowId);
+    const lane = findLane();
     if (!lane) return;
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const highlight = () => {
-      lane.classList.remove('is-return-highlight');
-      void lane.offsetWidth;
-      lane.classList.add('is-return-highlight');
-      lane.addEventListener('animationend', () => lane.classList.remove('is-return-highlight'), { once: true });
+      // A background refresh re-renders the board from scratch, so the highlight has to live in state
+      // to survive it; decorating only this element would let a refresh drop the effect unseen.
+      returnHighlight = workflowId;
+      findLane()?.classList.add('is-return-highlight');
+      // The listener sits on the document for the same reason: the element carrying the animation may
+      // not be the one it started on. The sheen and the edge bar run on pseudo-elements and land
+      // first, so only the lane's own ring decay marks the end.
+      const settle = (event: AnimationEvent) => {
+        const target = event.target as HTMLElement;
+        if (event.pseudoElement || !target.classList?.contains('is-return-highlight')) return;
+        document.removeEventListener('animationend', settle);
+        returnHighlight = null;
+        target.classList.remove('is-return-highlight');
+      };
+      document.addEventListener('animationend', settle);
     };
+    const scrollable = document.documentElement.scrollHeight - window.innerHeight > 1;
     lane.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'center' });
-    if (reducedMotion) { highlight(); return; }
+    if (reducedMotion || !scrollable) { highlight(); return; }
 
     let frame = 0;
     let timeout = 0;
@@ -1449,7 +1463,7 @@ function projectLane(flow: Workflow) {
   const orderInput = laneSortMode === 'custom'
     ? `<label class="lane-order-input"><input type="text" inputmode="numeric" pattern="[0-9]*" value="${orderIndex + 1}" data-lane-position="${escape(flow.id)}" aria-label="${escape(t('overview.board.orderFor', { name: flow.name }))}" ${sortingDisabled ? 'disabled' : ''} /></label>`
     : '';
-  return `<article class="project-lane${expanded ? ' is-expanded' : ''}" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div>${orderInput}</div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${flowName}</h2>${sharedWorkflowBadge(flow)}<p class="lane-run-summary ${runSummary.tone}">${escape(runSummary.text)}</p></div></div><button type="button" class="lane-collapse-toggle" data-lane-collapse="${escape(flow.id)}" aria-expanded="${expanded}" aria-label="${escape(collapseLabel)}" title="${escape(collapseLabel)}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.75" y="2.75" width="10.5" height="10.5" rx="1.5"/><path d="m5.25 8 2.75-2.75L10.75 8"/></svg></button><div class="lane-actions"><button data-edit-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.edit')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button></div></header><div class="lane-body"${expanded ? '' : ' hidden'}>${warning}<div class="lane-track${hasFanIn ? ' has-fan-in' : ''}">${steps}</div>${timelineSection}${runHistory}</div></article>`;
+  return `<article class="project-lane${expanded ? ' is-expanded' : ''}${returnHighlight === flow.id ? ' is-return-highlight' : ''}" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div>${orderInput}</div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${flowName}</h2>${sharedWorkflowBadge(flow)}<p class="lane-run-summary ${runSummary.tone}">${escape(runSummary.text)}</p></div></div><button type="button" class="lane-collapse-toggle" data-lane-collapse="${escape(flow.id)}" aria-expanded="${expanded}" aria-label="${escape(collapseLabel)}" title="${escape(collapseLabel)}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.75" y="2.75" width="10.5" height="10.5" rx="1.5"/><path d="m5.25 8 2.75-2.75L10.75 8"/></svg></button><div class="lane-actions"><button data-edit-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.edit')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button></div></header><div class="lane-body"${expanded ? '' : ' hidden'}>${warning}<div class="lane-track${hasFanIn ? ' has-fan-in' : ''}">${steps}</div>${timelineSection}${runHistory}</div></article>`;
 }
 function bindLaneSorting() {
   const lanes = [...document.querySelectorAll<HTMLElement>('[data-project-lane]')];
