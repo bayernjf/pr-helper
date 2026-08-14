@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
-import { installationRequest } from './github-api.js';
+import { installationRequest, trackGitHubCalls } from './github-api.js';
 import { parseGithubAppConfig } from './github-app.js';
 import { sendPushNotifications, type BrowserPushSubscription } from './push.js';
 import { assertTeamOperation, type TeamOperation } from '../../src/lib/team-permissions.js';
@@ -1277,19 +1277,51 @@ async function reconcileStageDeployments(environment: Record<string, string | un
   });
 }
 
+// One greppable line per stage and per sweep: Vercel keeps stdout, and a single line survives log
+// truncation better than a nested object.
+export function reconcileTimingLine(fields: Record<string, string | number | undefined>) {
+  const parts = Object.entries(fields)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}=${typeof value === 'string' && /[\s"]/.test(value) ? JSON.stringify(value) : value}`);
+  return `[reconcile-timing] ${parts.join(' ')}`;
+}
+
 async function reconcileOneStage(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string) {
-  if (!row.github_installation_id) return false;
+  const startedAt = performance.now();
+  const tracked = await trackGitHubCalls(() => reconcileStageWork(environment, row, workflow, stageIndex, source, eventName));
+  console.log(reconcileTimingLine({
+    scope: 'stage',
+    repository: workflow.repository,
+    route: `${source} \u2192 ${workflow.stages[stageIndex]?.target || '?'}`,
+    ...tracked.value.phases,
+    githubCalls: tracked.stats.calls,
+    githubMs: tracked.stats.totalMs,
+    slowest: tracked.stats.slowest?.path,
+    slowestMs: tracked.stats.slowest?.ms,
+    total: Math.round(performance.now() - startedAt),
+  }));
+  return tracked.value.reconciled;
+}
+
+async function reconcileStageWork(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string): Promise<{ reconciled: boolean; phases: Record<string, number> }> {
+  const phases: Record<string, number> = {};
+  const phase = async <T>(name: string, work: () => Promise<T>): Promise<T> => {
+    const at = performance.now();
+    try { return await work(); } finally { phases[name] = (phases[name] || 0) + Math.round(performance.now() - at); }
+  };
+  if (!row.github_installation_id) return { reconciled: false, phases };
+  const installationId = row.github_installation_id;
   const stage = { ...stageForIndex(workflow, stageIndex), source };
   const stageId = stage.stageId!;
-  const pull = await pullForStage(environment, row.github_installation_id, workflow, stage);
+  const pull = await phase('pull', () => pullForStage(environment, installationId, workflow, stage));
   const sql = query(environment);
-  const previous = await sql<{ pull_number: number | null; pull_state: string; checks_state: string; approvals: number; required_approvals: number; ahead_by: number }[]>`SELECT pull_number, pull_state, checks_state, approvals, required_approvals, ahead_by FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`;
+  const previous = await phase('dbRead', () => sql<{ pull_number: number | null; pull_state: string; checks_state: string; approvals: number; required_approvals: number; ahead_by: number }[]>`SELECT pull_number, pull_state, checks_state, approvals, required_approvals, ahead_by FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
   const preceding = stageIndex
-    ? await sql<{ stage_index: number; stage_id: string; pull_state: string; checks_state: string }[]>`SELECT stage_index, stage_id, pull_state, checks_state FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`
+    ? await phase('dbRead', () => sql<{ stage_index: number; stage_id: string; pull_state: string; checks_state: string }[]>`SELECT stage_index, stage_id, pull_state, checks_state FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`)
     : [];
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
-  const comparison = await installationRequest<{ ahead_by: number; head_commit?: { id?: string }; commits?: { sha?: string }[] }>(config, row.github_installation_id, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`).catch(() => ({ ahead_by: 0, head_commit: undefined, commits: undefined }));
+  const comparison = await phase('compare', () => installationRequest<{ ahead_by: number; head_commit?: { id?: string }; commits?: { sha?: string }[] }>(config, installationId, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`).catch(() => ({ ahead_by: 0, head_commit: undefined, commits: undefined })));
   const comparisonHeadSha = comparison.head_commit?.id || comparison.commits?.at(-1)?.sha;
   if (!pull) {
     await sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`;
@@ -1299,18 +1331,18 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
     if (unlocked && comparison.ahead_by > 0 && (previous[0]?.ahead_by || 0) === 0) {
       await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:none`, kind: 'new-pr-ready', title: '可以创建下一步 PR', body: `${workflow.repository} · ${stage.source} → ${stage.target}`, url: '/' });
     }
-    if (comparison.ahead_by > 0 && comparisonHeadSha) await scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha);
-    return true;
+    if (comparison.ahead_by > 0 && comparisonHeadSha) await phase('write', () => scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha));
+    return { reconciled: true, phases };
   }
   const sha = pull.merged_at ? pull.merge_commit_sha : pull.head.sha;
   if (!pull.merged_at) await sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`;
-  const [runs, statuses, reviews, protection] = await Promise.all([
-    sha ? installationRequest<{ check_runs: CheckRun[] }>(config, row.github_installation_id, `/repos/${owner}/${name}/commits/${sha}/check-runs?per_page=100`).catch(() => ({ check_runs: [] })) : Promise.resolve({ check_runs: [] }),
-    sha ? installationRequest<{ statuses: CommitStatus[] }>(config, row.github_installation_id, `/repos/${owner}/${name}/commits/${sha}/status`).catch(() => ({ statuses: [] })) : Promise.resolve({ statuses: [] }),
-    pull.merged_at ? Promise.resolve([] as Review[]) : installationRequest<Review[]>(config, row.github_installation_id, `/repos/${owner}/${name}/pulls/${pull.number}/reviews?per_page=100`).catch(() => []),
-    pull.merged_at ? Promise.resolve(null as BranchProtection | null) : installationRequest<BranchProtection>(config, row.github_installation_id, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}/protection`).catch(() => null),
-  ]);
-  const deploymentStates = pull.merged_at && sha ? await reconcileStageDeployments(environment, sql, row, workflow, stageIndex, source, stage.target, sha) : [];
+  const [runs, statuses, reviews, protection] = await phase('checks', () => Promise.all([
+    sha ? installationRequest<{ check_runs: CheckRun[] }>(config, installationId, `/repos/${owner}/${name}/commits/${sha}/check-runs?per_page=100`).catch(() => ({ check_runs: [] })) : Promise.resolve({ check_runs: [] }),
+    sha ? installationRequest<{ statuses: CommitStatus[] }>(config, installationId, `/repos/${owner}/${name}/commits/${sha}/status`).catch(() => ({ statuses: [] })) : Promise.resolve({ statuses: [] }),
+    pull.merged_at ? Promise.resolve([] as Review[]) : installationRequest<Review[]>(config, installationId, `/repos/${owner}/${name}/pulls/${pull.number}/reviews?per_page=100`).catch(() => []),
+    pull.merged_at ? Promise.resolve(null as BranchProtection | null) : installationRequest<BranchProtection>(config, installationId, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}/protection`).catch(() => null),
+  ]));
+  const deploymentStates = pull.merged_at && sha ? await phase('deploy', () => reconcileStageDeployments(environment, sql, row, workflow, stageIndex, source, stage.target, sha)) : [];
   const observedChecks = runs.check_runs.length || statuses.statuses.length
     ? summarizeGitHubChecks(runs.check_runs, statuses.statuses)
     : { state: 'success' as const, passed: 0, total: 0 };
@@ -1342,8 +1374,8 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   }
   if (comparison.ahead_by > 0 && comparisonHeadSha) await scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha);
   // Only an open pull request can be merged, and the gate verdict is pinned to the head sha just stored.
-  if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await scheduleServerAutoMerge(environment, sql, row, workflow, stageIndex, source, pull.number, pull.head.sha);
-  return true;
+  if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await phase('write', () => scheduleServerAutoMerge(environment, sql, row, workflow, stageIndex, source, pull.number, pull.head.sha));
+  return { reconciled: true, phases };
 }
 
 // One push emits several deliveries within seconds. Without exclusion each one starts its own sweep
@@ -1423,12 +1455,14 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
       const scope = filter.branches && item.branchScoped ? reconciliationBranchScope(stage, filter.branches) : 'all';
       return scope === 'none' ? [] : [{ ...item, scope }];
     });
+    const routesAt = performance.now();
     const routeTasks = await Promise.all(scoped.map(async item => {
       const sources = await routeSourcesForStage(environment, sql, item.row, item.workflow, item.stageIndex);
       const inScope = item.scope === 'matching' && filter.branches ? sources.filter(source => filter.branches!.includes(source)) : sources;
       return inScope.map(source => ({ ...item, source }));
     }));
     const flatTasks = routeTasks.flat();
+    const routesMs = Math.round(performance.now() - routesAt);
     // Recording the intent before the work means a sweep that is killed mid-flight still shows how
     // much it meant to do, instead of looking like a sweep that found nothing.
     await sql`UPDATE reconciliation_runs SET stages_total = ${flatTasks.length} WHERE id = ${runId}`;
@@ -1443,6 +1477,19 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     )));
     const raced = deadlineMs === undefined ? { outcome: 'completed' as const } : await withStageDeadline(stageWork, deadlineMs);
     const durationMs = Date.now() - startedAt;
+    console.log(reconcileTimingLine({
+      scope: 'sweep',
+      trigger,
+      repository: repository || '*',
+      workflows: workflowsToReconcile.length,
+      stages: flatTasks.length,
+      routesMs,
+      reconciled,
+      failed,
+      budgetMs: deadlineMs,
+      outcome: raced.outcome,
+      total: durationMs,
+    }));
     const errorMessage = firstFailure ? String(firstFailure instanceof Error ? firstFailure.message : firstFailure).slice(0, 800) : null;
     if (raced.outcome === 'deferred') {
       // Closing the row here is the whole point: a deferred sweep used to stay 'running' until the
