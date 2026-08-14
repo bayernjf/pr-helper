@@ -9,6 +9,7 @@ type ApiFixture = {
   deployments?: unknown[];
   deploymentRuns?: unknown[];
   auditEntries?: unknown[];
+  automationReady?: boolean;
 };
 
 type MockApi = {
@@ -37,6 +38,10 @@ async function mockApi(page: Page, fixture: ApiFixture = {}): Promise<MockApi> {
     const pathname = url.pathname;
     const body = request.postDataJSON?.() ?? null;
     api.requests.push({ method: request.method(), pathname, search: url.search, body });
+
+    if (pathname === '/api/ai-credentials') return json(route, 200, fixture.automationReady
+      ? { credential: { configured: true, autoGeneratePrMessage: true, autoConfirmPrCreation: true, keyMask: 'sk-***e2e' } }
+      : { credential: { configured: false } });
 
     if (pathname === '/api/github/session') return json(route, 200, {
       connected: true,
@@ -102,6 +107,8 @@ async function mockApi(page: Page, fixture: ApiFixture = {}): Promise<MockApi> {
 
 async function openWorkspace(page: Page, fixture: ApiFixture = {}) {
   const api = await mockApi(page, fixture);
+  // Auto-create and auto-merge both require a generation rule, which the app keeps in local storage.
+  if (fixture.automationReady) await page.addInitScript(() => window.localStorage.setItem('pr-helper-generation-rules', JSON.stringify([{ id: 'rule-e2e', name: 'E2E 规则', content: '## Overview', isDefault: true, createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z' }])));
   await page.goto('/?github=connected');
   await expect(page.getByRole('heading', { name: '项目流程看板' })).toBeVisible();
   return api;
@@ -274,7 +281,7 @@ test('流程详情页可为单个步骤开启自动合并且不影响自动创�
       { stageId: 'stage-2', source: 'dev', target: 'main' },
     ],
   };
-  const api = await openWorkspace(page, { workflows: [workflow] });
+  const api = await openWorkspace(page, { workflows: [workflow], automationReady: true });
 
   const drawer = await openStepDrawer(page);
   await drawer.getByRole('button', { name: '查看完整流程' }).click();
@@ -289,6 +296,23 @@ test('流程详情页可为单个步骤开启自动合并且不影响自动创�
 
   await mergeToggles.first().uncheck();
   await expect.poll(() => api.workflows[0]?.stages[0]?.automation).toBeUndefined();
+});
+
+test('缺少自动化前置条件时自动合并勾选框与自动创建一起禁用', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-auto-merge-locked',
+    name: '自动合并前置条件流程',
+    repository,
+    version: 1,
+    stages: [{ stageId: 'stage-1', source: 'feature/e2e', target: 'dev' }],
+  };
+  await openWorkspace(page, { workflows: [workflow] });
+
+  const drawer = await openStepDrawer(page);
+  await drawer.getByRole('button', { name: '查看完整流程' }).click();
+
+  await expect(page.locator('[data-detail-auto-create-stage]').first()).toBeDisabled();
+  await expect(page.locator('[data-detail-auto-merge-stage]').first()).toBeDisabled();
 });
 
 test('删除流程需要确认，并且确认后才从云端删除', async ({ page }) => {
