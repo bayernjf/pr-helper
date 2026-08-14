@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { installationRequest } from './github-api.js';
 import { parseGithubAppConfig } from './github-app.js';
@@ -1352,6 +1353,21 @@ export function reconciliationLockKey(userId: string, repository: string | null)
   return `pr-helper:reconcile:${userId}:${repository || '*'}`;
 }
 
+// The lease must outlive a realtime sweep's whole budget, or a live sweep would be evicted by the
+// next delivery; it must also be short, because a frozen holder blocks the scope until it lapses.
+export const RECONCILIATION_LEASE_TTL_SECONDS = 30;
+
+export function reconciliationLeaseTtlSeconds(environment: Record<string, string | undefined>) {
+  const configured = Number(environment.RECONCILIATION_LEASE_TTL_SECONDS);
+  return Number.isFinite(configured) && configured > 0 ? configured : RECONCILIATION_LEASE_TTL_SECONDS;
+}
+
+// A cron sweep runs longer than one TTL, so it renews. Renewing at a third of the TTL leaves two
+// missed renewals of slack before a live sweep loses its lease.
+export function reconciliationLeaseRenewIntervalMs(ttlSeconds: number) {
+  return Math.max(1000, Math.floor((ttlSeconds * 1000) / 3));
+}
+
 async function reconcileWorkflowScope(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, workflowsToReconcile: { row: TrackedWorkflowRow; workflow: StoredWorkflow }[], filter: ReconciliationFilter, trigger: ReconciliationTrigger) {
   const startedAt = Date.now();
   const userId = workflowsToReconcile[0]?.row.user_id;
@@ -1359,13 +1375,27 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
   const repositories = [...new Set(workflowsToReconcile.map(item => item.workflow.repository))];
   const repository = filter.repository || (repositories.length === 1 ? repositories[0] : null);
   const lockKey = reconciliationLockKey(userId, repository);
-  const lock = await sql<{ locked: boolean }[]>`SELECT pg_try_advisory_lock(hashtext(${lockKey})) AS locked`;
-  if (!lock[0]?.locked) {
+  const ttlSeconds = reconciliationLeaseTtlSeconds(environment);
+  const holder = randomUUID();
+  // One statement decides the winner: the insert wins an unheld lease, and the conflict branch only
+  // takes over a lease whose holder let it lapse. A frozen holder therefore blocks for one TTL.
+  const lease = await sql<{ holder: string }[]>`
+    INSERT INTO reconciliation_leases (lock_key, holder, trigger, acquired_at, expires_at)
+    VALUES (${lockKey}, ${holder}, ${trigger}, now(), now() + (${ttlSeconds} * interval '1 second'))
+    ON CONFLICT (lock_key) DO UPDATE SET holder = EXCLUDED.holder, trigger = EXCLUDED.trigger, acquired_at = now(), expires_at = EXCLUDED.expires_at
+    WHERE reconciliation_leases.expires_at < now()
+    RETURNING holder`;
+  if (lease[0]?.holder !== holder) {
     // Queueing behind the holder would only burn the request budget: the running sweep reads the same
     // rows and will publish the same result.
     await sql`INSERT INTO reconciliation_runs (user_id, trigger, state, repository, stages_total, stages_reconciled, stages_failed, duration_ms, finished_at) VALUES (${userId}, ${trigger}, 'skipped', ${repository}, 0, 0, 0, ${Date.now() - startedAt}, now())`.catch(() => undefined);
     return 0;
   }
+  // Renewal is what separates a slow sweep from a dead one: a frozen instance stops renewing, so its
+  // lease lapses on its own instead of waiting for the connection to die.
+  const renewal = setInterval(() => {
+    void sql`UPDATE reconciliation_leases SET expires_at = now() + (${ttlSeconds} * interval '1 second') WHERE lock_key = ${lockKey} AND holder = ${holder}`.catch(() => undefined);
+  }, reconciliationLeaseRenewIntervalMs(ttlSeconds));
   const runRow = await sql<{ id: number }[]>`INSERT INTO reconciliation_runs (user_id, trigger, state, repository) VALUES (${userId}, ${trigger}, 'running', ${repository}) RETURNING id`;
   const runId = runRow[0].id;
   // The turn is given up before the work runs, so a workflow that fails or resolves to no route still
@@ -1405,7 +1435,10 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     await sql`UPDATE reconciliation_runs SET state = 'failure', duration_ms = ${durationMs}, error_message = ${String(error instanceof Error ? error.message : error).slice(0, 800)}, finished_at = now() WHERE id = ${runId}`.catch(() => undefined);
     throw error;
   } finally {
-    await sql`SELECT pg_advisory_unlock(hashtext(${lockKey}))`.catch(() => undefined);
+    clearInterval(renewal);
+    // The holder guard matters: without it a sweep that already lost its lease would delete the row a
+    // successor is relying on.
+    await sql`DELETE FROM reconciliation_leases WHERE lock_key = ${lockKey} AND holder = ${holder}`.catch(() => undefined);
   }
 }
 
@@ -1841,6 +1874,7 @@ export async function cleanupRetainedData(environment: Record<string, string | u
       sql`WITH stale AS (SELECT ctid FROM workflow_stage_deployment_runs WHERE updated_at < ${cutoffs.deploymentRuns} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM workflow_stage_deployment_runs USING stale WHERE workflow_stage_deployment_runs.ctid = stale.ctid RETURNING 1`,
       sql`WITH stale AS (SELECT ctid FROM workflow_operation_audit_logs WHERE occurred_at < ${cutoffs.operationAudit} LIMIT ${RETENTION_BATCH_SIZE}) DELETE FROM workflow_operation_audit_logs USING stale WHERE workflow_operation_audit_logs.ctid = stale.ctid RETURNING 1`,
     ]);
+    await sql`DELETE FROM reconciliation_leases WHERE expires_at < now() - interval '1 hour'`.catch(() => undefined);
     const deleted = { webhooks: webhooks.length, encryptedSyncHistory: history.length, reconciliationRuns: reconciliation.length, stageEvents: events.length, deploymentRuns: deployments.length, operationAudit: audit.length };
     await sql`UPDATE data_retention_runs SET state = 'success', finished_at = now(), deleted_counts = ${sql.json(deleted)} WHERE id = ${runId}`;
     return deleted;
