@@ -1812,7 +1812,7 @@ function detail() {
     if (!active) return;
     const stageIndex = Number(input.dataset.detailAutoCreateStage);
     const stage = active.stages[stageIndex];
-    const rule = stage.automation?.executionMode === 'server' ? { name: stage.automation.generationRule.name, content: stage.automation.generationRule.content } : defaultGenerationRule(generationRules);
+    const rule = stage.automation?.generationRule ? { name: stage.automation.generationRule.name, content: stage.automation.generationRule.content } : defaultGenerationRule(generationRules);
     if (input.checked && (!autoCreatePrerequisites() || !rule)) { input.checked = false; showToast(t('draft.autoCreatePrerequisites')); return; }
     const threshold = Number(document.querySelector<HTMLInputElement>(`[data-detail-auto-create-threshold="${stageIndex}"]`)?.value || active.stages[stageIndex]?.automation?.triggerMinCommits || 1);
     save(setStageAutoCreate(active, stageIndex, input.checked, rule ? { name: rule.name, content: rule.content } : undefined, threshold));
@@ -1823,7 +1823,7 @@ function detail() {
     if (!active) return;
     const stageIndex = Number(input.dataset.detailAutoCreateThreshold);
     const stage = active.stages[stageIndex];
-    const rule = stage.automation?.executionMode === 'server' ? { name: stage.automation.generationRule.name, content: stage.automation.generationRule.content } : defaultGenerationRule(generationRules);
+    const rule = stage.automation?.generationRule ? { name: stage.automation.generationRule.name, content: stage.automation.generationRule.content } : defaultGenerationRule(generationRules);
     if (!stage?.automation?.autoCreatePullRequest || !rule) return;
     const threshold = Number(input.value);
     if (!Number.isInteger(threshold) || threshold < 1) { input.value = String(stage.automation.triggerMinCommits || 1); showToast(t('draft.autoCreateThresholdInvalid')); return; }
