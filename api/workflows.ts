@@ -81,9 +81,10 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     if (request.method === 'PUT' && isStoredWorkflow(payload?.workflow)) {
       audit = { action: payload.workflow.version === undefined ? 'workflow-created' : 'workflow-updated', repository: payload.workflow.repository, workflowId: payload.workflow.id };
       const saved = await upsertWorkflow(process.env, identity, payload.workflow);
-      // Only auto-create earns an immediate sweep. Auto-merge waits for a real GitHub event, because a
-      // stage may target production and a saved checkbox is not merge authorization.
-      const reconciliation = saved.autoCreateActivated && session.installationId
+      // Either toggle earns an immediate sweep. Auto-merge acts on a pull request that already exists,
+      // so waiting for the next GitHub event removes no consequence; the tick-time confirmation is
+      // what makes the merge an explicit user action.
+      const reconciliation = (saved.automationActivated.create || saved.automationActivated.merge) && session.installationId
         ? await reconcileRealtime(process.env, { installationId: session.installationId, repository: saved.workflow.repository, eventName: 'automation_enabled' }, 'manual')
         : null;
       response.status(200).json({ ok: true, workflow: saved.workflow, ...(reconciliation ? { reconciliation } : {}) });
