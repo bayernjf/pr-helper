@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { reconcileTimingLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { serverAutomationActivated, reconcileTimingLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -543,6 +543,13 @@ describe('store queries against the migration schema', () => {
 
   // The pool runs in transaction mode, so a session-level advisory lock outlives the sweep that took
   // it: the unlock can land on a different backend, and a frozen instance never reaches it at all.
+  it('opens the connection pool beyond a single connection, which serialized every sweep', () => {
+    const pool = source.match(/postgres\(url, \{([^}]*)\}\)/);
+    expect(pool).not.toBeNull();
+    expect(Number(pool![1].match(/max:\s*(\d+)/)?.[1])).toBeGreaterThan(1);
+    expect(pool![1]).toContain('prepare: false');
+  });
+
   it('never guards a sweep with a session-level advisory lock', () => {
     expect(source).not.toMatch(/pg_(try_)?advisory_(un)?lock\b/);
   });
@@ -891,5 +898,60 @@ describe('reconcileTimingLine', () => {
 
   it('omits phases the caller did not measure', () => {
     expect(reconcileTimingLine({ scope: 'sweep', total: 12 })).toBe('[reconcile-timing] scope=sweep total=12');
+  });
+});
+
+describe('serverAutomationActivated', () => {
+  const stage = (stageId: string, automation?: Record<string, unknown>) => ({ source: 'feature/x', target: 'dev', stageId, ...(automation ? { automation } : {}) });
+  const workflow = (stages: ReturnType<typeof stage>[]) => ({ id: 'w1', repository: 'acme/app', stages }) as never;
+  const serverCreate = { autoCreatePullRequest: true, executionMode: 'server', triggerMinCommits: 1 };
+  const serverMerge = { autoMergePullRequest: true, executionMode: 'server' };
+
+  it('reports an activation when a stage turns server auto-create on', () => {
+    expect(serverAutomationActivated(workflow([stage('s1')]), workflow([stage('s1', serverCreate)]))).toEqual({ create: true, merge: false });
+  });
+
+  it('reports an activation when a stage turns server auto-merge on', () => {
+    expect(serverAutomationActivated(workflow([stage('s1')]), workflow([stage('s1', serverMerge)]))).toEqual({ create: false, merge: true });
+  });
+
+  it('reports both when a stage turns auto-create and auto-merge on at once', () => {
+    expect(serverAutomationActivated(workflow([stage('s1')]), workflow([stage('s1', { ...serverCreate, autoMergePullRequest: true })]))).toEqual({ create: true, merge: true });
+  });
+
+  it('reports only the newly enabled side when the other was already on', () => {
+    expect(serverAutomationActivated(workflow([stage('s1', serverCreate)]), workflow([stage('s1', { ...serverCreate, autoMergePullRequest: true })]))).toEqual({ create: false, merge: true });
+  });
+
+  it('reports an activation for a newly saved workflow that already has them on', () => {
+    expect(serverAutomationActivated(null, workflow([stage('s1', { ...serverCreate, autoMergePullRequest: true })]))).toEqual({ create: true, merge: true });
+  });
+
+  it('stays quiet when nothing changed', () => {
+    expect(serverAutomationActivated(workflow([stage('s1', serverCreate)]), workflow([stage('s1', serverCreate)]))).toEqual({ create: false, merge: false });
+  });
+
+  it('stays quiet when a toggle turns off', () => {
+    expect(serverAutomationActivated(workflow([stage('s1', { ...serverCreate, autoMergePullRequest: true })]), workflow([stage('s1', serverCreate)]))).toEqual({ create: false, merge: false });
+  });
+
+  it('ignores browser-mode automation, which the server never executes', () => {
+    expect(serverAutomationActivated(workflow([stage('s1')]), workflow([stage('s1', { autoCreatePullRequest: true, executionMode: 'browser' })]))).toEqual({ create: false, merge: false });
+  });
+
+  it('matches stages by id, so reordering a stage is not an activation', () => {
+    const before = workflow([stage('s1'), stage('s2', { ...serverCreate, autoMergePullRequest: true })]);
+    const after = workflow([stage('s2', { ...serverCreate, autoMergePullRequest: true }), stage('s1')]);
+    expect(serverAutomationActivated(before, after)).toEqual({ create: false, merge: false });
+  });
+});
+
+describe('workflow save route', () => {
+  const source = readFileSync(new URL('../workflows.ts', import.meta.url), 'utf8');
+
+  it('reconciles when either automation toggle activates, because auto-merge acts on an already created pull request', () => {
+    const trigger = source.slice(source.indexOf('const reconciliation'), source.indexOf('response.status(200).json({ ok: true, workflow: saved.workflow'));
+    expect(trigger).toContain('saved.automationActivated.create || saved.automationActivated.merge');
+    expect(trigger).not.toContain('autoCreateActivated');
   });
 });

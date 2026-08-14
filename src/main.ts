@@ -6,7 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, g
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, selectWorkflowAfterCloudLoad, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
+import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
@@ -1822,18 +1822,24 @@ function detail() {
     const rule = stage.automation?.generationRule ? { name: stage.automation.generationRule.name, content: stage.automation.generationRule.content } : defaultGenerationRule(generationRules);
     if (input.checked && (!autoCreatePrerequisites() || !rule)) { input.checked = false; showToast(t('draft.autoCreatePrerequisites')); return; }
     const threshold = Number(document.querySelector<HTMLInputElement>(`[data-detail-auto-create-threshold="${stageIndex}"]`)?.value || active.stages[stageIndex]?.automation?.triggerMinCommits || 1);
-    save(setStageAutoCreate(active, stageIndex, input.checked, rule ? { name: rule.name, content: rule.content } : undefined, threshold));
-    showToast(input.checked ? t('draft.autoCreateEnabled') : t('draft.autoCreateDisabled'));
-    render();
+    void (async () => {
+      if (!await confirmImmediateAutomation('create', stageIndex, input.checked, threshold)) { input.checked = !input.checked; return; }
+      save(setStageAutoCreate(active!, stageIndex, input.checked, rule ? { name: rule.name, content: rule.content } : undefined, threshold));
+      showToast(input.checked ? t('draft.autoCreateEnabled') : t('draft.autoCreateDisabled'));
+      render();
+    })();
   }));
   document.querySelectorAll<HTMLInputElement>('[data-detail-auto-merge-stage]').forEach(input => input.addEventListener('change', () => {
     if (!active) return;
     const stageIndex = Number(input.dataset.detailAutoMergeStage);
     const updated = setStageAutoMerge(active, stageIndex, input.checked);
     if (updated === active) { input.checked = !input.checked; showToast(t('detail.autoMergeLegacyPolicy')); return; }
-    save(updated);
-    showToast(input.checked ? t('draft.autoMergeEnabled') : t('draft.autoMergeDisabled'));
-    render();
+    void (async () => {
+      if (!await confirmImmediateAutomation('merge', stageIndex, input.checked)) { input.checked = !input.checked; return; }
+      save(updated);
+      showToast(input.checked ? t('draft.autoMergeEnabled') : t('draft.autoMergeDisabled'));
+      render();
+    })();
   }));
   document.querySelectorAll<HTMLInputElement>('[data-detail-auto-create-threshold]').forEach(input => input.addEventListener('change', () => {
     if (!active) return;
@@ -1934,14 +1940,32 @@ async function executeAutoCreatePr(stageIndex: number) {
   } catch (error) { showToast(error instanceof Error ? error.message : t('automation.executeFailed')); }
 }
 
-function confirmAutoCreateExecution(source: string, target: string, ruleName: string) {
+// A tick that acts inside the same save request needs the same confirmation an explicit button gets.
+async function confirmImmediateAutomation(toggle: 'create' | 'merge', stageIndex: number, enabling: boolean, triggerMinCommits?: number) {
+  const stage = active?.stages[stageIndex];
+  if (!stage) return false;
+  const status = statuses?.[stageIndex];
+  const unlocked = Boolean(active && statuses && canCreateWorkflowStage(stageIndex, active.stages, statuses));
+  const effect = immediateAutomationEffect({ toggle, enabling, stage, status, unlocked, triggerMinCommits });
+  if (effect.kind === 'none') return true;
+  const description = effect.kind === 'create-pr'
+    ? t('automation.tick.createDesc', { source: escape(effect.source), target: escape(effect.target), count: effect.aheadBy })
+    : t('automation.tick.mergeDesc', { source: escape(effect.source), target: escape(effect.target), number: effect.pullNumber });
+  return await confirmDialog(t('automation.tick.eyebrow'), t('automation.tick.title'), description, t('automation.tick.cancel'), t('automation.tick.confirm'));
+}
+
+function confirmDialog(eyebrow: string, title: string, description: string, cancelLabel: string, confirmLabel: string) {
   return new Promise<boolean>(resolve => {
     const dialog = document.createElement('dialog');
     dialog.className = 'create-dialog confirm-dialog';
-    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('automation.confirm.eyebrow')}</p><h2>${t('automation.confirm.title')}</h2><p>${t('automation.confirm.desc', { source: escape(source), target: escape(target), rule: escape(ruleName) })}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('automation.confirm.cancel')}</button><button value="confirm" class="primary">${t('automation.confirm.confirm')}</button></div></form>`;
+    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${eyebrow}</p><h2>${title}</h2><p>${description}</p><div class="dialog-actions"><button value="cancel" class="ghost">${cancelLabel}</button><button value="confirm" class="primary">${confirmLabel}</button></div></form>`;
     document.body.append(dialog); dialog.showModal();
     dialog.addEventListener('close', () => { resolve(dialog.returnValue === 'confirm'); dialog.remove(); }, { once: true });
   });
+}
+
+function confirmAutoCreateExecution(source: string, target: string, ruleName: string) {
+  return confirmDialog(t('automation.confirm.eyebrow'), t('automation.confirm.title'), t('automation.confirm.desc', { source: escape(source), target: escape(target), rule: escape(ruleName) }), t('automation.confirm.cancel'), t('automation.confirm.confirm'));
 }
 
 function stageTimeline(stage: Workflow['stages'][number], index: number) {

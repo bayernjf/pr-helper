@@ -1,6 +1,6 @@
 import { requestErrorStatus, type ApiRequest, type ApiResponse } from './_lib/http.js';
 import { currentGitHubIdentity } from './_lib/session.js';
-import { addTeamMember, createTeam, deleteAiAutomationCredential, enqueueWorkflowAutomationAction, executeWorkflowAutomationAction, getAiAutomationCredential, isStoredWorkflow, listTeamMembers, listTeams, listWorkflowAutomationActions, listWorkflows, recordOperationAudit, removeTeamMember, removeWorkflow, removeWorkflowStage, saveAiAutomationCredential, shareWorkflowWithTeam, testSavedAiAutomationCredential, upsertWorkflow, type TeamRole } from './_lib/workflows-store.js';
+import { addTeamMember, createTeam, deleteAiAutomationCredential, enqueueWorkflowAutomationAction, executeWorkflowAutomationAction, getAiAutomationCredential, isStoredWorkflow, listTeamMembers, listTeams, listWorkflowAutomationActions, listWorkflows, recordOperationAudit, removeTeamMember, removeWorkflow, reconcileRealtime, removeWorkflowStage, saveAiAutomationCredential, shareWorkflowWithTeam, testSavedAiAutomationCredential, upsertWorkflow, type TeamRole } from './_lib/workflows-store.js';
 import { testAiConnection } from '../src/lib/ai.js';
 import { validateAiBaseUrl } from './_lib/ai-credentials.js';
 
@@ -80,8 +80,14 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     const payload = body(request) as { workflow?: unknown; id?: unknown; workflowId?: unknown; stageId?: unknown; stageIndex?: unknown; source?: unknown; target?: unknown } | undefined;
     if (request.method === 'PUT' && isStoredWorkflow(payload?.workflow)) {
       audit = { action: payload.workflow.version === undefined ? 'workflow-created' : 'workflow-updated', repository: payload.workflow.repository, workflowId: payload.workflow.id };
-      const workflow = await upsertWorkflow(process.env, identity, payload.workflow);
-      response.status(200).json({ ok: true, workflow });
+      const saved = await upsertWorkflow(process.env, identity, payload.workflow);
+      // Either toggle earns an immediate sweep. Auto-merge acts on a pull request that already exists,
+      // so waiting for the next GitHub event removes no consequence; the tick-time confirmation is
+      // what makes the merge an explicit user action.
+      const reconciliation = (saved.automationActivated.create || saved.automationActivated.merge) && session.installationId
+        ? await reconcileRealtime(process.env, { installationId: session.installationId, repository: saved.workflow.repository, eventName: 'automation_enabled' }, 'manual')
+        : null;
+      response.status(200).json({ ok: true, workflow: saved.workflow, ...(reconciliation ? { reconciliation } : {}) });
       return;
     }
     if (request.method === 'PATCH' && typeof payload?.workflowId === 'string' && typeof payload?.stageId === 'string') {

@@ -125,6 +125,31 @@ export function addStage(workflow: Workflow, source: string, target: string, ind
   return { ...workflow, stages: [...workflow.stages, { source, target, stageId: generateStageId(), ...(independent ? { independent: true } : {}), ...(waitFor.length ? { waitFor } : {}) }] };
 }
 
+export type ImmediateAutomationEffect =
+  | { kind: 'none' }
+  | { kind: 'create-pr'; source: string; target: string; aheadBy: number }
+  | { kind: 'merge-pr'; source: string; target: string; pullNumber: number };
+
+// Ticking a toggle can act inside the very same save request, so the UI has to know whether this tick
+// has an immediate consequence and confirm it. Gates are deliberately not predicted here: GitHub stays
+// the authority on checks, approvals and mergeability, so a confirmed merge may still end up paused.
+export function immediateAutomationEffect(input: {
+  toggle: 'create' | 'merge';
+  enabling: boolean;
+  stage: { source: string; target: string };
+  status?: { kind: string; aheadBy?: number; pr?: { number: number } | null } | null;
+  unlocked: boolean;
+  triggerMinCommits?: number;
+}): ImmediateAutomationEffect {
+  const { toggle, enabling, stage, status, unlocked } = input;
+  if (!enabling || !status) return { kind: 'none' };
+  if (toggle === 'merge') return status.kind === 'open' && status.pr ? { kind: 'merge-pr', source: stage.source, target: stage.target, pullNumber: status.pr.number } : { kind: 'none' };
+  if (!unlocked || (status.kind !== 'not-created' && status.kind !== 'merged')) return { kind: 'none' };
+  const aheadBy = status.aheadBy || 0;
+  const threshold = Math.max(1, input.triggerMinCommits || 1);
+  return aheadBy >= threshold ? { kind: 'create-pr', source: stage.source, target: stage.target, aheadBy } : { kind: 'none' };
+}
+
 export function setStageAutoCreate(workflow: Workflow, stageIndex: number, enabled: boolean, generationRule?: { name: string; content: string }, triggerMinCommits = 1): Workflow {
   if (!Number.isInteger(stageIndex) || !workflow.stages[stageIndex]) return workflow;
   if (enabled && (!generationRule?.name.trim() || !generationRule.content.trim())) return workflow;
