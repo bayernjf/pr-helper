@@ -209,7 +209,7 @@ AI 生成的正文严格按生成规则模板输出（Overview / Changes / Relat
 - 泳道徽标与 `workflowRunSummary` 当前步指针（见第六节）。
 - 自动合并、自动推进、无人值守代码修改。
 
-## 九、遗留清理决定
+## 九、遗留数据处置（已决定：都保留）
 
-- `workflow_automation_actions` 的动作 1、2 仍停在 `queued` / `attempts=0`。它们的幂等键包含已过期的 `headSha`，既不会被 `enqueueServerAutoCreate` 复用，也不会被任何轮转执行，属于纯历史残留行。要么保留作为审计痕迹，要么加一条按 `headSha` 失效条件把它们标成 `cancelled` 的清理逻辑——需要一个明确决定，不默认动生产数据。
-- 与 `P7` 的沙箱工作流 `pr-helper-e2e-sandbox-1785691296724-69q14` 同属一类问题：陈旧数据的归档/清理策略尚未定。
+- `workflow_automation_actions` 的动作 1、2 仍停在 `queued` / `attempts=0`。它们的幂等键包含已过期的 `headSha`，既不会被 `enqueueServerAutoCreate` 复用，也不会被任何轮转执行，属于纯历史残留行。**决定保留**，作为这次排障的现场痕迹。`listWorkflowAutomationActions` 目前只有 `api/workflows.ts` 一个接口在用、前端无调用方，因此界面上不会显示这两行，不存在误导。若日后要清理，应先加「`headSha` 已失效则标 `cancelled`」的逻辑再跑，不手工 UPDATE 生产表。
+- `P7` 的沙箱工作流 `pr-helper-e2e-sandbox-1785691296724-69q14`：**决定保留**。它唯一的成本是占一个 cron 轮转名额（每轮 8 个、共 34 个），不影响正确性；真要删就在界面上删，属于产品内的正常操作，不需要 SQL。
