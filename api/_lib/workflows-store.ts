@@ -1544,7 +1544,7 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
       value => { if (value) reconciled += 1; return value; },
       error => { failed += 1; firstFailure ||= error; throw error; },
     )));
-    const raced = deadlineMs === undefined ? { outcome: 'completed' as const } : await withStageDeadline(stageWork, deadlineMs);
+    const raced = await withStageDeadline(stageWork, deadlineMs);
     const durationMs = Date.now() - startedAt;
     console.log(reconcileTimingLine({
       scope: 'sweep',
@@ -1608,7 +1608,11 @@ export function realtimeReconcileBudgetMs(environment: Record<string, string | u
   return Number.isFinite(configured) && configured > 0 ? configured : REALTIME_RECONCILE_BUDGET_MS;
 }
 
-export async function withStageDeadline<T>(work: Promise<T>, deadlineMs: number): Promise<{ outcome: 'completed'; value: T } | { outcome: 'deferred' }> {
+export async function withStageDeadline<T>(work: Promise<T>, deadlineMs?: number): Promise<{ outcome: 'completed'; value: T } | { outcome: 'deferred' }> {
+  // Only a realtime sweep has a budget to respect. The scheduled sweep owns its whole request, so it
+  // waits: reporting completion without awaiting left its counters at zero and let the platform freeze
+  // the stages that were still resolving.
+  if (deadlineMs === undefined) return { outcome: 'completed' as const, value: await work };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deferred = new Promise<{ outcome: 'deferred' }>(resolve => {
     timer = setTimeout(() => resolve({ outcome: 'deferred' }), deadlineMs);
