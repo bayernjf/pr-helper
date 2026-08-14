@@ -117,14 +117,27 @@ export function automationIdempotencyKey(route: { workflowId: string; stageId: s
   return `${route.workflowId}:${route.stageId}:${route.source}:${route.target}:${route.headSha}:${route.kind}`;
 }
 
+// Every gate below declines by returning null, which used to be indistinguishable from a queue that
+// never ran. One greppable line per decline is what makes a missing pull request diagnosable at all.
+export function automationSkipLine(fields: { kind: WorkflowAutomationAction['kind']; repository: string; route: string; reason: string } & Record<string, string | number | boolean | undefined>) {
+  return `[automation-skip] ${logFields(fields)}`;
+}
+
 async function enqueueServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string, aheadBy: number): Promise<number | null> {
   const stage = stageForIndex(workflow, stageIndex);
   const automation = stage?.automation;
-  if (!stage || !stage.stageId || !row.github_installation_id || automation?.autoCreatePullRequest !== true || automation.executionMode !== 'server' || !automation.generationRule.content.trim()) return null;
+  const skip = (reason: string, detail: Record<string, string | number | boolean | undefined> = {}) => {
+    console.info(automationSkipLine({ kind: 'create-pr', repository: workflow.repository, route: `${source} → ${stage?.target || '?'}`, reason, ...detail }));
+    return null;
+  };
+  if (!stage || !stage.stageId || !row.github_installation_id) return skip('stage-unusable', { stageId: stage?.stageId, installed: Boolean(row.github_installation_id) });
+  if (automation?.autoCreatePullRequest !== true || automation.executionMode !== 'server' || !automation.generationRule.content.trim()) {
+    return skip('policy-off', { autoCreate: automation?.autoCreatePullRequest === true, mode: automation?.executionMode, ruleLength: automation?.generationRule?.content.trim().length || 0 });
+  }
   const credentialRows = await sql<{ id: string }[]>`SELECT user_id AS id FROM pr_helper_ai_automation_credentials WHERE user_id = ${row.user_id} AND auto_generate_pr_message = true AND auto_confirm_pr_creation = true LIMIT 1`;
-  if (!credentialRows[0]) return null;
+  if (!credentialRows[0]) return skip('no-automation-credential');
   const triggerMinCommits = typeof automation.triggerMinCommits === 'number' && Number.isInteger(automation.triggerMinCommits) ? Math.min(20, Math.max(1, automation.triggerMinCommits)) : 1;
-  if (aheadBy < triggerMinCommits) return null;
+  if (aheadBy < triggerMinCommits) return skip('below-threshold', { aheadBy, threshold: triggerMinCommits });
   const idempotencyKey = automationIdempotencyKey({ workflowId: workflow.id, stageId: stage.stageId, source, target: stage.target, headSha, kind: 'create-pr' });
   const existing = await sql<{ id: number; state: WorkflowAutomationAction['state']; updated_at: string }[]>`SELECT id, state, updated_at FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
   if (existing[0]) {
@@ -133,7 +146,7 @@ async function enqueueServerAutoCreate(environment: Record<string, string | unde
       const reset = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'queued', failure_reason = NULL, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${existing[0].id} AND state IN ('running', 'paused') RETURNING id`;
       return automationActionId(reset[0]?.id);
     }
-    return existing[0].state === 'queued' ? automationActionId(existing[0].id) : null;
+    return existing[0].state === 'queued' ? automationActionId(existing[0].id) : skip('already-attempted', { state: existing[0].state, headSha });
   }
   const version = (await sql<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`)[0]?.version || workflow.version || 1;
   const snapshot = { ...workflow, stages: workflow.stages.map(item => ({ ...item })) };
@@ -142,7 +155,7 @@ async function enqueueServerAutoCreate(environment: Record<string, string | unde
   if (actions[0]) return automationActionId(actions[0].id);
   await sql`DELETE FROM workflow_automation_runs WHERE user_id = ${row.user_id} AND id = ${run[0].id}`;
   const concurrent = await sql<{ id: number; state: WorkflowAutomationAction['state'] }[]>`SELECT id, state FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
-  return concurrent[0]?.state === 'queued' ? automationActionId(concurrent[0].id) : null;
+  return concurrent[0]?.state === 'queued' ? automationActionId(concurrent[0].id) : skip('already-attempted', { state: concurrent[0]?.state, headSha });
 }
 
 async function enqueueServerAutoMerge(sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, pullNumber: number, headSha: string): Promise<number | null> {
@@ -184,7 +197,11 @@ async function scheduleServerAutoMerge(environment: Record<string, string | unde
 async function scheduleServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string) {
   const states = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`;
   const current = states.find(state => state.stage_id === workflow.stages[stageIndex]?.stageId && state.source === source);
-  if (!current || !deriveStageDecision(workflow, stageIndex, current, states).canCreateNext) return;
+  const decision = current ? deriveStageDecision(workflow, stageIndex, current, states) : null;
+  if (!current || !decision?.canCreateNext) {
+    console.info(automationSkipLine({ kind: 'create-pr', repository: workflow.repository, route: `${source} → ${workflow.stages[stageIndex]?.target || '?'}`, reason: 'not-creatable', decision: decision?.kind || 'no-state', pullState: current?.pull_state, checks: current?.checks_state, aheadBy: current?.ahead_by }));
+    return;
+  }
   const actionId = await enqueueServerAutoCreate(environment, sql, row, workflow, stageIndex, source, headSha, current.ahead_by);
   if (!actionId) return;
   try { await executeWorkflowAutomationActionForUser(environment, row.user_id, row.github_installation_id!, actionId); }
@@ -1302,10 +1319,14 @@ async function reconcileStageDeployments(environment: Record<string, string | un
 // One greppable line per stage and per sweep: Vercel keeps stdout, and a single line survives log
 // truncation better than a nested object.
 export function reconcileTimingLine(fields: Record<string, string | number | undefined>) {
-  const parts = Object.entries(fields)
+  return `[reconcile-timing] ${logFields(fields)}`;
+}
+
+function logFields(fields: Record<string, string | number | boolean | undefined>) {
+  return Object.entries(fields)
     .filter(([, value]) => value !== undefined)
-    .map(([key, value]) => `${key}=${typeof value === 'string' && /[\s"]/.test(value) ? JSON.stringify(value) : value}`);
-  return `[reconcile-timing] ${parts.join(' ')}`;
+    .map(([key, value]) => `${key}=${typeof value === 'string' && /[\s"]/.test(value) ? JSON.stringify(value) : value}`)
+    .join(' ');
 }
 
 async function reconcileOneStage(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string) {
