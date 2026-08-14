@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { actionableStageEntry, automationActionId, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withReconciliationBudget, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withReconciliationBudget, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -501,6 +501,12 @@ describe('store queries against the migration schema', () => {
   const schema = migrationSql();
   const source = readFileSync(STORE_SOURCE, 'utf8');
 
+  // The pool runs in transaction mode, so a session-level advisory lock outlives the sweep that took
+  // it: the unlock can land on a different backend, and a frozen instance never reaches it at all.
+  it('never guards a sweep with a session-level advisory lock', () => {
+    expect(source).not.toMatch(/pg_(try_)?advisory_(un)?lock\b/);
+  });
+
   for (const table of ['workflow_automation_actions', 'workflow_automation_runs', 'workflow_stage_states'] as const) {
     it(`only selects columns that ${table} actually declares`, () => {
       const declared = declaredColumns(schema, table);
@@ -773,6 +779,25 @@ describe('reconciliationLockKey', () => {
   it('falls back to a per-user key when no single repository is in scope', () => {
     expect(reconciliationLockKey('user-1', null)).toBe(reconciliationLockKey('user-1', null));
     expect(reconciliationLockKey('user-1', null)).not.toBe(reconciliationLockKey('user-1', 'acme/web'));
+  });
+});
+
+describe('reconciliation lease timing', () => {
+  it('keeps the TTL longer than the realtime budget so a live sweep is never evicted mid-flight', () => {
+    expect(reconciliationLeaseTtlSeconds({}) * 1000).toBeGreaterThan(realtimeReconcileBudgetMs({}));
+  });
+
+  it('takes the TTL from the environment when the platform limit changes', () => {
+    expect(reconciliationLeaseTtlSeconds({ RECONCILIATION_LEASE_TTL_SECONDS: '45' })).toBe(45);
+    expect(reconciliationLeaseTtlSeconds({ RECONCILIATION_LEASE_TTL_SECONDS: '0' })).toBe(RECONCILIATION_LEASE_TTL_SECONDS);
+  });
+
+  // A cron sweep outlives the TTL, so it renews. Renewing at the TTL would race the expiry it is
+  // trying to push out, and a frozen holder must still lapse within roughly one TTL.
+  it('renews several times inside one TTL', () => {
+    const ttl = reconciliationLeaseTtlSeconds({});
+    expect(reconciliationLeaseRenewIntervalMs(ttl)).toBeLessThan((ttl * 1000) / 2);
+    expect(reconciliationLeaseRenewIntervalMs(ttl)).toBeGreaterThan(0);
   });
 });
 
