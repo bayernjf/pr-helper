@@ -247,7 +247,7 @@ AI 生成的正文严格按生成规则模板输出（Overview / Changes / Relat
 - **自动合并当时被排除**（此判断已被第十三节推翻）：当时的理由是「步骤可能以 `main` 为目标，保存一个勾选不等于授权合并生产」。自动合并目前仍只由真实 GitHub 事件驱动。
 - **耗时埋点保留**：每个 stage 与每次 sweep 各输出一行 `[reconcile-timing]`，字段含各阶段毫秒数、GitHub 调用次数与最慢 path，便于放开连接池后复量对比。
 
-## 十三、勾选即生效的对称化与勾选时确认（2026-08-14，仅设计，未落代码）
+## 十三、勾选即生效的对称化与勾选时确认（2026-08-14，本地已落地待部署验收）
 
 完整方案见 [`docs/superpowers/plans/2026-08-14-automation-toggle-activation.md`](superpowers/plans/2026-08-14-automation-toggle-activation.md)。
 

@@ -29,7 +29,7 @@
 - 生产事故已修复并上线：`api/_lib/workflows-store.ts` 从浏览器模块 `src/lib/github.ts` 引入函数，该模块顶层读 `import.meta.env`，在 Node 下模块加载即崩，`/api/github/session` 返回 `FUNCTION_INVOCATION_FAILED`。已内联该调用并新增源码守卫测试，覆盖整类越界。
 - 部署前置：Supabase 需执行迁移 `028`（`reconciliation_leases` 表、`pr_helper_workflows.reconcile_pending_since`）。未执行前所有 sweep 会在抢租约时报错。
 - 后续本地已落地（同样待部署）：生产埋点证明校准的瓶颈是 `max: 1` 连接池而非 GitHub 往返（单个 stage 6 秒里 GitHub 只占 2.4 秒，`deploy` 阶段独占 3.2–4.6 秒，让出预算的收尾 UPDATE 还要再等 3.4 秒），连接池已放开到 4；勾选服务端自动创建后会立即触发一次 `manual` 校准，先有提交后勾选不再等下一次 push。自动合并当时未参与即时触发，理由是保存勾选不等于授权合并生产。详见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md) 第十二节。
-- 已设计未落代码：上述不对称已判定为错误结论（自动合并作用于已创建的 PR，推迟不减少后果，只是延后到用户注意力离开时）。方案是把「对称化触发」与「勾选时确认」绑在一起落地，不可拆开——没有确认的静默立即合并才违反 `AGENTS.md` 第 5 条。同时明确反选是尽力而为而非取消保证（窗口约 1–3 秒）。详见 [`docs/superpowers/plans/2026-08-14-automation-toggle-activation.md`](docs/superpowers/plans/2026-08-14-automation-toggle-activation.md) 与第十三节。
+- 已落地待部署：上述不对称已判定为错误结论（自动合并作用于已创建的 PR，推迟不减少后果，只是延后到用户注意力离开时）。已把「对称化触发」与「勾选时确认」绑在一起落地，不可拆开——没有确认的静默立即合并才违反 `AGENTS.md` 第 5 条。同时明确反选是尽力而为而非取消保证（窗口约 1–3 秒）。详见 [`docs/superpowers/plans/2026-08-14-automation-toggle-activation.md`](docs/superpowers/plans/2026-08-14-automation-toggle-activation.md) 与第十三节。
 - 部署后验收四项：一条 `webhook` 行到达 `success`/`degraded` 且 `finished_at` 非空、无行长期停在 `running`；一次 push 的非首条投递记 `skipped`；`reconciliation_leases` 无已过期却仍阻塞后继的行；一次 `degraded` sweep 由紧随其后的触发在秒级接走。
 
 ## 2026-08-12 刷新链路最新结论

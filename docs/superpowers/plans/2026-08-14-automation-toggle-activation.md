@@ -1,4 +1,4 @@
-# 勾选即生效的对称化与勾选时确认（2026-08-14，设计中，未落代码）
+# 勾选即生效的对称化与勾选时确认（2026-08-14，本地已落地待部署验收）
 
 前一批（连接池放开、勾选自动创建后立即校准）见 [`2026-08-14-reconciliation-lease.md`](2026-08-14-reconciliation-lease.md) 与 `docs/auto-create-pr-remediation.md` 第十二节。本计划处理那一批留下的两个问题：自动合并的触发时机与自动创建不对称，以及「勾选即刻执行」没有任何确认。
 
@@ -76,7 +76,11 @@ export type ImmediateAutomationEffect =
 - 撤销队列、勾选宽限期。
 - `deploy` 阶段对稳定已合并路由的跳过优化——仍待连接池放开后复量再决定。
 
-## 六、提交拆分
+## 六、落地记录
+
+实际落地与设计一致，无偏差。`immediateAutomationEffect` 放在 `src/lib/workflow.ts`，参数为对象形式（`toggle` / `enabling` / `stage` / `status` / `unlocked` / `triggerMinCommits`）；详情页两个 change handler 经 `confirmImmediateAutomation` 过一道，`none` 时行为与从前完全一致。顺带把 `confirmAutoCreateExecution` 抽到共用的 `confirmDialog`，两处确认框走同一实现。e2e 的 GitHub mock 新增 `openPull` / `compareAheadBy` 两个 fixture 字段，未设置时行为不变，因此既有用例不受影响。
+
+## 七、提交拆分
 
 1. `test:` 对称 activation 与 `immediateAutomationEffect` 的失败测试
 2. `feat(store):` activation 判定覆盖自动合并
