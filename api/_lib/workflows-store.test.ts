@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { actionableStageEntry, automationActionId, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { actionableStageEntry, automationActionId, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -630,5 +630,65 @@ describe('stored automation policies', () => {
   it('still rejects a policy that automates nothing', () => {
     expect(withAutomation({ executionMode: 'server' })).toBe(false);
     expect(withAutomation({ autoCreatePullRequest: false, autoMergePullRequest: false, executionMode: 'server' })).toBe(false);
+  });
+});
+
+describe('webhook branch scoping', () => {
+  it('reads the pushed branch and ignores tag pushes', () => {
+    expect(webhookBranchesForEvent('push', { ref: 'refs/heads/feature/20260722' })).toEqual(['feature/20260722']);
+    expect(webhookBranchesForEvent('push', { ref: 'refs/tags/v1.2.0' })).toEqual([]);
+    expect(webhookBranchesForEvent('push', {})).toEqual([]);
+  });
+
+  it('reads both ends of a pull request because either can move a stage', () => {
+    expect(webhookBranchesForEvent('pull_request', { pull_request: { head: { ref: 'feature/a' }, base: { ref: 'dev' } } })).toEqual(['feature/a', 'dev']);
+  });
+
+  it('reads the head branch of check and workflow events', () => {
+    expect(webhookBranchesForEvent('check_run', { check_run: { check_suite: { head_branch: 'dev' } } })).toEqual(['dev']);
+    expect(webhookBranchesForEvent('check_suite', { check_suite: { head_branch: 'dev' } })).toEqual(['dev']);
+    expect(webhookBranchesForEvent('workflow_run', { workflow_run: { head_branch: 'main' } })).toEqual(['main']);
+  });
+
+  it('reads every branch a commit status touches and drops duplicates', () => {
+    expect(webhookBranchesForEvent('status', { branches: [{ name: 'dev' }, { name: 'main' }, { name: 'dev' }] })).toEqual(['dev', 'main']);
+  });
+
+  // An unrecognized event must not silently lose realtime updates, so it keeps the full sweep.
+  it('declines to narrow an unrecognized event', () => {
+    expect(webhookBranchesForEvent('release', { release: { tag_name: 'v1' } })).toBeNull();
+  });
+});
+
+describe('reconciliationBranchScope', () => {
+  it('reconciles every source route when the target branch moved', () => {
+    expect(reconciliationBranchScope({ source: 'feature/*', target: 'dev' }, ['dev'])).toBe('all');
+  });
+
+  it('reconciles only the matching route when a source branch moved', () => {
+    expect(reconciliationBranchScope({ source: 'feature/20260722', target: 'dev' }, ['feature/20260722'])).toBe('matching');
+    expect(reconciliationBranchScope({ source: 'feature/*', target: 'dev' }, ['feature/20260722'])).toBe('matching');
+  });
+
+  it('skips a stage no pushed branch can reach', () => {
+    expect(reconciliationBranchScope({ source: 'feature/*', target: 'dev' }, ['docs/typo-fix'])).toBe('none');
+    expect(reconciliationBranchScope({ source: 'dev', target: 'main' }, ['feature/20260722'])).toBe('none');
+    expect(reconciliationBranchScope({ source: 'dev', target: 'main' }, [])).toBe('none');
+  });
+});
+
+describe('reconciliationRunIsAbandoned', () => {
+  const startedAt = '2026-08-14T10:00:00.000Z';
+
+  it('treats a running row older than the grace period as interrupted', () => {
+    expect(reconciliationRunIsAbandoned(startedAt, Date.parse('2026-08-14T10:05:01.000Z'))).toBe(true);
+  });
+
+  it('leaves a running row inside the grace period alone', () => {
+    expect(reconciliationRunIsAbandoned(startedAt, Date.parse('2026-08-14T10:04:59.000Z'))).toBe(false);
+  });
+
+  it('never reports an unparsable timestamp as interrupted', () => {
+    expect(reconciliationRunIsAbandoned('not-a-timestamp', Date.parse('2026-08-14T23:00:00.000Z'))).toBe(false);
   });
 });
