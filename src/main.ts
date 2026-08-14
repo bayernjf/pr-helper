@@ -179,10 +179,20 @@ function applySavedWorkflow(saved: Workflow, authoritative = false) {
   persistWorkflowsLocally();
   cloudWorkflowSyncError = '';
 }
-function reportWorkflowSaveError(error: unknown) {
+function reportWorkflowSaveError(error: unknown, workflowId: string) {
   cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail');
   showToast(t('toast.saved.local', { error: cloudWorkflowSyncError }));
   render();
+  // The toggle was already applied to memory and localStorage, so a failed save leaves the switch
+  // drawn as enabled — and a reload keeps showing it, because boot reads the local copy first.
+  // Read the stored state back so the checkbox can only show what the server accepted.
+  void loadCloudWorkflows().then(() => {
+    if (!workflows.some(workflow => workflow.id === workflowId)) return;
+    // The read-back succeeds on its own terms and would otherwise clear the banner for a save that
+    // did not land, hiding the very mismatch it just corrected.
+    cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail');
+    render();
+  });
 }
 const workflowSaveQueue = new WorkflowSaveQueue<Workflow>({
   current: workflowId => workflows.find(workflow => workflow.id === workflowId),
@@ -196,7 +206,7 @@ async function persistWorkflowRemotely(workflow: Workflow): Promise<Workflow | n
     applySavedWorkflow(saved);
     return saved;
   } catch (error) {
-    reportWorkflowSaveError(error);
+    reportWorkflowSaveError(error, workflow.id);
     return null;
   }
 }
@@ -264,7 +274,7 @@ async function removeStageAndPersist(workflow: Workflow, stageIndex: number) {
     applySavedWorkflow(saved, true);
     return true;
   } catch (error) {
-    reportWorkflowSaveError(error);
+    reportWorkflowSaveError(error, workflow.id);
     return false;
   }
 }
