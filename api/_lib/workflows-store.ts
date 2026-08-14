@@ -518,7 +518,7 @@ export type ActionableStage = {
 export type StageDecisionKind = 'none' | 'locked' | 'waiting' | 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create' | 'merged';
 export type StageDecision = { kind: StageDecisionKind; actionable: boolean; canCreateNext: boolean; message: string };
 export type ReconciliationTrigger = 'cron' | 'webhook' | 'inbox_refresh' | 'manual';
-export type ReconciliationRun = { id: number; trigger: ReconciliationTrigger; state: 'running' | 'success' | 'degraded' | 'failure'; stagesTotal: number; stagesReconciled: number; stagesFailed: number; durationMs: number | null; errorMessage: string | null; repository: string | null; startedAt: string; finishedAt: string | null };
+export type ReconciliationRun = { id: number; trigger: ReconciliationTrigger; state: 'running' | 'success' | 'degraded' | 'failure' | 'skipped'; stagesTotal: number; stagesReconciled: number; stagesFailed: number; durationMs: number | null; errorMessage: string | null; repository: string | null; startedAt: string; finishedAt: string | null };
 export type StageSyncHealth = { workflowId: string; stageIndex: number; stageId: string | null; source: string; target: string; updatedAt: string; ageSeconds: number; stale: boolean };
 export type SyncHealth = { lastReconciliation: ReconciliationRun | null; stages: StageSyncHealth[]; webhookDeliveriesLast24h: number };
 
@@ -1346,12 +1346,27 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   return true;
 }
 
+// One push emits several deliveries within seconds. Without exclusion each one starts its own sweep
+// over the same rows against a single pooled connection, and they starve each other until the
+// platform kills them, so a sweep takes a Postgres advisory lock on this key first.
+export function reconciliationLockKey(userId: string, repository: string | null) {
+  return `pr-helper:reconcile:${userId}:${repository || '*'}`;
+}
+
 async function reconcileWorkflowScope(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, workflowsToReconcile: { row: TrackedWorkflowRow; workflow: StoredWorkflow }[], filter: ReconciliationFilter, trigger: ReconciliationTrigger) {
   const startedAt = Date.now();
   const userId = workflowsToReconcile[0]?.row.user_id;
   if (!userId) return 0;
   const repositories = [...new Set(workflowsToReconcile.map(item => item.workflow.repository))];
   const repository = filter.repository || (repositories.length === 1 ? repositories[0] : null);
+  const lockKey = reconciliationLockKey(userId, repository);
+  const lock = await sql<{ locked: boolean }[]>`SELECT pg_try_advisory_lock(hashtext(${lockKey})) AS locked`;
+  if (!lock[0]?.locked) {
+    // Queueing behind the holder would only burn the request budget: the running sweep reads the same
+    // rows and will publish the same result.
+    await sql`INSERT INTO reconciliation_runs (user_id, trigger, state, repository, stages_total, stages_reconciled, stages_failed, duration_ms, finished_at) VALUES (${userId}, ${trigger}, 'skipped', ${repository}, 0, 0, 0, ${Date.now() - startedAt}, now())`.catch(() => undefined);
+    return 0;
+  }
   const runRow = await sql<{ id: number }[]>`INSERT INTO reconciliation_runs (user_id, trigger, state, repository) VALUES (${userId}, ${trigger}, 'running', ${repository}) RETURNING id`;
   const runId = runRow[0].id;
   try {
@@ -1384,6 +1399,8 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     const durationMs = Date.now() - startedAt;
     await sql`UPDATE reconciliation_runs SET state = 'failure', duration_ms = ${durationMs}, error_message = ${String(error instanceof Error ? error.message : error).slice(0, 800)}, finished_at = now() WHERE id = ${runId}`.catch(() => undefined);
     throw error;
+  } finally {
+    await sql`SELECT pg_advisory_unlock(hashtext(${lockKey}))`.catch(() => undefined);
   }
 }
 
@@ -1671,7 +1688,7 @@ export async function listSyncHealth(environment: Record<string, string | undefi
   const lastReconciliation: ReconciliationRun | null = lastRun ? {
     id: lastRun.id,
     trigger: lastRun.trigger as ReconciliationTrigger,
-    state: lastRun.state as 'running' | 'success' | 'degraded' | 'failure',
+    state: lastRun.state as ReconciliationRun['state'],
     stagesTotal: lastRun.stages_total,
     stagesReconciled: lastRun.stages_reconciled,
     stagesFailed: lastRun.stages_failed,
