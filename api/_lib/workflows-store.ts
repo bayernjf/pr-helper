@@ -170,6 +170,29 @@ export function automationCreateOutcome(openPulls: { number: number; html_url?: 
   return { kind: 'create' as const };
 }
 
+// Merging is irreversible, so anything short of a clean GitHub verdict pauses rather than guessing.
+// `behind` deliberately pauses instead of updating the branch, which would write to the source
+// branch, start another CI round and invalidate the head sha this merge is pinned to.
+export function automationMergeOutcome(pull: { number: number; state: string; merged?: boolean; html_url?: string } | undefined, gate: { checksState: string; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string }) {
+  if (!pull || !Number.isInteger(pull.number) || pull.number <= 0) return { kind: 'paused' as const, reason: '没有可合并的 PR' };
+  if (pull.merged === true) return { kind: 'idempotent' as const, pullNumber: pull.number, pullUrl: pull.html_url || null };
+  if (pull.state !== 'open') return { kind: 'cancelled' as const, reason: 'PR 已关闭且未合并' };
+  if (gate.checksState !== 'success') return { kind: 'paused' as const, reason: `门禁尚未全绿（当前 ${gate.checksState}）` };
+  if (gate.approvals < gate.requiredApprovals) return { kind: 'paused' as const, reason: `PR 还需要 ${gate.requiredApprovals - gate.approvals} 个 Approval` };
+  if (gate.mergeable !== true) return { kind: 'paused' as const, reason: 'GitHub 未判定该 PR 可合并' };
+  if (gate.mergeableState === 'behind') return { kind: 'paused' as const, reason: '分支落后于目标分支，需要先在 GitHub 更新分支' };
+  if (gate.mergeableState !== 'clean') return { kind: 'paused' as const, reason: `GitHub 合并状态为 ${gate.mergeableState}` };
+  return { kind: 'merge' as const, pullNumber: pull.number };
+}
+
+// A merge failure is usually a conflict or a red gate, which only a human can clear. Without a cap
+// the stale reset would re-queue the action every rotation and write a failure row each time.
+export function automationRetryIsExhausted(attempts: number, policy: { maxRetries?: number; cooldownSeconds?: number } | undefined) {
+  const configured = policy?.maxRetries;
+  const maxRetries = Number.isInteger(configured) && (configured as number) > 0 ? Math.min(10, configured as number) : DEFAULT_RECOVERY_POLICY.maxRetries;
+  return attempts >= maxRetries;
+}
+
 async function executeWorkflowAutomationActionForUser(environment: Record<string, string | undefined>, userId: string, installationId: string, actionId: number) {
   if (!Number.isInteger(actionId) || actionId <= 0 || !installationId) throw new Error('无效的自动化执行请求');
   const sql = query(environment);
@@ -693,9 +716,10 @@ export async function codexRepairContext(environment: Record<string, string | un
 
 function isStoredStageAutomation(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
-  const automation = value as { autoCreatePullRequest?: unknown; executionMode?: unknown; generationRule?: { name?: unknown; content?: unknown; capturedAt?: unknown } };
-  if (automation.autoCreatePullRequest !== true) return false;
-  if (automation.executionMode === 'browser-session') return true;
+  const automation = value as { autoCreatePullRequest?: unknown; autoMergePullRequest?: unknown; executionMode?: unknown; generationRule?: { name?: unknown; content?: unknown; capturedAt?: unknown } };
+  // Merging never calls the model, so a merge-only policy carries no generation rule.
+  if (automation.autoCreatePullRequest !== true) return automation.autoMergePullRequest === true && automation.executionMode === 'server';
+  if (automation.executionMode === 'browser-session') return automation.autoMergePullRequest === undefined;
   return automation.executionMode === 'server'
     && typeof automation.generationRule?.name === 'string' && automation.generationRule.name.length > 0
     && typeof automation.generationRule?.content === 'string' && automation.generationRule.content.length > 0
