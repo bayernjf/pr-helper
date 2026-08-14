@@ -1,7 +1,7 @@
 # 自动创建 PR 失效：诉求、问题与修复方案
 
 > 创建：2026-08-14。
-> 状态：`P1`–`P8` 已落代码，`P1`–`P8` 中 `P1`–`P6` 已部署生产、`P8` 亦已由用户部署生产并验证生效；`P3` 生产验收通过；`P7` 已查清，不是缺陷，等一个数据清理决定。`P8` 上线后执行器首次真正领取动作（`attempts` 由 0 变 1），随即暴露 `P9`（AI 响应的 markdown 围栏未被剥离），**`P9` 已落代码，待部署验收**。
+> 状态：`P1`–`P9` 已全部落代码并部署生产。**服务端自动创建 PR 已在生产端到端跑通**：`2026-08-14 00:20:08` 自动建出 `bayernjf/bayjf#42`。验收项 1–4 通过；项 5 待浏览器确认；项 6、7 需另造场景才能验；`P7` 已查清，不是缺陷，等一个数据清理决定。
 > 当前事实来源仍为 [`docs/current-state.md`](current-state.md)。本文只覆盖服务端自动创建 PR 链路，不改变自动合并/自动推进「默认关闭且本阶段不实现」的结论。
 > 方案与验收标准的上游文档为 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。
 
@@ -189,11 +189,13 @@
 | --- | --- |
 | 1 校准任务转绿、无重叠 | **通过**，见第三节 P3 |
 | 2 无 `stages_total=0` 孤儿 running 行 | cron 一路 `success`；webhook 仍全部停在 running（本就在第八节例外内） |
-| 3 滞留动作不再停在 `queued`+`attempts=0` | **P8 部署后通过**：动作 3 变为 `paused` / `attempts=1`，执行器首次真正越过原子领取。原始记录（P8 之前）如下——**未通过，但暴露了 P8**：动作 3 拿到了可读原因 `column "stage_index" does not exist`（`updated_at = 23:24:37`），说明 P1/P2 生效、执行确实被触发，卡点在 P8。动作 1、2 的 `headSha` 已过期，不会再被执行 |
-| 4 自动创建在一个轮转周期内触发且只建一个 PR | **仍未通过**：P8 部署后连跑 5 轮 `workflow_dispatch`（reconciled 8/13/11/10/15），`bayernjf/bayjf` 仍无新 PR，卡点已从 P8 前移到 P9 |
+| 3 滞留动作不再停在 `queued`+`attempts=0` | **通过**：P9 部署后动作 3 为 `succeeded` / `attempts=2` / `payload.pullNumber=42`（`updated_at = 2026-08-14 00:20:08`）。P8 部署后的中间态是 `paused` / `attempts=1`，执行器首次真正越过原子领取。原始记录（P8 之前）如下——**未通过，但暴露了 P8**：动作 3 拿到了可读原因 `column "stage_index" does not exist`（`updated_at = 23:24:37`），说明 P1/P2 生效、执行确实被触发，卡点在 P8。动作 1、2 的 `headSha` 已过期，不会再被执行 |
+| 4 自动创建在一个轮转周期内触发且只建一个 PR | **通过**：P9 部署后第 3 轮 `workflow_dispatch` 建出 `bayernjf/bayjf#42`（`feature/20260719 → dev`，作者 `app/pr-helper-by-bayernjf`，`2026-08-14 00:20:08`），第 4、5 轮未重复建。`workflow_operation_audit_logs` 中 `metadata.via = 'workflow-automation'` 的记录只有一条（id 1347）。P8 部署后、P9 之前连跑 5 轮（reconciled 8/13/11/10/15）无 PR，卡点当时在 P9 |
 | 5 收件箱与抽屉判断一致 | 待你在浏览器确认 |
-| 6 门禁为红不触发自动创建 | 待验，需先部署 P9 |
-| 7 幂等命中记成功 | 待验，需先部署 P9 |
+| 6 门禁为红不触发自动创建 | 待验：现有生产数据里没有「合并后门禁为红且 `ahead_by > 0`」的步骤，需要另造场景 |
+| 7 幂等命中记成功 | 未走到：第 4、5 轮之所以没重复建 PR，是因为动作已是 `succeeded`，`enqueueServerAutoCreate` 直接返回 null、根本没重新入队，比幂等分支更靠前就拦住了。要验 `automationCreateOutcome` 的 `idempotent` 分支需要另造场景（如手动先建同路由 PR 再入队）|
+
+AI 生成的正文严格按生成规则模板输出（Overview / Changes / Related Issues / Test Info / Risk Notes），确认围栏剥离正确、规则快照生效。
 
 链路上除 P8 之外的前置条件均已在生产核实：`pr_helper_ai_automation_credentials` 有一行且 `auto_generate_pr_message` / `auto_confirm_pr_creation` 均为 true；`bayjf-…cjtnq` 的 stage 0 为 `merged` / `checks=pending` / `ahead_by=3`、阈值 1、`executionMode='server'`，GitHub 侧确认 `ahead_by=3 behind=15 diverged` 且无开放 PR。也就是说 `canCreateNext` 与入队闸门都已放行，动作被真实领取执行，只是执行器第一条 SELECT 就抛错。
 
@@ -203,6 +205,24 @@
 
 ## 八、不在本批
 
-- **Webhook 与 inbox 的 fire-and-forget 截断**：`api/github/webhook.ts` 在返回 202 之后才 `void reconcileWorkflowStages(...)`，Vercel 随即冻结函数，因此每一条 `trigger='webhook'` 的 reconciliation 都停在 `running` / `stages_total=0`。全仓没有任何 `waitUntil`。这是 P3 代价成立的前提，也是自动创建实时性的关键，优先级应高于 P7。新增证据：2026-08-13 23:24 有一条 webhook 行以 `canceling statement due to statement timeout` 失败，`duration_ms=171876`，同时另有 6 条并发 webhook 行停在 running——`query()` 用 `max: 1` 连接池，被截断的 sweep 之间会互相挤压，所以修复形态需要同时考虑并发抑制，而不只是补 `waitUntil`。
 - 泳道徽标与 `workflowRunSummary` 当前步指针（见第六节）。
 - 自动合并、自动推进、无人值守代码修改。
+
+## 九、遗留数据处置（已决定：都保留）
+
+- `workflow_automation_actions` 的动作 1、2 仍停在 `queued` / `attempts=0`。它们的幂等键包含已过期的 `headSha`，既不会被 `enqueueServerAutoCreate` 复用，也不会被任何轮转执行，属于纯历史残留行。**决定保留**，作为这次排障的现场痕迹。`listWorkflowAutomationActions` 目前只有 `api/workflows.ts` 一个接口在用、前端无调用方，因此界面上不会显示这两行，不存在误导。若日后要清理，应先加「`headSha` 已失效则标 `cancelled`」的逻辑再跑，不手工 UPDATE 生产表。
+- `P7` 的沙箱工作流 `pr-helper-e2e-sandbox-1785691296724-69q14`：**决定保留**。它唯一的成本是占一个 cron 轮转名额（每轮 8 个、共 34 个），不影响正确性；真要删就在界面上删，属于产品内的正常操作，不需要 SQL。
+
+## 十、实时校准修复（2026-08-14，本地已落地待部署验收）
+
+计划与生产证据见 [`docs/superpowers/plans/2026-08-14-realtime-reconciliation.md`](superpowers/plans/2026-08-14-realtime-reconciliation.md)。起因：`feature/20260722 → dev` 已有 18 个新提交、四项 AI 前置与阈值全部满足，但 `workflow_automation_actions` 里没有任何入队行，自动创建始终不触发。
+
+已落地的改动：
+
+- **按事件分支收窄**：新增 `webhookBranchesForEvent`，把一次投递收窄到它真正触及的分支；`reconcileWorkflowStages` 增加 `branches` 过滤，`reconciliationBranchScope` 在解析路由前丢掉不可能被触及的步骤，无法识别的事件仍走全量以免静默丢事件。
+- **返回前跑完**：`api/github/webhook.ts` 与 `api/[action].ts` 不再在返回后 `void` 校准，改为在 `withReconciliationBudget` 的预算内 `await`（默认 8 秒，`REALTIME_RECONCILE_BUDGET_MS` 可调），超预算才把剩余交给定时校准。
+- **并发抑制**：`reconcileWorkflowScope` 先取 `pg_try_advisory_lock(hashtext(reconciliationLockKey(...)))`，抢不到锁的 sweep 记一行 `skipped` 后直接返回，不排队——`query()` 是 `max: 1` 连接池，排队只会互相挤压。
+- **失败可见**：`stages_total` 在执行前写入，定时校准把超过 5 分钟仍为 `running` 的行收尾为 `failure`，`listSyncHealth` 改为按 `started_at` 排序并返回近 24 小时每种触发方式的最新一次结果，界面在某条触发链路失效时给出提示。
+- **轮转公平**：迁移 `027` 增加 `pr_helper_workflows.last_reconcile_attempt_at`，批量选择改按尝试时间排序并在执行前落戳，解析不出路由的工作流不再永久占用名额。
+
+待部署验收：`skipped` 状态与 `last_reconcile_attempt_at` 需要先在生产执行迁移 `027`。

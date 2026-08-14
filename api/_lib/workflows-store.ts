@@ -4,14 +4,28 @@ import { parseGithubAppConfig } from './github-app.js';
 import { sendPushNotifications, type BrowserPushSubscription } from './push.js';
 import { assertTeamOperation, type TeamOperation } from '../../src/lib/team-permissions.js';
 import { summarizeGitHubChecks } from '../../src/lib/domain.js';
+import { mergePullRequestPayload } from '../../src/lib/github.js';
 import { credentialKeyHint, decryptAiApiKey, encryptAiApiKey, maskAiApiKey } from './ai-credentials.js';
 import { buildPrPrompt, aiChatCompletionsUrl, testAiConnection } from '../../src/lib/ai.js';
+
+// Mirrors `WorkflowStageAutomation` in src/lib/workflow.ts. Auto-merge stands alone because merging
+// calls no model, so a stage may automate it without automating creation.
+export type StoredWorkflowStage = {
+  source: string;
+  target: string;
+  independent?: boolean;
+  waitFor?: number[];
+  stageId?: string;
+  automation?: { autoCreatePullRequest: true; autoMergePullRequest?: undefined; executionMode: 'browser-session'; triggerMinCommits?: number; generationRule?: undefined }
+    | { autoCreatePullRequest: true; autoMergePullRequest?: true; executionMode: 'server'; triggerMinCommits?: number; generationRule: { name: string; content: string; capturedAt: string } }
+    | { autoCreatePullRequest?: undefined; autoMergePullRequest: true; executionMode: 'server'; triggerMinCommits?: undefined; generationRule?: undefined };
+};
 
 export type StoredWorkflow = {
   id: string;
   name: string;
   repository: string;
-  stages: { source: string; target: string; independent?: boolean; waitFor?: number[]; stageId?: string; automation?: { autoCreatePullRequest: true; executionMode: 'browser-session'; triggerMinCommits?: number } | { autoCreatePullRequest: true; executionMode: 'server'; triggerMinCommits?: number; generationRule: { name: string; content: string; capturedAt: string } } }[];
+  stages: StoredWorkflowStage[];
   createdAt?: string;
   deployments?: DeploymentConfig[];
   position?: number;
@@ -88,13 +102,19 @@ export async function enqueueWorkflowAutomationAction(environment: Record<string
   return { id: Number(row.id), runId: Number(row.run_id), workflowId: row.workflow_id, stageId: row.stage_id, stageIndex: input.stageIndex, source: row.source, target: row.target, kind: row.kind, idempotencyKey: row.idempotency_key, state: row.state, attempts: row.attempts, failureReason: row.failure_reason, createdAt: row.created_at, updatedAt: row.updated_at } satisfies WorkflowAutomationAction;
 }
 
-type AutomationActionRow = { id: number; run_id: number; workflow_id: string; stage_id: string; stage_index: number; source: string; target: string; kind: WorkflowAutomationAction['kind']; state: WorkflowAutomationAction['state']; attempts: number; payload: { generationRule?: string } | null };
+type AutomationActionRow = { id: number; run_id: number; workflow_id: string; stage_id: string; stage_index: number; source: string; target: string; kind: WorkflowAutomationAction['kind']; state: WorkflowAutomationAction['state']; attempts: number; payload: { generationRule?: string; pullNumber?: number | string; headSha?: string } | null };
 
 // BIGSERIAL identities arrive as strings from postgres.js, so every queue identity
 // crosses back into the executor through this normalization.
 export function automationActionId(value: unknown) {
   const parsed = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN;
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+// The key pins an intent to one head sha, so a new commit earns a fresh attempt while a retry of the
+// same commit collapses onto the existing row. Create and merge are distinct intents on the same route.
+export function automationIdempotencyKey(route: { workflowId: string; stageId: string; source: string; target: string; headSha: string; kind: WorkflowAutomationAction['kind'] }) {
+  return `${route.workflowId}:${route.stageId}:${route.source}:${route.target}:${route.headSha}:${route.kind}`;
 }
 
 async function enqueueServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string, aheadBy: number): Promise<number | null> {
@@ -105,7 +125,7 @@ async function enqueueServerAutoCreate(environment: Record<string, string | unde
   if (!credentialRows[0]) return null;
   const triggerMinCommits = typeof automation.triggerMinCommits === 'number' && Number.isInteger(automation.triggerMinCommits) ? Math.min(20, Math.max(1, automation.triggerMinCommits)) : 1;
   if (aheadBy < triggerMinCommits) return null;
-  const idempotencyKey = `${workflow.id}:${stage.stageId}:${source}:${stage.target}:${headSha}:create-pr`;
+  const idempotencyKey = automationIdempotencyKey({ workflowId: workflow.id, stageId: stage.stageId, source, target: stage.target, headSha, kind: 'create-pr' });
   const existing = await sql<{ id: number; state: WorkflowAutomationAction['state']; updated_at: string }[]>`SELECT id, state, updated_at FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
   if (existing[0]) {
     const stale = ['running', 'paused'].includes(existing[0].state) && Date.now() - Date.parse(existing[0].updated_at) > 120_000;
@@ -123,6 +143,42 @@ async function enqueueServerAutoCreate(environment: Record<string, string | unde
   await sql`DELETE FROM workflow_automation_runs WHERE user_id = ${row.user_id} AND id = ${run[0].id}`;
   const concurrent = await sql<{ id: number; state: WorkflowAutomationAction['state'] }[]>`SELECT id, state FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
   return concurrent[0]?.state === 'queued' ? automationActionId(concurrent[0].id) : null;
+}
+
+async function enqueueServerAutoMerge(sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, pullNumber: number, headSha: string): Promise<number | null> {
+  const stage = stageForIndex(workflow, stageIndex);
+  const automation = stage?.automation;
+  if (!stage || !stage.stageId || !row.github_installation_id || !Number.isInteger(pullNumber) || pullNumber <= 0) return null;
+  // Merging calls no model, so it needs neither AI credentials nor a generation rule snapshot.
+  if (automation?.autoMergePullRequest !== true || automation.executionMode !== 'server') return null;
+  const idempotencyKey = automationIdempotencyKey({ workflowId: workflow.id, stageId: stage.stageId, source, target: stage.target, headSha, kind: 'merge-pr' });
+  const existing = await sql<{ id: number; state: WorkflowAutomationAction['state']; attempts: number; updated_at: string }[]>`SELECT id, state, attempts, updated_at FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
+  if (existing[0]) {
+    if (existing[0].state === 'queued') return automationActionId(existing[0].id);
+    const stale = ['running', 'paused'].includes(existing[0].state) && Date.now() - Date.parse(existing[0].updated_at) > 120_000;
+    // Without the cap a conflicted merge would be re-queued every rotation and write a failure row each time.
+    if (!stale || automationRetryIsExhausted(existing[0].attempts, workflow.recoveryPolicy)) return null;
+    const reset = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'queued', failure_reason = NULL, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${existing[0].id} AND state IN ('running', 'paused') RETURNING id`;
+    return automationActionId(reset[0]?.id);
+  }
+  const version = (await sql<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`)[0]?.version || workflow.version || 1;
+  const snapshot = { ...workflow, stages: workflow.stages.map(item => ({ ...item })) };
+  const run = await sql<{ id: number }[]>`INSERT INTO workflow_automation_runs (user_id, workflow_id, workflow_version, stage_index, stage_id, source, target, workflow_snapshot) VALUES (${row.user_id}, ${workflow.id}, ${version}, ${stageIndex}, ${stage.stageId}, ${source}, ${stage.target}, ${sql.json(snapshot)}) RETURNING id`;
+  const actions = await sql<{ id: number }[]>`INSERT INTO workflow_automation_actions (user_id, run_id, workflow_id, stage_id, source, target, kind, idempotency_key, payload) VALUES (${row.user_id}, ${run[0].id}, ${workflow.id}, ${stage.stageId}, ${source}, ${stage.target}, 'merge-pr', ${idempotencyKey}, ${sql.json({ pullNumber, headSha })}) ON CONFLICT (user_id, idempotency_key) DO NOTHING RETURNING id`;
+  if (actions[0]) return automationActionId(actions[0].id);
+  await sql`DELETE FROM workflow_automation_runs WHERE user_id = ${row.user_id} AND id = ${run[0].id}`;
+  const concurrent = await sql<{ id: number; state: WorkflowAutomationAction['state'] }[]>`SELECT id, state FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
+  return concurrent[0]?.state === 'queued' ? automationActionId(concurrent[0].id) : null;
+}
+
+async function scheduleServerAutoMerge(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, pullNumber: number, headSha: string) {
+  const actionId = await enqueueServerAutoMerge(sql, row, workflow, stageIndex, source, pullNumber, headSha);
+  if (!actionId) return;
+  try { await executeWorkflowAutomationActionForUser(environment, row.user_id, row.github_installation_id!, actionId); }
+  catch (error) {
+    const reason = error instanceof Error ? error.message : '自动合并 PR 失败';
+    await sql`UPDATE workflow_automation_actions SET failure_reason = ${reason.slice(0, 800)}, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${actionId} AND state = 'queued'`.catch(() => undefined);
+  }
 }
 
 async function scheduleServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string) {
@@ -170,6 +226,68 @@ export function automationCreateOutcome(openPulls: { number: number; html_url?: 
   return { kind: 'create' as const };
 }
 
+// Merging is irreversible, so anything short of a clean GitHub verdict pauses rather than guessing.
+// `behind` deliberately pauses instead of updating the branch, which would write to the source
+// branch, start another CI round and invalidate the head sha this merge is pinned to.
+export function automationMergeOutcome(pull: { number: number; state: string; merged?: boolean; html_url?: string } | undefined, gate: { checksState: string; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string }) {
+  if (!pull || !Number.isInteger(pull.number) || pull.number <= 0) return { kind: 'paused' as const, reason: '没有可合并的 PR' };
+  if (pull.merged === true) return { kind: 'idempotent' as const, pullNumber: pull.number, pullUrl: pull.html_url || null };
+  if (pull.state !== 'open') return { kind: 'cancelled' as const, reason: 'PR 已关闭且未合并' };
+  if (gate.checksState !== 'success') return { kind: 'paused' as const, reason: `门禁尚未全绿（当前 ${gate.checksState}）` };
+  if (gate.approvals < gate.requiredApprovals) return { kind: 'paused' as const, reason: `PR 还需要 ${gate.requiredApprovals - gate.approvals} 个 Approval` };
+  if (gate.mergeable !== true) return { kind: 'paused' as const, reason: 'GitHub 未判定该 PR 可合并' };
+  if (gate.mergeableState === 'behind') return { kind: 'paused' as const, reason: '分支落后于目标分支，需要先在 GitHub 更新分支' };
+  if (gate.mergeableState !== 'clean') return { kind: 'paused' as const, reason: `GitHub 合并状态为 ${gate.mergeableState}` };
+  return { kind: 'merge' as const, pullNumber: pull.number };
+}
+
+// A merge failure is usually a conflict or a red gate, which only a human can clear. Without a cap
+// the stale reset would re-queue the action every rotation and write a failure row each time.
+export function automationRetryIsExhausted(attempts: number, policy: { maxRetries?: number; cooldownSeconds?: number } | undefined) {
+  const configured = policy?.maxRetries;
+  const maxRetries = Number.isInteger(configured) && (configured as number) > 0 ? Math.min(10, configured as number) : DEFAULT_RECOVERY_POLICY.maxRetries;
+  return attempts >= maxRetries;
+}
+
+// Runs inside the caller's claim and try/catch, so a throw here lands the action in `paused` with the
+// reason preserved. GitHub stays the authority: a non-clean verdict pauses instead of forcing a merge.
+async function runAutomationMergeAction(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, userId: string, installationId: string, actionId: number, action: AutomationActionRow, workflow: StoredWorkflow, stage: StoredWorkflowStage) {
+  if (stage.automation?.autoMergePullRequest !== true || stage.automation.executionMode !== 'server') throw new Error('流程步骤自动合并策略已失效');
+  const pullNumber = automationActionId(action.payload?.pullNumber);
+  if (!pullNumber) throw new Error('自动化动作缺少要合并的 PR 编号');
+  const states = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
+  const current = states.find(state => state.stage_id === action.stage_id && state.source === action.source);
+  if (!current || current.pull_number !== pullNumber) throw new Error('步骤状态与要合并的 PR 不一致');
+  const { owner, name } = ownerAndName(workflow.repository);
+  const config = parseGithubAppConfig(environment);
+  const pull = await installationRequest<Pull>(config, installationId, `/repos/${owner}/${name}/pulls/${pullNumber}`);
+  // `checks_state` comes from the reconciled row because it already folds deployment results in, which
+  // the pull request payload alone does not carry. Mergeability is read live from GitHub.
+  const outcome = automationMergeOutcome(
+    { number: pull.number, state: pull.state, merged: Boolean(pull.merged_at), html_url: pull.html_url },
+    { checksState: current.checks_state, approvals: current.approvals, requiredApprovals: current.required_approvals, mergeable: pull.mergeable ?? null, mergeableState: pull.mergeable_state || 'unknown' },
+  );
+  if (outcome.kind === 'paused') throw new Error(outcome.reason);
+  if (outcome.kind === 'cancelled') {
+    await sql`UPDATE workflow_automation_actions SET state = 'cancelled', failure_reason = ${outcome.reason}, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId}`;
+    await sql`UPDATE workflow_automation_runs SET state = 'cancelled', updated_at = now(), completed_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
+    return { state: 'cancelled' as const, pullNumber: null };
+  }
+  if (outcome.kind === 'merge') {
+    // The sha pins the merge to the commit this gate verdict was computed for, so a push that lands
+    // between the check and the call makes GitHub reject with 409 instead of merging unreviewed code.
+    await installationRequest(config, installationId, `/repos/${owner}/${name}/pulls/${pullNumber}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) });
+  }
+  await sql`UPDATE workflow_automation_actions SET state = 'succeeded', failure_reason = NULL, updated_at = now(), payload = ${sql.json({ ...(action.payload || {}), pullNumber })} WHERE user_id = ${userId} AND id = ${actionId}`;
+  await sql`UPDATE workflow_automation_runs SET state = 'succeeded', updated_at = now(), completed_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
+  await recordOperationAuditForUser(sql, userId, installationId, {
+    action: 'pull-merged', outcome: 'success', repository: workflow.repository, workflowId: workflow.id,
+    stageId: action.stage_id, source: action.source, target: action.target, pullNumber, runId: action.run_id,
+    metadata: { via: 'workflow-automation', ...(outcome.kind === 'idempotent' ? { idempotent: true } : {}) }, failureReason: null,
+  });
+  return { state: 'succeeded' as const, pullNumber };
+}
+
 async function executeWorkflowAutomationActionForUser(environment: Record<string, string | undefined>, userId: string, installationId: string, actionId: number) {
   if (!Number.isInteger(actionId) || actionId <= 0 || !installationId) throw new Error('无效的自动化执行请求');
   const sql = query(environment);
@@ -178,14 +296,16 @@ async function executeWorkflowAutomationActionForUser(environment: Record<string
   if (!action) throw new Error('未找到自动化动作');
   if (action.state === 'succeeded') return { state: action.state, pullNumber: null };
   if (action.state !== 'queued') throw new Error(`当前动作状态为 ${action.state}，不能执行`);
-  if (action.kind !== 'create-pr') throw new Error('当前仅支持执行自动创建 PR 动作');
+  if (action.kind !== 'create-pr' && action.kind !== 'merge-pr') throw new Error('当前仅支持执行自动创建和自动合并 PR 动作');
   const claimed = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'running', attempts = attempts + 1, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId} AND state = 'queued' RETURNING id`;
   if (!claimed.length) throw new Error('动作已被其他执行请求领取');
   try {
     const workflowRows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${userId} AND id = ${action.workflow_id}`;
     const workflow = storedWorkflowFromPayload(workflowRows[0]?.payload);
     const stage = workflow ? stageForIndex(workflow, action.stage_index) : undefined;
-    if (!workflow || !stage || stage.stageId !== action.stage_id || stage.automation?.autoCreatePullRequest !== true || stage.automation.executionMode !== 'server') throw new Error('流程步骤自动创建策略已失效');
+    if (!workflow || !stage || stage.stageId !== action.stage_id) throw new Error('流程步骤自动化策略已失效');
+    if (action.kind === 'merge-pr') return await runAutomationMergeAction(environment, sql, userId, installationId, actionId, action, workflow, stage);
+    if (stage.automation?.autoCreatePullRequest !== true || stage.automation.executionMode !== 'server') throw new Error('流程步骤自动创建策略已失效');
     if (!action.payload?.generationRule?.trim()) throw new Error('自动化动作缺少生成规则快照');
     const currentStates = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
     const current = currentStates.find(state => state.stage_id === action.stage_id && state.source === action.source);
@@ -247,7 +367,7 @@ export async function listWorkflowAutomationActions(environment: Record<string, 
 
 type DatabaseUser = { id: string };
 type WorkflowRow = { payload: unknown; version?: number };
-type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string; github_installation_id?: string | null; last_reconciled_at?: string | null };
+type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string; github_installation_id?: string | null; last_reconcile_attempt_at?: string | null };
 type WorkflowAccess = { ownerUserId: string; workflow: StoredWorkflow; team?: { id: string; name: string; role: TeamRole } };
 
 type WebhookDelivery = { deliveryId: string; eventName: string; action?: string; repository?: string; installationId?: string };
@@ -398,9 +518,9 @@ export type ActionableStage = {
 export type StageDecisionKind = 'none' | 'locked' | 'waiting' | 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create' | 'merged';
 export type StageDecision = { kind: StageDecisionKind; actionable: boolean; canCreateNext: boolean; message: string };
 export type ReconciliationTrigger = 'cron' | 'webhook' | 'inbox_refresh' | 'manual';
-export type ReconciliationRun = { id: number; trigger: ReconciliationTrigger; state: 'running' | 'success' | 'degraded' | 'failure'; stagesTotal: number; stagesReconciled: number; stagesFailed: number; durationMs: number | null; errorMessage: string | null; repository: string | null; startedAt: string; finishedAt: string | null };
+export type ReconciliationRun = { id: number; trigger: ReconciliationTrigger; state: 'running' | 'success' | 'degraded' | 'failure' | 'skipped'; stagesTotal: number; stagesReconciled: number; stagesFailed: number; durationMs: number | null; errorMessage: string | null; repository: string | null; startedAt: string; finishedAt: string | null; interrupted: boolean };
 export type StageSyncHealth = { workflowId: string; stageIndex: number; stageId: string | null; source: string; target: string; updatedAt: string; ageSeconds: number; stale: boolean };
-export type SyncHealth = { lastReconciliation: ReconciliationRun | null; stages: StageSyncHealth[]; webhookDeliveriesLast24h: number };
+export type SyncHealth = { lastReconciliation: ReconciliationRun | null; triggerHealth: ReconciliationRun[]; stages: StageSyncHealth[]; webhookDeliveriesLast24h: number };
 
 export function reconciliationState(stagesFailed: number, stagesReconciled: number): 'success' | 'degraded' | 'failure' {
   if (stagesFailed <= 0) return 'success';
@@ -693,9 +813,10 @@ export async function codexRepairContext(environment: Record<string, string | un
 
 function isStoredStageAutomation(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
-  const automation = value as { autoCreatePullRequest?: unknown; executionMode?: unknown; generationRule?: { name?: unknown; content?: unknown; capturedAt?: unknown } };
-  if (automation.autoCreatePullRequest !== true) return false;
-  if (automation.executionMode === 'browser-session') return true;
+  const automation = value as { autoCreatePullRequest?: unknown; autoMergePullRequest?: unknown; executionMode?: unknown; generationRule?: { name?: unknown; content?: unknown; capturedAt?: unknown } };
+  // Merging never calls the model, so a merge-only policy carries no generation rule.
+  if (automation.autoCreatePullRequest !== true) return automation.autoMergePullRequest === true && automation.executionMode === 'server';
+  if (automation.executionMode === 'browser-session') return automation.autoMergePullRequest === undefined;
   return automation.executionMode === 'server'
     && typeof automation.generationRule?.name === 'string' && automation.generationRule.name.length > 0
     && typeof automation.generationRule?.content === 'string' && automation.generationRule.content.length > 0
@@ -744,6 +865,44 @@ export function isBranchRule(source: string) {
 
 export function branchRuleMatches(rule: string, branch: string) {
   return isBranchRule(rule) ? branch.startsWith(rule.slice(0, -1)) : rule === branch;
+}
+
+type WebhookEventPayload = {
+  [key: string]: unknown;
+  ref?: unknown;
+  branches?: { name?: unknown }[];
+  pull_request?: { head?: { ref?: unknown }; base?: { ref?: unknown } };
+  check_run?: { check_suite?: { head_branch?: unknown } };
+  check_suite?: { head_branch?: unknown };
+  workflow_run?: { head_branch?: unknown };
+};
+
+// Narrowing a delivery to the branches it touched is what keeps a webhook sweep small enough to
+// finish inside one request. `null` means the event carries no branch at all, so the caller must
+// fall back to the full sweep instead of silently dropping the update.
+export function webhookBranchesForEvent(eventName: string, payload: WebhookEventPayload): string[] | null {
+  const candidates = ((): unknown[] | null => {
+    switch (eventName) {
+      case 'push': {
+        const ref = typeof payload.ref === 'string' ? payload.ref : '';
+        return ref.startsWith('refs/heads/') ? [ref.slice('refs/heads/'.length)] : [];
+      }
+      case 'pull_request': return [payload.pull_request?.head?.ref, payload.pull_request?.base?.ref];
+      case 'check_run': return [payload.check_run?.check_suite?.head_branch];
+      case 'check_suite': return [payload.check_suite?.head_branch];
+      case 'workflow_run': return [payload.workflow_run?.head_branch];
+      case 'status': return (Array.isArray(payload.branches) ? payload.branches : []).map(branch => branch?.name);
+      default: return null;
+    }
+  })();
+  return candidates && [...new Set(candidates.filter((branch): branch is string => typeof branch === 'string' && branch.length > 0))];
+}
+
+// A moved target invalidates every source route into it, while a moved source only concerns its own
+// route, so the two cases cannot collapse into one boolean.
+export function reconciliationBranchScope(stage: { source: string; target: string }, branches: readonly string[]): 'all' | 'matching' | 'none' {
+  if (branches.includes(stage.target)) return 'all';
+  return branches.some(branch => branchRuleMatches(stage.source, branch)) ? 'matching' : 'none';
 }
 
 export function branchSourcesForRule(rule: string, candidates: readonly string[]) {
@@ -1182,22 +1341,56 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
     await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:${pull.number}`, kind: 'new-pr-ready', title: '有新提交，可以创建新 PR', body: `${workflow.repository} · ${route}`, url: '/' });
   }
   if (comparison.ahead_by > 0 && comparisonHeadSha) await scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha);
+  // Only an open pull request can be merged, and the gate verdict is pinned to the head sha just stored.
+  if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await scheduleServerAutoMerge(environment, sql, row, workflow, stageIndex, source, pull.number, pull.head.sha);
   return true;
 }
 
-async function reconcileWorkflowScope(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, workflowsToReconcile: { row: TrackedWorkflowRow; workflow: StoredWorkflow }[], filter: { repository?: string; eventName?: string }, trigger: ReconciliationTrigger) {
+// One push emits several deliveries within seconds. Without exclusion each one starts its own sweep
+// over the same rows against a single pooled connection, and they starve each other until the
+// platform kills them, so a sweep takes a Postgres advisory lock on this key first.
+export function reconciliationLockKey(userId: string, repository: string | null) {
+  return `pr-helper:reconcile:${userId}:${repository || '*'}`;
+}
+
+async function reconcileWorkflowScope(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, workflowsToReconcile: { row: TrackedWorkflowRow; workflow: StoredWorkflow }[], filter: ReconciliationFilter, trigger: ReconciliationTrigger) {
   const startedAt = Date.now();
   const userId = workflowsToReconcile[0]?.row.user_id;
   if (!userId) return 0;
   const repositories = [...new Set(workflowsToReconcile.map(item => item.workflow.repository))];
   const repository = filter.repository || (repositories.length === 1 ? repositories[0] : null);
+  const lockKey = reconciliationLockKey(userId, repository);
+  const lock = await sql<{ locked: boolean }[]>`SELECT pg_try_advisory_lock(hashtext(${lockKey})) AS locked`;
+  if (!lock[0]?.locked) {
+    // Queueing behind the holder would only burn the request budget: the running sweep reads the same
+    // rows and will publish the same result.
+    await sql`INSERT INTO reconciliation_runs (user_id, trigger, state, repository, stages_total, stages_reconciled, stages_failed, duration_ms, finished_at) VALUES (${userId}, ${trigger}, 'skipped', ${repository}, 0, 0, 0, ${Date.now() - startedAt}, now())`.catch(() => undefined);
+    return 0;
+  }
   const runRow = await sql<{ id: number }[]>`INSERT INTO reconciliation_runs (user_id, trigger, state, repository) VALUES (${userId}, ${trigger}, 'running', ${repository}) RETURNING id`;
   const runId = runRow[0].id;
+  // The turn is given up before the work runs, so a workflow that fails or resolves to no route still
+  // rotates to the back of the queue instead of being picked again in every sweep.
+  await sql`UPDATE pr_helper_workflows SET last_reconcile_attempt_at = now() WHERE user_id = ${userId} AND id IN ${sql(workflowsToReconcile.map(item => item.row.id))}`.catch(() => undefined);
   try {
     for (const item of workflowsToReconcile) await pruneStaleWorkflowStageData(sql, item.row.user_id, item.workflow);
     const tracked = workflowsToReconcile.flatMap(({ row, workflow }) => workflow.stages.map((_, stageIndex) => ({ row, workflow, stageIndex })));
-    const routeTasks = await Promise.all(tracked.map(async item => (await routeSourcesForStage(environment, sql, item.row, item.workflow, item.stageIndex)).map(source => ({ ...item, source }))));
+    // Resolving a stage costs GitHub calls, so a branch-scoped sweep drops out-of-scope stages first
+    // and keeps only the routes the moved branches can actually reach.
+    const scoped = tracked.flatMap(item => {
+      const stage = item.workflow.stages[item.stageIndex];
+      const scope = filter.branches ? reconciliationBranchScope(stage, filter.branches) : 'all';
+      return scope === 'none' ? [] : [{ ...item, scope }];
+    });
+    const routeTasks = await Promise.all(scoped.map(async item => {
+      const sources = await routeSourcesForStage(environment, sql, item.row, item.workflow, item.stageIndex);
+      const inScope = item.scope === 'matching' && filter.branches ? sources.filter(source => filter.branches!.includes(source)) : sources;
+      return inScope.map(source => ({ ...item, source }));
+    }));
     const flatTasks = routeTasks.flat();
+    // Recording the intent before the work means a sweep that is killed mid-flight still shows how
+    // much it meant to do, instead of looking like a sweep that found nothing.
+    await sql`UPDATE reconciliation_runs SET stages_total = ${flatTasks.length} WHERE id = ${runId}`;
     const results = await Promise.allSettled(flatTasks.map(item => reconcileOneStage(environment, item.row, item.workflow, item.stageIndex, item.source, filter.eventName)));
     const reconciled = results.filter(result => result.status === 'fulfilled' && result.value).length;
     const failed = results.filter(result => result.status === 'rejected').length;
@@ -1212,6 +1405,44 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     const durationMs = Date.now() - startedAt;
     await sql`UPDATE reconciliation_runs SET state = 'failure', duration_ms = ${durationMs}, error_message = ${String(error instanceof Error ? error.message : error).slice(0, 800)}, finished_at = now() WHERE id = ${runId}`.catch(() => undefined);
     throw error;
+  } finally {
+    await sql`SELECT pg_advisory_unlock(hashtext(${lockKey}))`.catch(() => undefined);
+  }
+}
+
+// A truncated serverless instance leaves its run row at 'running' forever, so a run older than the
+// grace period is reported as interrupted rather than in flight.
+export const RECONCILIATION_RUN_GRACE_SECONDS = 5 * 60;
+
+export function reconciliationRunIsAbandoned(startedAt: string, now: number) {
+  const started = Date.parse(startedAt);
+  return Number.isFinite(started) && now - started > RECONCILIATION_RUN_GRACE_SECONDS * 1000;
+}
+
+export function reconciliationRunInterrupted(run: { state: string; startedAt: string }, now: number) {
+  return run.state === 'running' && reconciliationRunIsAbandoned(run.startedAt, now);
+}
+
+// A realtime trigger reconciles inline so the user sees the effect immediately, but a serverless
+// request is killed at a hard platform limit, so the wait is bounded and the scheduled sweep is the
+// safety net for whatever did not finish.
+export const REALTIME_RECONCILE_BUDGET_MS = 8000;
+
+export function realtimeReconcileBudgetMs(environment: Record<string, string | undefined>) {
+  const configured = Number(environment.REALTIME_RECONCILE_BUDGET_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : REALTIME_RECONCILE_BUDGET_MS;
+}
+
+export async function withReconciliationBudget(sweep: Promise<number>, budgetMs: number): Promise<{ outcome: 'completed' | 'failed' | 'deferred'; reconciled: number }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deferred = new Promise<{ outcome: 'deferred'; reconciled: number }>(resolve => {
+    timer = setTimeout(() => resolve({ outcome: 'deferred', reconciled: 0 }), budgetMs);
+  });
+  const settled = sweep.then(reconciled => ({ outcome: 'completed' as const, reconciled })).catch(() => ({ outcome: 'failed' as const, reconciled: 0 }));
+  try {
+    return await Promise.race([settled, deferred]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1222,26 +1453,36 @@ export function reconciliationBatchSize(environment: Record<string, string | und
   return Number.isInteger(configured) && configured >= 0 ? configured : RECONCILE_WORKFLOW_BATCH_SIZE;
 }
 
-function reconciliationStaleness(lastReconciledAt: string | null) {
-  return (lastReconciledAt ? Date.parse(lastReconciledAt) : 0) || 0;
+function reconciliationStaleness(lastAttemptAt: string | null) {
+  return (lastAttemptAt ? Date.parse(lastAttemptAt) : 0) || 0;
 }
 
-export function selectReconciliationBatch<T extends { lastReconciledAt: string | null }>(candidates: readonly T[], limit: number): T[] {
+// Ordering on the attempt rather than on the resulting stage data is what keeps rotation fair: a
+// workflow that resolves to no route still advances its turn instead of holding a slot forever.
+export function selectReconciliationBatch<T extends { lastAttemptAt: string | null }>(candidates: readonly T[], limit: number): T[] {
   if (limit <= 0 || candidates.length <= limit) return [...candidates];
   return candidates
     .map((candidate, index) => ({ candidate, index }))
-    .sort((left, right) => reconciliationStaleness(left.candidate.lastReconciledAt) - reconciliationStaleness(right.candidate.lastReconciledAt) || left.index - right.index)
+    .sort((left, right) => reconciliationStaleness(left.candidate.lastAttemptAt) - reconciliationStaleness(right.candidate.lastAttemptAt) || left.index - right.index)
     .slice(0, limit)
     .map(item => item.candidate);
 }
 
-export async function reconcileWorkflowStages(environment: Record<string, string | undefined>, filter: { repository?: string; installationId?: string; eventName?: string } = {}, trigger: ReconciliationTrigger = 'cron') {
+export type ReconciliationFilter = { repository?: string; installationId?: string; eventName?: string; branches?: readonly string[] };
+
+export async function reconcileWorkflowStages(environment: Record<string, string | undefined>, filter: ReconciliationFilter = {}, trigger: ReconciliationTrigger = 'cron') {
   const sql = query(environment);
-  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, (SELECT max(states.updated_at) FROM workflow_stage_states states WHERE states.user_id = workflows.user_id AND states.workflow_id = workflows.id) AS last_reconciled_at FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
+  // The scheduled sweep is the only trigger guaranteed to come back, so it closes out the rows left
+  // behind by instances that were killed before they could finish.
+  if (trigger === 'cron') {
+    await sql`UPDATE reconciliation_runs SET state = 'failure', error_message = coalesce(error_message, '校准中断：函数实例在完成前被回收'), duration_ms = coalesce(duration_ms, (extract(epoch from now() - started_at) * 1000)::int), finished_at = now() WHERE state = 'running' AND started_at < now() - (${RECONCILIATION_RUN_GRACE_SECONDS} * interval '1 second')`.catch(() => undefined);
+  }
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, workflows.last_reconcile_attempt_at FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
   const candidates = rows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
     if (!workflow || (filter.repository && workflow.repository !== filter.repository) || (filter.installationId && row.github_installation_id !== filter.installationId)) return [];
-    return [{ row, workflow: ensureStageIds(workflow), lastReconciledAt: row.last_reconciled_at ?? null }];
+    if (filter.branches && !workflow.stages.some(stage => reconciliationBranchScope(stage, filter.branches!) !== 'none')) return [];
+    return [{ row, workflow: ensureStageIds(workflow), lastAttemptAt: row.last_reconcile_attempt_at ?? null }];
   });
   // A scheduled sweep must answer within one request timeout, so it reconciles the stalest
   // workflows only and relies on its 10 minute cadence to rotate through the rest.
@@ -1454,32 +1695,35 @@ type ReconciliationRunRow = { id: number; trigger: string; state: string; stages
 export async function listSyncHealth(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<SyncHealth> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const [runs, stageStates, webhookCount] = await Promise.all([
-    sql<ReconciliationRunRow[]>`SELECT id, trigger, state, stages_total, stages_reconciled, stages_failed, duration_ms, error_message, repository, started_at, finished_at FROM reconciliation_runs WHERE user_id = ${user.id} ORDER BY finished_at DESC NULLS LAST, started_at DESC LIMIT 1`,
+  const [runs, triggerRuns, stageStates, webhookCount] = await Promise.all([
+    sql<ReconciliationRunRow[]>`SELECT id, trigger, state, stages_total, stages_reconciled, stages_failed, duration_ms, error_message, repository, started_at, finished_at FROM reconciliation_runs WHERE user_id = ${user.id} AND state <> 'skipped' ORDER BY started_at DESC LIMIT 1`,
+    sql<ReconciliationRunRow[]>`SELECT DISTINCT ON (trigger) id, trigger, state, stages_total, stages_reconciled, stages_failed, duration_ms, error_message, repository, started_at, finished_at FROM reconciliation_runs WHERE user_id = ${user.id} AND state <> 'skipped' AND started_at > now() - interval '24 hours' ORDER BY trigger, started_at DESC`,
     sql<StageStateRow[]>`SELECT states.workflow_id, states.stage_index, states.stage_id, states.repository, states.source, states.target, states.updated_at FROM workflow_stage_states states WHERE ${visibleWorkflowPredicate(sql, user.id, 'states.user_id', 'states.workflow_id')}`,
     sql<{ count: number }[]>`SELECT count(*)::int AS count FROM github_webhook_deliveries WHERE installation_id = ${identity.installationId || null} AND received_at > now() - interval '24 hours'`,
   ]);
   const now = Date.now();
   const lastRun = runs[0];
-  const lastReconciliation: ReconciliationRun | null = lastRun ? {
-    id: lastRun.id,
-    trigger: lastRun.trigger as ReconciliationTrigger,
-    state: lastRun.state as 'running' | 'success' | 'degraded' | 'failure',
-    stagesTotal: lastRun.stages_total,
-    stagesReconciled: lastRun.stages_reconciled,
-    stagesFailed: lastRun.stages_failed,
-    durationMs: lastRun.duration_ms,
-    errorMessage: lastRun.error_message,
-    repository: lastRun.repository,
-    startedAt: lastRun.started_at,
-    finishedAt: lastRun.finished_at,
-  } : null;
+  const asReconciliationRun = (row: ReconciliationRunRow): ReconciliationRun => ({
+    id: row.id,
+    trigger: row.trigger as ReconciliationTrigger,
+    state: row.state as ReconciliationRun['state'],
+    stagesTotal: row.stages_total,
+    stagesReconciled: row.stages_reconciled,
+    stagesFailed: row.stages_failed,
+    durationMs: row.duration_ms,
+    errorMessage: row.error_message,
+    repository: row.repository,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    interrupted: reconciliationRunInterrupted({ state: row.state, startedAt: row.started_at }, now),
+  });
+  const lastReconciliation: ReconciliationRun | null = lastRun ? asReconciliationRun(lastRun) : null;
   const stages: StageSyncHealth[] = stageStates.map(row => {
     const updatedAt = row.updated_at;
     const ageSeconds = Math.max(0, Math.floor((now - new Date(updatedAt).getTime()) / 1000));
     return { workflowId: row.workflow_id, stageIndex: row.stage_index, stageId: row.stage_id, source: row.source, target: row.target, updatedAt, ageSeconds, stale: ageSeconds > STAGE_STALE_THRESHOLD_SECONDS };
   });
-  return { lastReconciliation, stages, webhookDeliveriesLast24h: webhookCount[0]?.count || 0 };
+  return { lastReconciliation, triggerHealth: triggerRuns.map(asReconciliationRun), stages, webhookDeliveriesLast24h: webhookCount[0]?.count || 0 };
 }
 
 export async function listWorkflowTimeline(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<TimelineEntry[]> {

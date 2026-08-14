@@ -16,6 +16,12 @@
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
 - PR #172 的首个 Vercel Preview 失败原因为 Vercel 对 `api/` 完整 TypeScript 编译，而仓库原 `tsconfig.json` 仅包含 `src/`；随后又因 Hobby 计划 Serverless Function 数量限制在部署输出阶段失败。已将 `api/` 纳入本地检查、修复类型错误，并把自动化与 AI 凭据入口合并到 `/api/workflows` rewrite；提交 `93c00d41` 后 Vercel Preview、CI 和 Preview Comments 全部通过。
 
+## 2026-08-14 实时校准修复（本地已落地待部署验收）
+
+- 自动创建长时间不触发的根因不在自动化闸门，而在校准链路：webhook 与收件箱刷新在返回响应之后才 `void reconcileWorkflowStages(...)`，函数随即被冻结，`trigger='webhook'` 的行全部停在 `running` / `stages_total=0`；一次 push 触发 5 条投递同时抢 `max: 1` 连接池；定时校准的批量排序按阶段数据取最新值，解析不出路由的工作流永久占用名额，轮转最坏 4–5 小时。
+- 本地已落地：按事件分支收窄校准范围、在预算内 `await` 校准后再返回、`pg_try_advisory_lock` 抑制同仓并发、提前写入 `stages_total` 并回收中断行、按尝试时间轮转。计划与证据见 [`docs/superpowers/plans/2026-08-14-realtime-reconciliation.md`](docs/superpowers/plans/2026-08-14-realtime-reconciliation.md)，实现清单见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md) 第十节。
+- 部署前置：Supabase 需执行迁移 `027`（`reconciliation_runs.state` 允许 `skipped`、`pr_helper_workflows.last_reconcile_attempt_at`）。
+
 ## 2026-08-12 刷新链路最新结论
 
 - 详情页、步骤抽屉及创建/合并/重试/回滚/删除后的刷新按当前仓库触发；流程总览手动“刷新队列”和定时 reconciliation 仍为全量。
@@ -117,7 +123,9 @@ AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 P
 
 生产验收查出仍未修的真正根因 `P8`：`workflow_automation_actions` 表没有 `stage_index` 列（`025` 只把它建在 `workflow_automation_runs` 上），而执行器 `executeWorkflowAutomationActionForUser` 和队列列表 `listWorkflowAutomationActions` 都在 SELECT 它。执行器在原子领取动作**之前**就抛 `column "stage_index" does not exist`，所以动作永远停在 `queued` / `attempts=0`——这是自动创建至今从未成功过的原因。修法是把两条查询改为 JOIN `workflow_automation_runs` 取该列，不需要迁移；配套加一条「迁移列集合 ⊇ SELECT 列名」的静态一致性守卫测试。P1/P2 的价值在于让这条错误第一次被写进 `failure_reason` 而不是继续静默。
 
-`P8` 已按上述修法落代码并由用户部署到生产，验证生效：动作首次被真正领取，`attempts` 由 0 变 1。随即暴露 `P9`——`generateAutomationMessage` 的围栏剥离把 `trim()` 写在 `replace()` 之后，模型只要在 ```` ```json ```` 前多一个换行，`^` 锚点就失配，围栏原样进 `JSON.parse`，动作落到 `paused` / `attempts=1`。已抽出可单测的 `jsonFromModelText`（先 trim、再判断是否以围栏开头、从末尾找收尾围栏以免误截 PR 正文里的代码块），`P9` 已落代码待部署。`paused` 超 120 秒会被 stale 重置回 `queued`，所以部署后会自愈重试，不需要人工干预。
+`P8` 已按上述修法落代码并由用户部署到生产，验证生效：动作首次被真正领取，`attempts` 由 0 变 1。随即暴露 `P9`——`generateAutomationMessage` 的围栏剥离把 `trim()` 写在 `replace()` 之后，模型只要在 ```` ```json ```` 前多一个换行，`^` 锚点就失配，围栏原样进 `JSON.parse`，动作落到 `paused` / `attempts=1`。已抽出可单测的 `jsonFromModelText`（先 trim、再判断是否以围栏开头、从末尾找收尾围栏以免误截 PR 正文里的代码块），`P9` 已部署生产并完成验收：`2026-08-14 00:20:08` 自动建出 `bayernjf/bayjf#42`（`feature/20260719 → dev`，作者 `app/pr-helper-by-bayernjf`），动作 3 为 `succeeded` / `attempts=2` / `payload.pullNumber=42`，审计里 `metadata.via='workflow-automation'` 只有一条，后续轮转未重复建。**服务端自动创建 PR 至此在生产端到端跑通。** 仍未验的两项：门禁为红不触发、幂等命中记成功——生产数据里没有对应场景，需另造。遗留：动作 1、2 因 `headSha` 过期永远停在 `queued`，已决定保留作为排障痕迹（见 remediation 文档第九节）。
+
+第 5 阶段「逐步骤自动合并」已于 2026-08-14 在本地落地，设计见 [`docs/automated-workflow-plan.md`](docs/automated-workflow-plan.md)，尚未部署。要点：与自动创建**状态独立**的按步骤开关（互不清除，可只开自动合并），但界面可勾选条件与自动创建**对齐**——同样要求四项 AI 前置，另加 `pull-merge` 权限；该约束只在界面，服务端 `enqueueServerAutoMerge` 不校验 AI 前置；只做 merge commit，请求必带 `sha = pull.head.sha`；只在 `mergeable=true` 且 `mergeable_state='clean'` 时合并，`'behind'` 只暂停不自动 update branch；失败次数达 `recoveryPolicy.maxRetries` 后停在 `paused` 不再被 120 秒 stale 逻辑重排；PR 已 merged 记 `succeeded` 幂等成功。注意「合并后 Actions 全绿才解锁下一步」已经实现（`stageIsUnlocked` + `mergeChecksWithDeployments`），不在本阶段范围；合并后自动推进属第 6 阶段。
 
 在上述生产验收通过后，建议顺序为：
 

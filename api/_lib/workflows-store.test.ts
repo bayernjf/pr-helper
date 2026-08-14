@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { actionableStageEntry, automationActionId, automationCreateOutcome, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { actionableStageEntry, automationActionId, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withReconciliationBudget, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -229,7 +229,7 @@ describe('reconciliation state', () => {
 });
 
 describe('cron reconciliation batch', () => {
-  const candidate = (id: string, lastReconciledAt: string | null) => ({ id, lastReconciledAt });
+  const candidate = (id: string, lastAttemptAt: string | null) => ({ id, lastAttemptAt });
 
   it('keeps the scheduled sweep bounded so it can answer within the request timeout', () => {
     expect(RECONCILE_WORKFLOW_BATCH_SIZE).toBe(8);
@@ -256,6 +256,13 @@ describe('cron reconciliation batch', () => {
       candidate('b', '2026-08-13T09:10:00.000Z'),
       candidates[2],
     ], 2).map(item => item.id)).toEqual(['c', 'a']);
+  });
+
+  // A workflow whose branch rule currently matches nothing writes no stage state, so ordering on stage
+  // data kept selecting it in every sweep and starved the rest of the queue.
+  it('rotates past a workflow that produced no stage data', () => {
+    const attempted = [candidate('barren', '2026-08-13T09:05:00.000Z'), candidate('waiting', '2026-08-13T09:00:00.000Z')];
+    expect(selectReconciliationBatch(attempted, 1).map(item => item.id)).toEqual(['waiting']);
   });
 
   it('reconciles everything when the batch cannot be exceeded or is disabled', () => {
@@ -476,7 +483,9 @@ function declaredColumns(sqlText: string, table: string) {
 
 function selectedColumns(source: string, table: string) {
   const selected = new Set<string>();
-  for (const statement of source.matchAll(new RegExp(`SELECT\\s+((?:(?!\\bFROM\\b)[\\s\\S])*?)\\s+FROM\\s+${table}(?:\\s+([a-z_][a-z0-9_]*))?`, 'gi'))) {
+  // Statements live in template literals, so the column list may not cross a backtick: a SELECT with
+  // no FROM of its own must not swallow the next statement's table.
+  for (const statement of source.matchAll(new RegExp(`SELECT\\s+((?:(?!\\bFROM\\b)[^\`])*?)\\s+FROM\\s+${table}(?:\\s+([a-z_][a-z0-9_]*))?`, 'gi'))) {
     const alias = statement[2];
     for (const expression of statement[1].split(',')) {
       const column = expression.trim().replace(/\s+AS\s+[a-z_][a-z0-9_]*$/i, '').trim();
@@ -516,5 +525,244 @@ describe('jsonFromModelText', () => {
 
   it('keeps a fenced block that the pull request body itself contains', () => {
     expect(jsonFromModelText('```json\n{"body":"see ```ts\\ncode\\n``` above"}\n```')).toBe('{"body":"see ```ts\\ncode\\n``` above"}');
+  });
+});
+
+describe('automationMergeOutcome', () => {
+  const green = { checksState: 'success', approvals: 1, requiredApprovals: 1, mergeable: true, mergeableState: 'clean' };
+  const pull = { number: 42, state: 'open', merged: false, html_url: 'https://github.com/o/r/pull/42' };
+
+  it('merges when GitHub reports a clean verdict', () => {
+    expect(automationMergeOutcome(pull, green)).toEqual({ kind: 'merge', pullNumber: 42 });
+  });
+
+  it('records an already merged pull request as an idempotent success', () => {
+    expect(automationMergeOutcome({ ...pull, state: 'closed', merged: true }, green)).toEqual({ kind: 'idempotent', pullNumber: 42, pullUrl: 'https://github.com/o/r/pull/42' });
+  });
+
+  it('cancels when the pull request was closed without merging', () => {
+    expect(automationMergeOutcome({ ...pull, state: 'closed' }, green).kind).toBe('cancelled');
+  });
+
+  it('pauses instead of merging when no pull request exists', () => {
+    expect(automationMergeOutcome(undefined, green).kind).toBe('paused');
+  });
+
+  it('pauses while checks are not green', () => {
+    expect(automationMergeOutcome(pull, { ...green, checksState: 'pending' }).kind).toBe('paused');
+    expect(automationMergeOutcome(pull, { ...green, checksState: 'failure' }).kind).toBe('paused');
+  });
+
+  it('pauses while approvals are missing', () => {
+    expect(automationMergeOutcome(pull, { ...green, approvals: 0, requiredApprovals: 2 }).kind).toBe('paused');
+  });
+
+  it('pauses when GitHub does not report the pull request as mergeable', () => {
+    expect(automationMergeOutcome(pull, { ...green, mergeable: false }).kind).toBe('paused');
+    expect(automationMergeOutcome(pull, { ...green, mergeable: null }).kind).toBe('paused');
+  });
+
+  it('pauses on a behind branch instead of updating it', () => {
+    const outcome = automationMergeOutcome(pull, { ...green, mergeableState: 'behind' });
+    expect(outcome.kind).toBe('paused');
+    expect(outcome.kind === 'paused' && outcome.reason).toContain('更新分支');
+  });
+
+  it('pauses on any other mergeable state', () => {
+    for (const mergeableState of ['dirty', 'blocked', 'unstable', 'unknown', 'draft']) {
+      expect(automationMergeOutcome(pull, { ...green, mergeableState }).kind).toBe('paused');
+    }
+  });
+});
+
+describe('automationIdempotencyKey', () => {
+  const route = { workflowId: 'w-1', stageId: 's-1', source: 'feature/a', target: 'dev', headSha: 'abc123' };
+
+  it('keeps create and merge intents on separate keys for the same route and head sha', () => {
+    expect(automationIdempotencyKey({ ...route, kind: 'create-pr' })).not.toBe(automationIdempotencyKey({ ...route, kind: 'merge-pr' }));
+  });
+
+  it('is stable for the same route, head sha and kind', () => {
+    expect(automationIdempotencyKey({ ...route, kind: 'merge-pr' })).toBe(automationIdempotencyKey({ ...route, kind: 'merge-pr' }));
+  });
+
+  it('changes when the head sha moves so a new commit gets a new merge attempt', () => {
+    expect(automationIdempotencyKey({ ...route, kind: 'merge-pr' })).not.toBe(automationIdempotencyKey({ ...route, headSha: 'def456', kind: 'merge-pr' }));
+  });
+
+  it('keeps the existing create key format so deployed rows stay idempotent', () => {
+    expect(automationIdempotencyKey({ ...route, kind: 'create-pr' })).toBe('w-1:s-1:feature/a:dev:abc123:create-pr');
+  });
+});
+
+describe('automationRetryIsExhausted', () => {
+  it('allows retries below the policy limit', () => {
+    expect(automationRetryIsExhausted(2, { maxRetries: 3, cooldownSeconds: 300 })).toBe(false);
+  });
+
+  it('stops retrying once the policy limit is reached', () => {
+    expect(automationRetryIsExhausted(3, { maxRetries: 3, cooldownSeconds: 300 })).toBe(true);
+    expect(automationRetryIsExhausted(4, { maxRetries: 3, cooldownSeconds: 300 })).toBe(true);
+  });
+
+  it('honours a stricter policy', () => {
+    expect(automationRetryIsExhausted(1, { maxRetries: 1, cooldownSeconds: 60 })).toBe(true);
+  });
+
+  it('falls back to the default policy when the workflow has none or an invalid one', () => {
+    expect(automationRetryIsExhausted(DEFAULT_RECOVERY_POLICY.maxRetries, undefined)).toBe(true);
+    expect(automationRetryIsExhausted(DEFAULT_RECOVERY_POLICY.maxRetries - 1, undefined)).toBe(false);
+    expect(automationRetryIsExhausted(DEFAULT_RECOVERY_POLICY.maxRetries, { maxRetries: 0, cooldownSeconds: 0 })).toBe(true);
+  });
+});
+
+describe('stored automation policies', () => {
+  const workflow = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature/payments', target: 'dev', stageId: 's-1' }] };
+  const withAutomation = (automation: unknown) => isStoredWorkflow({ ...workflow, stages: [{ ...workflow.stages[0], automation }] });
+
+  it('accepts a step that only automates merging', () => {
+    expect(withAutomation({ autoMergePullRequest: true, executionMode: 'server' })).toBe(true);
+  });
+
+  it('accepts a step that automates both creating and merging', () => {
+    expect(withAutomation({ autoCreatePullRequest: true, autoMergePullRequest: true, executionMode: 'server', generationRule: { name: 'Default', content: '# Rule', capturedAt: '2026-08-12T00:00:00.000Z' } })).toBe(true);
+  });
+
+  it('does not require a generation rule for merge-only automation because it never calls the model', () => {
+    expect(withAutomation({ autoMergePullRequest: true, executionMode: 'server', generationRule: undefined })).toBe(true);
+  });
+
+  it('rejects merge automation outside server execution', () => {
+    expect(withAutomation({ autoMergePullRequest: true, executionMode: 'browser-session' })).toBe(false);
+  });
+
+  it('still rejects a policy that automates nothing', () => {
+    expect(withAutomation({ executionMode: 'server' })).toBe(false);
+    expect(withAutomation({ autoCreatePullRequest: false, autoMergePullRequest: false, executionMode: 'server' })).toBe(false);
+  });
+});
+
+describe('webhook branch scoping', () => {
+  it('reads the pushed branch and ignores tag pushes', () => {
+    expect(webhookBranchesForEvent('push', { ref: 'refs/heads/feature/20260722' })).toEqual(['feature/20260722']);
+    expect(webhookBranchesForEvent('push', { ref: 'refs/tags/v1.2.0' })).toEqual([]);
+    expect(webhookBranchesForEvent('push', {})).toEqual([]);
+  });
+
+  it('reads both ends of a pull request because either can move a stage', () => {
+    expect(webhookBranchesForEvent('pull_request', { pull_request: { head: { ref: 'feature/a' }, base: { ref: 'dev' } } })).toEqual(['feature/a', 'dev']);
+  });
+
+  it('reads the head branch of check and workflow events', () => {
+    expect(webhookBranchesForEvent('check_run', { check_run: { check_suite: { head_branch: 'dev' } } })).toEqual(['dev']);
+    expect(webhookBranchesForEvent('check_suite', { check_suite: { head_branch: 'dev' } })).toEqual(['dev']);
+    expect(webhookBranchesForEvent('workflow_run', { workflow_run: { head_branch: 'main' } })).toEqual(['main']);
+  });
+
+  it('reads every branch a commit status touches and drops duplicates', () => {
+    expect(webhookBranchesForEvent('status', { branches: [{ name: 'dev' }, { name: 'main' }, { name: 'dev' }] })).toEqual(['dev', 'main']);
+  });
+
+  // An unrecognized event must not silently lose realtime updates, so it keeps the full sweep.
+  it('declines to narrow an unrecognized event', () => {
+    expect(webhookBranchesForEvent('release', { release: { tag_name: 'v1' } })).toBeNull();
+  });
+});
+
+describe('reconciliationBranchScope', () => {
+  it('reconciles every source route when the target branch moved', () => {
+    expect(reconciliationBranchScope({ source: 'feature/*', target: 'dev' }, ['dev'])).toBe('all');
+  });
+
+  it('reconciles only the matching route when a source branch moved', () => {
+    expect(reconciliationBranchScope({ source: 'feature/20260722', target: 'dev' }, ['feature/20260722'])).toBe('matching');
+    expect(reconciliationBranchScope({ source: 'feature/*', target: 'dev' }, ['feature/20260722'])).toBe('matching');
+  });
+
+  it('skips a stage no pushed branch can reach', () => {
+    expect(reconciliationBranchScope({ source: 'feature/*', target: 'dev' }, ['docs/typo-fix'])).toBe('none');
+    expect(reconciliationBranchScope({ source: 'dev', target: 'main' }, ['feature/20260722'])).toBe('none');
+    expect(reconciliationBranchScope({ source: 'dev', target: 'main' }, [])).toBe('none');
+  });
+});
+
+describe('reconciliationRunIsAbandoned', () => {
+  const startedAt = '2026-08-14T10:00:00.000Z';
+
+  it('treats a running row older than the grace period as interrupted', () => {
+    expect(reconciliationRunIsAbandoned(startedAt, Date.parse('2026-08-14T10:05:01.000Z'))).toBe(true);
+  });
+
+  it('leaves a running row inside the grace period alone', () => {
+    expect(reconciliationRunIsAbandoned(startedAt, Date.parse('2026-08-14T10:04:59.000Z'))).toBe(false);
+  });
+
+  it('never reports an unparsable timestamp as interrupted', () => {
+    expect(reconciliationRunIsAbandoned('not-a-timestamp', Date.parse('2026-08-14T23:00:00.000Z'))).toBe(false);
+  });
+});
+
+describe('realtimeReconcileBudgetMs', () => {
+  it('falls back to the packaged budget when the environment says nothing', () => {
+    expect(realtimeReconcileBudgetMs({})).toBe(REALTIME_RECONCILE_BUDGET_MS);
+    expect(realtimeReconcileBudgetMs({ REALTIME_RECONCILE_BUDGET_MS: 'soon' })).toBe(REALTIME_RECONCILE_BUDGET_MS);
+    expect(realtimeReconcileBudgetMs({ REALTIME_RECONCILE_BUDGET_MS: '0' })).toBe(REALTIME_RECONCILE_BUDGET_MS);
+  });
+
+  it('honours a configured budget so a slower plan can wait longer', () => {
+    expect(realtimeReconcileBudgetMs({ REALTIME_RECONCILE_BUDGET_MS: '20000' })).toBe(20000);
+  });
+});
+
+describe('withReconciliationBudget', () => {
+  it('reports the reconciled count when the sweep lands inside the budget', async () => {
+    await expect(withReconciliationBudget(Promise.resolve(3), 50)).resolves.toEqual({ outcome: 'completed', reconciled: 3 });
+  });
+
+  // The response must go out even if the sweep is still running, otherwise the platform kills the
+  // request and GitHub records a failed delivery.
+  it('defers a sweep that outlives the budget', async () => {
+    const slow = new Promise<number>(resolve => { setTimeout(() => resolve(1), 200); });
+    await expect(withReconciliationBudget(slow, 5)).resolves.toEqual({ outcome: 'deferred', reconciled: 0 });
+  });
+
+  it('turns a failed sweep into an outcome instead of rejecting the request', async () => {
+    await expect(withReconciliationBudget(Promise.reject(new Error('boom')), 50)).resolves.toEqual({ outcome: 'failed', reconciled: 0 });
+  });
+});
+
+describe('reconciliationLockKey', () => {
+  it('keeps repositories of the same user independent so one sweep never blocks another', () => {
+    expect(reconciliationLockKey('user-1', 'acme/web')).not.toBe(reconciliationLockKey('user-1', 'acme/api'));
+  });
+
+  it('keeps the same repository of different users independent', () => {
+    expect(reconciliationLockKey('user-1', 'acme/web')).not.toBe(reconciliationLockKey('user-2', 'acme/web'));
+  });
+
+  // A sweep spanning every repository of one user must still exclude a concurrent sweep of that user.
+  it('falls back to a per-user key when no single repository is in scope', () => {
+    expect(reconciliationLockKey('user-1', null)).toBe(reconciliationLockKey('user-1', null));
+    expect(reconciliationLockKey('user-1', null)).not.toBe(reconciliationLockKey('user-1', 'acme/web'));
+  });
+});
+
+describe('reconciliationRunInterrupted', () => {
+  const now = Date.parse('2026-08-14T10:10:00.000Z');
+
+  // A killed serverless instance never updates its row, so a stale 'running' row is the only trace of
+  // a sweep that silently died; reporting it as in flight is what hid the broken webhook path.
+  it('reports a running row that outlived the grace period', () => {
+    expect(reconciliationRunInterrupted({ state: 'running', startedAt: '2026-08-14T10:00:00.000Z' }, now)).toBe(true);
+  });
+
+  it('leaves a fresh running row reported as in flight', () => {
+    expect(reconciliationRunInterrupted({ state: 'running', startedAt: '2026-08-14T10:09:00.000Z' }, now)).toBe(false);
+  });
+
+  it('never reports a finished row as interrupted', () => {
+    for (const state of ['success', 'degraded', 'failure', 'skipped']) {
+      expect(reconciliationRunInterrupted({ state, startedAt: '2026-08-14T09:00:00.000Z' }, now)).toBe(false);
+    }
   });
 });
