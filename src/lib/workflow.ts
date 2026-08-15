@@ -168,6 +168,10 @@ export function removeDeployment(workflow: Workflow, index: number): Workflow {
   return { ...workflow, deployments: deploymentConfigs(workflow).filter((_, deploymentIndex) => deploymentIndex !== index) };
 }
 
+export function replaceDeployment(workflow: Workflow, index: number, deployment: DeploymentConfig): Workflow {
+  return { ...workflow, deployments: deploymentConfigs(workflow).map((current, deploymentIndex) => deploymentIndex === index ? deployment : current) };
+}
+
 export function createWorkflow(repository: string, source: string, target: string, name = repository, deployments: DeploymentConfig[] = defaultDeployments): Workflow {
   return { id: `${repository}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, repository, createdAt: new Date().toISOString(), stages: [{ source, target, stageId: generateStageId() }], deployments };
 }
