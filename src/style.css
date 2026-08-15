@@ -2172,6 +2172,50 @@ a.account-menu-item {
   cursor: help;
 }
 
+.automation-badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  padding: 1px 6px;
+  border-radius: 999px;
+  margin-left: 4px;
+  white-space: nowrap;
+  cursor: help;
+  background: var(--warning-bg, #fffbeb);
+  color: var(--warning-text, #92400e);
+  border: 1px solid var(--warning-border, #fde68a);
+}
+.automation-badge.is-failed {
+  background: var(--danger-bg, #fef2f2);
+  color: var(--danger-text, #991b1b);
+  border-color: var(--danger-border, #fecaca);
+}
+.automation-detail {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  background: var(--muted-bg, #f8fafc);
+}
+.automation-detail.is-attention {
+  border-color: var(--warning-border, #fde68a);
+  background: var(--warning-bg, #fffbeb);
+}
+.automation-detail.is-failed {
+  border-color: var(--danger-border, #fecaca);
+  background: var(--danger-bg, #fef2f2);
+}
+.automation-detail .automation-line {
+  margin: 2px 0 0;
+  font-weight: 600;
+}
+.automation-detail .automation-reason,
+.automation-detail .automation-empty {
+  margin: 4px 0 0;
+  font-size: 0.78rem;
+  color: var(--muted-text, #64748b);
+  word-break: break-word;
+}
+
 /* Workflow run history in project lane */
 .lane-run-history {
   margin: 12px 18px 16px;
