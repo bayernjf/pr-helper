@@ -62,7 +62,7 @@
 6. **drain 稳定观察若干天后，删掉 sweep 内联的执行路径**，让自动化动作只剩一条执行入口，不再有两套会各自漂移的实现。
 7. 迁移 `031`（`reconciliation_runs.claimed_workflow_ids`）已执行并部署，列已就位、cron run 认领 8 个 / webhook run 认领 1 个。尚未等到「回收僵尸扫描 → 标回 `reconcile_pending_since`」的真实样本，下次出现中途被回收的扫描时核对一次即可。
 8. 等门禁的动作退避（`1e02a8a0` + `6a0ede17`）已部署并在生产验完，**无待办，仅留结论**：排空自身的计数就是证据——19:22/19:24/19:26 三次都是 `examined 2 / executed 1 / skipped 1`（那个 `executed` 就是动作 205），部署后 19:30 变成 `examined 2 / executed 0 / skipped 2`，`attempts` 停在 46。时效未受影响：19:31:58 给 PR #12 approve，19:32:01 收到 `pull_request_review/submitted`（该窗口内唯一事件），19:32:20 合并、19:32:21 动作 205 `succeeded`，**从事件到合并 19 秒**。这次执行不可能来自排空——19:32:00 那次排空看到的 `updated_at` 是 19:28:04，而 attempts=46 对应封顶的 30 分钟等待，必然 `skip`。顺带记一笔：`pull_request_review` 不在 `webhookBranchesForEvent` 的 switch 里，返回 null 即不收窄范围，一次 review 会触发全量扫掠（约 69 次调用）。review 频次低，暂不动；若日后调用量逼近警戒线，这是一个可收窄的点。
-9. 仍未验的自动化场景只剩幂等命中记成功（生产无对应场景，需另造）。门禁为红一项已在沙箱验完，见 remediation 第十节。
+9. 仍未验的自动化场景只剩幂等命中记成功（生产无对应场景，需另造）。门禁为红一项已在沙箱验完，见 remediation 第十节。造场景的脚手架**有意保留**在 `bayernjf/pr-helper-e2e-sandbox`：分支 `fix/red-gate-e2e`（已合入 dev，PR #12 已关闭）与 `.github/workflows/red-gate-e2e.yml`（分支内限定触发，缺 `.pr-helper-e2e/gate-green` 即失败）。别删，下次造场景直接复用；注意该工作流必须带 `actions/checkout@v4`，否则标记文件不在盘上、门禁永远为红。
 
 **二、已明确后置**
 
