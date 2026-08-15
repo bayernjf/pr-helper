@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -898,6 +898,40 @@ describe('realtimeReconcileBudgetMs', () => {
   it('honours a configured budget so a slower plan can wait longer', () => {
     expect(realtimeReconcileBudgetMs({ REALTIME_RECONCILE_BUDGET_MS: '20000' })).toBe(20000);
   });
+
+  // A webhook body is read by nobody, so completing the sweep is worth more than answering early. One
+  // stage costs several seconds of GitHub calls, so the interactive budget could not finish even a
+  // two-stage delivery: production yielded on a third of them and threw away 151 of 195 stages.
+  it('gives a webhook room to finish the stages one delivery touches', () => {
+    expect(realtimeReconcileBudgetMs({}, 'webhook')).toBe(WEBHOOK_RECONCILE_BUDGET_MS);
+    expect(realtimeReconcileBudgetMs({}, 'webhook')).toBeGreaterThan(realtimeReconcileBudgetMs({}));
+  });
+
+  // A person is waiting on these two, and a deferral is not lost work: the sweep marks the workflow
+  // pending and the next trigger carries it. So latency wins over completeness here.
+  it('keeps the interactive triggers on the short budget', () => {
+    expect(realtimeReconcileBudgetMs({}, 'manual')).toBe(REALTIME_RECONCILE_BUDGET_MS);
+    expect(realtimeReconcileBudgetMs({}, 'inbox_refresh')).toBe(REALTIME_RECONCILE_BUDGET_MS);
+  });
+
+  it('lets one override cover every realtime trigger, because the platform limit is what moves', () => {
+    expect(realtimeReconcileBudgetMs({ REALTIME_RECONCILE_BUDGET_MS: '20000' }, 'webhook')).toBe(20000);
+  });
+});
+
+describe('realtimeReconcileCeilingMs', () => {
+  // The outer race is a backstop for I/O that never settles, not a second budget. Doubling the budget
+  // put the webhook backstop at 50s, over the platform limit; and at 16s it fired often enough to
+  // abandon 25 sweeps mid-flight in a day, each left running until a later sweep reaped it.
+  it('stays clear of the platform limit whatever the budget is', () => {
+    expect(realtimeReconcileCeilingMs(WEBHOOK_RECONCILE_BUDGET_MS)).toBeLessThan(AUTOMATION_FUNCTION_CEILING_MS);
+    expect(realtimeReconcileCeilingMs(600_000)).toBeLessThan(AUTOMATION_FUNCTION_CEILING_MS);
+  });
+
+  it('leaves the budget room to yield on its own before the backstop fires', () => {
+    expect(realtimeReconcileCeilingMs(WEBHOOK_RECONCILE_BUDGET_MS)).toBeGreaterThan(WEBHOOK_RECONCILE_BUDGET_MS);
+    expect(realtimeReconcileCeilingMs(REALTIME_RECONCILE_BUDGET_MS)).toBeGreaterThan(REALTIME_RECONCILE_BUDGET_MS);
+  });
 });
 
 describe('withStageDeadline', () => {
@@ -1320,6 +1354,8 @@ describe('workflow save route', () => {
     const body = store.slice(store.indexOf('export async function reconcileRealtime'), store.indexOf('type StageStateRow'));
     expect(body).toContain('withStageDeadline(');
     expect(body).toContain("outcome: 'deferred'");
+    expect(body).toContain('realtimeReconcileCeilingMs(');
+    expect(body).not.toContain('budgetMs * 2');
   });
 });
 
