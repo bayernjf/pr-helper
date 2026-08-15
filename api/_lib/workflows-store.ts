@@ -266,6 +266,101 @@ export function automationMergeOutcome(pull: { number: number; state: string; me
   return { kind: 'merge' as const, pullNumber: pull.number };
 }
 
+// A claim that stops updating for longer than this can only be an instance that was recycled: every
+// path that reaches a verdict writes one.
+export const AUTOMATION_ACTION_ABANDON_MS = 120_000;
+// Long enough to clear the scheduled sweep's real delivery gap, which throttling stretches past an
+// hour, and short enough that nothing wakes up after the person who pushed has moved on.
+export const AUTOMATION_ACTION_STALE_MS = 12 * 60 * 60 * 1000;
+
+export type AutomationDrainDecision = { kind: 'execute' } | { kind: 'reclaim'; refundAttempt: boolean } | { kind: 'cancel'; reason: 'superseded' | 'stale' } | { kind: 'skip' };
+
+// Draining is the only reader the action queue has, so this verdict is what stands between a stuck row
+// and either a duplicate pull request or a pull request nobody expects. Supersession decides before age
+// because the idempotency key carries the head sha: once a later push enqueued its own action, the older
+// row describes commits already covered, however recently it was written.
+export function automationDrainDecision(action: { state: string; createdAt: string; updatedAt: string; failureReason: string | null; hasNewer: boolean }, now: number): AutomationDrainDecision {
+  if (action.state !== 'queued' && action.state !== 'running') return { kind: 'skip' };
+  const abandoned = action.state === 'running' && now - Date.parse(action.updatedAt) > AUTOMATION_ACTION_ABANDON_MS;
+  if (action.state === 'running' && !abandoned) return { kind: 'skip' };
+  if (action.hasNewer) return { kind: 'cancel', reason: 'superseded' };
+  if (now - Date.parse(action.createdAt) > AUTOMATION_ACTION_STALE_MS) return { kind: 'cancel', reason: 'stale' };
+  if (abandoned) return { kind: 'reclaim', refundAttempt: action.failureReason === null };
+  return { kind: 'execute' };
+}
+
+// The Hobby ceiling once `maxDuration` is declared. Nothing reads it at runtime; it is the number the
+// reserve below is derived from, kept here so the two cannot drift apart silently.
+export const AUTOMATION_FUNCTION_CEILING_MS = 60_000;
+// A create-pr action calls a model, so it can run for tens of seconds. Starting one late is how a drain
+// gets recycled mid-flight and leaves behind exactly the row it came to clear, so new work only starts
+// while most of the ceiling is still unspent.
+export const AUTOMATION_DRAIN_START_BUDGET_MS = 25_000;
+export const AUTOMATION_DRAIN_BATCH_SIZE = 10;
+
+export function automationDrainHasStartBudget(startedAt: number, now: number) {
+  return now - startedAt < AUTOMATION_DRAIN_START_BUDGET_MS;
+}
+
+type DrainActionRow = { id: number; user_id: string; kind: WorkflowAutomationAction['kind']; state: string; attempts: number; failure_reason: string | null; created_at: string; updated_at: string; repository: string | null; source: string; target: string; installation_id: string | null; newer: number };
+
+// The queue has had no reader: an action's only chance to run was the request that enqueued it, and the
+// recovery hidden in that same enqueue path needs someone to push again to the very stage that is stuck.
+// Reading it on a clock is what decouples recovery from the event that produced the work.
+export async function drainWorkflowAutomationActions(environment: Record<string, string | undefined>) {
+  const sql = query(environment);
+  const startedAt = Date.now();
+  const rows = await sql<DrainActionRow[]>`
+    SELECT actions.id, actions.user_id, actions.kind, actions.state, actions.attempts, actions.failure_reason,
+           actions.created_at, actions.updated_at, actions.source, actions.target,
+           workflows.payload->>'repository' AS repository, users.github_installation_id AS installation_id,
+           (SELECT count(*) FROM workflow_automation_actions newer
+              WHERE newer.user_id = actions.user_id AND newer.workflow_id = actions.workflow_id
+                AND newer.stage_id = actions.stage_id AND newer.source = actions.source
+                AND newer.kind = actions.kind AND newer.created_at > actions.created_at)::int AS newer
+    FROM workflow_automation_actions actions
+    JOIN pr_helper_users users ON users.id = actions.user_id
+    LEFT JOIN pr_helper_workflows workflows ON workflows.user_id = actions.user_id AND workflows.id = actions.workflow_id
+    WHERE actions.state IN ('queued', 'running')
+    ORDER BY actions.created_at
+    LIMIT ${AUTOMATION_DRAIN_BATCH_SIZE}`;
+  const counts = { examined: rows.length, executed: 0, reclaimed: 0, cancelled: 0, failed: 0, skipped: 0, deferred: 0 };
+  for (const row of rows) {
+    const decision = automationDrainDecision({ state: row.state, createdAt: row.created_at, updatedAt: row.updated_at, failureReason: row.failure_reason, hasNewer: row.newer > 0 }, Date.now());
+    const line = (reason: string, detail: Record<string, string | number | boolean | undefined> = {}) => console.info(automationSkipLine({ kind: row.kind, repository: row.repository || '?', route: `${row.source} → ${row.target}`, reason, action: row.id, ...detail }));
+    if (decision.kind === 'skip') { counts.skipped += 1; continue; }
+    if (decision.kind === 'cancel') {
+      const cancelled = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'cancelled', failure_reason = ${decision.reason === 'superseded' ? '已被后续提交的自动化动作取代' : '超过自动化时限，未再尝试'}, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${row.id} AND state = ${row.state} RETURNING id`;
+      if (cancelled.length) {
+        await sql`UPDATE workflow_automation_runs SET state = 'cancelled', updated_at = now(), completed_at = now() WHERE user_id = ${row.user_id} AND id = (SELECT run_id FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND id = ${row.id})`.catch(() => undefined);
+        counts.cancelled += 1;
+        line(`drain-cancelled-${decision.reason}`);
+      }
+      continue;
+    }
+    if (decision.kind === 'reclaim') {
+      // The claim itself charged an attempt, and the crash that followed did no work; attempts are capped,
+      // so leaving the charge in place retires an action that was never really tried.
+      const reclaimed = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'queued', failure_reason = NULL, attempts = ${decision.refundAttempt ? sql`GREATEST(attempts - 1, 0)` : sql`attempts`}, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${row.id} AND state = 'running' RETURNING id`;
+      if (!reclaimed.length) { counts.skipped += 1; continue; }
+      counts.reclaimed += 1;
+      line('drain-reclaimed', { refunded: decision.refundAttempt });
+    }
+    if (!row.installation_id) { counts.skipped += 1; line('drain-no-installation'); continue; }
+    if (!automationDrainHasStartBudget(startedAt, Date.now())) { counts.deferred += 1; line('drain-deferred', { elapsedMs: Date.now() - startedAt }); continue; }
+    try {
+      await executeWorkflowAutomationActionForUser(environment, row.user_id, row.installation_id, row.id);
+      counts.executed += 1;
+    } catch (error) {
+      // One blocked action must not strand the rest of the batch: the executor has already recorded its
+      // own verdict and reason on the row by the time it throws.
+      counts.failed += 1;
+      line('drain-failed', { detail: error instanceof Error ? error.message.slice(0, 200) : 'unknown' });
+    }
+  }
+  return counts;
+}
+
 // A merge failure is usually a conflict or a red gate, which only a human can clear. Without a cap
 // the stale reset would re-queue the action every rotation and write a failure row each time.
 export function automationRetryIsExhausted(attempts: number, policy: { maxRetries?: number; cooldownSeconds?: number } | undefined) {

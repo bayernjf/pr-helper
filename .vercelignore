@@ -3,3 +3,6 @@
 node_modules/
 dist/
 .env*
+# A test file beside a handler under api/ is otherwise built and published as its own Serverless
+# Function, which spends the plan's function budget and exposes the file as a route.
+*.test.ts
