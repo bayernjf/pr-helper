@@ -47,7 +47,7 @@ npm run lint
 
 ## Database
 
-Run every migration in `db/migrations/` in numeric order. The current applied schema baseline is `001` through `026`; request handlers never create or alter tables. See [db/README.md](db/README.md).
+Run every migration in `db/migrations/` in numeric order. The current applied schema baseline is `001` through `029`; request handlers never create or alter tables. See [db/README.md](db/README.md).
 
 Required Vercel settings for the secure API include:
 

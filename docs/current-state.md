@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-12（PR #172 已修复 Serverless TypeScript 编译与 Hobby 函数数量限制，Preview Checks 全部通过）
+> 最后更新：2026-08-15（服务端自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 已上线；reconciliation 开始记录 GitHub 调用成本）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -14,15 +14,15 @@ PR Helper 是 GitHub-first 的 PR / Release Control Tower。用户以项目 Lane
 - 多路径汇聚门禁：下游步骤可等待多个上游路径全部合并且合并后检查成功。
 - Lane 上下拖动、键盘/按钮排序和项目状态筛选。
 
-当前不提供任意 DAG 编辑器、流程模板市场或默认开启的自动化执行。按步骤配置的自动 PR/合并/推进方案已确认；服务端自动创建 PR 已在生产端到端跑通；逐步骤自动合并已在本地落地（见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)《第 5 阶段：逐步骤自动合并设计》），待部署后进行真实 GitHub 验收；合并后自动推进仍未实现。
+当前不提供任意 DAG 编辑器、流程模板市场或默认开启的自动化执行。按步骤配置的自动 PR/合并/推进方案已确认；服务端自动创建 PR 与逐步骤自动合并均已在生产端到端跑通（见《2026-08-15 生产实测结论》）；合并后自动推进仍未实现。
 
 ## 当前整体评估
 
-- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
-- **功能质量：8/10**。流程 CRUD、Lane 看板、动态来源、多路径汇聚、PR 创建/合并、五类门禁、合并后 Actions/部署状态、失败恢复和审计均已具备；后台自动创建 PR 待线上真实验证。
+- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（412 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
+- **功能质量：8.5/10**。流程 CRUD、Lane 看板、动态来源、多路径汇聚、PR 创建/合并、五类门禁、合并后 Actions/部署状态、失败恢复和审计均已具备；后台自动创建 PR 和逐步骤自动合并已有生产成功记录。
 - **产品完善度：7.5/10**。个人使用和小团队发布控制塔已可用；多账号权限、private/organization 边界、Web Push 关闭页面投递和部署回滚仍需外部条件验收。
-- **生产准备度：7/10**。主链路已有真实 Production 证据，但自动化 PR、健康检查/失败部署投影、确认式回滚和部分协作能力不能仅凭本地测试视为通过。
-- **结论：综合 7.5/10**。产品已超过 MVP，可继续作为受控生产工具使用；下一步优先完成后台自动创建 PR 的 Preview/Production 验收和剩余外部条件验收，不建议立即投入画布、模板市场或自动合并。
+- **生产准备度：7.5/10**。主链路和两级自动化都已有真实 Production 证据；健康检查/失败部署投影、确认式回滚和部分协作能力不能仅凭本地测试视为通过。GitHub 调用预算是当前唯一还在影响自动化可靠性的工程问题。
+- **结论：综合 8/10**。产品已超过 MVP，可继续作为受控生产工具使用；下一步优先收敛 reconciliation 的 GitHub 调用成本，再完成剩余外部条件验收，不建议立即投入画布或模板市场。
 
 ## 当前架构
 
@@ -82,7 +82,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - 稳定阶段决策：服务端统一输出 `locked`、`waiting`、`checks-failed`、`needs-approval`、`ready-to-merge`、`ready-to-create` 和 `merged` 决策，待办队列与阶段状态共用同一套判断。
 - 保存并发保护：流程版本使用数据库事务锁和版本号校验，检测到其他窗口更新时拒绝覆盖。
 - 请求安全保护：受保护 API 校验浏览器来源并按登录用户/操作限流；创建 PR 前检查同一 Source → Target 的开放 PR，Actions 重试和部署回滚使用稳定事件键去重。
-- 自动化方案：已确认“阈值触发 → AI/PR → 门禁 → 按步骤合并 → 合并后门禁/部署 → 下一步”的产品方案，第一阶段不使用画布，详情见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。`024`–`026` 已执行，服务端加密 AI 凭据、偏好、步骤规则快照、幂等动作队列和后台自动创建 PR 已在本地实现；Webhook、Cron 和 inbox reconciliation 在 `ready-to-create` 时可触发，部署后待真实验收。每个步骤可在流程详情页设置 1–20 的新提交触发阈值，只有 `aheadBy >= 阈值` 才会尝试自动创建 PR；流程编辑页不显示该配置。自动创建 PR 必须同时满足服务端自动流程凭据可用、AI 自动生成标题/描述、自动确认创建和有效规则快照，任一缺失时开关不可启用。条件满足只解除开启资格，不会自动勾选，必须用户主动点击。AI 生成失败时自动动作进入 `paused`，保留脱敏原因；用户可重新生成或手填标题/描述，确认后再 Unpause 继续原动作，不采用未经确认的兜底文案。自动合并的第 5 阶段已于 2026-08-14 在本地落地，待部署验收：按步骤勾选框位于流程详情页「新提交数达到」右侧，策略与自动创建**状态独立**（互不清除，可只开自动合并），但**界面可勾选条件与自动创建对齐**（同样要求四项 AI 前置，另加 `pull-merge` 权限）；该对齐只在界面，服务端入队不校验 AI 前置。只做 merge commit 且必带 `sha = pull.head.sha`、`mergeable_state='behind'` 只暂停不自动 update branch、失败次数达 `recoveryPolicy.maxRetries` 后停在 `paused` 不再自动重排、PR 已 merged 记幂等成功。Production 自动回滚仍不做。勾选自动创建或自动合并从关变开时，保存路径会打上 `reconcile_pending_since` 并立即触发一次校准，先有提交/先有 PR、后勾选的情形不再等下一次 push；若该次勾选会立即产生动作（有待创建的提交或有开着的 PR），界面先弹确认并写明源、目标与 PR 编号，取消则不保存——这个确认就是 `AGENTS.md` 第 5 条要求的明示用户动作。门禁不在界面预判，仍由服务端 `automationMergeOutcome` 权威判定。勾选后的反选是尽力而为而非取消保证：执行器认领动作后会重读工作流 payload，反选若已落库则动作抛「策略已失效」，但窗口只有 push 到 webhook 投递的 1–3 秒。
+- 自动化方案：已确认“阈值触发 → AI/PR → 门禁 → 按步骤合并 → 合并后门禁/部署 → 下一步”的产品方案，第一阶段不使用画布，详情见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。`024`–`026` 已执行，服务端加密 AI 凭据、偏好、步骤规则快照、幂等动作队列和后台自动创建 PR 已在本地实现；Webhook、Cron 和 inbox reconciliation 在 `ready-to-create` 时可触发，部署后待真实验收。每个步骤可在流程详情页设置 1–20 的新提交触发阈值，只有 `aheadBy >= 阈值` 才会尝试自动创建 PR；流程编辑页不显示该配置。自动创建 PR 必须同时满足服务端自动流程凭据可用、AI 自动生成标题/描述、自动确认创建和有效规则快照，任一缺失时开关不可启用。条件满足只解除开启资格，不会自动勾选，必须用户主动点击。AI 生成失败时自动动作进入 `paused`，保留脱敏原因；用户可重新生成或手填标题/描述，确认后再 Unpause 继续原动作，不采用未经确认的兜底文案。自动合并的第 5 阶段已于 2026-08-14 落地并于 2026-08-15 在生产验证通过（见《2026-08-15 生产实测结论》）：按步骤勾选框位于流程详情页「新提交数达到」右侧，策略与自动创建**状态独立**（互不清除，可只开自动合并），但**界面可勾选条件与自动创建对齐**（同样要求四项 AI 前置，另加 `pull-merge` 权限）；该对齐只在界面，服务端入队不校验 AI 前置。只做 merge commit 且必带 `sha = pull.head.sha`、`mergeable_state='behind'` 只暂停不自动 update branch、失败次数达 `recoveryPolicy.maxRetries` 后停在 `paused` 不再自动重排、PR 已 merged 记幂等成功。Production 自动回滚仍不做。勾选自动创建或自动合并从关变开时，保存路径会打上 `reconcile_pending_since` 并立即触发一次校准，先有提交/先有 PR、后勾选的情形不再等下一次 push；若该次勾选会立即产生动作（有待创建的提交或有开着的 PR），界面先弹确认并写明源、目标与 PR 编号，取消则不保存——这个确认就是 `AGENTS.md` 第 5 条要求的明示用户动作。门禁不在界面预判，仍由服务端 `automationMergeOutcome` 权威判定。勾选后的反选是尽力而为而非取消保证：执行器认领动作后会重读工作流 payload，反选若已落库则动作抛「策略已失效」，但窗口只有 push 到 webhook 投递的 1–3 秒。
 - 自动化进度展示方案：流程详情页将增加按步骤的进度条，明确显示已完成、当前、上一步、下一步及暂停原因；状态必须来自服务端统一阶段决策和动作队列。多路径汇聚只有所有前置路径完成后才解锁，人工合并不会显示为自动合并中。该进度条与 AI 接管、Unpause 一并列入后续代码实现和验收。
 - AI 失败节点交互已确定：进度条放在每个步骤的“自动创建 PR”控制区下方；AI 生成失败节点点击后打开接管弹窗，用户可重新生成或手填标题/描述，点击“确认并继续自动流程”后恢复原动作。内容确认不会立即把步骤标绿；必须等 PR 创建和全部 GitHub 门禁/合并后部署条件完成，节点才变绿并激活下一步。详细 Tooltip、弹窗字段、服务端校验和幂等恢复规则见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。
 
@@ -112,6 +112,35 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - 服务端模块不得引入任何顶层读 `import.meta.env` 的浏览器模块：该越界曾使 `/api/github/session` 在模块加载阶段崩溃并返回 `FUNCTION_INVOCATION_FAILED`，现由源码守卫测试沿相对导入链检查。
 - GitHub App 已订阅 Push、Pull request、Pull request review、Check run、Check suite、Status 与 Workflow run 事件。沙箱 PR #11 重开事件在 GitHub Recent Deliveries 返回 `202`（2.73 秒）；生产详情页未手动刷新，在下一个轮询周期自动展示 `feature/webhook-live-e2e-2 · PR #11`，Webhook 自动投影验收通过。
 - “重新同步”在真实全量 reconciliation 下约需 150 秒；当前以 180 秒超时保障结果正确，后台同步和局部更新体验仍是后续优化项。
+
+### 2026-08-15 生产实测结论
+
+生产库直接查询（时间为 UTC）：
+
+- **自动创建 PR：47 个动作 `succeeded`**，1 个 `paused`（`The operation was aborted due to timeout`）。
+- **逐步骤自动合并：37 个动作 `succeeded`**，10 个 `paused`、2 个 `queued`。10 个 `paused` 中 7 个原因是 `门禁尚未全绿`，属设计正确的行为；异常只有 3 个，全是 GitHub 侧超时或 `CONNECT_TIMEOUT`。至此第 5 阶段在生产端到端跑通。
+- 近 12 小时 sweep 分布：`cron` 120 次全部 success，`webhook` 100 success / 443 skipped / 39 degraded / 5 failure，另有 2 次停在 `running`。
+
+新增的调用成本遥测第一次量化了 reconciliation 的 GitHub 开销，近 12 小时：
+
+| 触发 | sweep 次数 | GitHub 调用 | 平均 GitHub 耗时 |
+| --- | --- | --- | --- |
+| `cron` | 120 | 8,275 | 16.3 秒 |
+| `webhook` | 131 | 1,095 | 1.8 秒 |
+| `manual` | 10 | 54 | 1.3 秒 |
+
+**约 88% 的调用配额由定时校准消耗**，而不是 Webhook。这解释了 2026-08-14 installation 配额被打爆、自动合并被迫暂停的现象，也说明「一次投递扫多轮」提升覆盖率的同时抬高了配额压力。收敛调用预算是下一阶段第一优先级，方案未定，不应在没有预算模型前继续加密扫描频率。
+
+### 2026-08-15 本批修复
+
+- **失败保存不再丢配置**：保存队列在请求进行中合并的编辑，遇到该请求失败时会被静默丢弃，导致用户勾选的自动合并从未到达服务端；现在失败会清理待存标记并回报具体流程 id，由界面重新读取服务端状态对齐，勾选框不再显示服务端没有接受过的开关。
+- **实时校准不再拖垮保存**：保存响应会等待一次实时校准，而原先的预算只覆盖阶段工作，租约等待和周边查询在预算之外，生产上曾把保存从 5 秒拖到 400 秒以上并丢写；现在整轮 sweep 受同一预算约束，超时即记 `deferred` 交给下一次触发。
+- **重试预算不再被供方拒绝消耗**：`attempts` 每次认领即自增，配额耗尽或请求超时这类从未得到 GitHub 裁决的拒绝会白白花掉 3 次额度并永久退役自动合并；现在这类原因在暂停时退回一次尝试，只有 GitHub 真正给出裁决（冲突、落后、策略失效）才计入。
+- **无版本历史的老流程恢复可保存**：版本机制上线前建的记录 `payload.version` 为空且 `workflow_versions` 无任何行，而并发校验要求客户端回显一个它从未拿到的版本号，导致这些记录永久无法保存、刷新也无法自愈。`workflowSaveConflicts` 现在把「无版本历史」视为可认领。生产已确认修复生效：33 个流程 version-less 记录归零。
+- **排序不再回退版本**：排序取自拖动前的看板快照，期间落地的保存响应会被整体覆盖回旧版本号，下一个请求即被判为冲突。`applyWorkflowOrder` 改为只把位置贴到当前内存记录上，并把整盘并发保存改为串行。生产已确认修复生效：33 个流程的 position 唯一且连续（0–32）。
+- **自动化队列自愈**：新增计划端点在每次校准 sweep 之后 drain 卡住的动作，恢复不再依赖新的 push 事件；drain 中执行抛错的动作会被 park，避免后续 sweep 反复重试同一个。
+- **部署门禁可维护**：门禁可就地编辑而非删除重建、可从仓库实际的 Actions 工作流重新派生和同步、新建流程时按所选仓库预填候选；没有任何 Actions 工作流的仓库不再被塞入默认门禁，清空配置的步骤会退役对应数据行。
+- 其余：详情页刷新一律触发服务端校准；未设预算的 sweep 等待自身阶段结束再报完成；等待中的门禁保持 `queued` 而不是 `paused`；`duration_ms` 不再把回收前的等待计入耗时。
 
 ## 数据边界
 
@@ -162,7 +191,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 ## 测试覆盖
 
-- 本地单元/服务端测试：`npm test` 运行 24 个文件 / 229 个测试（含 cron 分批、自动化动作身份归一化、创建门禁与执行器终态用例）；`npx tsc --noEmit`、`npm run lint` 和 `git diff --check` 同时通过。
+- 本地单元/服务端测试：`npm test` 运行 27 个文件 / 412 个测试；`npx tsc --noEmit` 和 `npm run build` 同时通过。
 - 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉、创建/合并 PR、删除流程、确认式部署回滚和操作审计查询。它验证真实 DOM、二次确认和浏览器请求负载，不替代真实 GitHub 写入、门禁和部署验收。
 - 已新增流程保存队列回归：连续编辑会串行使用服务端返回的新版本，且不会由旧响应覆盖最新编辑；真实跨窗口乐观锁冲突仍会明确报错。
 - Production E2E 通过项目与尚未通过的集成项目均以 [验证报告](verification-report.md) 为准。
@@ -260,13 +289,15 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 > 详细待执行/待验证清单见上方「待执行与待验证清单」章节，包含数据库迁移、代码部署、发布回归、权限回归和新功能验证的具体步骤。
 
+0. **收敛 reconciliation 的 GitHub 调用预算（当前第一优先级，方案待设计）**。遥测显示定时校准占用约 88% 的调用配额（12 小时 8,275 次、每轮约 69 次），已经导致过 installation 配额耗尽和自动合并被迫暂停。设计时至少要定清楚：是否只扫带 `reconcile_pending_since` 标记的工作流、每轮是否设调用上限、以及覆盖率与配额之间取什么折中。在有预算模型之前不要继续提高扫描频率。
+
 1. private / organization 安装边界、Web Push、团队多账号协作、加密同步线上回归与数据保留 Cron：详见上方「依赖外部条件的待办」。
 2. 完整发布回归：已通过 `feature → dev → main`、PR Actions、应用内合并与双平台 Preview/Production 部署跟踪；健康检查、失败部署投影和 Production 回滚仍待实测。 ⏳ 部分完成
 3. 对 public、private、organization 仓库执行一轮 GitHub App 权限回归。 🟡 public 通过 / ⏳ private、organization 待验证
 4. 失败恢复已由服务端校验重试次数、冷却时间、当前提交和失败 Actions；仍不自动修改代码或合并生产。
 5. 加密云同步已接通密文上传/下载原型，仍需补齐密钥轮换、冲突处理和线上回归后再扩大使用范围。 🟡 待加固
 6. 阶段状态、事件和部署历史已切换到稳定 `stage_id`。 ✅ 019 已执行，并已通过当前 Production 流程回归。
-7. PR 流程自动化：服务端加密 AI 凭据、步骤级规则快照、`025` 运行快照/幂等动作队列和 `026` 自动化偏好已落地；Webhook、Cron 和 inbox reconciliation 会在 `ready-to-create` 自动入队，执行器会重校验统一阶段决策、服务端自动生成/确认、规则快照、新提交和开放 PR。自动创建 PR 受服务端凭据、AI 自动生成、自动确认和有效生成规则四项前置条件保护。合并后门禁与下一步解锁已经生效：`stageIsUnlocked` 要求前序步骤 `pull_state='merged'` 且 `checks_state='success'`，合并瞬间 `checks_state` 重置为 `pending` 由合并后 Actions 填回，`mergeChecksWithDeployments` 还把部署状态并入该字段。自动合并本身已在本地落地：`automationMergeOutcome` 只在 GitHub 判定 `mergeable=true` 且 `mergeable_state='clean'`、门禁全绿、审批达标时返回合并，其余一律 `paused`（含 `'behind'`，不自动 update branch）；`automationRetryIsExhausted` 按 `recoveryPolicy.maxRetries` 封顶重排；`merge-pr` 用独立幂等键，PR 已 merged 记幂等成功。待部署验收。方案与验收标准见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。🔴 2026-08-13 生产查询确认服务端自动创建实际未生效，原因链、修复方案与回归清单见 [`docs/auto-create-pr-remediation.md`](auto-create-pr-remediation.md)；其中 `P1`–`P6`（身份归一化、失败留痕、cron 分批、统一决策模型、执行器幂等化）已全部合入 `main` 并部署，`P3` 生产验收通过。`P8`（`workflow_automation_actions` 没有 `stage_index` 列，而执行器与队列列表都在 SELECT 它，执行器因此在原子领取动作之前抛错）已改为 JOIN `workflow_automation_runs` 取该列并部署生产，验证生效。`P9`（AI 响应的 markdown 围栏未被正确剥离，`trim()` 写在 `replace()` 之后导致锚点失配）已由 `jsonFromModelText` 修复并部署。✅ 2026-08-14 服务端自动创建 PR 在生产端到端跑通：自动建出 `bayernjf/bayjf#42`，动作 `succeeded` / `attempts=2` / `pullNumber=42`，后续轮转未重复建。仍待验：门禁为红不触发、幂等命中记成功（生产无对应场景，需另造）。
+7. PR 流程自动化：服务端加密 AI 凭据、步骤级规则快照、`025` 运行快照/幂等动作队列和 `026` 自动化偏好已落地；Webhook、Cron 和 inbox reconciliation 会在 `ready-to-create` 自动入队，执行器会重校验统一阶段决策、服务端自动生成/确认、规则快照、新提交和开放 PR。自动创建 PR 受服务端凭据、AI 自动生成、自动确认和有效生成规则四项前置条件保护。合并后门禁与下一步解锁已经生效：`stageIsUnlocked` 要求前序步骤 `pull_state='merged'` 且 `checks_state='success'`，合并瞬间 `checks_state` 重置为 `pending` 由合并后 Actions 填回，`mergeChecksWithDeployments` 还把部署状态并入该字段。自动合并本身：`automationMergeOutcome` 只在 GitHub 判定 `mergeable=true` 且 `mergeable_state='clean'`、门禁全绿、审批达标时返回合并，其余一律 `paused`（含 `'behind'`，不自动 update branch）；`automationRetryIsExhausted` 按 `recoveryPolicy.maxRetries` 封顶重排；`merge-pr` 用独立幂等键，PR 已 merged 记幂等成功。方案与验收标准见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。🔴 2026-08-13 生产查询确认服务端自动创建实际未生效，原因链、修复方案与回归清单见 [`docs/auto-create-pr-remediation.md`](auto-create-pr-remediation.md)；其中 `P1`–`P6`（身份归一化、失败留痕、cron 分批、统一决策模型、执行器幂等化）已全部合入 `main` 并部署，`P3` 生产验收通过。`P8`（`workflow_automation_actions` 没有 `stage_index` 列，而执行器与队列列表都在 SELECT 它，执行器因此在原子领取动作之前抛错）已改为 JOIN `workflow_automation_runs` 取该列并部署生产，验证生效。`P9`（AI 响应的 markdown 围栏未被正确剥离，`trim()` 写在 `replace()` 之后导致锚点失配）已由 `jsonFromModelText` 修复并部署。✅ 2026-08-14 服务端自动创建 PR 在生产端到端跑通：自动建出 `bayernjf/bayjf#42`，动作 `succeeded` / `attempts=2` / `pullNumber=42`，后续轮转未重复建。✅ 2026-08-15 逐步骤自动合并在生产跑通：`create-pr` 47 次成功、`merge-pr` 37 次成功；10 次 `paused` 中 7 次是门禁未全绿的正确行为，另 3 次是 GitHub 超时（`71e6c4fb` 的尝试次数退还即针对这一类）。数据见《2026-08-15 生产实测结论》。仍待验：门禁为红不触发、幂等命中记成功（生产无对应场景，需另造）。
 
 ### 八、非验收类后续开发
 
@@ -279,6 +310,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - **加密同步加固**：已部署 v2 密文格式、v1 兼容读取、口令轮换、设备标识和乐观版本冲突拒绝；`021` 已执行，待线上回归。
 - **数据保留与清理**：已部署 Webhook、密文历史、reconciliation、事件、部署运行和审计日志的 30/90/180/365 天保留策略；现有 Cron 每次受限清理 2,000 条，`022` 已执行，待运行观察。
 - **团队协作闭环**：已部署团队管理界面、成员角色更新/移除、流程共享、共享流程投影和服务端角色强制执行；`023` 已执行。实际多账号协作与 GitHub App 安装边界仍需 Production 验收。
+- **reconciliation 调用预算（未开始，待设计）**：`github_calls` / `github_ms` 遥测已上线，数据显示定时校准吃掉约 88% 的 installation 配额。见「下一阶段优先级」第 0 项。
 - **流程归档 / 静音（未开始，待设计）**：现在只有「保留」和「删除整个流程」两种状态，中间态缺失。沙盒、演示和已下线的流程会长期占据收件箱待办，唯一的消除办法是不可逆删除（级联清空全部状态与历史）。需要一个可逆的「归档 / 静音」态：流程与历史保留可查，但不进动作队列、不参与自动化入队、不发通知。设计时至少要定清楚归档流程是否仍被 cron 校准、是否仍接收 Webhook 投影、以及归档态与团队共享和自动化开关的关系。触发这条需求的具体场景见 [`docs/auto-create-pr-remediation.md`](auto-create-pr-remediation.md) 第三节 P7。
 
 ## 变更日志
