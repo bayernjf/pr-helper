@@ -134,6 +134,32 @@ export function syncedDeployments(workflow: Workflow, actionWorkflows: readonly 
   return [...kept, ...deploymentsForRepository(actionWorkflows, environments, true).filter(deployment => !covered.has(`${deployment.target}:${deployment.provider}`))];
 }
 
+// Detection only adopts a workflow whose name carries its platform, so a repository that deploys through one
+// generically named workflow gets no gate at all and whoever configures it has to know which name to type,
+// which branch to bind and which Environment to reach for. These candidates are filled in from what the
+// repository has so the choice is a confirmation rather than a guess: only workflows that read as deploying,
+// never a rollback, one per branch the flow releases into, and a platform slot that is merely still free.
+export function deploymentSuggestions(workflow: Workflow, actionWorkflows: readonly { name: string }[], environments: readonly string[]): DeploymentConfig[] {
+  const candidates = actionWorkflows.filter(candidate => /deploy/i.test(candidate.name) && !/rollback/i.test(candidate.name));
+  if (!candidates.length) return [];
+  const configured = deploymentConfigs(workflow);
+  const targets = [...new Set(workflow.stages.map(stage => stage.target))];
+  return targets.flatMap((target, targetIndex) => {
+    const environment = targetIndex === targets.length - 1 ? 'production' : 'preview';
+    const bound = configured.filter(deployment => deployment.target === target);
+    const free = (['vercel', 'cloudflare'] as const).filter(provider => !bound.some(deployment => deployment.provider === provider));
+    const offered = candidates.filter(candidate => !bound.some(deployment => deployment.workflowName === candidate.name)).slice(0, free.length);
+    const matchedEnvironments = environments.filter(name => name.toLowerCase().startsWith(environment));
+    const githubEnvironment = matchedEnvironments.length === 1 ? matchedEnvironments[0] : undefined;
+    const taken = new Set<DeploymentConfig['provider']>();
+    return offered.map(candidate => {
+      const provider = free.find(slot => !taken.has(slot) && providerKeywords[slot].test(candidate.name)) || free.find(slot => !taken.has(slot))!;
+      taken.add(provider);
+      return { target, provider, workflowName: candidate.name, environment: environment as DeploymentConfig['environment'], githubEnvironment };
+    });
+  });
+}
+
 // Reconciliation records a run-less row for a configured deployment whose workflow it never found.
 // That row is the only evidence available downstream: the gate it holds shut looks exactly like a
 // deployment that has not started, so the stage it locks has to be able to name it.
