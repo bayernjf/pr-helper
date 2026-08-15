@@ -82,8 +82,10 @@ const providerKeywords: Record<DeploymentConfig['provider'], RegExp> = { vercel:
 // deployment can never match a run, and the gate it holds shuts the pipeline permanently with no run to
 // point at. So a new workflow is seeded from what the repository actually has: an existing default is
 // kept, a single unambiguous provider match is adopted, and anything else is dropped rather than guessed.
-export function deploymentsForRepository(actionWorkflows: readonly { name: string }[], environments: readonly string[]): DeploymentConfig[] {
-  if (!actionWorkflows.length) return defaultDeployments.map(deployment => ({ ...deployment }));
+// An empty list means either that the Actions request failed or that the repository has no workflow, and
+// only the first case justifies falling back to the defaults.
+export function deploymentsForRepository(actionWorkflows: readonly { name: string }[], environments: readonly string[], actionsLoaded = false): DeploymentConfig[] {
+  if (!actionWorkflows.length) return actionsLoaded ? [] : defaultDeployments.map(deployment => ({ ...deployment }));
   const workflowNameFor = (deployment: DeploymentConfig) => {
     if (actionWorkflows.some(candidate => candidate.name === deployment.workflowName)) return deployment.workflowName;
     const matches = actionWorkflows.filter(candidate => providerKeywords[deployment.provider].test(candidate.name));
