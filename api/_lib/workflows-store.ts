@@ -290,8 +290,11 @@ export function automationDrainDecision(action: { state: string; createdAt: stri
   // that never reached a verdict: nothing else requeues `paused`, and three production actions proved that
   // means such a row is never retried once before it ages out.
   if (action.state === 'paused') {
+    // Once a later action covers the same route, that one is the record and this one answers a question
+    // nobody is asking any more. Ordering this after the reason check is what left nine dead rows sitting
+    // in the failure centre, every one of them already followed by an action that succeeded.
+    if (action.hasNewer) return { kind: 'cancel', reason: 'superseded' };
     if (!action.failureReason || automationAttemptWasReached(action.failureReason)) return { kind: 'skip' };
-    if (action.hasNewer) return { kind: 'skip' };
     // Nothing else retries this, so parking it past the window leaves a dead intent in the failure centre
     // for good. Only reachable for a fault that reached no verdict; a verdict stays paused however old.
     if (now - Date.parse(action.createdAt) > AUTOMATION_ACTION_STALE_MS) return { kind: 'cancel', reason: 'stale' };

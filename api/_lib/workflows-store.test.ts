@@ -1156,8 +1156,16 @@ describe('automationDrainDecision', () => {
     expect(automationDrainDecision(action({ state: 'paused', failureReason: '门禁尚未全绿（当前 failure）', createdAt: '2026-08-14T13:00:00.000Z', updatedAt: '2026-08-14T13:30:00.000Z' }), now)).toEqual({ kind: 'skip' });
   });
 
-  it('leaves a paused action a later one already covers', () => {
-    expect(automationDrainDecision(action({ state: 'paused', failureReason: 'GitHub 请求超时，请稍后重试', updatedAt: '2026-08-15T01:30:00.000Z', hasNewer: true }), now)).toEqual({ kind: 'skip' });
+  // Every one of the nine rows the failure centre showed as needing attention was superseded, and in
+  // every case the newer action for the same route had already succeeded. Nothing retired them: the
+  // paused branch tested the failure reason first, so a verdict returned `skip` before it could ever be
+  // recognised as superseded, and the newest row is the record from that point on.
+  it('cancels a paused action a later one already covers', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: 'GitHub 请求超时，请稍后重试', updatedAt: '2026-08-15T01:30:00.000Z', hasNewer: true }), now)).toEqual({ kind: 'cancel', reason: 'superseded' });
+  });
+
+  it('cancels a superseded verdict too, because the newer action is the record now', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: '门禁尚未全绿（当前 failure）', createdAt: '2026-08-14T13:00:00.000Z', updatedAt: '2026-08-14T13:30:00.000Z', hasNewer: true }), now)).toEqual({ kind: 'cancel', reason: 'superseded' });
   });
 
   // A fault that throws before the executor's claim charges no attempt, so the cap cannot bound this on
