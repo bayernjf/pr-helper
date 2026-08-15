@@ -1774,9 +1774,23 @@ export function reconciliationRunInterrupted(run: { state: string; startedAt: st
 // safety net for whatever did not finish.
 export const REALTIME_RECONCILE_BUDGET_MS = 8000;
 
-export function realtimeReconcileBudgetMs(environment: Record<string, string | undefined>) {
+// Nobody reads a webhook response, so a delivery is the one realtime trigger where finishing the
+// sweep beats answering early. At the interactive budget a third of deliveries yielded and dropped
+// most of the stages they had already picked up, which is what left a merged PR's projection stale
+// for ten minutes.
+export const WEBHOOK_RECONCILE_BUDGET_MS = 25_000;
+
+export function realtimeReconcileBudgetMs(environment: Record<string, string | undefined>, trigger?: ReconciliationTrigger) {
   const configured = Number(environment.REALTIME_RECONCILE_BUDGET_MS);
-  return Number.isFinite(configured) && configured > 0 ? configured : REALTIME_RECONCILE_BUDGET_MS;
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  return trigger === 'webhook' ? WEBHOOK_RECONCILE_BUDGET_MS : REALTIME_RECONCILE_BUDGET_MS;
+}
+
+// The budget is what the sweep yields to; this is only a backstop for I/O that never settles, so it
+// sits well above the budget and well under the platform limit. Doubling the budget did neither: it
+// fired close enough to the budget to abandon live sweeps, leaving a run row nothing could finish.
+export function realtimeReconcileCeilingMs(budgetMs: number) {
+  return Math.min(budgetMs + 15_000, AUTOMATION_FUNCTION_CEILING_MS - 15_000);
 }
 
 export async function withStageDeadline<T>(work: Promise<T>, deadlineMs?: number): Promise<{ outcome: 'completed'; value: T } | { outcome: 'deferred' }> {
@@ -1895,12 +1909,12 @@ export async function reconcileWorkflowStages(environment: Record<string, string
 // Both realtime routes want the same thing: reconcile within the request budget, and never fail the
 // request over it, because GitHub records a failed delivery and retries the whole webhook.
 export async function reconcileRealtime(environment: Record<string, string | undefined>, filter: ReconciliationFilter, trigger: ReconciliationTrigger): Promise<{ outcome: 'completed' | 'deferred' | 'failed'; reconciled: number }> {
-  const budgetMs = realtimeReconcileBudgetMs(environment);
+  const budgetMs = realtimeReconcileBudgetMs(environment, trigger);
   // The stage budget covers stage work only: lease waits and the queries around it sit outside it, so a
   // contended sweep still ran for minutes. A save waits for this call before it answers, which turned a
   // slow sweep into a lost toggle. Bound the whole sweep and let the next trigger finish what is left.
   const sweep = reconcileWorkflowStages(environment, filter, trigger, { deadlineMs: budgetMs }).catch(() => ({ outcome: 'failed' as const, reconciled: 0 }));
-  const raced = await withStageDeadline(sweep, budgetMs * 2);
+  const raced = await withStageDeadline(sweep, realtimeReconcileCeilingMs(budgetMs));
   return raced.outcome === 'completed' ? raced.value : { outcome: 'deferred', reconciled: 0 };
 }
 
