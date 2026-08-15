@@ -34,7 +34,7 @@
 
 ## 2026-08-15 生产实测与本批修复
 
-- 两条自动化链路都已在生产跑通：`create-pr` 47 次成功 / 1 次 `paused`，`merge-pr` 37 次成功 / 10 次 `paused` / 2 次仍在 `queued`。10 次 `paused` 里 7 次是门禁未全绿的正确行为，另 3 次是 GitHub 超时（`CONNECT_TIMEOUT`）。仍未验：门禁为红不触发、幂等命中记成功（生产无对应场景，需另造）。
+- 两条自动化链路都已在生产跑通：`create-pr` 47 次成功 / 1 次 `paused`，`merge-pr` 37 次成功 / 10 次 `paused` / 2 次仍在 `queued`。10 次 `paused` 里 7 次是门禁未全绿的正确行为，另 3 次是 GitHub 超时（`CONNECT_TIMEOUT`）。门禁为红一项已在沙箱验完，结论是守卫落在合并侧、创建侧不可达，原措辞应改为「门禁为红不自动合并」；顺带暴露 ruleset 审批要求不可见并已修（见 remediation 第十节）。仍未验：幂等命中记成功（生产无对应场景，需另造）。
 - 新增 `reconciliation_runs.github_calls` / `github_ms` 遥测后，真正的剩余工程问题被量化出来：12 小时内定时校准跑 120 轮共 8,275 次 GitHub 调用（每轮约 69 次、平均 16.3 秒），webhook 只有 1,095 次、manual 54 次——约 88% 的 installation 配额来自定时扫描，这正是 08-14 配额耗尽、自动合并被迫暂停的来源。**收敛这份预算是当前第一优先级，方案待设计**，在有预算模型之前不要继续提高扫描频率。
 - 本批已修并上线：保存失败不再丢弃配置；实时 sweep 不再拖慢保存；重试预算不再花在 provider 明确拒绝上；无版本历史的历史流程重新可保存（生产确认 version-less 记录归零）；排序不再回滚版本号（生产确认 33 个流程 position 唯一、跨 0–32）；自动化队列 drain 具备自愈与抛错停机保护。
 - 数据与结论细节见 [`docs/current-state.md`](docs/current-state.md) 的《2026-08-15 生产实测结论》与《2026-08-15 本批修复》。
@@ -60,7 +60,7 @@
 4. **失败中心 9 条假待办已修，生产已验证（无待办，仅留结论）**。首页「需要处理」显示十项，核对后 9 项失效：全部是被同路线更新动作取代的 `paused` 行，取代它们的那条都已 `succeeded`（ids 11/13/15/20/22/58/71/80/99）。根因是 08-15 新加的 `paused` 分支先判失败原因、GitHub 裁决直接 `skip`，永远走不到 `hasNewer`，而 `queued` / `running` 本来就有 `superseded` 出口。已把 `hasNewer` 提到该分支首位判 `cancel / superseded`。真待办只有 1 项：`E2E Failure and Dynamic Rule` 的 `fix/failure-e2e`（PR #4）Actions 失败。**2026-08-15 14:50 部署后核对**：九条在同一个 drain 批次里被清成 `cancelled / 已被后续提交的自动化动作取代`（约 0.75 秒一条），库里已无任何 `paused` 行，失败中心只剩那 1 项真待办。
 5. **时钟已搬进数据库，生产已验证（无待办，仅留结论）**。近 7 天相邻 cron 送达的间隔：p50 46 分、p90 82 分、最大 152 分，而一次送达只覆盖约 7.5 分钟（`SWEEPS: 6` × 75 秒），约 85% 的时间没有 drain 在跑；被回收实例留下的已领取行本该 `AUTOMATION_ACTION_ABANDON_MS`（120 秒）后就能接手，实际最坏等 2.5 小时。迁移 030 用 `pg_cron` + `pg_net` 打这两个端点：**drain `*/2`**（对齐 abandon 窗口，队列空时不产生 GitHub 调用）、**reconcile `*/5`**（每次扫掠约 69 次调用，5 分钟一次 = 828 次/小时；2 分钟则单这一项 2070 次/小时，直接压第 6 项那条 2500 次/小时的线，故不取）。密钥不进仓库：迁移只建 `public.pr_helper_cron_ping(endpoint)`（`security definer`），调用时从 Vault 取 `pr_helper_cron_secret`，取不到就抛错——否则只会在 `net._http_response` 里留一片 401，看着像端点坏了。`timeout_milliseconds` 给 90 秒，因为 pg_net 默认 5 秒会把正常干完活的调用记成超时。Actions 作业保留为兜底但 `SWEEPS` 6 → 1（重叠无害：抢不到 `reconciliation_leases` 的触发记 `skipped`）。**不采用「把 Actions 循环拉长」**：仓库是 public、分钟数免费，但 p90 82 分、最大 152 分超出任何单次作业的合理循环时长，且计划工作流在仓库连续 60 天无提交后会被 GitHub 自动停用，覆盖率仍挂在会漂移的调度器上。**你要做的一次性操作**：在 Supabase SQL Editor 执行 `select vault.create_secret('<CRON_SECRET 的值>', 'pr_helper_cron_secret');`，然后应用迁移 030。**2026-08-15 17:06 UTC 上线后核对**：`net._http_response` 前 5 条全是 200,时间落在 17:06 / 17:08 / 17:10×2 / 17:12——drain 每 2 分钟、reconcile 每 5 分钟(17:10 两条即两个作业同刻),无 401、无超时。17:10:03 的 cron 扫掠成功校准 10 个步骤、57 次调用。**实测调用量比按 `*/5` 折算的高**:17:06–17:39 共 33 分钟内 cron 8 次扫掠 522 次调用、webhook 68 次 155 次调用,合计约 1230 次/小时,约为 2500 警戒线的一半。多出来的扫掠来自 Actions 兜底作业的送达(它现在每次只扫一遍,但送达本身会叠在 `*/5` 之上)。若日后逼近警戒线,第一个可动的杠杆是把兜底作业的 `schedule` 放稀或让它只打 drain 不打 reconcile。密钥同时轮换过(旧值在 Vercel 上是 Sensitive、取不回来),新值只存在于 Vercel、GitHub Secret、Supabase Vault 和 `~/.config/pr-helper/cron-secret.txt`,未进仓库。只读凭据 `prh_readonly` 看不到 `cron` schema(`permission denied`),`net._http_response` 可读,后续核对走后者。
 6. **drain 稳定观察若干天后，删掉 sweep 内联的执行路径**，让自动化动作只剩一条执行入口，不再有两套会各自漂移的实现。
-7. 仍未验的两项自动化场景：门禁为红不触发、幂等命中记成功（生产无对应场景，需另造）。
+7. 仍未验的自动化场景只剩幂等命中记成功（生产无对应场景，需另造）。门禁为红一项已在沙箱验完，见 remediation 第十节。
 
 **二、已明确后置**
 
@@ -181,7 +181,7 @@ AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 P
 在上述生产验收通过后，建议顺序为：
 
 1. 收敛 reconciliation 的 GitHub 调用预算（方案待设计）：定时扫描占约 88% 的配额，先定清楚是否只扫带 `reconcile_pending_since` 标记的工作流、每轮是否设调用上限、覆盖率与配额取什么折中。
-2. 后台自动创建 PR 与自动合并：生产已跑通；补齐门禁为红不触发、幂等命中记成功两项需另造场景的验收。
+2. 后台自动创建 PR 与自动合并：生产已跑通；门禁为红一项已在沙箱验完并顺带修掉 ruleset 审批不可见，仅剩幂等命中记成功需另造场景。
 3. 浏览器 E2E：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影已有真实 delivery 证据。
 4. 操作审计：`020` 已执行；Production 已完成流程更新、创建/合并 PR 记录读取及 CSV 导出可用性验收。✅
 5. 加密云同步加固：已部署，`021` 已执行；待验证 v1/v2 兼容、口令轮换、冲突拒绝和历史恢复。

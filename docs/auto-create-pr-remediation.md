@@ -180,7 +180,7 @@
 3. 第二节那 2 条滞留动作变为 `succeeded` 并带 `pullNumber`，或 `paused` 且带可读 `failure_reason`——**不允许再停在 `queued` 且 `attempts=0`**。
 4. 在 `feature/20260719` 推一个新提交，观察自动创建是否在一个轮转周期内触发，且只创建一个 PR。
 5. 对已合并且有新提交的路由，确认收件箱出现待办、抽屉按钮可用，且两者判断一致。
-6. 门禁为红的路由确认**没有**触发自动创建。
+6. 门禁为红的路由确认**没有**触发自动合并（创建侧见第十节：无 PR 时门禁必然是 `unknown`，该守卫不可达）。
 7. 幂等验证：连续两次触发同一 `source → target`，确认第二次记为成功幂等命中而非 paused。
 
 **已执行结果（2026-08-13 至 08-14，`main` = `bc23f642`）**
@@ -192,7 +192,7 @@
 | 3 滞留动作不再停在 `queued`+`attempts=0` | **通过**：P9 部署后动作 3 为 `succeeded` / `attempts=2` / `payload.pullNumber=42`（`updated_at = 2026-08-14 00:20:08`）。P8 部署后的中间态是 `paused` / `attempts=1`，执行器首次真正越过原子领取。原始记录（P8 之前）如下——**未通过，但暴露了 P8**：动作 3 拿到了可读原因 `column "stage_index" does not exist`（`updated_at = 23:24:37`），说明 P1/P2 生效、执行确实被触发，卡点在 P8。动作 1、2 的 `headSha` 已过期，不会再被执行 |
 | 4 自动创建在一个轮转周期内触发且只建一个 PR | **通过**：P9 部署后第 3 轮 `workflow_dispatch` 建出 `bayernjf/bayjf#42`（`feature/20260719 → dev`，作者 `app/pr-helper-by-bayernjf`，`2026-08-14 00:20:08`），第 4、5 轮未重复建。`workflow_operation_audit_logs` 中 `metadata.via = 'workflow-automation'` 的记录只有一条（id 1347）。P8 部署后、P9 之前连跑 5 轮（reconciled 8/13/11/10/15）无 PR，卡点当时在 P9 |
 | 5 收件箱与抽屉判断一致 | 待你在浏览器确认 |
-| 6 门禁为红不触发自动创建 | 待验：现有生产数据里没有「合并后门禁为红且 `ahead_by > 0`」的步骤，需要另造场景 |
+| 6 门禁为红不触发自动创建 | **已验，但结论要改写**：守卫在合并侧生效、创建侧不可达。见第十节 |
 | 7 幂等命中记成功 | 未走到：第 4、5 轮之所以没重复建 PR，是因为动作已是 `succeeded`，`enqueueServerAutoCreate` 直接返回 null、根本没重新入队，比幂等分支更靠前就拦住了。要验 `automationCreateOutcome` 的 `idempotent` 分支需要另造场景（如手动先建同路由 PR 再入队）|
 
 AI 生成的正文严格按生成规则模板输出（Overview / Changes / Related Issues / Test Info / Risk Notes），确认围栏剥离正确、规则快照生效。
@@ -259,3 +259,15 @@ AI 生成的正文严格按生成规则模板输出（Overview / Changes / Relat
 - **勾选时确认**：新增纯函数判定「这次勾选是否会立即产生动作」（有待创建的提交 / 有开着的 PR），会立即产生动作时先弹确认，写明源、目标与 PR 编号。`AGENTS.md` 第 5 条要求的「明示的用户动作」由这个确认满足；没有它的静默立即合并才是违反。门禁不在 UI 侧预判（第 4 条），文案只说「将立即尝试合并，门禁未通过则暂停」。
 
 顺带明确一条此前未写明的语义：勾选后的反选是**尽力而为**，不是取消保证。两条执行路径在认领动作后都重读工作流 payload（`executeWorkflowAutomationActionForUser` 与 `runAutomationMergeAction:255`），反选若在认领前落库会让动作抛「策略已失效」；但入队与执行同请求同步完成，窗口只有 push 到 webhook 投递的 1–3 秒。不为此新增撤销队列或勾选宽限期——队列本就不停留，宽限期会让每次正常触发都变慢。
+
+## 十、门禁为红场景的实测结论（2026-08-15，沙箱 `bayernjf/pr-helper-e2e-sandbox`）
+
+在 `fix/red-gate-e2e` 上挂一个分支内生效的必红检查（`.github/workflows/red-gate-e2e.yml`，`on: push` 且缺少标记文件就 `exit 1`），观察 `E2E Failure and Dynamic Rule` 的 `fix/* → dev` 步骤。结果分成三段，前两段推翻了原来的措辞。
+
+**创建侧的红门禁守卫不可达。** 分支的必红检查先失败，随后自动化仍然把 PR 建了出来（动作 202 `create-pr` / `succeeded`，产出 PR #12，作者 `app/pr-helper-by-bayernjf`）。原因不是时序而是结构：无 PR 的步骤在投影里 `checks_state` 被硬编码为 `'unknown'`、`head_sha` 为 `NULL`，检查运行只在存在 PR 头 SHA 时才去拉，`check_run` / `check_suite` webhook 也只用来限定扫描范围。因此 `canCreateNext` 里的 `checks_state !== 'failure'` 对一条刚推上来的分支永远不成立。这一条并非缺陷：PR 本身就是红灯该被看见的地方，「不推进」的语义落在合并上。**验收项 6 的正确表述是「门禁为红不自动合并」。**
+
+**合并侧的守卫正确生效。** PR 建出后门禁是真实的 `failure`，动作 204 `merge-pr` 落到 `paused` / `门禁尚未全绿（当前 failure）`。
+
+**门禁转绿后 paused 动作正确让位。** 补上标记文件让检查转绿，204 在一个 drain 周期内变为 `cancelled` / `已被后续提交的自动化动作取代`，由携带新 head SHA 的 205 接手——本轮部署的「后续动作取代 paused 动作」修复因此也在真实新增场景上得到验证，而不只是历史数据回填。
+
+**顺带暴露的缺陷：ruleset 里的审批要求不可见。** 205 停在 `GitHub 合并状态为 blocked` 并反复重试（`attempts=5`）。沙箱 `dev` 的 1 个审批要求写在 **ruleset**，经典分支保护里没有 `required_pull_request_reviews`，而投影只读 `/branches/{target}/protection`，于是 `required_approvals` 落库为 0。`automationMergeOutcome` 因此跳过「PR 还需要 N 个 Approval」那条分支，掉到兜底的 `blocked`——而 `blocked` 标记为可重试，等于把重试预算花在只有人能清除的门槛上。已加 `requiredApprovalsFromProtection`，并行读取 `/rules/branches/{target}` 并取两者较严者；合并后的 PR 跳过该调用，与既有的保护与评审调用同一条件。
