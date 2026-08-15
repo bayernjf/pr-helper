@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, replaceDeployment, defaultDeployments, deploymentsForRepository, syncedDeployments, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type Workflow } from './workflow';
+import { addDeployment, replaceDeployment, deploymentSuggestions, defaultDeployments, deploymentsForRepository, syncedDeployments, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type Workflow } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -504,6 +504,35 @@ describe('syncedDeployments', () => {
   it('changes nothing on a second run, so the button is safe to press twice', () => {
     const once = syncedDeployments(flow([...defaultDeployments]), wordBase, [], true);
     expect(syncedDeployments(flow(once), wordBase, [], true)).toEqual(once);
+  });
+});
+
+// Detection only adopts a workflow whose name carries its platform, so a repository that deploys through
+// one generically named workflow leaves the editor blank and the person configuring it has to know which
+// name to type, which branch to bind and which Environment to reach for. Offering the repository's own
+// deploy workflows as filled-in candidates asks them to confirm rather than to know.
+describe('deploymentSuggestions', () => {
+  const wordBase = [{ name: 'CI' }, { name: 'Deploy Web' }, { name: 'Rollback' }];
+  const twoStage: Workflow = { ...createWorkflow('octo/app', 'feature/x', 'dev'), deployments: [] };
+  const released: Workflow = { ...addStage(twoStage, 'dev', 'main'), deployments: [] };
+
+  it('offers the repository deploy workflow for every branch the flow releases into', () => {
+    const suggestions = deploymentSuggestions(released, wordBase, []);
+    expect(suggestions.map(suggestion => `${suggestion.target}:${suggestion.environment}`)).toEqual(['dev:preview', 'main:production']);
+    expect(suggestions.every(suggestion => suggestion.workflowName === 'Deploy Web')).toBe(true);
+  });
+
+  it('never offers a rollback workflow as a deployment gate', () => {
+    expect(deploymentSuggestions(released, [{ name: 'Rollback' }], [])).toEqual([]);
+  });
+
+  it('stops offering a workflow already bound to that branch', () => {
+    const configured: Workflow = { ...released, deployments: [{ target: 'dev', provider: 'vercel', workflowName: 'Deploy Web', environment: 'preview' }] };
+    expect(deploymentSuggestions(configured, wordBase, []).map(suggestion => suggestion.target)).toEqual(['main']);
+  });
+
+  it('binds a GitHub Environment the repository really has, so the gate is not warned about on save', () => {
+    expect(deploymentSuggestions(released, wordBase, ['Preview', 'Production']).map(suggestion => suggestion.githubEnvironment)).toEqual(['Preview', 'Production']);
   });
 });
 
