@@ -1146,6 +1146,13 @@ describe('draining the automation queue', () => {
     expect(select.slice(0, select.indexOf('AUTOMATION_DRAIN_BATCH_SIZE'))).toContain("actions.state IN ('queued', 'running', 'paused')");
   });
 
+  // Paused rows are the oldest ones in the queue, so an age-only order would let them fill the batch and
+  // starve the queued work the sweep exists to run.
+  it('orders the batch so paused rows never crowd out executable ones', () => {
+    const select = source.slice(source.indexOf('export async function drainWorkflowAutomationActions'));
+    expect(select.slice(0, select.indexOf('AUTOMATION_DRAIN_BATCH_SIZE'))).toContain("ORDER BY (actions.state = 'paused'), actions.created_at");
+  });
+
   it('requeues under the paused state it read, so a concurrent verdict wins', () => {
     const body = source.slice(source.indexOf('export async function drainWorkflowAutomationActions'));
     const drain = body.slice(0, body.indexOf('\nexport ', 1));
