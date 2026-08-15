@@ -26,3 +26,23 @@ export function workflowRunSummary(states: readonly (WorkflowStageRunState | und
   const currentIndex = stageIndex === -1 ? Math.max(states.length - 1, 0) : stageIndex;
   return { stageIndex: currentIndex, ...stageRunPresentation(states[currentIndex]) };
 }
+
+export type AutomationActionState = 'queued' | 'running' | 'paused' | 'failed';
+export type AutomationActionTone = 'running' | 'attention' | 'failed';
+export type AutomationActionPresentation = { tone: AutomationActionTone; status: 'queued' | 'running' | 'blocked' | 'failed'; blocked: boolean };
+
+// Four surfaces read this — the failure centre, the board counter, the lane badge and the step
+// detail — and a copy in each would let them disagree about whether an action is still moving.
+export function automationActionPresentation(action: { state: AutomationActionState }): AutomationActionPresentation {
+  if (action.state === 'failed') return { tone: 'failed', status: 'failed', blocked: true };
+  // Nothing retries `paused` today, so it is where a stuck automation stays until someone looks.
+  if (action.state === 'paused') return { tone: 'attention', status: 'blocked', blocked: true };
+  return { tone: 'running', status: action.state, blocked: false };
+}
+
+export function latestAutomationAction<T extends { stageId: string | null; source: string; updatedAt: string }>(actions: readonly T[], stageId: string | null | undefined, source: string): T | undefined {
+  if (!stageId) return undefined;
+  return actions
+    .filter(action => action.stageId === stageId && action.source === source)
+    .reduce<T | undefined>((newest, action) => (!newest || action.updatedAt > newest.updatedAt ? action : newest), undefined);
+}

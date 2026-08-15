@@ -1,6 +1,6 @@
 import { requestErrorStatus, type ApiRequest, type ApiResponse } from './_lib/http.js';
 import { currentGitHubIdentity } from './_lib/session.js';
-import { codexRepairContext, listActionableStages, listOperationAuditLogs, listRecentWorkflowStageEvents, listRecoveryStatuses, listSyncHealth, listWorkflowConfigurationWarnings, listWorkflowStageDeploymentRuns, listWorkflowStageDeployments, listWorkflowStageStates, listWorkflowRuns, listWorkflowTimeline, reconcileRealtime, recordOperationAudit, recordRecoveryEvent, rerunFailedActions, requestDeploymentRollback, type DeploymentProvider } from './_lib/workflows-store.js';
+import { codexRepairContext, type DeploymentProvider, listActionableStages, listOperationAuditLogs, listRecentWorkflowStageEvents, listRecoveryStatuses, listSyncHealth, listWorkflowAutomationActions, listWorkflowConfigurationWarnings, listWorkflowRuns, listWorkflowStageDeploymentRuns, listWorkflowStageDeployments, listWorkflowStageStates, listWorkflowTimeline, reconcileRealtime, recordOperationAudit, recordRecoveryEvent, requestDeploymentRollback, rerunFailedActions } from './_lib/workflows-store.js';
 import { runPreflightChecks } from './_lib/preflight.js';
 
 function action(request: ApiRequest) {
@@ -45,8 +45,10 @@ async function inbox(request: ApiRequest, response: ApiResponse) {
       reconciliation = await reconcileRealtime(process.env, { installationId: session.installationId, repository: reconciliationRepository(request), eventName: 'inbox_refresh' }, 'inbox_refresh');
     }
     const identity = { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId };
-    const [items, states, events, deployments, deploymentRuns, configurationWarnings, syncHealth, runs, timeline, recoveryStatuses] = await Promise.all([listActionableStages(process.env, identity), listWorkflowStageStates(process.env, identity), listRecentWorkflowStageEvents(process.env, identity), listWorkflowStageDeployments(process.env, identity), listWorkflowStageDeploymentRuns(process.env, identity), listWorkflowConfigurationWarnings(process.env, identity), listSyncHealth(process.env, identity), listWorkflowRuns(process.env, identity), listWorkflowTimeline(process.env, identity), listRecoveryStatuses(process.env, identity)]);
-    response.status(200).json({ items, states, events, deployments, deploymentRuns, configurationWarnings, syncHealth, runs, timeline, recoveryStatuses, reconciliationScheduled, reconciliation });
+    // The automation queue rides this read rather than a second request: the board already polls here,
+    // and an unfinished action is what tells the operator why a step stopped moving on its own.
+    const [items, states, events, deployments, deploymentRuns, configurationWarnings, syncHealth, runs, timeline, recoveryStatuses, automation] = await Promise.all([listActionableStages(process.env, identity), listWorkflowStageStates(process.env, identity), listRecentWorkflowStageEvents(process.env, identity), listWorkflowStageDeployments(process.env, identity), listWorkflowStageDeploymentRuns(process.env, identity), listWorkflowConfigurationWarnings(process.env, identity), listSyncHealth(process.env, identity), listWorkflowRuns(process.env, identity), listWorkflowTimeline(process.env, identity), listRecoveryStatuses(process.env, identity), listWorkflowAutomationActions(process.env, identity, undefined, true)]);
+    response.status(200).json({ items, states, events, deployments, deploymentRuns, configurationWarnings, syncHealth, runs, timeline, recoveryStatuses, automation, reconciliationScheduled, reconciliation });
   } catch (error) {
     response.status(requestErrorStatus(error)).json({ message: error instanceof Error ? error.message : '无法读取待办队列' });
   }
