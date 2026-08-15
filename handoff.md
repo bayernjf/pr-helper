@@ -34,7 +34,7 @@
 
 ## 2026-08-15 生产实测与本批修复
 
-- 两条自动化链路都已在生产跑通：`create-pr` 47 次成功 / 1 次 `paused`，`merge-pr` 37 次成功 / 10 次 `paused` / 2 次仍在 `queued`。10 次 `paused` 里 7 次是门禁未全绿的正确行为，另 3 次是 GitHub 超时（`CONNECT_TIMEOUT`）。门禁为红一项已在沙箱验完，结论是守卫落在合并侧、创建侧不可达，原措辞应改为「门禁为红不自动合并」；顺带暴露 ruleset 审批要求不可见并已修（见 remediation 第十节）。仍未验：幂等命中记成功（生产无对应场景，需另造）。
+- 两条自动化链路都已在生产跑通：`create-pr` 47 次成功 / 1 次 `paused`，`merge-pr` 37 次成功 / 10 次 `paused` / 2 次仍在 `queued`。10 次 `paused` 里 7 次是门禁未全绿的正确行为，另 3 次是 GitHub 超时（`CONNECT_TIMEOUT`）。门禁为红一项已在沙箱验完，结论是守卫落在合并侧、创建侧不可达，原措辞应改为「门禁为红不自动合并」；顺带暴露 ruleset 审批要求不可见并已修（见 remediation 第十节）。仍未验项已清空：幂等命中记成功已于 2026-08-15 在沙箱验完（remediation 第十七节）。自动化验收清单至此没有未验项。
 - 新增 `reconciliation_runs.github_calls` / `github_ms` 遥测后，真正的剩余工程问题被量化出来：12 小时内定时校准跑 120 轮共 8,275 次 GitHub 调用（每轮约 69 次、平均 16.3 秒），webhook 只有 1,095 次、manual 54 次——约 88% 的 installation 配额来自定时扫描，这正是 08-14 配额耗尽、自动合并被迫暂停的来源。**收敛这份预算是当前第一优先级，方案待设计**，在有预算模型之前不要继续提高扫描频率。
 - 本批已修并上线：保存失败不再丢弃配置；实时 sweep 不再拖慢保存；重试预算不再花在 provider 明确拒绝上；无版本历史的历史流程重新可保存（生产确认 version-less 记录归零）；排序不再回滚版本号（生产确认 33 个流程 position 唯一、跨 0–32）；自动化队列 drain 具备自愈与抛错停机保护。
 - 数据与结论细节见 [`docs/current-state.md`](docs/current-state.md) 的《2026-08-15 生产实测结论》与《2026-08-15 本批修复》。
@@ -62,7 +62,7 @@
 6. **drain 稳定观察若干天后，删掉 sweep 内联的执行路径**，让自动化动作只剩一条执行入口，不再有两套会各自漂移的实现。
 7. 迁移 `031`（`reconciliation_runs.claimed_workflow_ids`）已执行并部署，列已就位、cron run 认领 8 个 / webhook run 认领 1 个。尚未等到「回收僵尸扫描 → 标回 `reconcile_pending_since`」的真实样本，下次出现中途被回收的扫描时核对一次即可。
 8. 等门禁的动作退避（`1e02a8a0` + `6a0ede17`）已部署并在生产验完，**无待办，仅留结论**：排空自身的计数就是证据——19:22/19:24/19:26 三次都是 `examined 2 / executed 1 / skipped 1`（那个 `executed` 就是动作 205），部署后 19:30 变成 `examined 2 / executed 0 / skipped 2`，`attempts` 停在 46。时效未受影响：19:31:58 给 PR #12 approve，19:32:01 收到 `pull_request_review/submitted`（该窗口内唯一事件），19:32:20 合并、19:32:21 动作 205 `succeeded`，**从事件到合并 19 秒**。这次执行不可能来自排空——19:32:00 那次排空看到的 `updated_at` 是 19:28:04，而 attempts=46 对应封顶的 30 分钟等待，必然 `skip`。顺带记一笔：`pull_request_review` 不在 `webhookBranchesForEvent` 的 switch 里，返回 null 即不收窄范围，一次 review 会触发全量扫掠（约 69 次调用）。review 频次低，暂不动；若日后调用量逼近警戒线，这是一个可收窄的点。
-9. 仍未验的自动化场景只剩幂等命中记成功（生产无对应场景，需另造）。门禁为红一项已在沙箱验完，见 remediation 第十节。造场景的脚手架**有意保留**在 `bayernjf/pr-helper-e2e-sandbox`：分支 `fix/red-gate-e2e`（已合入 dev，PR #12 已关闭）与 `.github/workflows/red-gate-e2e.yml`（分支内限定触发，缺 `.pr-helper-e2e/gate-green` 即失败）。别删，下次造场景直接复用；注意该工作流必须带 `actions/checkout@v4`，否则标记文件不在盘上、门禁永远为红。
+9. **自动化验收清单已清空，无待办，仅留结论**。幂等命中记成功于 2026-08-15 20:20 在沙箱验完（remediation 第十七节）：动作 219 停在 `queued`、PR #13 由 `bayernjf` 本人合掉，排空执行后记 `succeeded` 且审计带 `metadata.idempotent = true`，`mergedBy` 始终不是 App，即从未发出合并调用。门禁为红一项见 remediation 第十节。造场景的脚手架**有意保留**在 `bayernjf/pr-helper-e2e-sandbox`：分支 `fix/red-gate-e2e`（已合入 dev，PR #12 已关闭）与 `.github/workflows/red-gate-e2e.yml`（分支内限定触发，缺 `.pr-helper-e2e/gate-green` 即失败）。别删，下次造场景直接复用；注意该工作流必须带 `actions/checkout@v4`，否则标记文件不在盘上、门禁永远为红。
 
 **二、已明确后置**
 
@@ -183,7 +183,7 @@ AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 P
 在上述生产验收通过后，建议顺序为：
 
 1. 收敛 reconciliation 的 GitHub 调用预算（方案待设计）：定时扫描占约 88% 的配额，先定清楚是否只扫带 `reconcile_pending_since` 标记的工作流、每轮是否设调用上限、覆盖率与配额取什么折中。
-2. 后台自动创建 PR 与自动合并：生产已跑通；门禁为红一项已在沙箱验完并顺带修掉 ruleset 审批不可见，仅剩幂等命中记成功需另造场景。
+2. 后台自动创建 PR 与自动合并：生产已跑通；门禁为红与幂等命中两项均已在沙箱验完（前者顺带修掉 ruleset 审批不可见），自动化验收清单无未验项。
 3. 浏览器 E2E：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影已有真实 delivery 证据。
 4. 操作审计：`020` 已执行；Production 已完成流程更新、创建/合并 PR 记录读取及 CSV 导出可用性验收。✅
 5. 加密云同步加固：已部署，`021` 已执行；待验证 v1/v2 兼容、口令轮换、冲突拒绝和历史恢复。

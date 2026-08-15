@@ -295,3 +295,26 @@ AI 生成的正文严格按生成规则模板输出（Overview / Changes / Relat
 一个坑：排空查询取 `payload->'recoveryPolicy'->>'cooldownSeconds'`，缺省时必须传 `undefined` 而不是 `Number(null)`——后者是 0，会把没配策略的流程全部读成「不等待」，等于修复白做。
 
 顺带记一笔：`pull_request_review` 不在 `webhookBranchesForEvent` 的 switch 里，返回 null 即不收窄范围，一次 review 会触发全量扫掠（约 69 次调用）。review 频次低，暂不动；调用量逼近 2500 次/小时警戒线时这是一个可收窄的点。
+
+## 十七、幂等命中记成功（2026-08-15，沙箱验完）
+
+自动化验收清单里最后一个未验项。它问的是：动作要合并的 PR 已经被**别人**合掉时，执行器该记成功还是记失败。生产数据里始终没有这个场景，因为正常路径下动作自己就是合并者。
+
+**为什么必须造**：`automationMergeOutcome` 的幂等判定排在所有门禁判断**之前**（[`workflows-store.ts`](../api/_lib/workflows-store.ts) 中 `if (pull.merged === true)` 是该函数第二行），命中后 `runAutomationMergeAction` 跳过 `/pulls/{n}/merge` 直接走成功收尾，并在审计 `metadata` 打 `idempotent: true`。这两点都不在行为单测的射程内，只有真实场景能证明。
+
+**造法**：动作只在 PR `open` 时入队，所以必须让它入队后卡在**可重试**的门禁上——`paused` 是终态，排空不会再执行它，只有 `queued` 会。可重试的门禁有检查 pending、缺审批、`mergeable` 为 null 三种，其中缺审批最稳。
+
+1. 从 `dev` 顶端切 `fix/idempotent-e2e`（必须是顶端：经典保护的 `strict` 会让落后的分支变 `behind`，那是**不可重试**的暂停）并推一个提交。
+2. 自动创建建出 PR #13（动作 218，20:12:51）；合并动作 219 随即入队，停在 `queued` / `门禁尚未全绿（当前 pending）` / `attempts=1`。
+3. 20:15:24 由 `bayernjf` 本人合掉 PR #13，**不给 approval**。
+4. 20:20:00 排空执行动作 219。
+
+**两个坑**：
+
+- `gh pr merge --admin` **不能**绕过 ruleset 的必需审批，只对经典分支保护有效。用临时把 ruleset（id `20664426`）`enforcement` 置 `disabled`、合完立刻置回 `active`，比加 bypass actor 或改规则内容都小且可逆。
+- 不能用 approve 来放行：approve 会触发 `pull_request_review` webhook → 校准 → `scheduleServerAutoMerge` 把动作**内联真合并**，得到的正好是要避开的那个结果。
+- 经典保护另有一道 `PR gate` 必需检查（`strict`），所以外部合并前仍须等检查转绿。
+
+**证据**：动作 219 于 20:20:04 记 `succeeded` / `attempts=2` / `failure_reason` 为 NULL，运行 220 `succeeded`；审计 2633 为 `pull-merged` / `success` / `{"via": "workflow-automation", "idempotent": true}`。App 从未发出合并调用——PR 的 `mergedBy` 始终是 `bayernjf`、`mergedAt` 停在 20:15:24、`reviews` 为 0。顺带第三次印证门禁退避：20:18:00 那次排空 `skipped`，因为距 `updated_at`（20:13:03.788）只有 296.2 秒，比 `attempts=1` 对应的 300 秒**早 3 秒**。
+
+**补的测试**：幂等与合并两条裁决共用成功收尾，唯一拦住已合并 PR 挨一个 merge PUT 的就是 `if (outcome.kind === 'merge')` 守卫；守卫一去，GitHub 回 405、抛错把动作打进 `paused`，一个其实已达成目标的运行会在失败中心显示为失败。已加源文本断言钉住该守卫与审计标记（把守卫改成 `if (true)` 可使其变红，已实测）。
