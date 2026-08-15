@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, defaultDeployments, deploymentsForRepository, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
+import { addDeployment, defaultDeployments, deploymentsForRepository, syncedDeployments, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type Workflow } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -451,6 +451,42 @@ describe('deploymentsForRepository', () => {
   it('ignores an ambiguous provider match, because picking one of two deploy workflows would be a coin flip', () => {
     const configured = deploymentsForRepository([{ name: 'Deploy API to Vercel' }, { name: 'Deploy web to Vercel' }], []);
     expect(configured).toEqual([]);
+  });
+});
+
+// Seeding only runs once, at creation, so every repository whose Actions changed afterwards — or that was
+// created before seeding existed — carries a configuration nobody can repair without editing each row by
+// hand. Re-deriving has to keep whatever the repository really has, including names auto-detection cannot
+// recognise, or the sync would delete the very entries a person added because detection missed them.
+describe('syncedDeployments', () => {
+  const wordBase = [{ name: 'CI' }, { name: 'Deploy Web' }, { name: 'Rollback' }];
+  const flow = (deployments: DeploymentConfig[]): Workflow => ({ ...createWorkflow('octo/app', 'dev', 'main'), deployments });
+
+  it('drops an entry whose workflow the repository does not have', () => {
+    expect(syncedDeployments(flow([...defaultDeployments]), wordBase, [], true)).toEqual([]);
+  });
+
+  it('keeps a hand-configured entry whose workflow really exists, because detection cannot recognise its name', () => {
+    const configured: DeploymentConfig[] = [
+      { target: 'dev', provider: 'cloudflare', workflowName: 'Deploy Web', environment: 'preview', githubEnvironment: 'Preview' },
+      { target: 'main', provider: 'cloudflare', workflowName: 'Deploy Web', environment: 'production', githubEnvironment: 'Production' },
+    ];
+    expect(syncedDeployments(flow(configured), wordBase, ['Preview', 'Production'], true)).toEqual(configured);
+  });
+
+  it('adopts a deployment workflow the repository gained after the flow was created', () => {
+    const synced = syncedDeployments(flow([]), [{ name: 'Deploy frontend to Cloudflare Pages' }], ['preview-cloudflare-pages', 'production-cloudflare-pages'], true);
+    expect(synced.map(deployment => deployment.target)).toEqual(['dev', 'main']);
+    expect(synced.every(deployment => deployment.workflowName === 'Deploy frontend to Cloudflare Pages')).toBe(true);
+  });
+
+  it('leaves the configuration alone when the Actions request failed, so a network error cannot wipe the gates', () => {
+    expect(syncedDeployments(flow([...defaultDeployments]), [], [], false)).toEqual(defaultDeployments);
+  });
+
+  it('changes nothing on a second run, so the button is safe to press twice', () => {
+    const once = syncedDeployments(flow([...defaultDeployments]), wordBase, [], true);
+    expect(syncedDeployments(flow(once), wordBase, [], true)).toEqual(once);
   });
 });
 
