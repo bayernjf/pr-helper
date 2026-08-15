@@ -917,6 +917,36 @@ describe('reconciliationRunIsAbandoned', () => {
   });
 });
 
+// A sweep gives up its turn before it does any work, so that a workflow resolving to no route still
+// rotates. When the instance is recycled mid-sweep the turn is spent and nothing was reconciled, and
+// the pending marker that would let the workflow jump the rotation is written only at the end of a
+// sweep — so the one case the marker exists for is the case it misses. Reaping has to restore the turn.
+describe('reaping an interrupted sweep restores the turn it spent', () => {
+  const source = readFileSync(new URL('./workflows-store.ts', import.meta.url), 'utf8');
+
+  it('records the claimed workflow ids on the run row', () => {
+    const insert = source.slice(source.indexOf('INSERT INTO reconciliation_runs'), source.indexOf('const runId = runRow[0].id'));
+    expect(insert).toContain('claimed_workflow_ids');
+  });
+
+  it('marks the claimed workflows pending when it reaps their run', () => {
+    const reap = source.slice(source.indexOf("if (trigger === 'cron') {"), source.indexOf('workflows.last_reconcile_attempt_at, workflows.reconcile_pending_since FROM'));
+    expect(reap).toContain('claimed_workflow_ids');
+    expect(reap).toContain('reconcile_pending_since');
+    // Restoring the turn has to happen in the same statement that reaps the row, or a reap that lands
+    // between the two writes leaves the workflow both un-pending and marked as freshly attempted.
+    expect(reap.indexOf('reconcile_pending_since')).toBeGreaterThan(reap.indexOf("state = 'failure'"));
+    expect(reap).toMatch(/WITH\s+reaped/);
+  });
+
+  it('adds the column in an ordered migration rather than at runtime', () => {
+    const migration = readFileSync(new URL('../../db/migrations/031_reconciliation_claimed_workflows.sql', import.meta.url), 'utf8');
+    expect(migration).toContain('ALTER TABLE reconciliation_runs');
+    expect(migration).toContain('ADD COLUMN IF NOT EXISTS claimed_workflow_ids');
+    expect(source).not.toContain('ALTER TABLE reconciliation_runs');
+  });
+});
+
 describe('realtimeReconcileBudgetMs', () => {
   it('falls back to the packaged budget when the environment says nothing', () => {
     expect(realtimeReconcileBudgetMs({})).toBe(REALTIME_RECONCILE_BUDGET_MS);
