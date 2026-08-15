@@ -122,6 +122,18 @@ export function deploymentConfigsForTarget(workflow: object, target: string) {
   return deploymentConfigs(workflow).filter(deployment => deployment.target === target);
 }
 
+// Seeding happens once, at creation, so a repository whose Actions changed later keeps a configuration that
+// only hand editing can repair. Re-deriving keeps every entry whose workflow the repository really has —
+// including a name detection cannot recognise, which is the only reason someone would have typed it — and
+// fills the target and provider pairs still uncovered. An unreadable Actions list decides nothing.
+export function syncedDeployments(workflow: Workflow, actionWorkflows: readonly { name: string }[], environments: readonly string[], actionsLoaded = false): DeploymentConfig[] {
+  const configured = deploymentConfigs(workflow);
+  if (!actionsLoaded) return configured;
+  const kept = configured.filter(deployment => actionWorkflows.some(candidate => candidate.name === deployment.workflowName));
+  const covered = new Set(kept.map(deployment => `${deployment.target}:${deployment.provider}`));
+  return [...kept, ...deploymentsForRepository(actionWorkflows, environments, true).filter(deployment => !covered.has(`${deployment.target}:${deployment.provider}`))];
+}
+
 // Reconciliation records a run-less row for a configured deployment whose workflow it never found.
 // That row is the only evidence available downstream: the gate it holds shut looks exactly like a
 // deployment that has not started, so the stage it locks has to be able to name it.
