@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { automationDrainDecision, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -1008,6 +1008,69 @@ describe('reconciliationRunInterrupted', () => {
   it('never reports a finished row as interrupted', () => {
     for (const state of ['success', 'degraded', 'failure', 'skipped']) {
       expect(reconciliationRunInterrupted({ state, startedAt: '2026-08-14T09:00:00.000Z' }, now)).toBe(false);
+    }
+  });
+});
+
+describe('automationDrainDecision', () => {
+  const now = Date.parse('2026-08-15T02:26:00.000Z');
+  const action = (overrides: Partial<Parameters<typeof automationDrainDecision>[0]> = {}) => ({
+    state: 'queued', createdAt: '2026-08-15T02:20:00.000Z', updatedAt: '2026-08-15T02:20:00.000Z',
+    failureReason: null, hasNewer: false, ...overrides,
+  });
+
+  // Nothing reads the queued rows today, so an action's only chance to run is the request that enqueued
+  // it. Four rows have sat queued for up to sixty-one hours because recovery is reached only through the
+  // enqueue path, which needs someone to push again to the very stage that is stuck.
+  it('executes a queued action that nothing has superseded', () => {
+    expect(automationDrainDecision(action(), now)).toEqual({ kind: 'execute' });
+  });
+
+  // A live invocation still holds this row. Cancelling or re-running it here is how one PR becomes two.
+  it('leaves a freshly running action to the invocation that claimed it', () => {
+    expect(automationDrainDecision(action({ state: 'running', updatedAt: '2026-08-15T02:25:00.000Z' }), now)).toEqual({ kind: 'skip' });
+  });
+
+  // A recycled instance never reaches the catch that records a reason, so 'running' with no reason is the
+  // fingerprint of a crash rather than of a failure. The attempt it burned did no work, and attempts are
+  // capped, so charging for it spends the retry budget on nothing.
+  it('reclaims a running action that outlived the abandon window and refunds the attempt the crash burned', () => {
+    expect(automationDrainDecision(action({ state: 'running', updatedAt: '2026-08-15T02:23:00.000Z' }), now)).toEqual({ kind: 'reclaim', refundAttempt: true });
+  });
+
+  it('keeps the attempt charged when the abandoned action recorded a reason', () => {
+    expect(automationDrainDecision(action({ state: 'running', updatedAt: '2026-08-15T02:23:00.000Z', failureReason: '合并被拒绝' }), now)).toEqual({ kind: 'reclaim', refundAttempt: false });
+  });
+
+  // The idempotency key carries the head sha, so a later push enqueues its own action and the older one
+  // describes commits that are already covered. Age cannot decide this: the older row is redundant the
+  // moment the newer one exists, however recently it was written.
+  it('cancels an action a later one already covers', () => {
+    expect(automationDrainDecision(action({ hasNewer: true }), now)).toEqual({ kind: 'cancel', reason: 'superseded' });
+  });
+
+  it('cancels an abandoned action a later one already covers rather than reclaiming it', () => {
+    expect(automationDrainDecision(action({ state: 'running', updatedAt: '2026-08-15T02:23:00.000Z', hasNewer: true }), now)).toEqual({ kind: 'cancel', reason: 'superseded' });
+  });
+
+  // Waking a day-old intent creates a pull request nobody is expecting. The window has to clear the
+  // scheduled sweep's real delivery gap, which throttling stretches to ninety minutes, and stop short of
+  // the point where the person who pushed has moved on.
+  it('cancels an action past the staleness window', () => {
+    expect(automationDrainDecision(action({ createdAt: '2026-08-14T14:00:00.000Z' }), now)).toEqual({ kind: 'cancel', reason: 'stale' });
+  });
+
+  it('measures staleness from creation, so reclaiming does not extend the window forever', () => {
+    expect(automationDrainDecision(action({ state: 'running', createdAt: '2026-08-14T02:00:00.000Z', updatedAt: '2026-08-15T02:23:00.000Z' }), now)).toEqual({ kind: 'cancel', reason: 'stale' });
+  });
+
+  it('holds an action inside the window that only waits for the next sweep', () => {
+    expect(automationDrainDecision(action({ createdAt: '2026-08-14T20:00:00.000Z' }), now)).toEqual({ kind: 'execute' });
+  });
+
+  it('never touches an action that already reached a verdict', () => {
+    for (const state of ['succeeded', 'failed', 'paused', 'cancelled']) {
+      expect(automationDrainDecision(action({ state, createdAt: '2026-08-12T02:00:00.000Z' }), now)).toEqual({ kind: 'skip' });
     }
   });
 });
