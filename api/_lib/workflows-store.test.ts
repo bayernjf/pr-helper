@@ -591,6 +591,24 @@ function browserOnlyModulesReachableFrom(entry: URL, seen = new Set<string>()): 
   return offenders;
 }
 
+describe('listWorkflowAutomationActions', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const body = source.slice(source.indexOf('export async function listWorkflowAutomationActions'));
+  const list = body.slice(0, body.indexOf('\nexport ', 1));
+
+  it('reads only the unfinished actions, bounded, within the caller\u0027s visibility', () => {
+    // A succeeded or cancelled action needs no observation and would grow this read without bound.
+    expect(list).toContain("state IN ('queued', 'running', 'paused', 'failed')");
+    expect(list).toMatch(/LIMIT \$\{[A-Z_]+\}|LIMIT \d+/);
+    // Team-shared workflows are visible to their members, and nothing outside that scope may be.
+    expect(list).toContain('visibleWorkflowPredicate');
+  });
+
+  it('spends no GitHub call to answer', () => {
+    expect(list).not.toContain('installationRequest');
+  });
+});
+
 describe('server bundle boundaries', () => {
   for (const entry of importedSourcePaths(new URL('../', import.meta.url), '.ts')) {
     it(`keeps browser-only modules out of ${entry.pathname.replace(/^.*\/api\//, 'api/')}`, () => {
