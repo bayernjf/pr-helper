@@ -1079,6 +1079,26 @@ describe('reaped run rows', () => {
   });
 });
 
+describe('an idempotent merge hit', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const runMerge = source.slice(source.indexOf('async function runAutomationMergeAction'), source.indexOf('async function executeWorkflowAutomationActionForUser'));
+
+  // The idempotent verdict and the merge verdict share the success write, so only this guard keeps an
+  // already merged pull request from taking a merge PUT. GitHub answers 405 to that, the throw lands the
+  // action in `paused`, and a run that had in fact reached its goal reads as a failure in the inbox.
+  it('reaches the success write without asking GitHub to merge again', () => {
+    const merge = runMerge.slice(runMerge.indexOf("if (outcome.kind === 'merge')"));
+    expect(merge.indexOf(`/pulls/\${pullNumber}/merge`)).toBeLessThan(merge.indexOf("state = 'succeeded'"));
+    expect(runMerge).toMatch(/if \(outcome\.kind === 'merge'\) \{[\s\S]*?\/merge`, \{ method: 'PUT'/);
+  });
+
+  // Without the flag the two verdicts are indistinguishable afterwards, and the question this scenario
+  // exists to answer — did automation merge it, or find it merged — has no answer in the record.
+  it('marks the audit row so the hit stays distinguishable from a real merge', () => {
+    expect(runMerge).toContain("...(outcome.kind === 'idempotent' ? { idempotent: true } : {})");
+  });
+});
+
 describe('sweep GitHub call accounting', () => {
   const source = readFileSync(STORE_SOURCE, 'utf8');
 
