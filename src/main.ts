@@ -6,7 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, g
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, selectWorkflowAfterCloudLoad, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
+import { addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
@@ -60,6 +60,8 @@ let editorDraft: { repository: string; name: string; source: string; target: str
 let deploymentFormOpen = false;
 let deploymentAdvancedOpen = false;
 let deploymentHighlight: string | null = null;
+let deploymentEditIndex: number | null = null;
+let deploymentDraft: DeploymentConfig | null = null;
 let returnHighlight: string | null = null;
 let workflowMutationRevision = 0;
 let screen: Screen = 'overview';
@@ -1768,9 +1770,11 @@ function renderStepForm(repository: string) {
   sourceBranchToggle.addEventListener('click', () => { if (sourceBranchOptions.hidden) { sourceInput.focus(); openSourceBranches(); } else closeSourceBranches(); });
   sourceBranchOptions.querySelectorAll<HTMLButtonElement>('[data-source-branch]').forEach(button => button.addEventListener('click', () => { sourceInput.value = button.dataset.sourceBranch || ''; sync(); closeSourceBranches(); sourceInput.focus(); }));
   document.querySelector('#target')!.addEventListener('change', event => { if (!active) editorDraft.target = (event.target as HTMLSelectElement).value; sync(); }); sync();
-    document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } const isNew = active?.repository !== repository; if (isNew && workflows.some(workflow => workflow.repository === repository)) { showToast(t('editor.error.repoUsed')); return; } if (active?.repository === repository && active.stages.some(stage => stage.source === source && stage.target === target)) { showToast(t('editor.error.duplicateRoute')); return; } const name = value('flow-name') || repository; const independent = document.querySelector<HTMLInputElement>('#independent-route')!.checked; const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="wait-for-route"]:checked')].map(input => Number(input.value)); const next = active?.repository === repository ? { ...addStage(active, source, target, independent, waitFor), name } : createWorkflow(repository, source, target, name, deploymentsForRepository(repositoryActionWorkflows, repositoryEnvironments)); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); bindDraftActions(); bindDraftStepSorting(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.routeSaved', { source, target })); renderStepForm(repository); });
+    document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } const isNew = active?.repository !== repository; if (isNew && workflows.some(workflow => workflow.repository === repository)) { showToast(t('editor.error.repoUsed')); return; } if (active?.repository === repository && active.stages.some(stage => stage.source === source && stage.target === target)) { showToast(t('editor.error.duplicateRoute')); return; } const name = value('flow-name') || repository; const independent = document.querySelector<HTMLInputElement>('#independent-route')!.checked; const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="wait-for-route"]:checked')].map(input => Number(input.value)); const next = active?.repository === repository ? { ...addStage(active, source, target, independent, waitFor), name } : createWorkflow(repository, source, target, name, deploymentsForRepository(repositoryActionWorkflows, repositoryEnvironments, repositoryActionsLoaded)); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); bindDraftActions(); bindDraftStepSorting(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.routeSaved', { source, target })); renderStepForm(repository); });
   document.querySelector<HTMLButtonElement>('#toggle-deployment-form')?.addEventListener('click', () => {
     deploymentFormOpen = !deploymentFormOpen;
+    deploymentEditIndex = null;
+    deploymentDraft = null;
     rerenderStepForm(repository);
     if (deploymentFormOpen) document.querySelector<HTMLInputElement>('#deployment-workflow')?.focus();
   });
@@ -1781,18 +1785,38 @@ function renderStepForm(repository: string) {
     const deployment: DeploymentConfig = { target: value('deployment-target'), provider: value('deployment-provider') as DeploymentConfig['provider'], workflowName: value('deployment-workflow').trim(), environment: value('deployment-environment') as DeploymentConfig['environment'], ...(value('deployment-github-environment').trim() ? { githubEnvironment: value('deployment-github-environment').trim() } : {}), ...(healthCheckPath ? { healthCheckPath } : {}), ...(value('deployment-rollback-workflow').trim() ? { rollbackWorkflowName: value('deployment-rollback-workflow').trim() } : {}) };
     if (!deployment.workflowName) { showToast(t('editor.deployments.workflowRequired')); return; }
     if (healthCheckPath && !healthCheckPath.startsWith('/')) { showToast(t('editor.deployments.healthPathInvalid')); return; }
-    if (deploymentConfigs(active).some(item => item.target === deployment.target && item.provider === deployment.provider)) { showToast(t('editor.deployments.duplicate')); return; }
-    save(addDeployment(active, deployment));
+    if (deploymentConfigs(active).some((item, index) => index !== deploymentEditIndex && item.target === deployment.target && item.provider === deployment.provider)) { showToast(t('editor.deployments.duplicate')); return; }
+    const editIndex = deploymentEditIndex;
+    save(editIndex === null ? addDeployment(active, deployment) : replaceDeployment(active, editIndex, deployment));
     deploymentFormOpen = false;
+    deploymentEditIndex = null;
+    deploymentDraft = null;
     deploymentHighlight = deploymentKey(deployment);
-    showToast(t('editor.deployments.saved'));
+    showToast(t(editIndex === null ? 'editor.deployments.saved' : 'editor.deployments.updated'));
     rerenderStepForm(repository);
     deploymentHighlight = null;
   });
+  document.querySelectorAll<HTMLButtonElement>('[data-edit-deployment]').forEach(button => button.addEventListener('click', () => {
+    deploymentEditIndex = Number(button.dataset.editDeployment);
+    deploymentDraft = null;
+    deploymentFormOpen = true;
+    rerenderStepForm(repository);
+    document.querySelector<HTMLInputElement>('#deployment-workflow')?.focus();
+  }));
+  document.querySelectorAll<HTMLButtonElement>('[data-apply-suggestion]').forEach(button => button.addEventListener('click', () => {
+    if (!active) return;
+    deploymentDraft = deploymentSuggestions(active, repositoryActionWorkflows, repositoryEnvironments)[Number(button.dataset.applySuggestion)] || null;
+    if (!deploymentDraft) return;
+    deploymentEditIndex = null;
+    deploymentFormOpen = true;
+    rerenderStepForm(repository);
+    document.querySelector<HTMLInputElement>('#deployment-workflow')?.focus();
+  }));
   document.querySelectorAll<HTMLButtonElement>('[data-remove-deployment]').forEach(button => button.addEventListener('click', () => {
     if (!active) return;
     const restored = active;
     const removed = deploymentConfigs(restored)[Number(button.dataset.removeDeployment)];
+    deploymentEditIndex = null;
     save(removeDeployment(restored, Number(button.dataset.removeDeployment)));
     showToast(t('editor.deployments.removed'), { label: t('editor.deployments.undo'), onUndo: () => {
       save(restored);
@@ -1802,6 +1826,23 @@ function renderStepForm(repository: string) {
     } });
     rerenderStepForm(repository);
   }));
+  document.querySelector<HTMLButtonElement>('#sync-deployments')?.addEventListener('click', () => {
+    if (!active) return;
+    const restored = active;
+    const before = deploymentConfigs(restored);
+    const synced = syncedDeployments(restored, repositoryActionWorkflows, repositoryEnvironments, repositoryActionsLoaded);
+    const kept = synced.filter(deployment => before.some(candidate => deploymentKey(candidate) === deploymentKey(deployment) && candidate.workflowName === deployment.workflowName));
+    const removed = before.length - kept.length;
+    const added = synced.length - kept.length;
+    if (!removed && !added) { showToast(t('editor.deployments.syncUnchanged')); return; }
+    deploymentEditIndex = null;
+    save({ ...restored, deployments: synced });
+    showToast(t('editor.deployments.synced', { kept: kept.length, added, removed }), { label: t('editor.deployments.undo'), onUndo: () => {
+      save(restored);
+      rerenderStepForm(repository);
+    } });
+    rerenderStepForm(repository);
+  });
   document.querySelector<HTMLButtonElement>('#save-recovery-policy')?.addEventListener('click', () => {
     if (!active) return;
     const maxRetries = Math.max(0, Math.min(20, Number(value('recovery-max-retries')) || 0));
@@ -1834,18 +1875,27 @@ function renderDeploymentSettings() {
       const chips = `<span class="deployment-chips"><span class="deployment-chip provider">${deployment.provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages'}</span><span class="deployment-chip env-${deployment.environment}">${t(`editor.deployments.${deployment.environment}`)}</span>${deployment.healthCheckPath ? `<span class="deployment-chip flag" title="${escape(deployment.healthCheckPath)}">♥ ${escape(deployment.healthCheckPath)}</span>` : ''}${deployment.rollbackWorkflowName ? `<span class="deployment-chip flag" title="${escape(deployment.rollbackWorkflowName)}">↩ ${t('editor.deployments.rollbackSummary', { workflow: escape(deployment.rollbackWorkflowName) })}</span>` : ''}</span>`;
       const detail = `<small>${escape(deployment.workflowName)}${deployment.githubEnvironment ? ` · ${escape(deployment.githubEnvironment)}` : ''}</small>`;
       const inline = warnings.length ? `<ul class="deployment-row-warnings">${warnings.map(warning => `<li>${warningText(warning)}</li>`).join('')}</ul>` : '';
-      return `<div class="${[warnings.length ? 'has-warning' : '', deploymentHighlight === deploymentKey(deployment) ? 'is-new' : ''].filter(Boolean).join(' ')}"><b>${escape(deployment.target)}</b>${chips}${detail}${inline}<button class="ghost" type="button" data-remove-deployment="${index}">${t('editor.deployments.remove')}</button></div>`;
+      return `<div class="${[warnings.length ? 'has-warning' : '', deploymentEditIndex === index ? 'is-editing' : '', deploymentHighlight === deploymentKey(deployment) ? 'is-new' : ''].filter(Boolean).join(' ')}"><b>${escape(deployment.target)}</b>${chips}${detail}${inline}<button class="ghost" type="button" data-edit-deployment="${index}">${t('editor.deployments.edit')}</button><button class="ghost" type="button" data-remove-deployment="${index}">${t('editor.deployments.remove')}</button></div>`;
     }).join('')
     : `<p class="meta">${t('editor.deployments.empty')}</p>`;
+  const suggestions = repositoryActionsLoaded ? deploymentSuggestions(active, repositoryActionWorkflows, repositoryEnvironments) : [];
+  const suggested = suggestions.length
+    ? `<div class="deployment-suggestions"><b>${t('editor.deployments.suggestLabel')}</b><small>${t('editor.deployments.suggestHint')}</small>${suggestions.map((suggestion, index) => `<div><b>${escape(suggestion.target)}</b><small>${escape(suggestion.workflowName)} · ${t(`editor.deployments.${suggestion.environment}`)}</small><button class="ghost" type="button" data-apply-suggestion="${index}">${t('editor.deployments.suggestApply')}</button></div>`).join('')}</div>`
+    : '';
   const toggle = `<button id="toggle-deployment-form" type="button" class="ghost deployment-add-toggle" aria-expanded="${deploymentFormOpen}">${deploymentFormOpen ? t('editor.deployments.cancel') : t('editor.deployments.add')}</button>`;
-  return `<fieldset class="deployment-settings"><legend>${t('editor.deployments.label')}</legend><small>${t('editor.deployments.desc')}</small>${summary}<div class="deployment-config-list">${rows}</div>${toggle}${deploymentFormOpen ? renderDeploymentForm() : ''}</fieldset>`;
+  const sync = `<button id="sync-deployments" type="button" class="ghost deployment-sync" ${repositoryActionsLoaded ? '' : 'disabled'} title="${repositoryActionsLoaded ? t('editor.deployments.syncHint') : t('editor.deployments.syncUnavailable')}">${t('editor.deployments.sync')}</button>`;
+  return `<fieldset class="deployment-settings"><legend>${t('editor.deployments.label')}</legend><small>${t('editor.deployments.desc')}</small>${summary}<div class="deployment-config-list">${rows}</div>${suggested}<div class="deployment-actions">${toggle}${sync}</div>${deploymentFormOpen ? renderDeploymentForm() : ''}</fieldset>`;
 }
 function renderDeploymentForm() {
-  const target = branches.find(branch => branch === 'dev') || branches.find(branch => branch === 'main') || branches[0] || '';
+  const editing = deploymentEditIndex === null || !active ? null : deploymentConfigs(active)[deploymentEditIndex] || null;
+  const prefill = editing || deploymentDraft;
+  const target = prefill?.target || branches.find(branch => branch === 'dev') || branches.find(branch => branch === 'main') || branches[0] || '';
   const workflows = repositoryActionWorkflows.map(workflow => `<option value="${escape(workflow.name)}">${escape(workflow.path)}</option>`).join('');
   const workflowHint = repositoryActionWorkflows.length ? t('editor.deployments.workflowHint') : t('editor.deployments.workflowUnavailable');
-  const advanced = `<details class="deployment-advanced" ${deploymentAdvancedOpen ? 'open' : ''}><summary>${t('editor.deployments.advanced')}</summary><label>${t('editor.deployments.githubEnvironment')}<input id="deployment-github-environment" placeholder="preview-vercel" /></label><label>${t('editor.deployments.healthPath')}<input id="deployment-health-path" placeholder="/health" /><small>${t('editor.deployments.healthPathHint')}</small></label><label>${t('editor.deployments.rollbackWorkflow')}<input id="deployment-rollback-workflow" list="deployment-workflows" placeholder="Rollback production" /><small>${t('editor.deployments.rollbackWorkflowHint')}</small></label></details>`;
-  return `<div class="deployment-add-form"><label>${t('editor.deployments.workflow')}<input id="deployment-workflow" list="deployment-workflows" placeholder="Deploy frontend to Vercel" /><datalist id="deployment-workflows">${workflows}</datalist><small>${workflowHint}</small></label><div class="two"><label>${t('editor.deployments.target')}<select id="deployment-target">${options(target)}</select></label><label>${t('editor.deployments.provider')}<select id="deployment-provider"><option value="vercel">Vercel</option><option value="cloudflare">Cloudflare Pages</option></select></label></div><label>${t('editor.deployments.environment')}<select id="deployment-environment"><option value="preview">${t('editor.deployments.preview')}</option><option value="production">${t('editor.deployments.production')}</option></select></label>${advanced}<button id="add-deployment" type="button" class="primary">${t('editor.deployments.submit')}</button></div>`;
+  const pick = (candidate: string, current: string | undefined) => candidate === current ? 'selected' : '';
+  const advanced = `<details class="deployment-advanced" ${deploymentAdvancedOpen || prefill ? 'open' : ''}><summary>${t('editor.deployments.advanced')}</summary><label>${t('editor.deployments.githubEnvironment')}<input id="deployment-github-environment" placeholder="preview-vercel" value="${escape(prefill?.githubEnvironment || '')}" /></label><label>${t('editor.deployments.healthPath')}<input id="deployment-health-path" placeholder="/health" value="${escape(prefill?.healthCheckPath || '')}" /><small>${t('editor.deployments.healthPathHint')}</small></label><label>${t('editor.deployments.rollbackWorkflow')}<input id="deployment-rollback-workflow" list="deployment-workflows" placeholder="Rollback production" value="${escape(prefill?.rollbackWorkflowName || '')}" /><small>${t('editor.deployments.rollbackWorkflowHint')}</small></label></details>`;
+  const banner = editing ? `<p class="deployment-editing-banner">${t('editor.deployments.editing', { workflow: escape(editing.workflowName), target: escape(editing.target) })}</p>` : '';
+  return `<div class="deployment-add-form">${banner}<label>${t('editor.deployments.workflow')}<input id="deployment-workflow" list="deployment-workflows" placeholder="Deploy frontend to Vercel" value="${escape(prefill?.workflowName || '')}" /><datalist id="deployment-workflows">${workflows}</datalist><small>${workflowHint}</small></label><div class="two"><label>${t('editor.deployments.target')}<select id="deployment-target">${options(target)}</select></label><label>${t('editor.deployments.provider')}<select id="deployment-provider"><option value="vercel" ${pick('vercel', prefill?.provider)}>Vercel</option><option value="cloudflare" ${pick('cloudflare', prefill?.provider)}>Cloudflare Pages</option></select></label></div><label>${t('editor.deployments.environment')}<select id="deployment-environment"><option value="preview" ${pick('preview', prefill?.environment)}>${t('editor.deployments.preview')}</option><option value="production" ${pick('production', prefill?.environment)}>${t('editor.deployments.production')}</option></select></label>${advanced}<button id="add-deployment" type="button" class="primary">${editing ? t('editor.deployments.update') : t('editor.deployments.submit')}</button></div>`;
 }
 function renderRecoveryPolicySettings() {
   if (!active) return '';

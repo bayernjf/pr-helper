@@ -82,8 +82,10 @@ const providerKeywords: Record<DeploymentConfig['provider'], RegExp> = { vercel:
 // deployment can never match a run, and the gate it holds shuts the pipeline permanently with no run to
 // point at. So a new workflow is seeded from what the repository actually has: an existing default is
 // kept, a single unambiguous provider match is adopted, and anything else is dropped rather than guessed.
-export function deploymentsForRepository(actionWorkflows: readonly { name: string }[], environments: readonly string[]): DeploymentConfig[] {
-  if (!actionWorkflows.length) return defaultDeployments.map(deployment => ({ ...deployment }));
+// An empty list means either that the Actions request failed or that the repository has no workflow, and
+// only the first case justifies falling back to the defaults.
+export function deploymentsForRepository(actionWorkflows: readonly { name: string }[], environments: readonly string[], actionsLoaded = false): DeploymentConfig[] {
+  if (!actionWorkflows.length) return actionsLoaded ? [] : defaultDeployments.map(deployment => ({ ...deployment }));
   const workflowNameFor = (deployment: DeploymentConfig) => {
     if (actionWorkflows.some(candidate => candidate.name === deployment.workflowName)) return deployment.workflowName;
     const matches = actionWorkflows.filter(candidate => providerKeywords[deployment.provider].test(candidate.name));
@@ -120,6 +122,44 @@ export function deploymentConfigsForTarget(workflow: object, target: string) {
   return deploymentConfigs(workflow).filter(deployment => deployment.target === target);
 }
 
+// Seeding happens once, at creation, so a repository whose Actions changed later keeps a configuration that
+// only hand editing can repair. Re-deriving keeps every entry whose workflow the repository really has —
+// including a name detection cannot recognise, which is the only reason someone would have typed it — and
+// fills the target and provider pairs still uncovered. An unreadable Actions list decides nothing.
+export function syncedDeployments(workflow: Workflow, actionWorkflows: readonly { name: string }[], environments: readonly string[], actionsLoaded = false): DeploymentConfig[] {
+  const configured = deploymentConfigs(workflow);
+  if (!actionsLoaded) return configured;
+  const kept = configured.filter(deployment => actionWorkflows.some(candidate => candidate.name === deployment.workflowName));
+  const covered = new Set(kept.map(deployment => `${deployment.target}:${deployment.provider}`));
+  return [...kept, ...deploymentsForRepository(actionWorkflows, environments, true).filter(deployment => !covered.has(`${deployment.target}:${deployment.provider}`))];
+}
+
+// Detection only adopts a workflow whose name carries its platform, so a repository that deploys through one
+// generically named workflow gets no gate at all and whoever configures it has to know which name to type,
+// which branch to bind and which Environment to reach for. These candidates are filled in from what the
+// repository has so the choice is a confirmation rather than a guess: only workflows that read as deploying,
+// never a rollback, one per branch the flow releases into, and a platform slot that is merely still free.
+export function deploymentSuggestions(workflow: Workflow, actionWorkflows: readonly { name: string }[], environments: readonly string[]): DeploymentConfig[] {
+  const candidates = actionWorkflows.filter(candidate => /deploy/i.test(candidate.name) && !/rollback/i.test(candidate.name));
+  if (!candidates.length) return [];
+  const configured = deploymentConfigs(workflow);
+  const targets = [...new Set(workflow.stages.map(stage => stage.target))];
+  return targets.flatMap((target, targetIndex) => {
+    const environment = targetIndex === targets.length - 1 ? 'production' : 'preview';
+    const bound = configured.filter(deployment => deployment.target === target);
+    const free = (['vercel', 'cloudflare'] as const).filter(provider => !bound.some(deployment => deployment.provider === provider));
+    const offered = candidates.filter(candidate => !bound.some(deployment => deployment.workflowName === candidate.name)).slice(0, free.length);
+    const matchedEnvironments = environments.filter(name => name.toLowerCase().startsWith(environment));
+    const githubEnvironment = matchedEnvironments.length === 1 ? matchedEnvironments[0] : undefined;
+    const taken = new Set<DeploymentConfig['provider']>();
+    return offered.map(candidate => {
+      const provider = free.find(slot => !taken.has(slot) && providerKeywords[slot].test(candidate.name)) || free.find(slot => !taken.has(slot))!;
+      taken.add(provider);
+      return { target, provider, workflowName: candidate.name, environment: environment as DeploymentConfig['environment'], githubEnvironment };
+    });
+  });
+}
+
 // Reconciliation records a run-less row for a configured deployment whose workflow it never found.
 // That row is the only evidence available downstream: the gate it holds shut looks exactly like a
 // deployment that has not started, so the stage it locks has to be able to name it.
@@ -152,6 +192,10 @@ export function addDeployment(workflow: Workflow, deployment: DeploymentConfig):
 
 export function removeDeployment(workflow: Workflow, index: number): Workflow {
   return { ...workflow, deployments: deploymentConfigs(workflow).filter((_, deploymentIndex) => deploymentIndex !== index) };
+}
+
+export function replaceDeployment(workflow: Workflow, index: number, deployment: DeploymentConfig): Workflow {
+  return { ...workflow, deployments: deploymentConfigs(workflow).map((current, deploymentIndex) => deploymentIndex === index ? deployment : current) };
 }
 
 export function createWorkflow(repository: string, source: string, target: string, name = repository, deployments: DeploymentConfig[] = defaultDeployments): Workflow {
