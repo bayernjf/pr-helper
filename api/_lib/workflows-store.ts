@@ -266,6 +266,29 @@ export function automationMergeOutcome(pull: { number: number; state: string; me
   return { kind: 'merge' as const, pullNumber: pull.number };
 }
 
+// A claim that stops updating for longer than this can only be an instance that was recycled: every
+// path that reaches a verdict writes one.
+export const AUTOMATION_ACTION_ABANDON_MS = 120_000;
+// Long enough to clear the scheduled sweep's real delivery gap, which throttling stretches past an
+// hour, and short enough that nothing wakes up after the person who pushed has moved on.
+export const AUTOMATION_ACTION_STALE_MS = 12 * 60 * 60 * 1000;
+
+export type AutomationDrainDecision = { kind: 'execute' } | { kind: 'reclaim'; refundAttempt: boolean } | { kind: 'cancel'; reason: 'superseded' | 'stale' } | { kind: 'skip' };
+
+// Draining is the only reader the action queue has, so this verdict is what stands between a stuck row
+// and either a duplicate pull request or a pull request nobody expects. Supersession decides before age
+// because the idempotency key carries the head sha: once a later push enqueued its own action, the older
+// row describes commits already covered, however recently it was written.
+export function automationDrainDecision(action: { state: string; createdAt: string; updatedAt: string; failureReason: string | null; hasNewer: boolean }, now: number): AutomationDrainDecision {
+  if (action.state !== 'queued' && action.state !== 'running') return { kind: 'skip' };
+  const abandoned = action.state === 'running' && now - Date.parse(action.updatedAt) > AUTOMATION_ACTION_ABANDON_MS;
+  if (action.state === 'running' && !abandoned) return { kind: 'skip' };
+  if (action.hasNewer) return { kind: 'cancel', reason: 'superseded' };
+  if (now - Date.parse(action.createdAt) > AUTOMATION_ACTION_STALE_MS) return { kind: 'cancel', reason: 'stale' };
+  if (abandoned) return { kind: 'reclaim', refundAttempt: action.failureReason === null };
+  return { kind: 'execute' };
+}
+
 // A merge failure is usually a conflict or a red gate, which only a human can clear. Without a cap
 // the stale reset would re-queue the action every rotation and write a failure row each time.
 export function automationRetryIsExhausted(attempts: number, policy: { maxRetries?: number; cooldownSeconds?: number } | undefined) {
