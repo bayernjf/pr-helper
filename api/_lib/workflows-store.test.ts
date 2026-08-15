@@ -596,11 +596,12 @@ describe('listWorkflowAutomationActions', () => {
   const body = source.slice(source.indexOf('export async function listWorkflowAutomationActions'));
   const list = body.slice(0, body.indexOf('\nexport ', 1));
 
-  it('reads only the unfinished actions, bounded, within the caller\u0027s visibility', () => {
-    // A succeeded or cancelled action needs no observation and would grow this read without bound.
+  it('can read only the unfinished actions, bounded, within the caller\u0027s visibility', () => {
+    // Without the filter the newest terminal rows push a week-old paused action past the limit,
+    // which is the one row anybody reads this for.
     expect(list).toContain("state IN ('queued', 'running', 'paused', 'failed')");
-    expect(list).toMatch(/LIMIT \$\{[A-Z_]+\}|LIMIT \d+/);
-    // Team-shared workflows are visible to their members, and nothing outside that scope may be.
+    expect(list).toContain('LIMIT ${AUTOMATION_ACTION_VIEW_LIMIT}');
+    // A shared workflow's automation is visible to its members, exactly as its stage states are.
     expect(list).toContain('visibleWorkflowPredicate');
   });
 
