@@ -9,10 +9,10 @@ The current implementation includes:
 - PR creation, merge-commit execution, five-category GitHub gates, and post-merge Actions tracking.
 - Dynamic source rules, independent routes, and multi-route convergence gates.
 - Streaming AI-generated PR titles/descriptions, 24-hour local drafts, and Markdown generation rules.
-- GitHub Webhook + scheduled reconciliation, Web Push, failure details, Actions reruns, and Codex repair packages.
+- GitHub Webhook + `pg_cron` reconciliation (drain every 2 minutes, reconcile every 5), Web Push, failure details, Actions reruns, and Codex repair packages.
 - Server-validated Actions reruns with retry limits and cooldowns, plus a method/path allowlist for the GitHub proxy.
 - Vercel/Cloudflare deployment gates, health checks, run history, configuration warnings, and confirmed Production rollback.
-- Server-side encrypted AI credentials and opt-in background PR creation with rule snapshots, idempotent actions, and reconciliation triggers. Automatic merge remains disabled.
+- Server-side encrypted AI credentials and opt-in background PR creation with rule snapshots, idempotent actions, and reconciliation triggers. Per-stage automatic merge is opt-in and enforced against GitHub: it merges only when checks are green, the required approvals are present, and GitHub itself reports the PR mergeable and clean.
 
 See [docs/current-state.md](docs/current-state.md) for the authoritative architecture, feature boundaries, and next priorities. Historical specifications and plans under `docs/superpowers/` are retained for decision history.
 
@@ -47,7 +47,7 @@ npm run lint
 
 ## Database
 
-Run every migration in `db/migrations/` in numeric order. The current applied schema baseline is `001` through `029`; request handlers never create or alter tables. See [db/README.md](db/README.md).
+Run every migration in `db/migrations/` in numeric order. The current applied schema baseline is `001` through `031`; request handlers never create or alter tables. See [db/README.md](db/README.md).
 
 Required Vercel settings for the secure API include:
 
