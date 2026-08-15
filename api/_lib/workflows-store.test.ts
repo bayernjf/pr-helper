@@ -1110,9 +1110,16 @@ describe('automationDrainDecision', () => {
   });
 
   // The row is only worth waking while its intent still holds; past the window a requeue would create a
-  // pull request nobody expects, which is the same reason the queued path cancels instead of executing.
-  it('leaves a paused action that already aged out of the window', () => {
-    expect(automationDrainDecision(action({ state: 'paused', failureReason: 'GitHub 请求超时，请稍后重试', createdAt: '2026-08-14T13:00:00.000Z', updatedAt: '2026-08-14T13:30:00.000Z' }), now)).toEqual({ kind: 'skip' });
+  // pull request nobody expects. Skipping is not enough either: nothing else will ever retry a fault that
+  // reached no verdict, so leaving it paused parks a dead intent in the failure centre for good.
+  it('cancels a paused transient failure that aged out of the window', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: 'GitHub 请求超时，请稍后重试', createdAt: '2026-08-14T13:00:00.000Z', updatedAt: '2026-08-14T13:30:00.000Z' }), now)).toEqual({ kind: 'cancel', reason: 'stale' });
+  });
+
+  // A verdict GitHub reached is the operator's to read, however old it is. Ageing it out would erase the
+  // one record of why the step stopped.
+  it('keeps an aged-out verdict paused rather than cancelling it', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: '门禁尚未全绿（当前 failure）', createdAt: '2026-08-14T13:00:00.000Z', updatedAt: '2026-08-14T13:30:00.000Z' }), now)).toEqual({ kind: 'skip' });
   });
 
   it('leaves a paused action a later one already covers', () => {
