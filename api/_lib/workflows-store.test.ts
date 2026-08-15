@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -1235,6 +1235,78 @@ describe('automationDrainDecision', () => {
 
   it('stops requeueing once the attempts the executor charged reach the cap', () => {
     expect(automationDrainDecision(action({ state: 'paused', failureReason: 'GitHub 请求超时，请稍后重试', updatedAt: '2026-08-15T01:30:00.000Z', attempts: AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS }), now)).toEqual({ kind: 'skip' });
+  });
+
+  // Nothing bounded this: the gate-wait requeue keeps the row queued, which the cap on attempts never
+  // reads, so a PR waiting for one approval reached thirty-five attempts. Two-minute sweeps make that
+  // thirty GitHub round trips an hour for a gate no sweep can clear.
+  const gateWait = (overrides: Partial<Parameters<typeof automationDrainDecision>[0]> = {}) =>
+    action({ failureReason: 'PR 还需要 1 个 Approval', attempts: 1, createdAt: '2026-08-15T01:00:00.000Z', ...overrides });
+
+  it('waits out the cooldown before re-running a queued action that is holding for a gate', () => {
+    expect(automationDrainDecision(gateWait({ updatedAt: '2026-08-15T02:24:00.000Z' }), now)).toEqual({ kind: 'skip' });
+  });
+
+  it('runs the held action once the wait has elapsed', () => {
+    expect(automationDrainDecision(gateWait({ updatedAt: '2026-08-15T02:20:00.000Z' }), now)).toEqual({ kind: 'execute' });
+  });
+
+  // An approval nobody has given yet is no closer for being asked a second time, so each unanswered
+  // attempt earns a longer wait than the one before it.
+  it('stretches the wait as the unanswered attempts pile up', () => {
+    expect(automationDrainDecision(gateWait({ attempts: 3, updatedAt: '2026-08-15T02:10:00.000Z' }), now)).toEqual({ kind: 'skip' });
+    expect(automationDrainDecision(gateWait({ attempts: 1, updatedAt: '2026-08-15T02:10:00.000Z' }), now)).toEqual({ kind: 'execute' });
+  });
+
+  // The event that clears the gate runs the action inline, so this wait only bounds the fallback poll —
+  // but it still has to stay short enough that a missed event is recovered the same hour.
+  it('stops stretching the wait at the ceiling', () => {
+    expect(automationDrainDecision(gateWait({ attempts: 35, updatedAt: '2026-08-15T01:58:00.000Z' }), now)).toEqual({ kind: 'skip' });
+    expect(automationDrainDecision(gateWait({ attempts: 35, updatedAt: '2026-08-15T01:54:00.000Z' }), now)).toEqual({ kind: 'execute' });
+  });
+
+  it('honours the cooldown the workflow configured instead of the default', () => {
+    expect(automationDrainDecision(gateWait({ updatedAt: '2026-08-15T02:24:00.000Z' }), now, { cooldownSeconds: 60 })).toEqual({ kind: 'execute' });
+    expect(automationDrainDecision(gateWait({ updatedAt: '2026-08-15T02:25:59.000Z' }), now, { cooldownSeconds: 0 })).toEqual({ kind: 'execute' });
+  });
+
+  // A fresh action carries no reason, and delaying it would put the whole point of reading the queue —
+  // running work its own request could not finish — behind a five minute wait.
+  it('runs a queued action that never recorded a reason without waiting', () => {
+    expect(automationDrainDecision(action({ updatedAt: '2026-08-15T02:25:59.000Z', attempts: 1 }), now)).toEqual({ kind: 'execute' });
+  });
+});
+
+describe('automationGateWaitDelayMs', () => {
+  it('grows from the configured cooldown and stops at the ceiling', () => {
+    expect(automationGateWaitDelayMs(1, undefined)).toBe(DEFAULT_RECOVERY_POLICY.cooldownSeconds * 1000);
+    expect(automationGateWaitDelayMs(0, undefined)).toBe(DEFAULT_RECOVERY_POLICY.cooldownSeconds * 1000);
+    expect(automationGateWaitDelayMs(2, undefined)).toBe(DEFAULT_RECOVERY_POLICY.cooldownSeconds * 2000);
+    expect(automationGateWaitDelayMs(99, undefined)).toBe(AUTOMATION_GATE_WAIT_MAX_MS);
+  });
+
+  // The bounds the payload validation already accepts, so a rejected shape cannot reach here; a missing
+  // one can, and reading it as no wait at all would restore the every-sweep retry this replaces.
+  it('falls back to the default when the policy carries no usable cooldown', () => {
+    expect(automationGateWaitDelayMs(1, {})).toBe(DEFAULT_RECOVERY_POLICY.cooldownSeconds * 1000);
+    expect(automationGateWaitDelayMs(1, { cooldownSeconds: -5 })).toBe(DEFAULT_RECOVERY_POLICY.cooldownSeconds * 1000);
+    expect(automationGateWaitDelayMs(1, { cooldownSeconds: 0 })).toBe(0);
+  });
+});
+
+describe('the drain reads the cooldown the workflow configured', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const drain = source.slice(source.indexOf('export async function drainWorkflowAutomationActions'), source.indexOf('export function automationRetryIsExhausted'));
+
+  it('selects the recovery cooldown alongside the action and hands it to the decision', () => {
+    expect(drain).toContain("recoveryPolicy");
+    expect(drain).toMatch(/automationDrainDecision\([^;]*cooldownSeconds/s);
+  });
+
+  // Most workflows configure no recovery policy at all, and `Number(null)` is zero — reading the absent
+  // column as a number would hand every one of them the no-wait case this change exists to remove.
+  it('leaves an absent policy undefined rather than reading it as no cooldown', () => {
+    expect(drain).toContain('row.cooldown_seconds === null ? undefined :');
   });
 });
 
