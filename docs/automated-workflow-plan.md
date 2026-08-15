@@ -1,7 +1,7 @@
 # PR 流程自动化方案
 
 > 状态：第一版本地已实现，但 2026-08-13 生产查询确认服务端自动创建 PR 实际未生效。本文保留原始设计假设；实际问题链、修复方案与回归清单见 [`auto-create-pr-remediation.md`](auto-create-pr-remediation.md)。
-> 最后更新：2026-08-14
+> 最后更新：2026-08-15
 
 ## 目标
 
@@ -21,7 +21,7 @@
 
 ## 第一版实现状态
 
-- `024`、`025`、`026` 已由用户在 Supabase 执行；Vercel Production 和 Preview 已配置 `AI_CREDENTIALS_ENCRYPTION_KEY`。
+- `024`–`031` 已由用户在 Supabase 执行；Vercel Production 和 Preview 已配置 `AI_CREDENTIALS_ENCRYPTION_KEY`。
 - 用户主动开启某一步“自动创建 PR”时，前端会把当时的默认 Markdown 规则名称、正文和捕获时间写入该步骤策略快照。后续默认规则改变不会静默改变已启用步骤的自动化行为。
 - Webhook、Cron 和 inbox reconciliation 在阶段统一决策进入 `ready-to-create` 时，服务端基于 `workflow + stage + source + target + head SHA` 生成稳定幂等键，入队并原子领取执行；关闭页面不影响执行。
 - 执行前再次验证当前决策、服务端加密凭据、自动生成、自动确认、规则快照、Source 新提交和无同路径开放 PR。失败动作暂停并保留原因；AI 失败时不使用未经确认的兜底文案创建 PR。
@@ -247,7 +247,7 @@ failed
 - 自动合并必须同时满足 GitHub 返回的 `mergeable=true`、`mergeable_state=clean`、审批和所有门禁条件。
 - 生产合并和生产回滚仍保留独立权限和明确审计记录。
 - 自动动作使用用户、流程版本、阶段 ID、Source、Target、提交 SHA 和动作类型组成幂等键。
-- 每个步骤设置超时和最大重试次数；超过限制后进入 `paused` 并要求人工处理。
+- 每个步骤设置超时和最大重试次数；超过限制后进入 `paused` 并要求人工处理。例外是「等门禁」这一类：它按设计留在 `queued` 以便被清门禁的事件接上，因此由时间退避而不是尝试次数封顶，见《重试上限》。
 - 任何配置缺失、Actions 不存在、Environment 不存在或状态过期，都只能暂停，不能猜测成功。
 - AI 修复不能直接获得 GitHub App secret、installation token 或长期 API Key。
 
@@ -265,6 +265,8 @@ failed
 
 沿用《安全与保护》：只有 GitHub 返回 `mergeable = true`、`mergeable_state = 'clean'`、审批与所有必需门禁均满足时才执行合并。判定必须在执行前重新向 GitHub 取，不使用库里的缓存状态。
 
+**必需审批数要同时读两个来源。** GitHub 的经典分支保护与 ruleset 是并行生效、由不同端点上报的：一个分支若把审批要求只写在 ruleset 里，`/repos/{o}/{r}/branches/{b}/protection` 会完全不返回 review 段，于是投影里的 `required_approvals` 是 0，判定跳过审批那一支、落到笼统的 `blocked`。`requiredApprovalsFromProtection(protection, rules)` 并行取 `/rules/branches/{b}` 并取两者较严者（已合并的 PR 跳过这次调用）。
+
 `mergeable_state = 'behind'`（仓库开启「Require branches to be up to date」且 base 已前进）**只暂停，不自动 update branch**。理由：update branch 是对源分支的写入，会触发新一轮 CI，并使 head sha、幂等键和待用 `sha` 同时失效，还可能与自动创建互相触发形成循环。暂停后由用户在 GitHub 或详情页处理。
 
 ### 重试上限
@@ -272,6 +274,10 @@ failed
 现有机制是失败动作落 `paused`，超过 120 秒被 `enqueueServerAutoCreate` 的 stale 逻辑重置回 `queued`。这对自动创建是自愈能力（`P9` 即靠它恢复），但对合并有害：冲突、缺审批、必需检查为红都属于**人工才能解决**的失败，无上限重排会每轮重试、每轮写一条失败原因和审计，刷满队列、白耗 API 配额，并让界面看起来「系统在努力」而实际永不成功。
 
 因此 `merge-pr` 必须有重试上限：复用工作流上已有的 `recoveryPolicy { maxRetries, cooldownSeconds }`，超过 `maxRetries` 后停在 `paused` 且不再自动重排，必须人工恢复。这也落实《安全与保护》中「每个步骤设置超时和最大重试次数」。
+
+**2026-08-15 修正：上面这个上限漏掉了一整类路径。** `automationRetryIsExhausted` 只读走到过判决的行，而「门禁未全绿」「审批不足」「mergeability 未判定」这几种原因被标为 `retryable`，执行器按设计把动作留在 `queued`（不是 `paused`）以便被清门禁的事件接上——`queued` 不在上限的视野里，所以这条路径**根本没有上限**。迁移 `030` 把排空收到每 2 分钟后代价才显形：一个只差一个 Approval 的 PR 在 74 分钟里累计 46 次尝试，每次都花 GitHub 调用，而门禁只有人能清。本节原本担心的浪费确实发生了，只是走的是另一条路。
+
+修法的前提是**定时重试不是时效来源**：清门禁的事件本身会触发校准，而 `scheduleServerAutoMerge` 命中已 `queued` 的行会就地执行，所以排空的重试只是「事件漏了」的兜底。于是 `automationGateWaitDelayMs(attempts, policy)` 让带 `failure_reason` 的 `queued` 行等一段时间才重跑：等待时长取同一个 `recoveryPolicy.cooldownSeconds`（默认 300 秒，可配 0–86400，显式配 0 表示不等），随尝试次数翻倍，封顶 `AUTOMATION_GATE_WAIT_MAX_MS = 30 分钟`——封顶存在的理由是漏掉的事件要在同一小时内被兜回来。`automationDrainDecision` 因此多了第三个可选参数 `policy?: { cooldownSeconds?: number }`，排空查询多取 `workflows.payload->'recoveryPolicy'->>'cooldownSeconds'`。注意该列缺省时必须传 `undefined` 而不是 `Number(null)`——后者是 0，会把没配策略的流程全都读成「不等待」。
 
 ### 幂等
 
@@ -317,7 +323,7 @@ failed
 2. 增加策略类型、默认值和编辑器配置，不执行自动动作。 ✅ 已落地
 3. 增加策略快照、自动化运行和动作表迁移。 ✅ `025` 已落地并执行
 4. 接入 `ready-to-create`，实现自动创建 PR、1–20 新提交阈值和幂等去重。 ✅ 本地已接入 webhook、Cron 和 inbox reconciliation；每个动作保存不可为空的生成规则快照，并重校验服务端保存的自动生成/自动确认偏好与阈值。重复幂等键直接复用已有动作，不新增运行快照。待部署后进行真实 GitHub 验收。
-5. 接入 `ready-to-merge`，实现逐步骤自动合并和暂停/恢复。 ✅ 本地已落地：`automationMergeOutcome` 判定、`automationRetryIsExhausted` 重试上限、`merge-pr` 幂等键与执行器分支、reconciliation 入队，以及流程详情页的按步骤勾选框。判定门禁的 `checks_state` 取已 reconcile 的行（已折入部署结果），`mergeable`/`mergeable_state` 现拉 GitHub。待部署后进行真实 GitHub 验收
+5. 接入 `ready-to-merge`，实现逐步骤自动合并和暂停/恢复。 ✅ **已部署并在生产验收通过**：`automationMergeOutcome` 判定、`automationRetryIsExhausted` 重试上限、`automationGateWaitDelayMs` 等门禁退避、`merge-pr` 幂等键与执行器分支、reconciliation 入队，以及流程详情页的按步骤勾选框。判定门禁的 `checks_state` 取已 reconcile 的行（已折入部署结果），`mergeable`/`mergeable_state` 现拉 GitHub，必需审批数取经典保护与 ruleset 的较严者。2026-08-15 生产计数：`create-pr` 47 次成功、`merge-pr` 37 次成功
 6. 接入合并后门禁、部署、健康检查和多路径汇聚推进。
 7. 增加运行详情、失败原因、成本限制、审计和浏览器 E2E。
 8. 完成密钥轮换、团队权限和凭据生命周期后，再评估后台 AI 修复。
@@ -338,11 +344,12 @@ failed
 - 自动合并只使用 merge commit，且请求必须携带 `sha = pull.head.sha`；head 前进后这次合并必须失败而不是改合新 commit。
 - `mergeable_state = 'behind'` 时暂停并给出可操作原因，不自动 update branch。
 - 合并失败次数达到 `recoveryPolicy.maxRetries` 后停在 `paused`，不再被 stale 逻辑自动重排。
+- 等门禁而留在 `queued` 的动作，在 `recoveryPolicy.cooldownSeconds`（随尝试次数翻倍、封顶 30 分钟）走完前不被排空重跑；而清门禁的事件到达后必须立即合并，不受该退避影响。
 - 目标 PR 已是 merged 时记 `succeeded` 并带 PR 号，不调用合并接口、不产生失败记录。
 - 自动合并策略可在未开启自动创建的步骤上单独存在：勾选后该步骤保存 `{ autoMergePullRequest: true, executionMode: 'server' }`，不带生成规则；关闭自动创建不会清除自动合并，反之亦然。
 - 界面上自动合并的可勾选条件与自动创建一致：四项 AI 前置缺失时两个勾选框都为 `disabled`；服务端入队不校验这些前置。
 - 自动合并勾选框位于流程详情页步骤卡片内「新提交数达到」输入框右侧的同一行；抽屉不提供自动化开关。
-- Checks、Actions、审批、mergeability 任一未满足时不会执行合并。
+- Checks、Actions、审批、mergeability 任一未满足时不会执行合并；其中必需审批数须同时覆盖只写在 ruleset 里的审批要求。
 - 合并后的所有配置门禁未全绿时不会创建下一步 PR。
 - 多路径汇聚必须等待全部显式前置路径完成。
 - 重复 Webhook、重复轮询和重复点击不会创建重复 PR 或重复合并。
