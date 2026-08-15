@@ -6,7 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, g
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, selectWorkflowAfterCloudLoad, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addDeployment, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
+import { addDeployment, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
@@ -1802,6 +1802,22 @@ function renderStepForm(repository: string) {
     } });
     rerenderStepForm(repository);
   }));
+  document.querySelector<HTMLButtonElement>('#sync-deployments')?.addEventListener('click', () => {
+    if (!active) return;
+    const restored = active;
+    const before = deploymentConfigs(restored);
+    const synced = syncedDeployments(restored, repositoryActionWorkflows, repositoryEnvironments, repositoryActionsLoaded);
+    const kept = synced.filter(deployment => before.some(candidate => deploymentKey(candidate) === deploymentKey(deployment) && candidate.workflowName === deployment.workflowName));
+    const removed = before.length - kept.length;
+    const added = synced.length - kept.length;
+    if (!removed && !added) { showToast(t('editor.deployments.syncUnchanged')); return; }
+    save({ ...restored, deployments: synced });
+    showToast(t('editor.deployments.synced', { kept: kept.length, added, removed }), { label: t('editor.deployments.undo'), onUndo: () => {
+      save(restored);
+      rerenderStepForm(repository);
+    } });
+    rerenderStepForm(repository);
+  });
   document.querySelector<HTMLButtonElement>('#save-recovery-policy')?.addEventListener('click', () => {
     if (!active) return;
     const maxRetries = Math.max(0, Math.min(20, Number(value('recovery-max-retries')) || 0));
@@ -1838,7 +1854,8 @@ function renderDeploymentSettings() {
     }).join('')
     : `<p class="meta">${t('editor.deployments.empty')}</p>`;
   const toggle = `<button id="toggle-deployment-form" type="button" class="ghost deployment-add-toggle" aria-expanded="${deploymentFormOpen}">${deploymentFormOpen ? t('editor.deployments.cancel') : t('editor.deployments.add')}</button>`;
-  return `<fieldset class="deployment-settings"><legend>${t('editor.deployments.label')}</legend><small>${t('editor.deployments.desc')}</small>${summary}<div class="deployment-config-list">${rows}</div>${toggle}${deploymentFormOpen ? renderDeploymentForm() : ''}</fieldset>`;
+  const sync = `<button id="sync-deployments" type="button" class="ghost deployment-sync" ${repositoryActionsLoaded ? '' : 'disabled'} title="${repositoryActionsLoaded ? t('editor.deployments.syncHint') : t('editor.deployments.syncUnavailable')}">${t('editor.deployments.sync')}</button>`;
+  return `<fieldset class="deployment-settings"><legend>${t('editor.deployments.label')}</legend><small>${t('editor.deployments.desc')}</small>${summary}<div class="deployment-config-list">${rows}</div><div class="deployment-actions">${toggle}${sync}</div>${deploymentFormOpen ? renderDeploymentForm() : ''}</fieldset>`;
 }
 function renderDeploymentForm() {
   const target = branches.find(branch => branch === 'dev') || branches.find(branch => branch === 'main') || branches[0] || '';
