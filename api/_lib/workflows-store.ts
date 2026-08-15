@@ -302,7 +302,7 @@ export function automationDrainHasStartBudget(startedAt: number, now: number) {
   return now - startedAt < AUTOMATION_DRAIN_START_BUDGET_MS;
 }
 
-type DrainActionRow = { id: number; user_id: string; kind: WorkflowAutomationAction['kind']; state: string; attempts: number; failure_reason: string | null; created_at: string; updated_at: string; repository: string | null; source: string; target: string; installation_id: string | null; newer: number };
+type DrainActionRow = { id: string; user_id: string; kind: WorkflowAutomationAction['kind']; state: string; attempts: number; failure_reason: string | null; created_at: string; updated_at: string; repository: string | null; source: string; target: string; installation_id: string | null; newer: number };
 
 // The queue has had no reader: an action's only chance to run was the request that enqueued it, and the
 // recovery hidden in that same enqueue path needs someone to push again to the very stage that is stuck.
@@ -354,9 +354,13 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
       line('drain-reclaimed', { refunded: decision.refundAttempt });
     }
     if (!row.installation_id) { counts.skipped += 1; line('drain-no-installation'); continue; }
+    // The executor rejects a non-integer identity before it claims anything, so an unnormalized bigint
+    // makes every row fail identically and hides whatever the action's real verdict would have been.
+    const actionId = automationActionId(row.id);
+    if (!actionId) { counts.skipped += 1; line('drain-invalid-action'); continue; }
     if (!automationDrainHasStartBudget(startedAt, Date.now())) { counts.deferred += 1; line('drain-deferred', { elapsedMs: Date.now() - startedAt }); continue; }
     try {
-      await executeWorkflowAutomationActionForUser(environment, row.user_id, row.installation_id, row.id);
+      await executeWorkflowAutomationActionForUser(environment, row.user_id, row.installation_id, actionId);
       counts.executed += 1;
     } catch (error) {
       // One blocked action must not strand the rest of the batch. Past the claim the executor records its
@@ -364,7 +368,7 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
       // all, and leaving it there is what makes every later sweep run the same throwing action again.
       const reason = automationDrainFailureReason(error);
       counts.failed += 1;
-      counts.failures.push({ action: row.id, reason });
+      counts.failures.push({ action: actionId, reason });
       await sql`UPDATE workflow_automation_actions SET state = 'paused', failure_reason = ${reason}, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${row.id} AND state IN ('queued', 'running')`.catch(() => undefined);
       line('drain-failed', { detail: reason.slice(0, 200) });
     }
