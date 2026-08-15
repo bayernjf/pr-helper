@@ -184,9 +184,17 @@ async function enqueueServerAutoMerge(sql: ReturnType<typeof query>, row: Tracke
   return concurrent[0]?.state === 'queued' ? automationActionId(concurrent[0].id) : null;
 }
 
-async function scheduleServerAutoMerge(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, pullNumber: number, headSha: string) {
+async function scheduleServerAutoMerge(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, pullNumber: number, headSha: string, gate: { checksState: string; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string }) {
   const actionId = await enqueueServerAutoMerge(sql, row, workflow, stageIndex, source, pullNumber, headSha);
   if (!actionId) return;
+  const outcome = automationMergeOutcome({ number: pullNumber, state: 'open' }, gate);
+  if (outcome.kind === 'paused' && !automationInlineMergeShouldAttempt(outcome)) {
+    // Naming the wait on the queued row is what the failure centre shows, and a reason is also what
+    // engages the drain's backoff. `updated_at` is deliberately left alone: bumping it on every delivery
+    // would keep pushing the backoff window forward and the drain would never get its turn as the net.
+    await sql`UPDATE workflow_automation_actions SET failure_reason = ${outcome.reason.slice(0, 800)} WHERE user_id = ${row.user_id} AND id = ${actionId} AND state = 'queued'`.catch(() => undefined);
+    return;
+  }
   try { await executeWorkflowAutomationActionForUser(environment, row.user_id, row.github_installation_id!, actionId); }
   catch (error) {
     const reason = error instanceof Error ? error.message : '自动合并 PR 失败';
@@ -264,6 +272,14 @@ export function automationMergeOutcome(pull: { number: number; state: string; me
   if (gate.mergeableState === 'behind') return { kind: 'paused' as const, reason: '分支落后于目标分支，需要先在 GitHub 更新分支' };
   if (gate.mergeableState !== 'clean') return { kind: 'paused' as const, reason: `GitHub 合并状态为 ${gate.mergeableState}`, ...(gate.mergeableState === 'unknown' || gate.mergeableState === 'blocked' ? { retryable: true } : {}) };
   return { kind: 'merge' as const, pullNumber: pull.number };
+}
+
+// A retryable pause is a wait for an event, and the reconcile that observes that event attempts the merge
+// then. Attempting in between re-reads from GitHub the very gate this verdict was computed from, so it
+// cannot reach a different answer: it only spends calls and inflates the attempt count, which is the
+// signal the drain's backoff and the failure centre both read.
+export function automationInlineMergeShouldAttempt(outcome: ReturnType<typeof automationMergeOutcome>) {
+  return !(outcome.kind === 'paused' && 'retryable' in outcome && outcome.retryable === true);
 }
 
 // A claim that stops updating for longer than this can only be an instance that was recycled: every
@@ -1646,7 +1662,8 @@ async function reconcileStageWork(environment: Record<string, string | undefined
   }
   if (comparison.ahead_by > 0 && comparisonHeadSha) await scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha);
   // Only an open pull request can be merged, and the gate verdict is pinned to the head sha just stored.
-  if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await phase('write', () => scheduleServerAutoMerge(environment, sql, row, workflow, stageIndex, source, pull.number, pull.head.sha));
+  // The gate goes in already computed, so a wait that only a later event can end costs no second read.
+  if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await phase('write', () => scheduleServerAutoMerge(environment, sql, row, workflow, stageIndex, source, pull.number, pull.head.sha, { checksState: checks.state, approvals, requiredApprovals, mergeable: pull.mergeable ?? null, mergeableState: pull.mergeable_state || '' }));
   return { reconciled: true, phases };
 }
 
