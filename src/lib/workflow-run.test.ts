@@ -30,16 +30,16 @@ describe('workflow run presentation', () => {
 
 describe('automationActionPresentation', () => {
   it('separates an action still in flight from one that stopped', () => {
-    expect(automationActionPresentation({ kind: 'create-pr', state: 'queued', attempts: 0, failureReason: null }).blocked).toBe(false);
-    expect(automationActionPresentation({ kind: 'create-pr', state: 'running', attempts: 1, failureReason: null }).blocked).toBe(false);
+    expect(automationActionPresentation({ state: 'queued' }).blocked).toBe(false);
+    expect(automationActionPresentation({ state: 'running' }).blocked).toBe(false);
     // `paused` is where every stuck automation ends up, and nothing retries it today.
-    expect(automationActionPresentation({ kind: 'merge-pr', state: 'paused', attempts: 1, failureReason: '门禁尚未全绿（当前 pending）' })).toEqual({ tone: 'attention', status: 'blocked', blocked: true });
-    expect(automationActionPresentation({ kind: 'merge-pr', state: 'failed', attempts: 3, failureReason: 'boom' })).toEqual({ tone: 'failed', status: 'failed', blocked: true });
+    expect(automationActionPresentation({ state: 'paused' })).toEqual({ tone: 'attention', status: 'blocked', blocked: true });
+    expect(automationActionPresentation({ state: 'failed' })).toEqual({ tone: 'failed', status: 'failed', blocked: true });
   });
 
   it('keeps a queued action distinguishable from one already claimed', () => {
-    expect(automationActionPresentation({ kind: 'create-pr', state: 'queued', attempts: 0, failureReason: null }).status).toBe('queued');
-    expect(automationActionPresentation({ kind: 'create-pr', state: 'running', attempts: 1, failureReason: null }).status).toBe('running');
+    expect(automationActionPresentation({ state: 'queued' }).status).toBe('queued');
+    expect(automationActionPresentation({ state: 'running' }).status).toBe('running');
   });
 });
 
