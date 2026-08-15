@@ -307,6 +307,13 @@ type DrainActionRow = { id: number; user_id: string; kind: WorkflowAutomationAct
 // The queue has had no reader: an action's only chance to run was the request that enqueued it, and the
 // recovery hidden in that same enqueue path needs someone to push again to the very stage that is stuck.
 // Reading it on a clock is what decouples recovery from the event that produced the work.
+// An executor that throws before it can claim the row leaves no reason anywhere, so the same throw is all
+// a later sweep would learn. Naming the drain as the origin keeps it apart from the reasons the executor
+// writes for itself once it is past the claim.
+export function automationDrainFailureReason(error: unknown) {
+  return `排空时执行失败：${error instanceof Error ? error.message : '未知错误'}`.slice(0, 800);
+}
+
 export async function drainWorkflowAutomationActions(environment: Record<string, string | undefined>) {
   const sql = query(environment);
   const startedAt = Date.now();
@@ -324,7 +331,7 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
     WHERE actions.state IN ('queued', 'running')
     ORDER BY actions.created_at
     LIMIT ${AUTOMATION_DRAIN_BATCH_SIZE}`;
-  const counts = { examined: rows.length, executed: 0, reclaimed: 0, cancelled: 0, failed: 0, skipped: 0, deferred: 0 };
+  const counts = { examined: rows.length, executed: 0, reclaimed: 0, cancelled: 0, failed: 0, skipped: 0, deferred: 0, failures: [] as { action: number; reason: string }[] };
   for (const row of rows) {
     const decision = automationDrainDecision({ state: row.state, createdAt: row.created_at, updatedAt: row.updated_at, failureReason: row.failure_reason, hasNewer: row.newer > 0 }, Date.now());
     const line = (reason: string, detail: Record<string, string | number | boolean | undefined> = {}) => console.info(automationSkipLine({ kind: row.kind, repository: row.repository || '?', route: `${row.source} → ${row.target}`, reason, action: row.id, ...detail }));
@@ -352,10 +359,14 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
       await executeWorkflowAutomationActionForUser(environment, row.user_id, row.installation_id, row.id);
       counts.executed += 1;
     } catch (error) {
-      // One blocked action must not strand the rest of the batch: the executor has already recorded its
-      // own verdict and reason on the row by the time it throws.
+      // One blocked action must not strand the rest of the batch. Past the claim the executor records its
+      // own verdict, and that one must stand; a row still sitting where the drain left it got no verdict at
+      // all, and leaving it there is what makes every later sweep run the same throwing action again.
+      const reason = automationDrainFailureReason(error);
       counts.failed += 1;
-      line('drain-failed', { detail: error instanceof Error ? error.message.slice(0, 200) : 'unknown' });
+      counts.failures.push({ action: row.id, reason });
+      await sql`UPDATE workflow_automation_actions SET state = 'paused', failure_reason = ${reason}, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${row.id} AND state IN ('queued', 'running')`.catch(() => undefined);
+      line('drain-failed', { detail: reason.slice(0, 200) });
     }
   }
   return counts;
