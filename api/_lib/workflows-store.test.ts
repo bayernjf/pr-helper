@@ -1145,4 +1145,18 @@ describe('missing deployment workflows', () => {
     expect(body).toContain('run_id IS NULL');
     expect(body).toContain('missingDeployments:');
   });
+
+  // Clearing the deployment configuration is the only way to release a gate held by a workflow the
+  // repository does not have. It used to be a dead end: the rewrite only clears the old rows on the
+  // path that reinserts them, so an empty configuration returned before touching anything and left
+  // its run-less placeholders behind, holding checks_state at pending and locking the next stage for
+  // good. bayernjf/agent-dev sat at 38 commits ahead this way.
+  it('retires the rows an emptied deployment configuration left behind', () => {
+    const source = readFileSync(new URL('./workflows-store.ts', import.meta.url), 'utf8');
+    const body = source.slice(source.indexOf('async function reconcileStageDeployments'), source.indexOf('export function reconcileTimingLine'));
+    const beforeReturn = body.slice(0, body.indexOf('if (!configurations.length'));
+    const emptyPath = body.slice(body.indexOf('if (!configurations.length'), body.indexOf('const parent = deploymentParentState'));
+    expect(beforeReturn).not.toContain('return [];');
+    expect(emptyPath).toContain('DELETE FROM workflow_stage_deployments');
+  });
 });

@@ -1304,11 +1304,19 @@ function githubEnvironment(provider: DeploymentProvider, environment: 'preview' 
 
 async function reconcileStageDeployments(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, target: string, sha: string): Promise<DeploymentState[]> {
   const configurations = deploymentConfigsForTarget(workflow, target);
-  if (!configurations.length || !row.github_installation_id) return [];
+  const stageId = stageIdentity(workflow, stageIndex);
+  // A configuration that no longer declares a deployment for this target still owns the rows it once
+  // created, and the rewrite below only clears them on the path that reinserts. Returning early left
+  // run-less placeholders for workflows the repository does not have, and those hold checks_state at
+  // pending, which locks the next stage with no way out but this delete.
+  if (!configurations.length) {
+    await sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`;
+    return [];
+  }
+  if (!row.github_installation_id) return [];
   const parent = deploymentParentState(workflow, stageIndex, source, sha);
   // Deployment rows are children of workflow_stage_states. Reconciliation discovers
   // deployments before the final stage status is written, so establish the parent first.
-  const stageId = stageIdentity(workflow, stageIndex);
   await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_state, head_sha, checks_state, checks_passed, checks_total) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${parent.repository}, ${parent.source}, ${parent.target}, 'merged', ${parent.headSha}, 'pending', ${0}, ${0}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, head_sha = EXCLUDED.head_sha`;
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
