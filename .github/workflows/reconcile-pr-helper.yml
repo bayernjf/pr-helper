@@ -34,13 +34,15 @@ jobs:
       - name: Calibrate active workflows
         if: steps.config.outputs.configured == 'true'
         env:
-          SWEEPS: '6'
+          SWEEPS: '1'
           SWEEP_INTERVAL_SECONDS: '75'
         run: |
-          # GitHub throttles scheduled deliveries, so a */10 schedule arrives every 30-60 minutes in
-          # practice. Each sweep covers one batch of workflows, so relying on the schedule alone left a
-          # fleet larger than a batch waiting hours to have its automation evaluated. Sweeping several
-          # times per delivery makes coverage depend on this job rather than on the scheduler.
+          # pg_cron (migration 030) is the clock now: it drains every 2 minutes and reconciles every 5.
+          # This job is the fallback for when pg_net cannot reach the endpoints, so it sweeps once.
+          # Sweeping repeatedly here was how coverage survived a scheduler that delivered a */10
+          # schedule every 46 minutes; restoring it would only double the reconcile spend against the
+          # GitHub quota for coverage pg_cron already provides. Overlap is harmless either way, because
+          # a trigger that cannot take the reconciliation lease records itself as skipped.
           failures=0
           for sweep in $(seq 1 "$SWEEPS"); do
             if [[ "$sweep" -gt 1 ]]; then sleep "$SWEEP_INTERVAL_SECONDS"; fi

@@ -319,9 +319,9 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 1. **瞬时失败的重排路径已实现，待生产验证（当前第一优先级）**。`drainWorkflowAutomationActions` 现在也读 `paused` 行，`automationDrainDecision` 对 `paused` 只在「失败原因存在且 `automationAttemptWasReached` 判为未触达供方」时返回 `requeue`，并叠加多重界限：未被更新动作取代、仍在 12 小时 stale 窗口内、距上次更新超过 `AUTOMATION_TRANSIENT_REQUEUE_COOLDOWN_MS`（15 分钟）、`attempts` 未达 `AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS`（3）。冷却是必需的：领取前抛出的故障不计 `attempts`，仅靠次数上限无法收敛。重排写入以读到的 `state = 'paused'` 为条件，期间若有真实裁决写入则裁决胜出。批次排序改为 `ORDER BY (actions.state = 'paused'), actions.created_at`，避免最老的 `paused` 行占满 10 条批次、饿死本该执行的队列行。7 条「门禁尚未全绿」是 GitHub 已给出的裁决，仍留在 `paused` 不动。**更正**：此前记录「`automationAttemptWasReached` 的正则漏掉 `CONNECT_TIMEOUT`」是错的——`timed? ?out` 在忽略大小写下已经匹配 `TIMEOUT`，无需改正则，现由测试固定该分类。超窗的瞬时失败改判 `cancel / stale` 而不是继续 `skip`：没有别的机制会重试它，留在 `paused` 就是把一个已死的意图长期钉在失败中心里；GitHub 已给出的裁决无论多老都保持 `paused`，那是操作者唯一的记录。因此 `id 6` / `58` / `80` 会被清成 `cancelled`，不会被救回；重排路径本身的生产验证要等下一次真实的瞬时故障。`id 84` 已于 2026-08-15 13:29 按预期清成 `cancelled / 超过自动化时限，未再尝试`。
 
-2. **实时校准预算已按触发方分开，待生产验证（当前第一优先级）**。原先一个 8 秒常数同时服务三种触发方，而它们的约束正相反：webhook 的响应体没有任何调用方读，投递本身要求把这次事件涉及的 1–2 个步骤跑完；保存与收件箱刷新背后有人在等，让出不等于丢工作（`reconcile_pending_since` 会让下一次触发接力）。因此 `webhook` 提到 `WEBHOOK_RECONCILE_BUDGET_MS = 25000`，`manual` / `inbox_refresh` 保持 8000，`REALTIME_RECONCILE_BUDGET_MS` 环境变量仍可一并覆盖。同时把外层兜底从 `budgetMs * 2` 改为 `realtimeReconcileCeilingMs(budgetMs)`（`min(budgetMs + 15s, 60s - 15s)`）：外层只是给永不落地的 I/O 兜底，不是第二份预算，16 秒时它离预算太近，会在 sweep 还活着时把它甩掉，25 秒预算再翻倍则直接越过平台上限。依据见《2026-08-15 实时校准预算的实测重定》。
+2. **实时校准预算已按触发方分开，生产已验证（无待办，仅留结论）**。原先一个 8 秒常数同时服务三种触发方，而它们的约束正相反：webhook 的响应体没有任何调用方读，投递本身要求把这次事件涉及的 1–2 个步骤跑完；保存与收件箱刷新背后有人在等，让出不等于丢工作（`reconcile_pending_since` 会让下一次触发接力）。因此 `webhook` 提到 `WEBHOOK_RECONCILE_BUDGET_MS = 25000`，`manual` / `inbox_refresh` 保持 8000，`REALTIME_RECONCILE_BUDGET_MS` 环境变量仍可一并覆盖。同时把外层兜底从 `budgetMs * 2` 改为 `realtimeReconcileCeilingMs(budgetMs)`（`min(budgetMs + 15s, 60s - 15s)`）：外层只是给永不落地的 I/O 兜底，不是第二份预算，16 秒时它离预算太近，会在 sweep 还活着时把它甩掉，25 秒预算再翻倍则直接越过平台上限。依据见《2026-08-15 实时校准预算的实测重定》。**2026-08-15 14:49 部署后核对**：webhook 12 次成功、让出 0、被回收 0（部署前 24 小时 292 / 149 / 60）；p50 9.0 秒、最长 17.2 秒，全部在旧的 8 秒预算之上。cron 11 次全成功，p50 14.1 秒，校准 130 个步骤。待补齐标记为 0。`manual` / `inbox_refresh` 暂无部署后样本，仍需在日常使用中观察 p90。
 
-3. **收紧恢复时钟**。GitHub 计划任务实际 20–90 分钟才送达，drain 的恢复延迟整条绑在这上面。评估 Supabase `pg_cron` 作为更准的时钟（Vercel Hobby 的 Cron 是每天 1 次、上限 2 个任务，用不了）。
+3. **时钟已搬进数据库，待生产验证（当前第一优先级）**。近 7 天相邻 cron 送达的间隔：p50 46 分、p90 82 分、最大 152 分，而一次送达只覆盖约 7.5 分钟（`SWEEPS: 6` × 75 秒），约 85% 的时间没有 drain 在跑；被回收实例留下的已领取行本该 `AUTOMATION_ACTION_ABANDON_MS`（120 秒）后就能接手，实际最坏等 2.5 小时。迁移 030 用 `pg_cron` + `pg_net` 打这两个端点：**drain `*/2`**（对齐 abandon 窗口，队列空时不产生 GitHub 调用）、**reconcile `*/5`**（每次扫掠约 69 次调用，5 分钟一次 = 828 次/小时；2 分钟则单这一项 2070 次/小时，直接压第 6 项那条 2500 次/小时的线，故不取）。密钥不进仓库：迁移只建 `public.pr_helper_cron_ping(endpoint)`（`security definer`），调用时从 Vault 取 `pr_helper_cron_secret`，取不到就抛错——否则只会在 `net._http_response` 里留一片 401，看着像端点坏了。`timeout_milliseconds` 给 90 秒，因为 pg_net 默认 5 秒会把正常干完活的调用记成超时。Actions 作业保留为兜底但 `SWEEPS` 6 → 1（重叠无害：抢不到 `reconciliation_leases` 的触发记 `skipped`）。**不采用「把 Actions 循环拉长」**：仓库是 public、分钟数免费，但 p90 82 分、最大 152 分超出任何单次作业的合理循环时长，且计划工作流在仓库连续 60 天无提交后会被 GitHub 自动停用，覆盖率仍挂在会漂移的调度器上。**你要做的一次性操作**：在 Supabase SQL Editor 执行 `select vault.create_secret('<CRON_SECRET 的值>', 'pr_helper_cron_secret');`，然后应用迁移 030。之后核对 `cron.job_run_details` 与 `net._http_response`：节奏是否真落到 2 / 5 分钟、有无 401、`github_calls` 每小时是否仍低于 2500。
 
 4. **drain 稳定后删掉 sweep 内联的执行路径**，让自动化动作只有一条执行入口；在 drain 未经过若干天生产观察前不动。
 
@@ -359,6 +359,8 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 **根因在 08-15 新加的 `paused` 分支的判断顺序**：它先看失败原因，GitHub 已给出裁决的行直接 `skip`，因此永远走不到 `hasNewer` 那一步；而 `queued` / `running` 早就有 `superseded` 的退出口，`paused` 没有。修复是把 `hasNewer` 提到该分支的第一条并判 `cancel / superseded`。这同时纠正了「裁决要留作操作者的记录」这条理由的适用范围：只有最新那条才是记录，被取代的那条不是。
 
 修复上线后失败中心应只剩 1 项（`fix/failure-e2e` 的 Actions 失败），9 条 `paused` 会被清成 `cancelled / 已被后续提交的自动化动作取代`，仍可在历史里查到。看板「已暂停，需要处理」计数应从 9 归零。
+
+**2026-08-15 14:50 部署后核对已确认**：九条在同一个 drain 批次里被清成 `cancelled / 已被后续提交的自动化动作取代`（约 0.75 秒一条，批量上限 10），库里已无任何 `paused` 行，失败中心只剩那 1 项真待办。
 
 ### 2026-08-15 实时校准预算的实测重定
 
