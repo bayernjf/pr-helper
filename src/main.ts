@@ -9,7 +9,7 @@ import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, up
 import { addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
-import { stageRunPresentation, workflowRunSummary, type WorkflowStageRunState } from './lib/workflow-run';
+import { automationActionPresentation, latestAutomationAction, stageRunPresentation, workflowRunSummary, type AutomationActionState, type WorkflowStageRunState } from './lib/workflow-run';
 import { getCloudSyncStatus, unlockCloudSync, lockCloudSync, isCloudSyncUnlocked, encryptForCloud, decryptFromCloud, rotateCloudSyncKey, type CloudSyncStatus, type SyncableData } from './lib/encrypted-sync';
 import { canPerformTeamOperation, teamRoleLabel } from './lib/team-permissions';
 import { t, getLocale, setLocale, detectLocale, registerTranslations, type Locale } from './lib/i18n';
@@ -45,6 +45,7 @@ type Team = { id: string; name: string; role: 'owner' | 'editor' | 'operator' | 
 type TeamMember = { githubLogin: string; role: Team['role'] };
 type PreflightCheck = { code: string; severity: 'error' | 'warning' | 'info'; title: string; detail: string; workflowId: string; stageIndex: number | null; source: string | null; fix?: string };
 type PreflightResult = { workflowId: string; workflowName: string; repository: string; checks: PreflightCheck[]; summary: { errors: number; warnings: number; info: number }; ok: boolean };
+type AutomationAction = { id: number; workflowId: string; stageId: string | null; stageIndex: number; source: string; target: string; kind: 'create-pr' | 'merge-pr'; state: AutomationActionState; attempts: number; failureReason: string | null; createdAt: string; updatedAt: string };
 type RecoveryStatus = { workflowId: string; stageIndex: number; source: string; retryCount: number; maxRetries: number; lastRetryAt: string | null; cooldownRemainingSeconds: number; exhausted: boolean; escalationNeeded: boolean };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
@@ -97,11 +98,12 @@ let preflightResults: PreflightResult[] = [];
 let preflightLoading = false;
 let preflightError = '';
 let recoveryStatuses: RecoveryStatus[] = [];
+let automationActions: AutomationAction[] = [];
 let actionQueueError = '';
 let actionQueueRefreshing = false;
 let actionQueueReconciliationScheduled = false;
 const actionQueueRequestQueue = new ActionQueueRequestQueue();
-let overviewFilter: 'all' | 'attention' | 'failed' = 'all';
+let overviewFilter: 'all' | 'attention' | 'failed' | 'automation' = 'all';
 let laneSearchQuery = '';
 const expandedLaneIds = new Set<string>();
 let laneSortMode: WorkflowSortMode = 'custom';
@@ -328,7 +330,7 @@ async function loadCloudWorkflows() {
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
 }
 async function loadActionQueue(reconcile = true, repository?: string) {
-  if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = []; syncHealth = null; workflowRuns = []; timeline = []; recoveryStatuses = []; actionQueueError = ''; return false; }
+  if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = []; syncHealth = null; workflowRuns = []; timeline = []; recoveryStatuses = []; automationActions = []; actionQueueError = ''; return false; }
   return actionQueueRequestQueue.run(reconcile, currentReconcile => loadActionQueueOnce(currentReconcile, repository));
 }
 async function loadActionQueueOnce(reconcile: boolean, repository?: string) {
@@ -340,7 +342,7 @@ async function loadActionQueueOnce(reconcile: boolean, repository?: string) {
       actionQueueError = payload.message || t('toast.queue.failed');
       return false;
     }
-    const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[]; events?: WorkflowStageEvent[]; deployments?: WorkflowStageDeployment[]; deploymentRuns?: WorkflowStageDeploymentRun[]; configurationWarnings?: WorkflowConfigurationWarning[]; syncHealth?: SyncHealth; runs?: WorkflowRun[]; timeline?: TimelineEntry[]; recoveryStatuses?: RecoveryStatus[]; reconciliationScheduled?: boolean };
+    const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[]; events?: WorkflowStageEvent[]; deployments?: WorkflowStageDeployment[]; deploymentRuns?: WorkflowStageDeploymentRun[]; configurationWarnings?: WorkflowConfigurationWarning[]; syncHealth?: SyncHealth; runs?: WorkflowRun[]; timeline?: TimelineEntry[]; recoveryStatuses?: RecoveryStatus[]; automation?: AutomationAction[]; reconciliationScheduled?: boolean };
     actionQueue = Array.isArray(payload.items) ? payload.items : [];
     workflowStageStates = Array.isArray(payload.states) ? payload.states : [];
     workflowStageEvents = Array.isArray(payload.events) ? payload.events : [];
@@ -351,6 +353,7 @@ async function loadActionQueueOnce(reconcile: boolean, repository?: string) {
     workflowRuns = Array.isArray(payload.runs) ? payload.runs : [];
     timeline = Array.isArray(payload.timeline) ? payload.timeline : [];
     recoveryStatuses = Array.isArray(payload.recoveryStatuses) ? payload.recoveryStatuses : [];
+    automationActions = Array.isArray(payload.automation) ? payload.automation : [];
     actionQueueReconciliationScheduled = Boolean(reconcile && payload.reconciliationScheduled);
     actionQueueError = '';
     return true;
@@ -1231,10 +1234,45 @@ function recoveryStatusBadge(status: RecoveryStatus | undefined): string {
   if (status.retryCount > 0) return `<span class="fc-recovery-badge fc-retries">${t('recovery.retries', { count: status.retryCount, max: status.maxRetries })}</span>`;
   return '';
 }
+function automationActionFor(workflowId: string, stageIndex: number, source: string): AutomationAction | undefined {
+  const stage = workflows.find(flow => flow.id === workflowId)?.stages[stageIndex];
+  const scoped = automationActions.filter(action => action.workflowId === workflowId);
+  // A stage keeps its identity across reorders, so prefer it and fall back to the index only for
+  // legacy stages saved before stable ids existed.
+  if (stage?.stageId) return latestAutomationAction(scoped, stage.stageId, source);
+  return latestAutomationAction(scoped.map(action => ({ ...action, stageId: String(action.stageIndex) })), String(stageIndex), source);
+}
+function automationUpdatedLabel(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  return t('automation.updated', { time: new Intl.DateTimeFormat(getLocale() === 'zh' ? 'zh-CN' : 'en-US', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date) });
+}
+function automationActionSummary(action: AutomationAction): string {
+  const presentation = automationActionPresentation(action);
+  const attempts = action.attempts > 0 ? ` · ${t('automation.attempts', { count: action.attempts })}` : '';
+  return `${t(`automation.kind.${action.kind}`)} · ${t(`automation.state.${presentation.status}`)}${attempts}`;
+}
+function automationStageBadge(workflowId: string, stageIndex: number, source: string): string {
+  const action = automationActionFor(workflowId, stageIndex, source);
+  if (!action) return '';
+  const presentation = automationActionPresentation(action);
+  if (!presentation.blocked) return '';
+  return `<span class="automation-badge is-${presentation.tone}" title="${escape(t('automation.blockedTooltip'))}">${t('automation.blockedBadge')}</span>`;
+}
+function automationDetailBlock(workflowId: string, stageIndex: number, source: string, showEmpty = true): string {
+  const action = automationActionFor(workflowId, stageIndex, source);
+  if (!action) return showEmpty ? `<div class="automation-detail"><p class="eyebrow">${t('automation.detail.eyebrow')}</p><p class="automation-empty">${t('automation.detail.empty')}</p></div>` : '';
+  const presentation = automationActionPresentation(action);
+  const reason = presentation.blocked ? `<p class="automation-reason">${escape(action.failureReason?.trim() || t('automation.reasonUnknown'))}</p>` : '';
+  return `<div class="automation-detail is-${presentation.tone}"><p class="eyebrow">${t('automation.detail.eyebrow')}</p><p class="automation-line">${escape(automationActionSummary(action))}</p>${reason}<small>${automationUpdatedLabel(action.updatedAt)}</small></div>`;
+}
+function blockedAutomationActions(): AutomationAction[] {
+  return automationActions.filter(action => automationActionPresentation(action).blocked);
+}
 function failureCenterPanel(): string {
   const failures = actionQueue.filter(item => item.kind === 'checks-failed' || item.kind === 'needs-approval');
   const deploymentFailures = workflowStageStates.filter(state => state.checksState === 'failure' && state.pullState === 'merged');
-  if (!failures.length && !deploymentFailures.length) return '';
+  if (!failures.length && !deploymentFailures.length && !blockedAutomationActions().length) return '';
   const items = failures.map(item => {
     const flow = workflows.find(w => w.id === item.workflowId);
     const icon = item.kind === 'checks-failed' ? '✗' : '⏳';
@@ -1253,8 +1291,16 @@ function failureCenterPanel(): string {
     if (!flow) return '';
     return `<li class="failed"><span class="fc-icon">🔴</span><div><b>${escape(flow.name)}</b><small>${escape(state.source)} → ${escape(state.target)} · ${t('overview.deployment.failure')}</small></div><div class="fc-actions"><button class="link-button fc-open" data-fc-workflow="${escape(state.workflowId)}" data-fc-stage="${state.stageIndex}" data-fc-source="${escape(state.source)}">${t('overview.board.stepDetail')}</button></div></li>`;
   }).join('');
-  const total = failures.length + deploymentFailures.length;
-  return `<section class="failure-center"><div class="fc-head"><p class="eyebrow">${t('failureCenter.eyebrow')}</p><span class="fc-count">${t('failureCenter.count', { count: total })}</span></div><ul>${items}${deployItems}</ul></section>`;
+  const automationItems = blockedAutomationActions().map(action => {
+    const flow = workflows.find(w => w.id === action.workflowId);
+    if (!flow) return '';
+    const presentation = automationActionPresentation(action);
+    const icon = presentation.tone === 'failed' ? '✗' : '⏸';
+    const reason = escape(action.failureReason?.trim() || t('automation.reasonUnknown'));
+    return `<li class="${presentation.tone}"><span class="fc-icon">${icon}</span><div><b>${escape(flow.name)}</b><small>${escape(action.source)} → ${escape(action.target)} · ${escape(automationActionSummary(action))}</small><p>${reason}</p></div><div class="fc-actions"><button class="link-button fc-open" data-fc-workflow="${escape(action.workflowId)}" data-fc-stage="${action.stageIndex}" data-fc-source="${escape(action.source)}">${t('overview.board.stepDetail')}</button></div></li>`;
+  }).join('');
+  const total = failures.length + deploymentFailures.length + blockedAutomationActions().length;
+  return `<section class="failure-center"><div class="fc-head"><p class="eyebrow">${t('failureCenter.eyebrow')}</p><span class="fc-count">${t('failureCenter.count', { count: total })}</span></div><ul>${items}${deployItems}${automationItems}</ul></section>`;
 }
 function laneSortControls() {
   const button = (mode: WorkflowSortMode, label: string) => {
@@ -1275,14 +1321,19 @@ function overview() {
   const failurePanel = failureCenterPanel();
   const preflight = preflightPanel();
   const failedCount = actionQueue.filter(item => item.kind === 'checks-failed').length;
+  const automationBlockedCount = blockedAutomationActions().length;
   const workflowCount = workflows.length;
   const sortedWorkflows = sortWorkflowsForView(workflows, laneSortMode, laneSortDirection);
-  const filterMatchedWorkflows = sortedWorkflows.filter(flow => overviewFilter === 'all' || actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed')));
+  const filterMatchedWorkflows = sortedWorkflows.filter(flow => {
+    if (overviewFilter === 'all') return true;
+    if (overviewFilter === 'automation') return blockedAutomationActions().some(action => action.workflowId === flow.id);
+    return actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed'));
+  });
   const normalizedSearch = laneSearchQuery.trim().toLocaleLowerCase();
   const visibleWorkflows = filterMatchedWorkflows.filter(flow => !normalizedSearch || `${flow.name} ${flow.repository}`.toLocaleLowerCase().includes(normalizedSearch));
   const hasSearchMiss = Boolean(normalizedSearch && !visibleWorkflows.length);
   const refreshLabel = actionQueueRefreshing ? t('overview.queue.refreshing') : t('overview.queue.refresh');
-  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div>${laneSortControls()}<button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button id="refresh-action-queue" class="board-refresh${actionQueueRefreshing ? ' is-loading' : ''}"${actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section><div class="board-scroll-controls" hidden aria-label="${escape(t('overview.board.scrollControls'))}"><button type="button" data-board-scroll="top" aria-label="${escape(t('overview.board.scrollTop'))}" title="${escape(t('overview.board.scrollTop'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 10 5-5 5 5M3 14l5-5 5 5"/></svg></button><button type="button" data-board-scroll="bottom" aria-label="${escape(t('overview.board.scrollBottom'))}" title="${escape(t('overview.board.scrollBottom'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 6 5 5 5-5M3 2l5 5 5-5"/></svg></button></div>`;
+  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div>${laneSortControls()}<button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button data-board-filter="automation" class="${overviewFilter === 'automation' ? 'active' : ''}"><span>${automationBlockedCount}</span>${t('overview.board.automationBlocked')}</button><button id="refresh-action-queue" class="board-refresh${actionQueueRefreshing ? ' is-loading' : ''}"${actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section><div class="board-scroll-controls" hidden aria-label="${escape(t('overview.board.scrollControls'))}"><button type="button" data-board-scroll="top" aria-label="${escape(t('overview.board.scrollTop'))}" title="${escape(t('overview.board.scrollTop'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 10 5-5 5 5M3 14l5-5 5 5"/></svg></button><button type="button" data-board-scroll="bottom" aria-label="${escape(t('overview.board.scrollBottom'))}" title="${escape(t('overview.board.scrollBottom'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 6 5 5 5-5M3 2l5 5 5-5"/></svg></button></div>`;
   const emptyResetButton = content.querySelector<HTMLButtonElement>('.board-empty button[data-board-filter="all"]');
   if (hasSearchMiss && emptyResetButton) {
     emptyResetButton.removeAttribute('data-board-filter');
@@ -1442,7 +1493,7 @@ function projectLane(flow: Workflow) {
     const label = item?.message || stageRunText(state);
     const updatedAt = stageUpdatedAt(state);
     const staleBadge = stageStaleBadge(flow.id, index, state?.source);
-    return `<button class="lane-step ${tone}" data-lane-step="${index}" data-lane-source="${escape(source)}" data-workflow-id="${escape(flow.id)}"><span class="lane-step-index">${index + 1}</span><b>${escape(source)} → ${escape(stage.target)}</b><small>${escape(label)}${updatedAt ? ` · ${escape(updatedAt)}` : ''}${staleBadge}</small></button>`;
+    return `<button class="lane-step ${tone}" data-lane-step="${index}" data-lane-source="${escape(source)}" data-workflow-id="${escape(flow.id)}"><span class="lane-step-index">${index + 1}</span><b>${escape(source)} → ${escape(stage.target)}</b><small>${escape(label)}${updatedAt ? ` · ${escape(updatedAt)}` : ''}${staleBadge}${automationStageBadge(flow.id, index, source)}</small></button>`;
   };
   const targets = new Map<string, Array<{ stage: Workflow['stages'][number]; index: number }>>();
   flow.stages.forEach((stage, index) => targets.set(stage.target, [...(targets.get(stage.target) || []), { stage, index }]));
@@ -1586,7 +1637,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const actions = `<div class="dialog-actions drawer-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div>`;
   const dialog = document.createElement('dialog');
   dialog.className = 'step-drawer';
-  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p>${actions}<div class="drawer-status ${tone}"><b>${escape(statusText)}</b>${pull}${drawerChecks}${drawerActions}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${configurationWarnings}${deployments}${deploymentHistory}${stepTimeline}${history}</section>`;
+  dialog.innerHTML = `<section><button class="drawer-close" aria-label="${t('overview.board.close')}">×</button><p class="eyebrow">${t('overview.board.stepDetail')}</p><h2>${escape(routeSource)} → ${escape(stage.target)}</h2><p class="drawer-repository">${escape(flow.repository)} · ${t('overview.queue.step', { index: stageIndex + 1 })}</p>${actions}<div class="drawer-status ${tone}"><b>${escape(statusText)}</b>${pull}${drawerChecks}${drawerActions}${state ? `<p>${escape(stageUpdatedAt(state))}</p>` : ''}</div>${configurationWarnings}${automationDetailBlock(workflowId, stageIndex, routeSource)}${deployments}${deploymentHistory}${stepTimeline}${history}</section>`;
   document.body.append(dialog); dialog.showModal();
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);
@@ -2112,7 +2163,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const mergeDisabled = autoDisabled || !canMergeAutomation || mergeLegacyPolicy;
   const mergeHint = !canEditAutomation ? t('detail.autoCreateReadonly') : !autoCreatePrerequisites() ? t('draft.autoCreatePrerequisites') : !canMergeAutomation ? t('detail.autoMergeReadonly') : mergeLegacyPolicy ? t('detail.autoMergeLegacyPolicy') : t('detail.autoMergeDesc');
   const mergeControl = `<label class="timeline-auto-merge"><input type="checkbox" data-detail-auto-merge-stage="${index}" ${mergeEnabled ? 'checked' : ''} ${mergeDisabled ? 'disabled' : ''} /><span>${t('draft.autoMerge')}</span></label>`;
-  const autoControl = `<div class="timeline-automation"><label class="timeline-auto-create"><input type="checkbox" data-detail-auto-create-stage="${index}" ${autoEnabled ? 'checked' : ''} ${autoDisabled ? 'disabled' : ''} /><span>${t('draft.autoCreate')}</span><span>${t('draft.autoCreateThreshold')}</span><input class="auto-create-threshold" type="number" min="1" max="20" step="1" value="${threshold}" data-detail-auto-create-threshold="${index}" aria-label="${escape(t('draft.autoCreateThreshold'))}" title="${escape(t('draft.autoCreateThresholdTooltip'))}" ${autoDisabled ? 'disabled' : ''} /></label>${mergeControl}<small>${escape(autoHint)}</small>${mergeHint === autoHint ? '' : `<small>${escape(mergeHint)}</small>`}</div>`;
+  const autoControl = `<div class="timeline-automation"><label class="timeline-auto-create"><input type="checkbox" data-detail-auto-create-stage="${index}" ${autoEnabled ? 'checked' : ''} ${autoDisabled ? 'disabled' : ''} /><span>${t('draft.autoCreate')}</span><span>${t('draft.autoCreateThreshold')}</span><input class="auto-create-threshold" type="number" min="1" max="20" step="1" value="${threshold}" data-detail-auto-create-threshold="${index}" aria-label="${escape(t('draft.autoCreateThreshold'))}" title="${escape(t('draft.autoCreateThresholdTooltip'))}" ${autoDisabled ? 'disabled' : ''} /></label>${mergeControl}<small>${escape(autoHint)}</small>${mergeHint === autoHint ? '' : `<small>${escape(mergeHint)}</small>`}${automationDetailBlock(active!.id, index, stage.source, false)}</div>`;
   if (stage.source.includes('*')) {
     const states = active ? statesForStage(active, index) : [];
     const runs = states.map(state => `<button type="button" class="timeline-action" data-dynamic-stage="${index}" data-dynamic-source="${escape(state.source)}"><b>${escape(state.source)}</b><small>${escape(dynamicBranchStatusText(state))}</small></button>`).join('');
