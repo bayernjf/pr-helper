@@ -1091,7 +1091,8 @@ describe('draining the automation queue', () => {
   // re-derives the gate and treats an existing open pull request as success, and a copy would drift away
   // from all three.
   it('executes through the one executor instead of repeating its checks', () => {
-    const drain = source.slice(source.indexOf('export async function drainWorkflowAutomationActions'));
+    const body = source.slice(source.indexOf('export async function drainWorkflowAutomationActions'));
+    const drain = body.slice(0, body.indexOf('\nexport ', 1));
     expect(drain).toContain('executeWorkflowAutomationActionForUser');
     expect(drain).not.toContain('/pulls`');
   });
