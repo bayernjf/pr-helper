@@ -230,9 +230,9 @@ alter role prh_readonly bypassrls;
 cd ~ && node ~/.local/bin/prh-sql.mjs "select table_name, string_agg(column_name, ', ' order by ordinal_position) as cols from information_schema.columns where table_schema='public' group by table_name order by table_name"
 ```
 
-两个反直觉的地方，值得单独记住：
+几个反直觉的地方，值得单独记住：
 
-- **表名前缀不统一。** `pr_helper_users` / `pr_helper_workflows` / `pr_helper_ai_automation_credentials` 有前缀；`workflow_stage_states` / `workflow_automation_actions` / `workflow_automation_runs` / `workflow_stage_deployments` / `reconciliation_runs` **没有**。写 `pr_helper_workflow_stage_states` 一定报表不存在。
+- **表名前缀不统一。** `pr_helper_users` / `pr_helper_workflows` / `pr_helper_ai_automation_credentials` 有前缀；`workflow_stage_states` / `workflow_automation_actions` / `workflow_automation_runs` / `workflow_stage_deployments` / `reconciliation_runs` / `reconciliation_leases` / `github_webhook_deliveries` **没有**。写 `pr_helper_workflow_stage_states` 一定报表不存在。
 - **`github_installation_id` 在 `pr_helper_users` 上，不在 `pr_helper_workflows` 上。** 服务端代码里的 `row.github_installation_id` 是 join 出来的（[`api/_lib/workflows-store.ts:1196`](../api/_lib/workflows-store.ts:1196)）。
 - `workflow_stage_states` 有 `ahead_by`，**没有** `behind_by`，也没有 `locked`——锁定是 `stageIsUnlocked()` 从前序步骤状态算出来的，不是存的字段。
 - 工作流的步骤和自动化策略全在 `pr_helper_workflows.payload` 这个 JSONB 里。展开步骤：
@@ -248,6 +248,12 @@ from pr_helper_workflows w, jsonb_array_elements(w.payload->'stages') with ordin
 order by repo, stage_index
 ```
 
+- **没有 `webhook_events` 表**，webhook 投递记在 `github_webhook_deliveries`，列只有 `delivery_id / event_name / action / repository / received_at / installation_id`（没有 `created_at`，按 `received_at` 排序）。
+- **`reconciliation_runs` 的状态列叫 `state`，不叫 `status`。** 完整列：`id, trigger, state, stages_total, stages_reconciled, stages_failed, duration_ms, error_message, repository, started_at, finished_at, user_id, github_calls, github_ms, claimed_workflow_ids`（末列自迁移 `031`，记录该次扫描认领过的工作流 id）。
+- **`workflow_automation_actions` 没有 `finished_at`，也没有 `stage_index`。** 时间只有 `created_at` / `updated_at`；`stage_index` 在 `workflow_automation_runs` 上，要 join 才拿得到（下一节第 5 条查询即如此）。
+- **`workflow_automation_runs` 没有 `trigger`，也没有 `repository`。** 想知道仓库要 join `pr_helper_workflows` 取 `payload->>'repository'`。
+- **`pr_helper_workflows` 只有 7 列**：`id, user_id, payload, created_at, updated_at, last_reconcile_attempt_at, reconcile_pending_since`。流程名、仓库、步骤全在 `payload` 里，`w.name` / `w.repository` 一定报列不存在。
+- **只读角色看不到 `cron` schema**（`permission denied`），所以迁移 `030` 的 pg_cron 计划本身查不到；但 `net._http_response` **可读**，那里有每次定时打点的状态码和响应体——排空和校准的实际节奏与结果从这张表看。
 - BIGSERIAL 主键经 postgres.js 回来是**字符串**，不是数字。比较 id 时注意。
 
 ---
