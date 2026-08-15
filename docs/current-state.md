@@ -319,7 +319,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 1. **瞬时失败的重排路径已实现，待生产验证（当前第一优先级）**。`drainWorkflowAutomationActions` 现在也读 `paused` 行，`automationDrainDecision` 对 `paused` 只在「失败原因存在且 `automationAttemptWasReached` 判为未触达供方」时返回 `requeue`，并叠加多重界限：未被更新动作取代、仍在 12 小时 stale 窗口内、距上次更新超过 `AUTOMATION_TRANSIENT_REQUEUE_COOLDOWN_MS`（15 分钟）、`attempts` 未达 `AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS`（3）。冷却是必需的：领取前抛出的故障不计 `attempts`，仅靠次数上限无法收敛。重排写入以读到的 `state = 'paused'` 为条件，期间若有真实裁决写入则裁决胜出。批次排序改为 `ORDER BY (actions.state = 'paused'), actions.created_at`，避免最老的 `paused` 行占满 10 条批次、饿死本该执行的队列行。7 条「门禁尚未全绿」是 GitHub 已给出的裁决，仍留在 `paused` 不动。**更正**：此前记录「`automationAttemptWasReached` 的正则漏掉 `CONNECT_TIMEOUT`」是错的——`timed? ?out` 在忽略大小写下已经匹配 `TIMEOUT`，无需改正则，现由测试固定该分类。超窗的瞬时失败改判 `cancel / stale` 而不是继续 `skip`：没有别的机制会重试它，留在 `paused` 就是把一个已死的意图长期钉在失败中心里；GitHub 已给出的裁决无论多老都保持 `paused`，那是操作者唯一的记录。因此 `id 6` / `58` / `80` 会被清成 `cancelled`，不会被救回；重排路径本身的生产验证要等下一次真实的瞬时故障。`id 84` 已于 2026-08-15 13:29 按预期清成 `cancelled / 超过自动化时限，未再尝试`。
 
-2. **按实测重定实时校准的时间预算**。`REALTIME_RECONCILE_BUDGET_MS = 8000` 是为躲 10 秒平台上限定的，现在 `maxDuration` 已是 60 秒、`duration_ms` 口径已修复且 `cron` 实测 p90 22.3 秒，该常数偏保守。这不只是调优：预算让出得太早、实例随后被回收，正是动作停在 `running` 却无人执行的来源，`id 84` 最初就是这么停在 `running` 的。
+2. **实时校准预算已按触发方分开，待生产验证（当前第一优先级）**。原先一个 8 秒常数同时服务三种触发方，而它们的约束正相反：webhook 的响应体没有任何调用方读，投递本身要求把这次事件涉及的 1–2 个步骤跑完；保存与收件箱刷新背后有人在等，让出不等于丢工作（`reconcile_pending_since` 会让下一次触发接力）。因此 `webhook` 提到 `WEBHOOK_RECONCILE_BUDGET_MS = 25000`，`manual` / `inbox_refresh` 保持 8000，`REALTIME_RECONCILE_BUDGET_MS` 环境变量仍可一并覆盖。同时把外层兜底从 `budgetMs * 2` 改为 `realtimeReconcileCeilingMs(budgetMs)`（`min(budgetMs + 15s, 60s - 15s)`）：外层只是给永不落地的 I/O 兜底，不是第二份预算，16 秒时它离预算太近，会在 sweep 还活着时把它甩掉，25 秒预算再翻倍则直接越过平台上限。依据见《2026-08-15 实时校准预算的实测重定》。
 
 3. **收紧恢复时钟**。GitHub 计划任务实际 20–90 分钟才送达，drain 的恢复延迟整条绑在这上面。评估 Supabase `pg_cron` 作为更准的时钟（Vercel Hobby 的 Cron 是每天 1 次、上限 2 个任务，用不了）。
 
@@ -336,6 +336,27 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 11. 加密云同步已接通密文上传/下载原型，仍需补齐密钥轮换、冲突处理和线上回归后再扩大使用范围。 🟡 待加固
 12. 阶段状态、事件和部署历史已切换到稳定 `stage_id`。 ✅ 019 已执行，并已通过当前 Production 流程回归。
 13. PR 流程自动化：服务端加密 AI 凭据、步骤级规则快照、`025` 运行快照/幂等动作队列和 `026` 自动化偏好已落地；Webhook、Cron 和 inbox reconciliation 会在 `ready-to-create` 自动入队，执行器会重校验统一阶段决策、服务端自动生成/确认、规则快照、新提交和开放 PR。自动创建 PR 受服务端凭据、AI 自动生成、自动确认和有效生成规则四项前置条件保护。合并后门禁与下一步解锁已经生效：`stageIsUnlocked` 要求前序步骤 `pull_state='merged'` 且 `checks_state='success'`，合并瞬间 `checks_state` 重置为 `pending` 由合并后 Actions 填回，`mergeChecksWithDeployments` 还把部署状态并入该字段。自动合并本身：`automationMergeOutcome` 只在 GitHub 判定 `mergeable=true` 且 `mergeable_state='clean'`、门禁全绿、审批达标时返回合并，其余一律 `paused`（含 `'behind'`，不自动 update branch）；`automationRetryIsExhausted` 按 `recoveryPolicy.maxRetries` 封顶重排；`merge-pr` 用独立幂等键，PR 已 merged 记幂等成功。方案与验收标准见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。🔴 2026-08-13 生产查询确认服务端自动创建实际未生效，原因链、修复方案与回归清单见 [`docs/auto-create-pr-remediation.md`](auto-create-pr-remediation.md)；其中 `P1`–`P6`（身份归一化、失败留痕、cron 分批、统一决策模型、执行器幂等化）已全部合入 `main` 并部署，`P3` 生产验收通过。`P8`（`workflow_automation_actions` 没有 `stage_index` 列，而执行器与队列列表都在 SELECT 它，执行器因此在原子领取动作之前抛错）已改为 JOIN `workflow_automation_runs` 取该列并部署生产，验证生效。`P9`（AI 响应的 markdown 围栏未被正确剥离，`trim()` 写在 `replace()` 之后导致锚点失配）已由 `jsonFromModelText` 修复并部署。✅ 2026-08-14 服务端自动创建 PR 在生产端到端跑通：自动建出 `bayernjf/bayjf#42`，动作 `succeeded` / `attempts=2` / `pullNumber=42`，后续轮转未重复建。✅ 2026-08-15 逐步骤自动合并在生产跑通：`create-pr` 47 次成功、`merge-pr` 37 次成功；10 次 `paused` 中 7 次是门禁未全绿的正确行为，另 3 次是 GitHub 超时（`71e6c4fb` 的尝试次数退还即针对这一类）。数据见《2026-08-15 生产实测结论》。仍待验：门禁为红不触发、幂等命中记成功（生产无对应场景，需另造）。
+
+### 2026-08-15 实时校准预算的实测重定
+
+近 24 小时 `reconciliation_runs` 按触发方分组（UTC）：
+
+| trigger | success | degraded | failure | success p50 / p90 / max | degraded 时长 | degraded 中已校准/总步骤 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `cron` | 179 | 1 | 0 | 13.4s / 22.6s / 38.1s | 13.8s | 9 / 10 |
+| `webhook` | 272 | 142 | 25 | 7.9s / 9.5s / 11.4s | 9.86–16.4s | 44 / 195 |
+| `manual` | 30 | 35 | 2 | 8.0s / 10.1s / 17.5s | 9.86–41.2s | 13 / 53 |
+| `inbox_refresh` | 2 | 3 | 0 | 6.3s / 8.0s / 8.0s | 9.87–10.0s | 2 / 6 |
+
+三条结论：
+
+- **8 秒装不下一个步骤。** webhook 与 manual 的 sweep 只覆盖 1–2 个步骤，成功的 p50 已是 7.9 秒，也就是单个步骤的 GitHub 往返本身就接近整份预算。于是 34% 的投递和 54% 的保存在让出，webhook 让出的 195 个步骤里有 151 个白做——这正是 PR #240 合并后第 1 步骤投影停在旧 PR #238 约 10 分钟的机制：每次触发都在到达该步骤前让出。
+- **让出的耗时全部落在 9.86 秒以上，不是 8 秒。** 租约获取与前后查询在预算之外，约 1.9 秒；调预算时要按这个口径算，不能只看常数。
+- **外层兜底会甩掉活着的 sweep。** webhook 让出耗时最大 16.4 秒，正好压在 `budgetMs * 2` = 16 秒上；被甩掉的 sweep 无人收尾，`reconciliation_runs` 留下 `running` 行，5 分钟宽限后被下一次 cron 记为 `校准中断：函数实例在完成前被回收`——24 小时内 25 条 webhook `failure` 就是这么来的（最小时长 391 秒 = 300 秒宽限 + 发现延迟，全部 0 步骤已校准）。
+
+原计划里「把两种 degraded 结局在遥测里分清楚」这一条不必做：查询已能区分——预算内让出记 `degraded` + `校准未在预算内完成，已让给下一次触发`，实例被回收记 `failure` + `校准中断：函数实例在完成前被回收`。上表就是用这一区分算出来的。
+
+部署后用同一组查询复核：`webhook` 的 degraded 占比应从 34% 明显下降，`failure` 应趋近于 0；`manual` / `inbox_refresh` 的 p90 不应上升。
 
 ### 2026-08-15 排空器首次真实执行与 stale 窗口的结构性缺陷
 
