@@ -1113,6 +1113,16 @@ describe('draining the automation queue', () => {
     expect(park).toContain("state IN ('queued', 'running')");
     expect(drain).toContain('failures');
   });
+
+  it('normalizes the queue identity before handing it to the executor', () => {
+    const body = source.slice(source.indexOf('export async function drainWorkflowAutomationActions'));
+    const drain = body.slice(0, body.indexOf('\nexport ', 1));
+    const call = drain.slice(drain.indexOf('await executeWorkflowAutomationActionForUser'));
+    // `id` is a bigint, so postgres.js hands back a string and the executor's own
+    // `Number.isInteger` guard rejects it before it can claim or record anything.
+    expect(call.slice(0, call.indexOf(')'))).not.toContain('row.id');
+    expect(drain).toContain('automationActionId(row.id)');
+  });
 });
 
 describe('reconcileTimingLine', () => {
