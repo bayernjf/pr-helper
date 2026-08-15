@@ -14,6 +14,7 @@ jobs:
     env:
       CRON_SECRET: ${{ secrets.PR_HELPER_CRON_SECRET }}
       RECONCILE_URL: https://pr-helper-ten.vercel.app/api/cron/reconcile
+      DRAIN_URL: https://pr-helper-ten.vercel.app/api/cron/drain
     steps:
       - name: Check reconcile configuration
         id: config
@@ -52,6 +53,15 @@ jobs:
               failures=$((failures + 1))
               echo "::warning title=Reconcile sweep failed::Sweep $sweep of $SWEEPS did not complete."
             fi
+            # An action is executed by whichever request enqueued it, so a recycled instance leaves the
+            # row claimed and nothing reads it back. Draining after each sweep is what makes that
+            # recovery depend on this schedule rather than on someone pushing to the stuck branch again.
+            if ! curl --fail-with-body --silent --show-error --max-time 90 \
+              --header "Authorization: Bearer ${CRON_SECRET}" \
+              "$DRAIN_URL"; then
+              echo "::warning title=Drain failed::Automation queue drain $sweep of $SWEEPS did not complete."
+            fi
+            echo ""
             echo "::endgroup::"
           done
           # One bad sweep is what the next sweep is for; every sweep failing is a real outage.
