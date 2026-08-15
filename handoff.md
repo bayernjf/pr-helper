@@ -49,14 +49,27 @@
 
 ### 待办列表（按优先级）
 
-1. **读出 `id 84` 被 park 的原因**，据此决定是否需要「瞬时失败 vs 终态失败」的分类重试。同一判断覆盖 `id 6`/`58`/`80`/`103` 四条因 GitHub 超时或 `CONNECT_TIMEOUT` 停在 `paused` 且无人重试的动作，其中 `id 103` 正卡着一次真实发布。读到真实原因之前不要先写分类器。
-2. **按实测重定 `REALTIME_RECONCILE_BUDGET_MS`**（现为 8000，是为躲 10 秒平台上限定的；`maxDuration` 已 60 秒、`cron` 实测 p90 22.3 秒）。
-3. **drain 稳定若干天后删掉 sweep 内联的执行路径**，让自动化动作只剩一条执行入口。
-4. **调用预算改为阈值观察**：峰值小时越过约 2,500 次（基线一半）再设计预算模型。
-5. **轮换 `prh_readonly` 口令**：该口令曾出现在会话记录中，需 `alter role prh_readonly password '<新口令>'` 并同步更新 `~/.config/pr-helper/db.env`。
-6. **重新登录 Vercel CLI**：当前 token 返回 `invalidToken`，函数日志读不到，drain 之外的线上排查会受阻。
-7. 仍未验的两项自动化场景：门禁为红不触发、幂等命中记成功（生产无对应场景，需另造）。
-8. 可选加固：给 agent-dev 的 `dev`/`main` 加 `quality` 必需检查（两者当前均未保护）；给 word-base 的 `deploy-cloudflare` 补 `environment: Production` 以便出现部署 URL。
+> 用户 2026-08-15 决定：自动化进度条 UI 后置，先解决自动创建 / 自动合并本身的不稳定。
+
+**一、自动创建 / 自动合并稳定性（当前唯一主线）**
+
+1. **读出 `id 84` 被 park 的原因**。drain 现在会把抛错原因写回行并随响应返回，部署后第一次 sweep 即可拿到。前置是推送部署。它决定第 2 项到底要做多大。
+2. **给「供方未给裁决」的失败一条重排路径**。这是当前不稳定的最大单一来源：`id 6`/`58`/`80`/`103` 四条因 GitHub 超时或 `CONNECT_TIMEOUT` 停在 `paused`，没有任何机制会重试，其中 `id 103` 正卡着 `soft-desk-landing` 的一次真实发布（`ahead=2`）。要做的是把这类原因与「门禁尚未全绿」这类 GitHub 已给出裁决的终态分开——前者可重排，后者必须留在 `paused`。`automationAttemptWasReached` 已经在退还尝试次数上做过同一类区分，可以复用它的判据而不是另造一套。
+3. **按实测重定 `REALTIME_RECONCILE_BUDGET_MS`**（现为 8000）。这不只是调优：预算让出得太早，sweep 记 `deferred` 后实例被回收，而被回收的实例正是动作停在 `running` 却无人执行的来源——`id 84` 就是这么来的。`maxDuration` 已提到 60 秒、`cron` 实测 p90 22.3 秒，8 秒已无依据。
+4. **收紧恢复时钟**。GitHub 计划任务实际 20–90 分钟才送达，drain 的恢复延迟整条绑在这上面。评估 Supabase `pg_cron` 作为更准的时钟（Vercel Hobby 的 Cron 是每天 1 次、上限 2 个任务，用不了）。
+5. **drain 稳定观察若干天后，删掉 sweep 内联的执行路径**，让自动化动作只剩一条执行入口，不再有两套会各自漂移的实现。
+6. 仍未验的两项自动化场景：门禁为红不触发、幂等命中记成功（生产无对应场景，需另造）。
+
+**二、已明确后置**
+
+- **自动化进度条 UI**：方案在 [`docs/automated-workflow-plan.md`](docs/automated-workflow-plan.md) 第《自动合并进度条》节定稿，代码零实现（`src/main.ts` 对 `/api/automation` 只有入队和执行两处调用，从不回读队列）。落地时需要一个按流程/步骤回读动作队列的接口，且因 Hobby 12 函数上限只能走 `vercel.json` 现有 rewrite 分流，不能新增函数文件。
+- **reconciliation 调用预算**：改为阈值观察，峰值小时越过约 2,500 次（基线 5,000 次/小时的一半）再设计模型。
+
+**三、只能由用户执行**
+
+- **轮换 `prh_readonly` 口令**：该口令曾出现在会话记录中。`alter role prh_readonly password '<新口令>'`，并同步更新 `~/.config/pr-helper/db.env`。
+- **重新登录 Vercel CLI**：当前 token 返回 `invalidToken`，函数日志读不到。
+- 可选加固：给 agent-dev 的 `dev`/`main` 加 `quality` 必需检查（两者当前均未保护）；给 word-base 的 `deploy-cloudflare` 补 `environment: Production` 以便出现部署 URL。
 
 ## 2026-08-12 刷新链路最新结论
 
