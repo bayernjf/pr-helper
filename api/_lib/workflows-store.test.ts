@@ -930,7 +930,7 @@ describe('reaping an interrupted sweep restores the turn it spent', () => {
   });
 
   it('marks the claimed workflows pending when it reaps their run', () => {
-    const reap = source.slice(source.indexOf("if (trigger === 'cron') {"), source.indexOf('const rows = await sql<TrackedWorkflowRow[]>'));
+    const reap = source.slice(source.indexOf("if (trigger === 'cron') {"), source.indexOf('workflows.last_reconcile_attempt_at, workflows.reconcile_pending_since FROM'));
     expect(reap).toContain('claimed_workflow_ids');
     expect(reap).toContain('reconcile_pending_since');
     // Restoring the turn has to happen in the same statement that reaps the row, or a reap that lands

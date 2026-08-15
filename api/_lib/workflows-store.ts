@@ -1682,7 +1682,9 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
   const renewal = setInterval(() => {
     void sql`UPDATE reconciliation_leases SET expires_at = now() + (${ttlSeconds} * interval '1 second') WHERE lock_key = ${lockKey} AND holder = ${holder}`.catch(() => undefined);
   }, reconciliationLeaseRenewIntervalMs(ttlSeconds));
-  const runRow = await sql<{ id: number }[]>`INSERT INTO reconciliation_runs (user_id, trigger, state, repository) VALUES (${userId}, ${trigger}, 'running', ${repository}) RETURNING id`;
+  // The claimed ids are written with the row rather than after it, so a sweep that dies before its
+  // first stage still leaves behind the list of turns it spent.
+  const runRow = await sql<{ id: number }[]>`INSERT INTO reconciliation_runs (user_id, trigger, state, repository, claimed_workflow_ids) VALUES (${userId}, ${trigger}, 'running', ${repository}, ${workflowsToReconcile.map(item => item.row.id)}) RETURNING id`;
   const runId = runRow[0].id;
   // The turn is given up before the work runs, so a workflow that fails or resolves to no route still
   // rotates to the back of the queue instead of being picked again in every sweep.
@@ -1882,7 +1884,14 @@ export async function reconcileWorkflowStages(environment: Record<string, string
     // delay before anyone noticed rather than how long the sweep ran. Reporting it as a duration made
     // a row reaped 6 minutes late read as a 391-second sweep, which sent a diagnosis down the wrong
     // path; the sweep died before it could measure itself, so nothing here is a measurement.
-    await sql`UPDATE reconciliation_runs SET state = 'failure', error_message = coalesce(error_message, '校准中断：函数实例在完成前被回收'), finished_at = now() WHERE state = 'running' AND started_at < now() - (${RECONCILIATION_RUN_GRACE_SECONDS} * interval '1 second')`.catch(() => undefined);
+    // Both writes belong to one statement: a reap that landed between them would leave the workflow
+    // neither pending nor stale-looking, which is the state that hides it for a whole rotation.
+    await sql`WITH reaped AS (
+      UPDATE reconciliation_runs SET state = 'failure', error_message = coalesce(error_message, '校准中断：函数实例在完成前被回收'), finished_at = now()
+      WHERE state = 'running' AND started_at < now() - (${RECONCILIATION_RUN_GRACE_SECONDS} * interval '1 second')
+      RETURNING user_id, claimed_workflow_ids)
+    UPDATE pr_helper_workflows workflows SET reconcile_pending_since = coalesce(workflows.reconcile_pending_since, now())
+    FROM reaped WHERE workflows.user_id = reaped.user_id AND workflows.id = ANY(reaped.claimed_workflow_ids)`.catch(() => undefined);
   }
   const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, workflows.last_reconcile_attempt_at, workflows.reconcile_pending_since FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
   const tracked = rows.flatMap(row => {
