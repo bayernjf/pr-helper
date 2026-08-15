@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, defaultDeployments, deploymentsForRepository, syncedDeployments, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type Workflow } from './workflow';
+import { addDeployment, replaceDeployment, defaultDeployments, deploymentsForRepository, syncedDeployments, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type Workflow } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -279,6 +279,23 @@ describe('workflow configuration', () => {
     const customized = addDeployment({ ...legacy, deployments: [] }, { target: 'staging', provider: 'vercel', workflowName: 'Deploy staging', environment: 'preview', githubEnvironment: 'staging-vercel' });
     expect(deploymentConfigsForTarget(customized, 'staging')).toEqual([{ target: 'staging', provider: 'vercel', workflowName: 'Deploy staging', environment: 'preview', githubEnvironment: 'staging-vercel' }]);
     expect(removeDeployment(customized, 0).deployments).toEqual([]);
+  });
+
+  // A gate is worth editing precisely because it is wrong: a GitHub Environment that does not exist, or a
+  // workflow that was renamed. Remove-and-re-add is the only route today, and it destroys the row the
+  // reconciliation keyed on before the replacement lands, so the gate reopens as pending in between.
+  it('replaces a deployment gate in place, so correcting one field does not destroy the gate', () => {
+    const workflow = { ...createWorkflow('octo/app', 'dev', 'main'), deployments: [...defaultDeployments] };
+    const corrected: DeploymentConfig = { target: 'dev', provider: 'vercel', workflowName: 'Deploy Web', environment: 'preview', githubEnvironment: 'Preview' };
+    const next = replaceDeployment(workflow, 0, corrected);
+    expect(next.deployments).toEqual([corrected, ...defaultDeployments.slice(1)]);
+  });
+
+  it('materializes the defaults when a gate is edited on a workflow that never stored any', () => {
+    const legacy = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main', stageId: 'stage-1' }] } as unknown as Workflow;
+    const edited = replaceDeployment(legacy, 1, { ...defaultDeployments[1], githubEnvironment: 'Preview' });
+    expect(edited.deployments).toHaveLength(defaultDeployments.length);
+    expect(edited.deployments![1].githubEnvironment).toBe('Preview');
   });
 
   it('preserves an explicitly configured rollback workflow on a deployment gate', () => {
