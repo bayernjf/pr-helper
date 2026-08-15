@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, defaultDeployments, deploymentsForRepository, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary } from './workflow';
+import { addDeployment, replaceDeployment, deploymentSuggestions, defaultDeployments, deploymentsForRepository, syncedDeployments, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type Workflow } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -281,6 +281,23 @@ describe('workflow configuration', () => {
     expect(removeDeployment(customized, 0).deployments).toEqual([]);
   });
 
+  // A gate is worth editing precisely because it is wrong: a GitHub Environment that does not exist, or a
+  // workflow that was renamed. Remove-and-re-add is the only route today, and it destroys the row the
+  // reconciliation keyed on before the replacement lands, so the gate reopens as pending in between.
+  it('replaces a deployment gate in place, so correcting one field does not destroy the gate', () => {
+    const workflow = { ...createWorkflow('octo/app', 'dev', 'main'), deployments: [...defaultDeployments] };
+    const corrected: DeploymentConfig = { target: 'dev', provider: 'vercel', workflowName: 'Deploy Web', environment: 'preview', githubEnvironment: 'Preview' };
+    const next = replaceDeployment(workflow, 0, corrected);
+    expect(next.deployments).toEqual([corrected, ...defaultDeployments.slice(1)]);
+  });
+
+  it('materializes the defaults when a gate is edited on a workflow that never stored any', () => {
+    const legacy = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main', stageId: 'stage-1' }] } as unknown as Workflow;
+    const edited = replaceDeployment(legacy, 1, { ...defaultDeployments[1], githubEnvironment: 'Preview' });
+    expect(edited.deployments).toHaveLength(defaultDeployments.length);
+    expect(edited.deployments![1].githubEnvironment).toBe('Preview');
+  });
+
   it('preserves an explicitly configured rollback workflow on a deployment gate', () => {
     const workflow = { ...createWorkflow('octo/app', 'dev', 'main'), deployments: [] };
     const configured = addDeployment(workflow, {
@@ -415,6 +432,13 @@ describe('deploymentsForRepository', () => {
     expect(deploymentsForRepository([], [])).toEqual(defaultDeployments);
   });
 
+  // An empty list arrives here for two unrelated reasons: the Actions request failed, or the repository
+  // has no workflow at all. Seeding the default names into the second case is what gave seventeen
+  // repositories four gates that can never match a run, and each one holds the next stage at pending.
+  it('seeds nothing once the repository is known to have no Actions workflow', () => {
+    expect(deploymentsForRepository([], [], true)).toEqual([]);
+  });
+
   it('keeps a default entry whose workflow really exists', () => {
     const configured = deploymentsForRepository([{ name: 'Deploy frontend to Vercel' }, { name: 'Deploy frontend to Cloudflare Pages' }], ['preview-vercel', 'production-vercel', 'preview-cloudflare-pages', 'production-cloudflare-pages']);
     expect(configured).toEqual(defaultDeployments);
@@ -444,6 +468,71 @@ describe('deploymentsForRepository', () => {
   it('ignores an ambiguous provider match, because picking one of two deploy workflows would be a coin flip', () => {
     const configured = deploymentsForRepository([{ name: 'Deploy API to Vercel' }, { name: 'Deploy web to Vercel' }], []);
     expect(configured).toEqual([]);
+  });
+});
+
+// Seeding only runs once, at creation, so every repository whose Actions changed afterwards — or that was
+// created before seeding existed — carries a configuration nobody can repair without editing each row by
+// hand. Re-deriving has to keep whatever the repository really has, including names auto-detection cannot
+// recognise, or the sync would delete the very entries a person added because detection missed them.
+describe('syncedDeployments', () => {
+  const wordBase = [{ name: 'CI' }, { name: 'Deploy Web' }, { name: 'Rollback' }];
+  const flow = (deployments: DeploymentConfig[]): Workflow => ({ ...createWorkflow('octo/app', 'dev', 'main'), deployments });
+
+  it('drops an entry whose workflow the repository does not have', () => {
+    expect(syncedDeployments(flow([...defaultDeployments]), wordBase, [], true)).toEqual([]);
+  });
+
+  it('keeps a hand-configured entry whose workflow really exists, because detection cannot recognise its name', () => {
+    const configured: DeploymentConfig[] = [
+      { target: 'dev', provider: 'cloudflare', workflowName: 'Deploy Web', environment: 'preview', githubEnvironment: 'Preview' },
+      { target: 'main', provider: 'cloudflare', workflowName: 'Deploy Web', environment: 'production', githubEnvironment: 'Production' },
+    ];
+    expect(syncedDeployments(flow(configured), wordBase, ['Preview', 'Production'], true)).toEqual(configured);
+  });
+
+  it('adopts a deployment workflow the repository gained after the flow was created', () => {
+    const synced = syncedDeployments(flow([]), [{ name: 'Deploy frontend to Cloudflare Pages' }], ['preview-cloudflare-pages', 'production-cloudflare-pages'], true);
+    expect(synced.map(deployment => deployment.target)).toEqual(['dev', 'main']);
+    expect(synced.every(deployment => deployment.workflowName === 'Deploy frontend to Cloudflare Pages')).toBe(true);
+  });
+
+  it('leaves the configuration alone when the Actions request failed, so a network error cannot wipe the gates', () => {
+    expect(syncedDeployments(flow([...defaultDeployments]), [], [], false)).toEqual(defaultDeployments);
+  });
+
+  it('changes nothing on a second run, so the button is safe to press twice', () => {
+    const once = syncedDeployments(flow([...defaultDeployments]), wordBase, [], true);
+    expect(syncedDeployments(flow(once), wordBase, [], true)).toEqual(once);
+  });
+});
+
+// Detection only adopts a workflow whose name carries its platform, so a repository that deploys through
+// one generically named workflow leaves the editor blank and the person configuring it has to know which
+// name to type, which branch to bind and which Environment to reach for. Offering the repository's own
+// deploy workflows as filled-in candidates asks them to confirm rather than to know.
+describe('deploymentSuggestions', () => {
+  const wordBase = [{ name: 'CI' }, { name: 'Deploy Web' }, { name: 'Rollback' }];
+  const twoStage: Workflow = { ...createWorkflow('octo/app', 'feature/x', 'dev'), deployments: [] };
+  const released: Workflow = { ...addStage(twoStage, 'dev', 'main'), deployments: [] };
+
+  it('offers the repository deploy workflow for every branch the flow releases into', () => {
+    const suggestions = deploymentSuggestions(released, wordBase, []);
+    expect(suggestions.map(suggestion => `${suggestion.target}:${suggestion.environment}`)).toEqual(['dev:preview', 'main:production']);
+    expect(suggestions.every(suggestion => suggestion.workflowName === 'Deploy Web')).toBe(true);
+  });
+
+  it('never offers a rollback workflow as a deployment gate', () => {
+    expect(deploymentSuggestions(released, [{ name: 'Rollback' }], [])).toEqual([]);
+  });
+
+  it('stops offering a workflow already bound to that branch', () => {
+    const configured: Workflow = { ...released, deployments: [{ target: 'dev', provider: 'vercel', workflowName: 'Deploy Web', environment: 'preview' }] };
+    expect(deploymentSuggestions(configured, wordBase, []).map(suggestion => suggestion.target)).toEqual(['main']);
+  });
+
+  it('binds a GitHub Environment the repository really has, so the gate is not warned about on save', () => {
+    expect(deploymentSuggestions(released, wordBase, ['Preview', 'Production']).map(suggestion => suggestion.githubEnvironment)).toEqual(['Preview', 'Production']);
   });
 });
 
