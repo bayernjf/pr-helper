@@ -337,6 +337,29 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 12. 阶段状态、事件和部署历史已切换到稳定 `stage_id`。 ✅ 019 已执行，并已通过当前 Production 流程回归。
 13. PR 流程自动化：服务端加密 AI 凭据、步骤级规则快照、`025` 运行快照/幂等动作队列和 `026` 自动化偏好已落地；Webhook、Cron 和 inbox reconciliation 会在 `ready-to-create` 自动入队，执行器会重校验统一阶段决策、服务端自动生成/确认、规则快照、新提交和开放 PR。自动创建 PR 受服务端凭据、AI 自动生成、自动确认和有效生成规则四项前置条件保护。合并后门禁与下一步解锁已经生效：`stageIsUnlocked` 要求前序步骤 `pull_state='merged'` 且 `checks_state='success'`，合并瞬间 `checks_state` 重置为 `pending` 由合并后 Actions 填回，`mergeChecksWithDeployments` 还把部署状态并入该字段。自动合并本身：`automationMergeOutcome` 只在 GitHub 判定 `mergeable=true` 且 `mergeable_state='clean'`、门禁全绿、审批达标时返回合并，其余一律 `paused`（含 `'behind'`，不自动 update branch）；`automationRetryIsExhausted` 按 `recoveryPolicy.maxRetries` 封顶重排；`merge-pr` 用独立幂等键，PR 已 merged 记幂等成功。方案与验收标准见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。🔴 2026-08-13 生产查询确认服务端自动创建实际未生效，原因链、修复方案与回归清单见 [`docs/auto-create-pr-remediation.md`](auto-create-pr-remediation.md)；其中 `P1`–`P6`（身份归一化、失败留痕、cron 分批、统一决策模型、执行器幂等化）已全部合入 `main` 并部署，`P3` 生产验收通过。`P8`（`workflow_automation_actions` 没有 `stage_index` 列，而执行器与队列列表都在 SELECT 它，执行器因此在原子领取动作之前抛错）已改为 JOIN `workflow_automation_runs` 取该列并部署生产，验证生效。`P9`（AI 响应的 markdown 围栏未被正确剥离，`trim()` 写在 `replace()` 之后导致锚点失配）已由 `jsonFromModelText` 修复并部署。✅ 2026-08-14 服务端自动创建 PR 在生产端到端跑通：自动建出 `bayernjf/bayjf#42`，动作 `succeeded` / `attempts=2` / `pullNumber=42`，后续轮转未重复建。✅ 2026-08-15 逐步骤自动合并在生产跑通：`create-pr` 47 次成功、`merge-pr` 37 次成功；10 次 `paused` 中 7 次是门禁未全绿的正确行为，另 3 次是 GitHub 超时（`71e6c4fb` 的尝试次数退还即针对这一类）。数据见《2026-08-15 生产实测结论》。仍待验：门禁为红不触发、幂等命中记成功（生产无对应场景，需另造）。
 
+### 2026-08-15 首页「需要处理」十项的核对
+
+用户报「首页需要处理有十项，感觉有的不太对」。用生产数据把这十项复原后，确认 **9 项是错的，只有 1 项是真的**。
+
+十项的来源是失败中心（`failureCenterPanel`）的三段之和：`actionQueue` 里的 `checks-failed` / `needs-approval`、部署失败、以及本次新加的受阻自动化动作。用生产 `workflow_stage_states` + 流程定义重放 `deriveStageDecision` / `actionableStageEntry`，`actionQueue` 只产出 2 项（`E2E Failure and Dynamic Rule` 的 `fix/failure-e2e` Actions 失败、`Private Repository E2E` 的 PR 已满足合并条件），其中只有前者进失败中心；部署失败 0 项。剩下 9 项全部是 `paused` 的自动化动作。
+
+这 9 条逐条核对的结果是**全部已失效**：
+
+| id | 路线 | 停在的原因 | 更新的同路线动作 |
+| --- | --- | --- | --- |
+| 11 / 15 / 99 | pr-helper `feature/20260722` | 门禁尚未全绿 | 18 / 17 / 8 条，含多条 `succeeded` |
+| 13 | pr-helper `dev` | 门禁尚未全绿 | 16 条，含多条 `succeeded` |
+| 20 | agent-dev `feature/20260802` | 门禁尚未全绿 | 1 条 `succeeded` |
+| 22 / 71 | word-base `feature/20260604` | 门禁尚未全绿 | 3 / 2 条，含 `succeeded` |
+| 58 | pr-helper-landing `dev` | `CONNECT_TIMEOUT` | 1 条 `succeeded` |
+| 80 | termana-landing `dev` | GitHub 请求超时 | 1 条 `succeeded` |
+
+也就是说每一条都已被同一路线上更新的动作取代，且取代它的那条都已经成功——对应的 PR 早已合并。
+
+**根因在 08-15 新加的 `paused` 分支的判断顺序**：它先看失败原因，GitHub 已给出裁决的行直接 `skip`，因此永远走不到 `hasNewer` 那一步；而 `queued` / `running` 早就有 `superseded` 的退出口，`paused` 没有。修复是把 `hasNewer` 提到该分支的第一条并判 `cancel / superseded`。这同时纠正了「裁决要留作操作者的记录」这条理由的适用范围：只有最新那条才是记录，被取代的那条不是。
+
+修复上线后失败中心应只剩 1 项（`fix/failure-e2e` 的 Actions 失败），9 条 `paused` 会被清成 `cancelled / 已被后续提交的自动化动作取代`，仍可在历史里查到。看板「已暂停，需要处理」计数应从 9 归零。
+
 ### 2026-08-15 实时校准预算的实测重定
 
 近 24 小时 `reconciliation_runs` 按触发方分组（UTC）：
