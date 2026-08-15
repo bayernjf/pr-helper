@@ -292,7 +292,9 @@ export function automationDrainDecision(action: { state: string; createdAt: stri
   if (action.state === 'paused') {
     if (!action.failureReason || automationAttemptWasReached(action.failureReason)) return { kind: 'skip' };
     if (action.hasNewer) return { kind: 'skip' };
-    if (now - Date.parse(action.createdAt) > AUTOMATION_ACTION_STALE_MS) return { kind: 'skip' };
+    // Nothing else retries this, so parking it past the window leaves a dead intent in the failure centre
+    // for good. Only reachable for a fault that reached no verdict; a verdict stays paused however old.
+    if (now - Date.parse(action.createdAt) > AUTOMATION_ACTION_STALE_MS) return { kind: 'cancel', reason: 'stale' };
     if (now - Date.parse(action.updatedAt) < AUTOMATION_TRANSIENT_REQUEUE_COOLDOWN_MS) return { kind: 'skip' };
     if (action.attempts >= AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS) return { kind: 'skip' };
     return { kind: 'requeue' };
