@@ -562,6 +562,16 @@ type CheckRun = { status: string; conclusion: string | null };
 type CommitStatus = { state: string };
 type Review = { state: string };
 type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
+type BranchRule = { type: string; parameters?: { required_approving_review_count?: number } | null };
+
+// GitHub enforces classic branch protection and rulesets at the same time, and reports them from
+// separate endpoints. A branch whose review requirement lives only in a ruleset answers the classic
+// endpoint with no review block at all, so reading one source alone understates the requirement.
+export function requiredApprovalsFromProtection(protection: BranchProtection | null, rules: readonly BranchRule[]) {
+  const classic = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
+  const ruleset = rules.reduce((most, rule) => Math.max(most, rule.parameters?.required_approving_review_count || 0), 0);
+  return Math.max(classic, ruleset);
+}
 type GitHubWorkflowRun = { id: number; name: string; status: string; conclusion: string | null; html_url: string; head_sha: string; created_at?: string };
 type GitHubDeployment = { id: number; environment: string; statuses_url: string };
 type GitHubDeploymentStatus = { state: string; environment_url?: string | null; log_url?: string | null };
@@ -1576,18 +1586,19 @@ async function reconcileStageWork(environment: Record<string, string | undefined
   }
   const sha = pull.merged_at ? pull.merge_commit_sha : pull.head.sha;
   if (!pull.merged_at) await sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`;
-  const [runs, statuses, reviews, protection] = await phase('checks', () => Promise.all([
+  const [runs, statuses, reviews, protection, rules] = await phase('checks', () => Promise.all([
     sha ? installationRequest<{ check_runs: CheckRun[] }>(config, installationId, `/repos/${owner}/${name}/commits/${sha}/check-runs?per_page=100`).catch(() => ({ check_runs: [] })) : Promise.resolve({ check_runs: [] }),
     sha ? installationRequest<{ statuses: CommitStatus[] }>(config, installationId, `/repos/${owner}/${name}/commits/${sha}/status`).catch(() => ({ statuses: [] })) : Promise.resolve({ statuses: [] }),
     pull.merged_at ? Promise.resolve([] as Review[]) : installationRequest<Review[]>(config, installationId, `/repos/${owner}/${name}/pulls/${pull.number}/reviews?per_page=100`).catch(() => []),
     pull.merged_at ? Promise.resolve(null as BranchProtection | null) : installationRequest<BranchProtection>(config, installationId, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}/protection`).catch(() => null),
+    pull.merged_at ? Promise.resolve([] as BranchRule[]) : installationRequest<BranchRule[]>(config, installationId, `/repos/${owner}/${name}/rules/branches/${encodeURIComponent(stage.target)}`).catch(() => []),
   ]));
   const deploymentStates = pull.merged_at && sha ? await phase('deploy', () => reconcileStageDeployments(environment, sql, row, workflow, stageIndex, source, stage.target, sha)) : [];
   const observedChecks = runs.check_runs.length || statuses.statuses.length
     ? summarizeGitHubChecks(runs.check_runs, statuses.statuses)
     : { state: 'success' as const, passed: 0, total: 0 };
   const checks = mergeChecksWithDeployments(observedChecks, deploymentStates);
-  const requiredApprovals = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
+  const requiredApprovals = requiredApprovalsFromProtection(protection, rules);
   const approvals = reviews.filter(review => review.state === 'APPROVED').length;
   await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${workflow.repository}, ${stage.source}, ${stage.target}, ${pull.number}, ${pull.merged_at ? 'merged' : pull.state}, ${pull.merged_at || null}, ${sha || null}, ${checks.state}, ${checks.passed}, ${checks.total}, ${approvals}, ${requiredApprovals}, ${pull.mergeable ?? null}, ${pull.mergeable_state || null}, ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, head_sha = EXCLUDED.head_sha, checks_state = EXCLUDED.checks_state, checks_passed = EXCLUDED.checks_passed, checks_total = EXCLUDED.checks_total, approvals = EXCLUDED.approvals, required_approvals = EXCLUDED.required_approvals, mergeable = EXCLUDED.mergeable, mergeable_state = EXCLUDED.mergeable_state, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`;
   const before = previous[0];

@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -714,6 +714,35 @@ describe('automationMergeOutcome', () => {
     expect(body).toContain("outcome.retryable");
     expect(body).toContain("state = 'queued'");
     expect(body).toContain("'waiting-gates'");
+  });
+});
+
+// A repository can require approvals through classic branch protection, through a ruleset, or through
+// both, and the two are reported by different endpoints. Reading only the classic one made a
+// ruleset-governed branch report zero required approvals, so `automationMergeOutcome` skipped its
+// approval branch and fell through to the generic `blocked` verdict — which is marked retryable and
+// therefore spent the whole retry budget waiting for a human approval to arrive on its own.
+describe('requiredApprovalsFromProtection', () => {
+  const ruleset = (count: number) => [{ type: 'pull_request', parameters: { required_approving_review_count: count } }];
+
+  it('reads the count from classic branch protection', () => {
+    expect(requiredApprovalsFromProtection({ required_pull_request_reviews: { required_approving_review_count: 2 } }, [])).toBe(2);
+  });
+
+  it('reads the count from a ruleset when classic protection carries no review requirement', () => {
+    expect(requiredApprovalsFromProtection({ required_pull_request_reviews: null }, ruleset(1))).toBe(1);
+    expect(requiredApprovalsFromProtection(null, ruleset(1))).toBe(1);
+  });
+
+  it('takes the stricter of the two, because GitHub enforces both at once', () => {
+    expect(requiredApprovalsFromProtection({ required_pull_request_reviews: { required_approving_review_count: 1 } }, ruleset(3))).toBe(3);
+    expect(requiredApprovalsFromProtection({ required_pull_request_reviews: { required_approving_review_count: 3 } }, ruleset(1))).toBe(3);
+  });
+
+  it('reports zero when neither source requires a review', () => {
+    expect(requiredApprovalsFromProtection(null, [])).toBe(0);
+    expect(requiredApprovalsFromProtection(null, [{ type: 'deletion' }, { type: 'non_fast_forward' }])).toBe(0);
+    expect(requiredApprovalsFromProtection(null, [{ type: 'pull_request', parameters: null }])).toBe(0);
   });
 });
 
