@@ -53,24 +53,17 @@
 
 **一、自动创建 / 自动合并稳定性（当前唯一主线）**
 
-1. **重排 `id 84`，让 drain 的修复真正被走到**。已读出的原因是 `排空时执行失败：无效的自动化执行请求`，追下去是 drain 自身的一行缺陷：`workflow_automation_actions.id` 是 `bigint`，postgres.js 返回字符串，执行器入口的 `Number.isInteger` 在原子领取之前就把它判为无效请求——**drain 上线以来一次都没真正执行过动作**，首轮 `executed: 0` 是这个原因而不是「无可执行动作」。修复已合入（`automationActionId(row.id)` 归一化）。`id 84` 现停在 `paused`，drain 按设计不碰 `paused`，需要一次人工重排：
+1. **`id 84` 重排已关闭：bigint 修复已在生产被真实执行验证（无待办，仅留结论）**。`6aa011c2` 部署后，12:36–13:11 之间 `id 113`–`121` 共 8 条动作 `succeeded`（`attempts` 1–3），`id 111` 被判 `superseded` 而 `cancelled`——这是 drain 上线以来第一次真正执行动作，此前首轮 `executed: 0` 是每行都在原子领取前抛错，不是队列为空。`id 84` 本身拿不到真实裁决了：它 `created_at` 为 08-15 01:03:20，人工重排发生在 13:03:30，已过 `AUTOMATION_ACTION_STALE_MS`（12 小时）30 秒，而 `automationDrainDecision` 的 stale 判定排在 execute 之前，因此只会被下一次 sweep 标记 `cancelled / 超过自动化时限，未再尝试`。不必再干预。
+2. **瞬时失败的重排路径已实现，待生产验证（当前第一优先级）**。drain 现在也读 `paused`，`automationDrainDecision` 只在「有失败原因且 `automationAttemptWasReached` 判为未触达供方」时返回 `requeue`，并要求未被取代、仍在 12 小时窗口内、距上次更新超过 15 分钟（`AUTOMATION_TRANSIENT_REQUEUE_COOLDOWN_MS`）、`attempts < 3`（`AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS`）。冷却不可省：领取前抛出的故障不计 `attempts`。重排以读到的 `state = 'paused'` 为条件写入，真实裁决胜出。批次改按 `ORDER BY (actions.state = 'paused'), actions.created_at`，防止最老的 `paused` 行占满批次饿死队列行。7 条「门禁尚未全绿」是正确终态，不动。**更正**：此前写「正则漏掉 `CONNECT_TIMEOUT`」是错的，`timed? ?out` 忽略大小写已匹配 `TIMEOUT`。`id 6` / `58` / `80` 均已超窗，救不回来，只会被按超时清掉——本项的生产验证要等下一次真实瞬时故障。
 
-   ```sql
-   UPDATE workflow_automation_actions SET state='queued', failure_reason=NULL, updated_at=now() WHERE id=84;
-   ```
-
-   重排后第一次 sweep 的响应会给出它真实的裁决，那才是第 2 项的依据。
-
-2. **给「供方未给裁决」的失败一条重排路径**。当前 11 条未结束动作里 7 条是「门禁尚未全绿」的正确终态，3 条（`id 6` / `58` / `80`）因 GitHub 超时或 `write CONNECT_TIMEOUT` 停在 `paused`，没有任何机制会重试。要做的是把这类原因与 GitHub 已给出裁决的终态分开：前者可重排，后者必须留在 `paused`。`automationAttemptWasReached` 已经在退还尝试次数上做过同一类区分，复用它的判据而不是另造一套——注意它现有的正则漏掉了 `CONNECT_TIMEOUT`。此前记为卡住 `soft-desk-landing` 发布的 `id 103` 已 `succeeded`，目前没有真实发布被阻塞，本项不再紧急但仍是结构性来源。
-
-3. **按实测重定 `REALTIME_RECONCILE_BUDGET_MS`**（现为 8000）。这不只是调优：预算让出得太早，sweep 记 `deferred` 后实例被回收，而被回收的实例正是动作停在 `running` 却无人执行的来源——`id 84` 就是这么来的。`maxDuration` 已提到 60 秒、`cron` 实测 p90 22.3 秒，8 秒已无依据。
+3. **按实测重定 `REALTIME_RECONCILE_BUDGET_MS`**（现为 8000）。这不只是调优：预算让出得太早，sweep 记 `deferred` 后实例被回收，而被回收的实例正是动作停在 `running` 却无人执行的来源——`id 84` 最初就是这么停在 `running` 的。`maxDuration` 已提到 60 秒、`cron` 实测 p90 22.3 秒，8 秒已无依据。
 4. **收紧恢复时钟**。GitHub 计划任务实际 20–90 分钟才送达，drain 的恢复延迟整条绑在这上面。评估 Supabase `pg_cron` 作为更准的时钟（Vercel Hobby 的 Cron 是每天 1 次、上限 2 个任务，用不了）。
 5. **drain 稳定观察若干天后，删掉 sweep 内联的执行路径**，让自动化动作只剩一条执行入口，不再有两套会各自漂移的实现。
 6. 仍未验的两项自动化场景：门禁为红不触发、幂等命中记成功（生产无对应场景，需另造）。
 
 **二、已明确后置**
 
-- **自动化进度条 UI**：方案在 [`docs/automated-workflow-plan.md`](docs/automated-workflow-plan.md) 第《自动合并进度条》节定稿，代码零实现（`src/main.ts` 对 `/api/automation` 只有入队和执行两处调用，从不回读队列）。落地时需要一个按流程/步骤回读动作队列的接口，且因 Hobby 12 函数上限只能走 `vercel.json` 现有 rewrite 分流，不能新增函数文件。
+- **自动化进度条 UI 的完整方案**：只读诊断切片已于 2026-08-15 落地（`/api/inbox` 多带 `automation` 字段，受阻动作显示在失败中心、看板计数、泳道徽标、步骤抽屉和流程详情页五处）。仍后置的是 [`docs/automated-workflow-plan.md`](docs/automated-workflow-plan.md)《自动合并进度条》的完整方案：百分比、接管对话框、`unpause` 都是写路径，依赖第 2 项的「瞬时 vs 终态」分类先定下来。
 - **reconciliation 调用预算**：改为阈值观察，峰值小时越过约 2,500 次（基线 5,000 次/小时的一半）再设计模型。
 
 **三、只能由用户执行**
