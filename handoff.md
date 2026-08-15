@@ -53,8 +53,16 @@
 
 **一、自动创建 / 自动合并稳定性（当前唯一主线）**
 
-1. **读出 `id 84` 被 park 的原因**。drain 现在会把抛错原因写回行并随响应返回，部署后第一次 sweep 即可拿到。前置是推送部署。它决定第 2 项到底要做多大。
-2. **给「供方未给裁决」的失败一条重排路径**。这是当前不稳定的最大单一来源：`id 6`/`58`/`80`/`103` 四条因 GitHub 超时或 `CONNECT_TIMEOUT` 停在 `paused`，没有任何机制会重试，其中 `id 103` 正卡着 `soft-desk-landing` 的一次真实发布（`ahead=2`）。要做的是把这类原因与「门禁尚未全绿」这类 GitHub 已给出裁决的终态分开——前者可重排，后者必须留在 `paused`。`automationAttemptWasReached` 已经在退还尝试次数上做过同一类区分，可以复用它的判据而不是另造一套。
+1. **重排 `id 84`，让 drain 的修复真正被走到**。已读出的原因是 `排空时执行失败：无效的自动化执行请求`，追下去是 drain 自身的一行缺陷：`workflow_automation_actions.id` 是 `bigint`，postgres.js 返回字符串，执行器入口的 `Number.isInteger` 在原子领取之前就把它判为无效请求——**drain 上线以来一次都没真正执行过动作**，首轮 `executed: 0` 是这个原因而不是「无可执行动作」。修复已合入（`automationActionId(row.id)` 归一化）。`id 84` 现停在 `paused`，drain 按设计不碰 `paused`，需要一次人工重排：
+
+   ```sql
+   UPDATE workflow_automation_actions SET state='queued', failure_reason=NULL, updated_at=now() WHERE id=84;
+   ```
+
+   重排后第一次 sweep 的响应会给出它真实的裁决，那才是第 2 项的依据。
+
+2. **给「供方未给裁决」的失败一条重排路径**。当前 11 条未结束动作里 7 条是「门禁尚未全绿」的正确终态，3 条（`id 6` / `58` / `80`）因 GitHub 超时或 `write CONNECT_TIMEOUT` 停在 `paused`，没有任何机制会重试。要做的是把这类原因与 GitHub 已给出裁决的终态分开：前者可重排，后者必须留在 `paused`。`automationAttemptWasReached` 已经在退还尝试次数上做过同一类区分，复用它的判据而不是另造一套——注意它现有的正则漏掉了 `CONNECT_TIMEOUT`。此前记为卡住 `soft-desk-landing` 发布的 `id 103` 已 `succeeded`，目前没有真实发布被阻塞，本项不再紧急但仍是结构性来源。
+
 3. **按实测重定 `REALTIME_RECONCILE_BUDGET_MS`**（现为 8000）。这不只是调优：预算让出得太早，sweep 记 `deferred` 后实例被回收，而被回收的实例正是动作停在 `running` 却无人执行的来源——`id 84` 就是这么来的。`maxDuration` 已提到 60 秒、`cron` 实测 p90 22.3 秒，8 秒已无依据。
 4. **收紧恢复时钟**。GitHub 计划任务实际 20–90 分钟才送达，drain 的恢复延迟整条绑在这上面。评估 Supabase `pg_cron` 作为更准的时钟（Vercel Hobby 的 Cron 是每天 1 次、上限 2 个任务，用不了）。
 5. **drain 稳定观察若干天后，删掉 sweep 内联的执行路径**，让自动化动作只剩一条执行入口，不再有两套会各自漂移的实现。
