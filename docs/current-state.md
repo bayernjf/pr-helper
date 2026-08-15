@@ -149,6 +149,10 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 - 第一次 sweep `{"examined":7,"reclaimed":1,"cancelled":6,"failed":1}`。6 条判为「已被后续提交取代」取消，1 条（`id 84`）从 `running` 回收成 `queued` 并退还误扣的尝试；未结束动作从 7 条降到 1 条。恢复不再依赖新的 push，这一点已由生产数据证实。
 - 随后 5 次 sweep 全部 `{"examined":1,"failed":1}`：`id 84` 每 75 秒被执行一次、每次都抛错，而行仍停在 `queued attempts=0`。原因是执行器在原子领取之前抛错时不写任何裁决，而 drain 当时只记日志不动行——一个不收敛的自旋。已修：抛错时 drain 把原因写回该行并置 `paused`，UPDATE 以 `state IN ('queued','running')` 为条件，绝不覆盖执行器越过领取后写下的裁决；失败明细同时随 drain 响应返回，下一次 sweep 自己就能说出原因，不必依赖 Vercel 日志。
 
+**park 后读出的原因是 `排空时执行失败：无效的自动化执行请求`，据此定位到 drain 自身的一行缺陷。** `workflow_automation_actions.id` 是 `bigint`，postgres.js 把它作为字符串返回；执行器入口第一行用 `Number.isInteger` 把关，字符串直接被判为无效请求，在原子领取之前抛错。仓库里 `automationActionId` 的注释本就写明了这件事，其余 8 个调用点都经过它，只有 drain 把 `row.id` 原样传了进去。含义是**上线以来 drain 一次都没有真正执行过动作**——首轮 `executed: 0` 不是「没有可执行的动作」，而是每一条都在入口被拒。已修：drain 先用 `automationActionId(row.id)` 归一化，取不到整数则记 `drain-invalid-action` 跳过，绝不把无效身份送进执行器。`DrainActionRow.id` 的类型也从 `number` 改为 `string`，不再对运行时说谎。
+
+因此 `id 84` 被写下的那句原因是这个缺陷的产物，不是它真实的裁决；它当前停在 `paused attempts=0`，而 drain 按设计不碰 `paused`，需要一次人工重排才能让修复真正被走到。
+
 调用预算按小时复核（近 24 小时，UTC）：
 
 | 指标 | 值 |
@@ -311,9 +315,9 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 >
 > 用户 2026-08-15 决定：自动化进度条 UI 后置（见第 5 项），当前主线只有一条——自动创建 PR / 自动合并 PR 的稳定性。
 
-0. **读出 `id 84` 被 park 的原因（当前第一优先级）**。drain 现在会把抛错原因写回行并随响应返回，部署后第一次 sweep 即可拿到那句话。它决定第 1 项的范围，在读到真实原因之前不要先写重试分类器。
+0. **重排 `id 84`，让 drain 的修复真正被走到（当前第一优先级）**。已读出的原因是 drain 自身缺陷的产物（bigint 身份未归一化，详见《2026-08-15 调用预算复核与 drain 实测》），修复已合入。该行现停在 `paused`，而 drain 按设计不碰 `paused`，需要一次人工重排：`UPDATE workflow_automation_actions SET state='queued', failure_reason=NULL, updated_at=now() WHERE id=84;`。重排后第一次 sweep 的响应会给出它真实的裁决——这才是判断第 1 项范围的依据。
 
-1. **给「供方未给裁决」的失败一条重排路径**。这是自动化不稳定的最大单一来源：`id 6` / `58` / `80` / `103` 四条因 GitHub 超时或 `CONNECT_TIMEOUT` 停在 `paused`，没有任何机制会重试，其中 `id 103` 正卡着 `soft-desk-landing` 的一次真实发布（`ahead=2`）。要做的是把这类原因与「门禁尚未全绿」这类 GitHub 已经给出裁决的终态分开——前者可重排，后者必须留在 `paused`。`automationAttemptWasReached` 已经在退还尝试次数上做过同一类区分，复用它的判据而不是另造一套。
+1. **给「供方未给裁决」的失败一条重排路径**。当前 11 条未结束动作里，7 条是「门禁尚未全绿」的正确终态，3 条（`id 6` / `58` / `80`）因 GitHub 超时或 `write CONNECT_TIMEOUT` 停在 `paused` 且没有任何机制会重试。要做的是把这类原因与 GitHub 已经给出裁决的终态分开——前者可重排，后者必须留在 `paused`。`automationAttemptWasReached` 已经在退还尝试次数上做过同一类区分，复用它的判据而不是另造一套（注意它现有的正则漏掉了 `CONNECT_TIMEOUT`）。此前记为「卡住一次真实发布」的 `id 103` 已 `succeeded`，目前没有真实发布被阻塞，本项因此不再紧急，但仍是不稳定的结构性来源。
 
 2. **按实测重定实时校准的时间预算**。`REALTIME_RECONCILE_BUDGET_MS = 8000` 是为躲 10 秒平台上限定的，现在 `maxDuration` 已是 60 秒、`duration_ms` 口径已修复且 `cron` 实测 p90 22.3 秒，该常数偏保守。这不只是调优：预算让出得太早、实例随后被回收，正是动作停在 `running` 却无人执行的来源，`id 84` 就是这么来的。
 
