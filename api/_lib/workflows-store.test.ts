@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { automationDrainDecision, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { automationDrainDecision, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -1072,6 +1072,28 @@ describe('automationDrainDecision', () => {
     for (const state of ['succeeded', 'failed', 'paused', 'cancelled']) {
       expect(automationDrainDecision(action({ state, createdAt: '2026-08-12T02:00:00.000Z' }), now)).toEqual({ kind: 'skip' });
     }
+  });
+});
+
+describe('draining the automation queue', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+
+  // The 10s platform default is what killed the create-pr that had to call a model, so raising the
+  // ceiling to the Hobby maximum is only half the fix: the drain must also stop starting work it cannot
+  // finish, or it trades one silent recycle for another.
+  it('keeps enough of the ceiling in reserve to finish an action it starts', () => {
+    expect(automationDrainHasStartBudget(0, AUTOMATION_DRAIN_START_BUDGET_MS - 1)).toBe(true);
+    expect(automationDrainHasStartBudget(0, AUTOMATION_DRAIN_START_BUDGET_MS)).toBe(false);
+    expect(AUTOMATION_DRAIN_START_BUDGET_MS).toBeLessThan(AUTOMATION_FUNCTION_CEILING_MS / 2);
+  });
+
+  // A second execution path is the real long-term risk here: the executor already re-reads the workflow,
+  // re-derives the gate and treats an existing open pull request as success, and a copy would drift away
+  // from all three.
+  it('executes through the one executor instead of repeating its checks', () => {
+    const drain = source.slice(source.indexOf('export async function drainWorkflowAutomationActions'));
+    expect(drain).toContain('executeWorkflowAutomationActionForUser');
+    expect(drain).not.toContain('/pulls`');
   });
 });
 
