@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { automationDrainDecision, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -1035,7 +1035,7 @@ describe('automationDrainDecision', () => {
   const now = Date.parse('2026-08-15T02:26:00.000Z');
   const action = (overrides: Partial<Parameters<typeof automationDrainDecision>[0]> = {}) => ({
     state: 'queued', createdAt: '2026-08-15T02:20:00.000Z', updatedAt: '2026-08-15T02:20:00.000Z',
-    failureReason: null, hasNewer: false, ...overrides,
+    failureReason: null, hasNewer: false, attempts: 0, ...overrides,
   });
 
   // Nothing reads the queued rows today, so an action's only chance to run is the request that enqueued
@@ -1092,10 +1092,66 @@ describe('automationDrainDecision', () => {
       expect(automationDrainDecision(action({ state, createdAt: '2026-08-12T02:00:00.000Z' }), now)).toEqual({ kind: 'skip' });
     }
   });
+
+  // Three production actions sat paused on a network fault until they aged out of the window: nothing
+  // requeues `paused`, so they were never retried once, let alone retried to exhaustion.
+  it('requeues a paused action whose failure never reached a verdict', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: 'GitHub 请求超时，请稍后重试', updatedAt: '2026-08-15T01:30:00.000Z' }), now)).toEqual({ kind: 'requeue' });
+  });
+
+  // GitHub decided this one. Requeueing it writes the same verdict again every sweep and buries the rows
+  // that a person could actually act on.
+  it('leaves a paused action GitHub already decided', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: '门禁尚未全绿（当前 failure）', updatedAt: '2026-08-15T01:30:00.000Z' }), now)).toEqual({ kind: 'skip' });
+  });
+
+  it('leaves a paused action with no recorded reason, which is not evidence of a transient fault', () => {
+    expect(automationDrainDecision(action({ state: 'paused', updatedAt: '2026-08-15T01:30:00.000Z' }), now)).toEqual({ kind: 'skip' });
+  });
+
+  // The row is only worth waking while its intent still holds; past the window a requeue would create a
+  // pull request nobody expects, which is the same reason the queued path cancels instead of executing.
+  it('leaves a paused action that already aged out of the window', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: 'GitHub 请求超时，请稍后重试', createdAt: '2026-08-14T13:00:00.000Z', updatedAt: '2026-08-14T13:30:00.000Z' }), now)).toEqual({ kind: 'skip' });
+  });
+
+  it('leaves a paused action a later one already covers', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: 'GitHub 请求超时，请稍后重试', updatedAt: '2026-08-15T01:30:00.000Z', hasNewer: true }), now)).toEqual({ kind: 'skip' });
+  });
+
+  // A fault that throws before the executor's claim charges no attempt, so the cap cannot bound this on
+  // its own; without a wait the same row would be retried on every sweep for the whole window.
+  it('waits out the cooldown before requeueing the same paused action again', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: 'GitHub 请求超时，请稍后重试', updatedAt: '2026-08-15T02:25:00.000Z' }), now)).toEqual({ kind: 'skip' });
+  });
+
+  it('stops requeueing once the attempts the executor charged reach the cap', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: 'GitHub 请求超时，请稍后重试', updatedAt: '2026-08-15T01:30:00.000Z', attempts: AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS }), now)).toEqual({ kind: 'skip' });
+  });
 });
 
 describe('draining the automation queue', () => {
   const source = readFileSync(STORE_SOURCE, 'utf8');
+
+  // `write CONNECT_TIMEOUT undefined:undefined` is what postgres.js throws when the socket never opens.
+  // The requeue path decides on this discriminator, so pin the classification the production reasons rely
+  // on rather than leaving it to be read out of a regex.
+  it('counts a connect timeout as an attempt that reached nothing', () => {
+    expect(automationAttemptWasReached('write CONNECT_TIMEOUT undefined:undefined')).toBe(false);
+    expect(automationAttemptWasReached('门禁尚未全绿（当前 failure）')).toBe(true);
+  });
+
+  it('reads paused rows so a transient failure has a way back into the queue', () => {
+    const select = source.slice(source.indexOf('export async function drainWorkflowAutomationActions'));
+    expect(select.slice(0, select.indexOf('AUTOMATION_DRAIN_BATCH_SIZE'))).toContain("actions.state IN ('queued', 'running', 'paused')");
+  });
+
+  it('requeues under the paused state it read, so a concurrent verdict wins', () => {
+    const body = source.slice(source.indexOf('export async function drainWorkflowAutomationActions'));
+    const drain = body.slice(0, body.indexOf('\nexport ', 1));
+    const requeue = drain.slice(drain.indexOf("decision.kind === 'requeue'"));
+    expect(requeue.slice(0, requeue.indexOf('counts.requeued'))).toContain("state = 'paused'");
+  });
 
   // The 10s platform default is what killed the create-pr that had to call a model, so raising the
   // ceiling to the Hobby maximum is only half the fix: the drain must also stop starting work it cannot
