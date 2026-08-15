@@ -82,7 +82,7 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - 稳定阶段决策：服务端统一输出 `locked`、`waiting`、`checks-failed`、`needs-approval`、`ready-to-merge`、`ready-to-create` 和 `merged` 决策，待办队列与阶段状态共用同一套判断。
 - 保存并发保护：流程版本使用数据库事务锁和版本号校验，检测到其他窗口更新时拒绝覆盖。
 - 请求安全保护：受保护 API 校验浏览器来源并按登录用户/操作限流；创建 PR 前检查同一 Source → Target 的开放 PR，Actions 重试和部署回滚使用稳定事件键去重。
-- 自动化方案：已确认“阈值触发 → AI/PR → 门禁 → 按步骤合并 → 合并后门禁/部署 → 下一步”的产品方案，第一阶段不使用画布，详情见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。`024`–`026` 已执行，服务端加密 AI 凭据、偏好、步骤规则快照、幂等动作队列和后台自动创建 PR 已在本地实现；Webhook、Cron 和 inbox reconciliation 在 `ready-to-create` 时可触发，部署后待真实验收。每个步骤可在流程详情页设置 1–20 的新提交触发阈值，只有 `aheadBy >= 阈值` 才会尝试自动创建 PR；流程编辑页不显示该配置。自动创建 PR 必须同时满足服务端自动流程凭据可用、AI 自动生成标题/描述、自动确认创建和有效规则快照，任一缺失时开关不可启用。条件满足只解除开启资格，不会自动勾选，必须用户主动点击。AI 生成失败时自动动作进入 `paused`，保留脱敏原因；用户可重新生成或手填标题/描述，确认后再 Unpause 继续原动作，不采用未经确认的兜底文案。自动合并的第 5 阶段已于 2026-08-14 落地并于 2026-08-15 在生产验证通过（见《2026-08-15 生产实测结论》）：按步骤勾选框位于流程详情页「新提交数达到」右侧，策略与自动创建**状态独立**（互不清除，可只开自动合并），但**界面可勾选条件与自动创建对齐**（同样要求四项 AI 前置，另加 `pull-merge` 权限）；该对齐只在界面，服务端入队不校验 AI 前置。只做 merge commit 且必带 `sha = pull.head.sha`、`mergeable_state='behind'` 只暂停不自动 update branch、失败次数达 `recoveryPolicy.maxRetries` 后停在 `paused` 不再自动重排、PR 已 merged 记幂等成功。Production 自动回滚仍不做。勾选自动创建或自动合并从关变开时，保存路径会打上 `reconcile_pending_since` 并立即触发一次校准，先有提交/先有 PR、后勾选的情形不再等下一次 push；若该次勾选会立即产生动作（有待创建的提交或有开着的 PR），界面先弹确认并写明源、目标与 PR 编号，取消则不保存——这个确认就是 `AGENTS.md` 第 5 条要求的明示用户动作。门禁不在界面预判，仍由服务端 `automationMergeOutcome` 权威判定。勾选后的反选是尽力而为而非取消保证：执行器认领动作后会重读工作流 payload，反选若已落库则动作抛「策略已失效」，但窗口只有 push 到 webhook 投递的 1–3 秒。
+- 自动化方案：已确认“阈值触发 → AI/PR → 门禁 → 按步骤合并 → 合并后门禁/部署 → 下一步”的产品方案，第一阶段不使用画布，详情见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。`024`–`031` 已执行，服务端加密 AI 凭据、偏好、步骤规则快照、幂等动作队列和后台自动创建 PR 均已部署并在生产跑通；Webhook、`pg_cron` 和 inbox reconciliation 在 `ready-to-create` 时可触发。每个步骤可在流程详情页设置 1–20 的新提交触发阈值，只有 `aheadBy >= 阈值` 才会尝试自动创建 PR；流程编辑页不显示该配置。自动创建 PR 必须同时满足服务端自动流程凭据可用、AI 自动生成标题/描述、自动确认创建和有效规则快照，任一缺失时开关不可启用。条件满足只解除开启资格，不会自动勾选，必须用户主动点击。AI 生成失败时自动动作进入 `paused`，保留脱敏原因；用户可重新生成或手填标题/描述，确认后再 Unpause 继续原动作，不采用未经确认的兜底文案。自动合并的第 5 阶段已于 2026-08-14 落地并于 2026-08-15 在生产验证通过（见《2026-08-15 生产实测结论》）：按步骤勾选框位于流程详情页「新提交数达到」右侧，策略与自动创建**状态独立**（互不清除，可只开自动合并），但**界面可勾选条件与自动创建对齐**（同样要求四项 AI 前置，另加 `pull-merge` 权限）；该对齐只在界面，服务端入队不校验 AI 前置。只做 merge commit 且必带 `sha = pull.head.sha`、`mergeable_state='behind'` 只暂停不自动 update branch、失败次数达 `recoveryPolicy.maxRetries` 后停在 `paused` 不再自动重排、PR 已 merged 记幂等成功。Production 自动回滚仍不做。勾选自动创建或自动合并从关变开时，保存路径会打上 `reconcile_pending_since` 并立即触发一次校准，先有提交/先有 PR、后勾选的情形不再等下一次 push；若该次勾选会立即产生动作（有待创建的提交或有开着的 PR），界面先弹确认并写明源、目标与 PR 编号，取消则不保存——这个确认就是 `AGENTS.md` 第 5 条要求的明示用户动作。门禁不在界面预判，仍由服务端 `automationMergeOutcome` 权威判定。勾选后的反选是尽力而为而非取消保证：执行器认领动作后会重读工作流 payload，反选若已落库则动作抛「策略已失效」，但窗口只有 push 到 webhook 投递的 1–3 秒。
 - 自动化进度展示方案：流程详情页将增加按步骤的进度条，明确显示已完成、当前、上一步、下一步及暂停原因；状态必须来自服务端统一阶段决策和动作队列。多路径汇聚只有所有前置路径完成后才解锁，人工合并不会显示为自动合并中。该进度条与 AI 接管、Unpause 一并列入后续代码实现和验收。
 - AI 失败节点交互已确定：进度条放在每个步骤的“自动创建 PR”控制区下方；AI 生成失败节点点击后打开接管弹窗，用户可重新生成或手填标题/描述，点击“确认并继续自动流程”后恢复原动作。内容确认不会立即把步骤标绿；必须等 PR 创建和全部 GitHub 门禁/合并后部署条件完成，节点才变绿并激活下一步。详细 Tooltip、弹窗字段、服务端校验和幂等恢复规则见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。
 
@@ -182,7 +182,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 | PR 草稿、Markdown 生成规则 | 浏览器 `localStorage`；可通过加密云同步上传服务端（原型） |
 | 加密云同步密文 | Supabase Postgres（`pr_helper_encrypted_sync`） |
 
-数据库迁移线上基线为 `001`–`026`，其中 `024_ai_automation_credentials.sql`、`025_workflow_automation_queue.sql` 与 `026_ai_automation_preferences.sql` 已执行。`024` 对应的服务端 API 还要求 Vercel 配置 `AI_CREDENTIALS_ENCRYPTION_KEY`（32 字节 hex 或 base64），不得写入代码、数据库或日志。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`。
+数据库迁移线上基线为 `001`–`031`，`027`–`031` 覆盖 `skipped` 动作状态、校准调用成本遥测、`pg_cron` 时钟和被回收扫描的名额归还。`024` 对应的服务端 API 还要求 Vercel 配置 `AI_CREDENTIALS_ENCRYPTION_KEY`（32 字节 hex 或 base64），不得写入代码、数据库或日志。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`。
 
 ## 最新验证结论
 
@@ -215,7 +215,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 ## 测试覆盖
 
-- 本地单元/服务端测试：`npm test` 运行 27 个文件 / 412 个测试；`npx tsc --noEmit` 和 `npm run build` 同时通过。
+- 本地单元/服务端测试：`npm test` 运行 27 个文件 / 460 个测试；`npx tsc --noEmit` 和 `npm run build` 同时通过。
 - 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉、创建/合并 PR、删除流程、确认式部署回滚和操作审计查询。它验证真实 DOM、二次确认和浏览器请求负载，不替代真实 GitHub 写入、门禁和部署验收。
 - 已新增流程保存队列回归：连续编辑会串行使用服务端返回的新版本，且不会由旧响应覆盖最新编辑；真实跨窗口乐观锁冲突仍会明确报错。
 - Production E2E 通过项目与尚未通过的集成项目均以 [验证报告](verification-report.md) 为准。
@@ -256,7 +256,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 已确认 4 个相关表存在，并确认 `reconciliation_runs.user_id`、`github_webhook_deliveries.installation_id`、外键和 `degraded` 状态约束已生效。018 新增的 5 个稳定身份索引均已存在，5 张相关表的 `stage_id` 空值数量均为 0。
 
-`018`–`026` 已执行并完成用户确认；自动化相关代码仍需部署到 Preview/Production 后进行真实 GitHub 验收。
+`018`–`031` 已执行并完成用户确认；自动创建 PR 与逐步骤自动合并均已部署且在生产验收通过，只剩「幂等命中记成功」需另造场景。
 
 ### 二、代码部署状态
 
