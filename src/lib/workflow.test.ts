@@ -415,6 +415,13 @@ describe('deploymentsForRepository', () => {
     expect(deploymentsForRepository([], [])).toEqual(defaultDeployments);
   });
 
+  // An empty list arrives here for two unrelated reasons: the Actions request failed, or the repository
+  // has no workflow at all. Seeding the default names into the second case is what gave seventeen
+  // repositories four gates that can never match a run, and each one holds the next stage at pending.
+  it('seeds nothing once the repository is known to have no Actions workflow', () => {
+    expect(deploymentsForRepository([], [], true)).toEqual([]);
+  });
+
   it('keeps a default entry whose workflow really exists', () => {
     const configured = deploymentsForRepository([{ name: 'Deploy frontend to Vercel' }, { name: 'Deploy frontend to Cloudflare Pages' }], ['preview-vercel', 'production-vercel', 'preview-cloudflare-pages', 'production-cloudflare-pages']);
     expect(configured).toEqual(defaultDeployments);
