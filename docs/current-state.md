@@ -315,17 +315,17 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 >
 > 用户 2026-08-15 决定：自动化进度条 UI 后置（见第 5 项），当前主线只有一条——自动创建 PR / 自动合并 PR 的稳定性。
 
-0. **重排 `id 84`，让 drain 的修复真正被走到（当前第一优先级）**。已读出的原因是 drain 自身缺陷的产物（bigint 身份未归一化，详见《2026-08-15 调用预算复核与 drain 实测》），修复已合入。该行现停在 `paused`，而 drain 按设计不碰 `paused`，需要一次人工重排：`UPDATE workflow_automation_actions SET state='queued', failure_reason=NULL, updated_at=now() WHERE id=84;`。重排后第一次 sweep 的响应会给出它真实的裁决——这才是判断第 1 项范围的依据。
+0. **`id 84` 重排已关闭，bigint 修复已由其他动作在生产验证（本项收尾，无待办）**。2026-08-15 13:03 用户按建议把 `id 84` 重排回 `queued`，但它 `created_at` 为 01:03:20，恰在 13:03 跨过 `AUTOMATION_ACTION_STALE_MS`（12 小时），而 `automationDrainDecision` 的 stale 判定排在 execute 之前，因此它只会被下一次 sweep 标记 `cancelled / 超过自动化时限，未再尝试`，拿不到真实裁决。提出该建议时未核对动作年龄，属规划疏漏。修复本身已被真实执行验证：12:36–13:11 之间 `id 113`–`121` 共 8 条动作 `succeeded`（`attempts` 1–3，领取与重排均正常），`id 111` 被正确判为 `superseded` 而 `cancelled`——这是排空器上线以来第一次真正执行动作。
 
-1. **给「供方未给裁决」的失败一条重排路径**。当前 11 条未结束动作里，7 条是「门禁尚未全绿」的正确终态，3 条（`id 6` / `58` / `80`）因 GitHub 超时或 `write CONNECT_TIMEOUT` 停在 `paused` 且没有任何机制会重试。要做的是把这类原因与 GitHub 已经给出裁决的终态分开——前者可重排，后者必须留在 `paused`。`automationAttemptWasReached` 已经在退还尝试次数上做过同一类区分，复用它的判据而不是另造一套（注意它现有的正则漏掉了 `CONNECT_TIMEOUT`）。此前记为「卡住一次真实发布」的 `id 103` 已 `succeeded`，目前没有真实发布被阻塞，本项因此不再紧急，但仍是不稳定的结构性来源。
+1. **给「供方未给裁决」的失败一条重排路径（当前第一优先级）**。3 条因 GitHub 超时或 `write CONNECT_TIMEOUT` 停在 `paused` 的动作（`id 6` / `58` / `80`）不是重试次数耗尽，而是从来没有被重试过——没有任何机制会把 `paused` 重新入队，它们就这样躺到超过 12 小时的 stale 窗口，只能被 sweep 按超时清掉。`id 84` 的结局是同一结构性缺陷的第二个样本。要做的是把这类原因与 GitHub 已经给出裁决的终态（7 条「门禁尚未全绿」是正确终态）分开：前者在 stale 窗口内可重排，后者必须留在 `paused`。`automationAttemptWasReached` 已经在退还尝试次数上做过同一类区分，复用它的判据而不是另造一套（注意它现有的正则漏掉了 `CONNECT_TIMEOUT`）。此前记为「卡住一次真实发布」的 `id 103` 已 `succeeded`，目前没有真实发布被阻塞。
 
-2. **按实测重定实时校准的时间预算**。`REALTIME_RECONCILE_BUDGET_MS = 8000` 是为躲 10 秒平台上限定的，现在 `maxDuration` 已是 60 秒、`duration_ms` 口径已修复且 `cron` 实测 p90 22.3 秒，该常数偏保守。这不只是调优：预算让出得太早、实例随后被回收，正是动作停在 `running` 却无人执行的来源，`id 84` 就是这么来的。
+2. **按实测重定实时校准的时间预算**。`REALTIME_RECONCILE_BUDGET_MS = 8000` 是为躲 10 秒平台上限定的，现在 `maxDuration` 已是 60 秒、`duration_ms` 口径已修复且 `cron` 实测 p90 22.3 秒，该常数偏保守。这不只是调优：预算让出得太早、实例随后被回收，正是动作停在 `running` 却无人执行的来源，`id 84` 最初就是这么停在 `running` 的。
 
 3. **收紧恢复时钟**。GitHub 计划任务实际 20–90 分钟才送达，drain 的恢复延迟整条绑在这上面。评估 Supabase `pg_cron` 作为更准的时钟（Vercel Hobby 的 Cron 是每天 1 次、上限 2 个任务，用不了）。
 
 4. **drain 稳定后删掉 sweep 内联的执行路径**，让自动化动作只有一条执行入口；在 drain 未经过若干天生产观察前不动。
 
-5. **自动化进度条 UI（已明确后置）**。方案在 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md) 的《自动合并进度条》一节定稿，代码零实现：`src/main.ts` 对 `/api/automation` 只有入队和执行两处调用，从不回读队列。落地时需要一个按流程/步骤回读动作队列的接口，且因 Hobby 12 函数上限只能挂在 `vercel.json` 现有 rewrite 上分流，不能新增函数文件。
+5. **自动化进度条 UI（完整方案仍后置，诊断回读切片已落地）**。2026-08-15 先做了只读的可观测切片：`/api/inbox` 多带一个 `automation` 字段（复用看板已有的 30 秒轮询，不新增函数、不新增请求、不耗调用预算），受阻动作显示在失败中心、看板汇总条第四个计数、泳道步骤徽标、步骤抽屉明细和流程详情页 `stageTimeline` 五处；`automationActionPresentation` / `latestAutomationAction` 是五处共用的唯一判定。仍后置的是完整进度条方案（[`docs/automated-workflow-plan.md`](automated-workflow-plan.md)《自动合并进度条》）：百分比、接管对话框和 `unpause` 都是写路径，依赖第 1 项的「瞬时 vs 终态」分类先定下来。
 
 6. **reconciliation 调用预算改为阈值观察（已从第一优先级降级）**。峰值小时 1,204 次、占基线 5,000 次/小时的约 24%，等越过约 2,500 次再设计预算模型。依据见《2026-08-15 调用预算复核与 drain 实测》。
 
@@ -336,6 +336,12 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 11. 加密云同步已接通密文上传/下载原型，仍需补齐密钥轮换、冲突处理和线上回归后再扩大使用范围。 🟡 待加固
 12. 阶段状态、事件和部署历史已切换到稳定 `stage_id`。 ✅ 019 已执行，并已通过当前 Production 流程回归。
 13. PR 流程自动化：服务端加密 AI 凭据、步骤级规则快照、`025` 运行快照/幂等动作队列和 `026` 自动化偏好已落地；Webhook、Cron 和 inbox reconciliation 会在 `ready-to-create` 自动入队，执行器会重校验统一阶段决策、服务端自动生成/确认、规则快照、新提交和开放 PR。自动创建 PR 受服务端凭据、AI 自动生成、自动确认和有效生成规则四项前置条件保护。合并后门禁与下一步解锁已经生效：`stageIsUnlocked` 要求前序步骤 `pull_state='merged'` 且 `checks_state='success'`，合并瞬间 `checks_state` 重置为 `pending` 由合并后 Actions 填回，`mergeChecksWithDeployments` 还把部署状态并入该字段。自动合并本身：`automationMergeOutcome` 只在 GitHub 判定 `mergeable=true` 且 `mergeable_state='clean'`、门禁全绿、审批达标时返回合并，其余一律 `paused`（含 `'behind'`，不自动 update branch）；`automationRetryIsExhausted` 按 `recoveryPolicy.maxRetries` 封顶重排；`merge-pr` 用独立幂等键，PR 已 merged 记幂等成功。方案与验收标准见 [`docs/automated-workflow-plan.md`](automated-workflow-plan.md)。🔴 2026-08-13 生产查询确认服务端自动创建实际未生效，原因链、修复方案与回归清单见 [`docs/auto-create-pr-remediation.md`](auto-create-pr-remediation.md)；其中 `P1`–`P6`（身份归一化、失败留痕、cron 分批、统一决策模型、执行器幂等化）已全部合入 `main` 并部署，`P3` 生产验收通过。`P8`（`workflow_automation_actions` 没有 `stage_index` 列，而执行器与队列列表都在 SELECT 它，执行器因此在原子领取动作之前抛错）已改为 JOIN `workflow_automation_runs` 取该列并部署生产，验证生效。`P9`（AI 响应的 markdown 围栏未被正确剥离，`trim()` 写在 `replace()` 之后导致锚点失配）已由 `jsonFromModelText` 修复并部署。✅ 2026-08-14 服务端自动创建 PR 在生产端到端跑通：自动建出 `bayernjf/bayjf#42`，动作 `succeeded` / `attempts=2` / `pullNumber=42`，后续轮转未重复建。✅ 2026-08-15 逐步骤自动合并在生产跑通：`create-pr` 47 次成功、`merge-pr` 37 次成功；10 次 `paused` 中 7 次是门禁未全绿的正确行为，另 3 次是 GitHub 超时（`71e6c4fb` 的尝试次数退还即针对这一类）。数据见《2026-08-15 生产实测结论》。仍待验：门禁为红不触发、幂等命中记成功（生产无对应场景，需另造）。
+
+### 2026-08-15 排空器首次真实执行与 stale 窗口的结构性缺陷
+
+bigint 身份修复（`6aa011c2`）部署后，12:36–13:11 之间 `id 113`–`121` 共 8 条动作 `succeeded`（`attempts` 1–3），`id 111` 被判 `superseded` 而 `cancelled`。这是排空器上线以来第一次真正执行动作，此前「`executed: 0`」并非队列为空，而是每一行都在原子领取之前抛错。
+
+同一次核查暴露出一个独立的结构性缺陷：`paused` 没有任何重排入口。`id 6`（21 小时）、`58`（14 小时）、`80`（12.3 小时）都是瞬时网络故障（GitHub 超时、`write CONNECT_TIMEOUT`），它们不是重试次数耗尽，而是从未被重试，一直躺到超过 `AUTOMATION_ACTION_STALE_MS`（12 小时），只能被 sweep 按超时清掉。`id 84` 被人工重排时已过窗口 30 秒，是同一缺陷的第二个样本。修法见「下一阶段优先级」第 1 项。
 
 ### 八、非验收类后续开发
 
