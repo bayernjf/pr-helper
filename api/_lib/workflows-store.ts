@@ -273,13 +273,30 @@ export const AUTOMATION_ACTION_ABANDON_MS = 120_000;
 // hour, and short enough that nothing wakes up after the person who pushed has moved on.
 export const AUTOMATION_ACTION_STALE_MS = 12 * 60 * 60 * 1000;
 
-export type AutomationDrainDecision = { kind: 'execute' } | { kind: 'reclaim'; refundAttempt: boolean } | { kind: 'cancel'; reason: 'superseded' | 'stale' } | { kind: 'skip' };
+// A fault that throws before the executor's claim charges no attempt, so the cap below cannot bound the
+// requeue on its own; the wait is what keeps one unreachable provider from being retried every sweep for
+// the whole staleness window.
+export const AUTOMATION_TRANSIENT_REQUEUE_COOLDOWN_MS = 15 * 60 * 1000;
+export const AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS = 3;
+
+export type AutomationDrainDecision = { kind: 'execute' } | { kind: 'reclaim'; refundAttempt: boolean } | { kind: 'requeue' } | { kind: 'cancel'; reason: 'superseded' | 'stale' } | { kind: 'skip' };
 
 // Draining is the only reader the action queue has, so this verdict is what stands between a stuck row
 // and either a duplicate pull request or a pull request nobody expects. Supersession decides before age
 // because the idempotency key carries the head sha: once a later push enqueued its own action, the older
 // row describes commits already covered, however recently it was written.
-export function automationDrainDecision(action: { state: string; createdAt: string; updatedAt: string; failureReason: string | null; hasNewer: boolean }, now: number): AutomationDrainDecision {
+export function automationDrainDecision(action: { state: string; createdAt: string; updatedAt: string; failureReason: string | null; hasNewer: boolean; attempts: number }, now: number): AutomationDrainDecision {
+  // A paused row is where a verdict lives, so it is left alone by default. The one exception is a failure
+  // that never reached a verdict: nothing else requeues `paused`, and three production actions proved that
+  // means such a row is never retried once before it ages out.
+  if (action.state === 'paused') {
+    if (!action.failureReason || automationAttemptWasReached(action.failureReason)) return { kind: 'skip' };
+    if (action.hasNewer) return { kind: 'skip' };
+    if (now - Date.parse(action.createdAt) > AUTOMATION_ACTION_STALE_MS) return { kind: 'skip' };
+    if (now - Date.parse(action.updatedAt) < AUTOMATION_TRANSIENT_REQUEUE_COOLDOWN_MS) return { kind: 'skip' };
+    if (action.attempts >= AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS) return { kind: 'skip' };
+    return { kind: 'requeue' };
+  }
   if (action.state !== 'queued' && action.state !== 'running') return { kind: 'skip' };
   const abandoned = action.state === 'running' && now - Date.parse(action.updatedAt) > AUTOMATION_ACTION_ABANDON_MS;
   if (action.state === 'running' && !abandoned) return { kind: 'skip' };
@@ -328,12 +345,12 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
     FROM workflow_automation_actions actions
     JOIN pr_helper_users users ON users.id = actions.user_id
     LEFT JOIN pr_helper_workflows workflows ON workflows.user_id = actions.user_id AND workflows.id = actions.workflow_id
-    WHERE actions.state IN ('queued', 'running')
-    ORDER BY actions.created_at
+    WHERE actions.state IN ('queued', 'running', 'paused')
+    ORDER BY (actions.state = 'paused'), actions.created_at
     LIMIT ${AUTOMATION_DRAIN_BATCH_SIZE}`;
-  const counts = { examined: rows.length, executed: 0, reclaimed: 0, cancelled: 0, failed: 0, skipped: 0, deferred: 0, failures: [] as { action: number; reason: string }[] };
+  const counts = { examined: rows.length, executed: 0, reclaimed: 0, requeued: 0, cancelled: 0, failed: 0, skipped: 0, deferred: 0, failures: [] as { action: number; reason: string }[] };
   for (const row of rows) {
-    const decision = automationDrainDecision({ state: row.state, createdAt: row.created_at, updatedAt: row.updated_at, failureReason: row.failure_reason, hasNewer: row.newer > 0 }, Date.now());
+    const decision = automationDrainDecision({ state: row.state, createdAt: row.created_at, updatedAt: row.updated_at, failureReason: row.failure_reason, hasNewer: row.newer > 0, attempts: row.attempts }, Date.now());
     const line = (reason: string, detail: Record<string, string | number | boolean | undefined> = {}) => console.info(automationSkipLine({ kind: row.kind, repository: row.repository || '?', route: `${row.source} → ${row.target}`, reason, action: row.id, ...detail }));
     if (decision.kind === 'skip') { counts.skipped += 1; continue; }
     if (decision.kind === 'cancel') {
@@ -344,6 +361,14 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
         line(`drain-cancelled-${decision.reason}`);
       }
       continue;
+    }
+    if (decision.kind === 'requeue') {
+      // Guarded on the state this row was read in, so a verdict written between the read and here wins
+      // instead of being overwritten by a requeue that no longer applies.
+      const requeued = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'queued', failure_reason = NULL, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${row.id} AND state = 'paused' RETURNING id`;
+      if (!requeued.length) { counts.skipped += 1; continue; }
+      counts.requeued += 1;
+      line('drain-requeued', { detail: (row.failure_reason || '').slice(0, 120) });
     }
     if (decision.kind === 'reclaim') {
       // The claim itself charged an attempt, and the crash that followed did no work; attempts are capped,
