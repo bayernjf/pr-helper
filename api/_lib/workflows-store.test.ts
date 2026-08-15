@@ -1302,6 +1302,12 @@ describe('the drain reads the cooldown the workflow configured', () => {
     expect(drain).toContain("recoveryPolicy");
     expect(drain).toMatch(/automationDrainDecision\([^;]*cooldownSeconds/s);
   });
+
+  // Most workflows configure no recovery policy at all, and `Number(null)` is zero — reading the absent
+  // column as a number would hand every one of them the no-wait case this change exists to remove.
+  it('leaves an absent policy undefined rather than reading it as no cooldown', () => {
+    expect(drain).toContain('row.cooldown_seconds === null ? undefined :');
+  });
 });
 
 describe('draining the automation queue', () => {

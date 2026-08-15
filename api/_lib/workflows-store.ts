@@ -279,13 +279,27 @@ export const AUTOMATION_ACTION_STALE_MS = 12 * 60 * 60 * 1000;
 export const AUTOMATION_TRANSIENT_REQUEUE_COOLDOWN_MS = 15 * 60 * 1000;
 export const AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS = 3;
 
+// A gate-held action is not retried on a clock to make it succeed sooner — the event that clears the gate
+// runs it inline — so this only bounds how late a missed event is recovered. Short enough to stay inside
+// the hour the person who pushed is still watching.
+export const AUTOMATION_GATE_WAIT_MAX_MS = 30 * 60 * 1000;
+
+// Each unanswered attempt earns a longer wait than the one before it: an approval nobody has given is no
+// closer for being asked again, and the reason the wait is measured in the recovery cooldown is that a
+// workflow which already told us how long to leave a stuck stage alone has answered this question too.
+export function automationGateWaitDelayMs(attempts: number, policy: { cooldownSeconds?: number } | undefined) {
+  const configured = policy?.cooldownSeconds;
+  const base = (typeof configured === 'number' && Number.isFinite(configured) && configured >= 0 ? configured : DEFAULT_RECOVERY_POLICY.cooldownSeconds) * 1000;
+  return Math.min(base * 2 ** Math.max(0, Math.min(attempts, 8) - 1), AUTOMATION_GATE_WAIT_MAX_MS);
+}
+
 export type AutomationDrainDecision = { kind: 'execute' } | { kind: 'reclaim'; refundAttempt: boolean } | { kind: 'requeue' } | { kind: 'cancel'; reason: 'superseded' | 'stale' } | { kind: 'skip' };
 
 // Draining is the only reader the action queue has, so this verdict is what stands between a stuck row
 // and either a duplicate pull request or a pull request nobody expects. Supersession decides before age
 // because the idempotency key carries the head sha: once a later push enqueued its own action, the older
 // row describes commits already covered, however recently it was written.
-export function automationDrainDecision(action: { state: string; createdAt: string; updatedAt: string; failureReason: string | null; hasNewer: boolean; attempts: number }, now: number): AutomationDrainDecision {
+export function automationDrainDecision(action: { state: string; createdAt: string; updatedAt: string; failureReason: string | null; hasNewer: boolean; attempts: number }, now: number, policy?: { cooldownSeconds?: number }): AutomationDrainDecision {
   // A paused row is where a verdict lives, so it is left alone by default. The one exception is a failure
   // that never reached a verdict: nothing else requeues `paused`, and three production actions proved that
   // means such a row is never retried once before it ages out.
@@ -308,6 +322,12 @@ export function automationDrainDecision(action: { state: string; createdAt: stri
   if (action.hasNewer) return { kind: 'cancel', reason: 'superseded' };
   if (now - Date.parse(action.createdAt) > AUTOMATION_ACTION_STALE_MS) return { kind: 'cancel', reason: 'stale' };
   if (abandoned) return { kind: 'reclaim', refundAttempt: action.failureReason === null };
+  // A queued row carrying a reason was put back to wait: either the executor found a gate only an event can
+  // clear, or the request that enqueued it threw before claiming. Neither is bounded by the attempt cap,
+  // which only reads rows that reached a verdict, and one PR waiting on a single approval reached
+  // thirty-five attempts because of it. The reconcile that the clearing event triggers runs the action
+  // inline, so nothing arrives sooner for the drain having asked again in between.
+  if (action.state === 'queued' && action.failureReason && now - Date.parse(action.updatedAt) < automationGateWaitDelayMs(action.attempts, policy)) return { kind: 'skip' };
   return { kind: 'execute' };
 }
 
@@ -324,7 +344,7 @@ export function automationDrainHasStartBudget(startedAt: number, now: number) {
   return now - startedAt < AUTOMATION_DRAIN_START_BUDGET_MS;
 }
 
-type DrainActionRow = { id: string; user_id: string; kind: WorkflowAutomationAction['kind']; state: string; attempts: number; failure_reason: string | null; created_at: string; updated_at: string; repository: string | null; source: string; target: string; installation_id: string | null; newer: number };
+type DrainActionRow = { id: string; user_id: string; kind: WorkflowAutomationAction['kind']; state: string; attempts: number; failure_reason: string | null; created_at: string; updated_at: string; repository: string | null; source: string; target: string; installation_id: string | null; cooldown_seconds: string | null; newer: number };
 
 // The queue has had no reader: an action's only chance to run was the request that enqueued it, and the
 // recovery hidden in that same enqueue path needs someone to push again to the very stage that is stuck.
@@ -343,6 +363,7 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
     SELECT actions.id, actions.user_id, actions.kind, actions.state, actions.attempts, actions.failure_reason,
            actions.created_at, actions.updated_at, actions.source, actions.target,
            workflows.payload->>'repository' AS repository, users.github_installation_id AS installation_id,
+           workflows.payload->'recoveryPolicy'->>'cooldownSeconds' AS cooldown_seconds,
            (SELECT count(*) FROM workflow_automation_actions newer
               WHERE newer.user_id = actions.user_id AND newer.workflow_id = actions.workflow_id
                 AND newer.stage_id = actions.stage_id AND newer.source = actions.source
@@ -355,7 +376,7 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
     LIMIT ${AUTOMATION_DRAIN_BATCH_SIZE}`;
   const counts = { examined: rows.length, executed: 0, reclaimed: 0, requeued: 0, cancelled: 0, failed: 0, skipped: 0, deferred: 0, failures: [] as { action: number; reason: string }[] };
   for (const row of rows) {
-    const decision = automationDrainDecision({ state: row.state, createdAt: row.created_at, updatedAt: row.updated_at, failureReason: row.failure_reason, hasNewer: row.newer > 0, attempts: row.attempts }, Date.now());
+    const decision = automationDrainDecision({ state: row.state, createdAt: row.created_at, updatedAt: row.updated_at, failureReason: row.failure_reason, hasNewer: row.newer > 0, attempts: row.attempts }, Date.now(), { cooldownSeconds: row.cooldown_seconds === null ? undefined : Number(row.cooldown_seconds) });
     const line = (reason: string, detail: Record<string, string | number | boolean | undefined> = {}) => console.info(automationSkipLine({ kind: row.kind, repository: row.repository || '?', route: `${row.source} → ${row.target}`, reason, action: row.id, ...detail }));
     if (decision.kind === 'skip') { counts.skipped += 1; continue; }
     if (decision.kind === 'cancel') {
