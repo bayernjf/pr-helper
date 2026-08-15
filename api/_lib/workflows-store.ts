@@ -184,9 +184,17 @@ async function enqueueServerAutoMerge(sql: ReturnType<typeof query>, row: Tracke
   return concurrent[0]?.state === 'queued' ? automationActionId(concurrent[0].id) : null;
 }
 
-async function scheduleServerAutoMerge(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, pullNumber: number, headSha: string) {
+async function scheduleServerAutoMerge(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, pullNumber: number, headSha: string, gate: { checksState: string; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string }) {
   const actionId = await enqueueServerAutoMerge(sql, row, workflow, stageIndex, source, pullNumber, headSha);
   if (!actionId) return;
+  const outcome = automationMergeOutcome({ number: pullNumber, state: 'open' }, gate);
+  if (outcome.kind === 'paused' && !automationInlineMergeShouldAttempt(outcome)) {
+    // Naming the wait on the queued row is what the failure centre shows, and a reason is also what
+    // engages the drain's backoff. `updated_at` is deliberately left alone: bumping it on every delivery
+    // would keep pushing the backoff window forward and the drain would never get its turn as the net.
+    await sql`UPDATE workflow_automation_actions SET failure_reason = ${outcome.reason.slice(0, 800)} WHERE user_id = ${row.user_id} AND id = ${actionId} AND state = 'queued'`.catch(() => undefined);
+    return;
+  }
   try { await executeWorkflowAutomationActionForUser(environment, row.user_id, row.github_installation_id!, actionId); }
   catch (error) {
     const reason = error instanceof Error ? error.message : '自动合并 PR 失败';
@@ -264,6 +272,14 @@ export function automationMergeOutcome(pull: { number: number; state: string; me
   if (gate.mergeableState === 'behind') return { kind: 'paused' as const, reason: '分支落后于目标分支，需要先在 GitHub 更新分支' };
   if (gate.mergeableState !== 'clean') return { kind: 'paused' as const, reason: `GitHub 合并状态为 ${gate.mergeableState}`, ...(gate.mergeableState === 'unknown' || gate.mergeableState === 'blocked' ? { retryable: true } : {}) };
   return { kind: 'merge' as const, pullNumber: pull.number };
+}
+
+// A retryable pause is a wait for an event, and the reconcile that observes that event attempts the merge
+// then. Attempting in between re-reads from GitHub the very gate this verdict was computed from, so it
+// cannot reach a different answer: it only spends calls and inflates the attempt count, which is the
+// signal the drain's backoff and the failure centre both read.
+export function automationInlineMergeShouldAttempt(outcome: ReturnType<typeof automationMergeOutcome>) {
+  return !(outcome.kind === 'paused' && 'retryable' in outcome && outcome.retryable === true);
 }
 
 // A claim that stops updating for longer than this can only be an instance that was recycled: every
@@ -1646,7 +1662,8 @@ async function reconcileStageWork(environment: Record<string, string | undefined
   }
   if (comparison.ahead_by > 0 && comparisonHeadSha) await scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha);
   // Only an open pull request can be merged, and the gate verdict is pinned to the head sha just stored.
-  if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await phase('write', () => scheduleServerAutoMerge(environment, sql, row, workflow, stageIndex, source, pull.number, pull.head.sha));
+  // The gate goes in already computed, so a wait that only a later event can end costs no second read.
+  if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await phase('write', () => scheduleServerAutoMerge(environment, sql, row, workflow, stageIndex, source, pull.number, pull.head.sha, { checksState: checks.state, approvals, requiredApprovals, mergeable: pull.mergeable ?? null, mergeableState: pull.mergeable_state || '' }));
   return { reconciled: true, phases };
 }
 
@@ -1675,7 +1692,7 @@ export function reconciliationLeaseRenewIntervalMs(ttlSeconds: number) {
 type ScopeOutcome = { reconciled: number; outcome: 'completed' | 'deferred' | 'skipped' };
 type ScopedWorkflow = { row: TrackedWorkflowRow; workflow: StoredWorkflow; branchScoped?: boolean };
 
-async function reconcileWorkflowScope(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, workflowsToReconcile: ScopedWorkflow[], filter: ReconciliationFilter, trigger: ReconciliationTrigger, deadlineMs?: number): Promise<ScopeOutcome> {
+async function reconcileWorkflowScope(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, workflowsToReconcile: ScopedWorkflow[], filter: ReconciliationFilter, trigger: ReconciliationTrigger, deadlineMs?: number, onRunStarted?: (runId: number) => void): Promise<ScopeOutcome> {
   const startedAt = Date.now();
   const userId = workflowsToReconcile[0]?.row.user_id;
   if (!userId) return { reconciled: 0, outcome: 'completed' };
@@ -1707,6 +1724,7 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
   // first stage still leaves behind the list of turns it spent.
   const runRow = await sql<{ id: number }[]>`INSERT INTO reconciliation_runs (user_id, trigger, state, repository, claimed_workflow_ids) VALUES (${userId}, ${trigger}, 'running', ${repository}, ${workflowsToReconcile.map(item => item.row.id)}) RETURNING id`;
   const runId = runRow[0].id;
+  onRunStarted?.(runId);
   // The turn is given up before the work runs, so a workflow that fails or resolves to no route still
   // rotates to the back of the queue instead of being picked again in every sweep.
   await sql`UPDATE pr_helper_workflows SET last_reconcile_attempt_at = now() WHERE user_id = ${userId} AND id IN ${sql(workflowsToReconcile.map(item => item.row.id))}`.catch(() => undefined);
@@ -1895,8 +1913,27 @@ export function selectReconciliationBatch<T extends { lastAttemptAt: string | nu
 export type ReconciliationFilter = { repository?: string; installationId?: string; eventName?: string; branches?: readonly string[] };
 
 export const RECONCILIATION_DEFERRED_MESSAGE = '校准未在预算内完成，已让给下一次触发';
+// The ceiling around the whole sweep is not the stage budget: it also covers the lease wait and the route
+// queries, so tripping it is still a deferral by design rather than a truncated instance. Saying so keeps
+// the interrupted-instance count meaning what it says.
+export const RECONCILIATION_ABANDONED_MESSAGE = '校准超出实时上限，已交给下一次触发接手';
 
-export async function reconcileWorkflowStages(environment: Record<string, string | undefined>, filter: ReconciliationFilter = {}, trigger: ReconciliationTrigger = 'cron', options: { deadlineMs?: number } = {}): Promise<{ reconciled: number; outcome: 'completed' | 'deferred' }> {
+// Called from outside the sweep that owns the row, so the sweep may have finished between the race
+// resolving and this write: only a row still in flight is claimed, and its verdict is never overwritten.
+// Unlike the reaper, this runs at the moment the sweep was abandoned, so now() - started_at is how long
+// it actually ran. The turn comes back in the same statement for the reason the reaper does it that way.
+async function closeAbandonedReconciliationRuns(environment: Record<string, string | undefined>, runIds: number[]) {
+  if (!runIds.length) return;
+  const sql = query(environment);
+  await sql`WITH abandoned AS (
+    UPDATE reconciliation_runs SET state = 'degraded', error_message = coalesce(error_message, ${RECONCILIATION_ABANDONED_MESSAGE}), duration_ms = round(extract(epoch from (now() - started_at)) * 1000), finished_at = now()
+    WHERE id = ANY(${runIds}) AND state = 'running'
+    RETURNING user_id, claimed_workflow_ids)
+  UPDATE pr_helper_workflows workflows SET reconcile_pending_since = coalesce(workflows.reconcile_pending_since, now())
+  FROM abandoned WHERE workflows.user_id = abandoned.user_id AND workflows.id = ANY(abandoned.claimed_workflow_ids)`.catch(() => undefined);
+}
+
+export async function reconcileWorkflowStages(environment: Record<string, string | undefined>, filter: ReconciliationFilter = {}, trigger: ReconciliationTrigger = 'cron', options: { deadlineMs?: number; onRunStarted?: (runId: number) => void } = {}): Promise<{ reconciled: number; outcome: 'completed' | 'deferred' }> {
   const sql = query(environment);
   // The scheduled sweep is the only trigger guaranteed to come back, so it closes out the rows left
   // behind by instances that were killed before they could finish.
@@ -1939,7 +1976,7 @@ export async function reconcileWorkflowStages(environment: Record<string, string
   for (const scopedWorkflows of byUser.values()) {
     try {
       const remaining = deadlineAt === undefined ? undefined : Math.max(0, deadlineAt - Date.now());
-      const scope = await reconcileWorkflowScope(environment, sql, scopedWorkflows, filter, trigger, remaining);
+      const scope = await reconcileWorkflowScope(environment, sql, scopedWorkflows, filter, trigger, remaining, options.onRunStarted);
       reconciledTotal += scope.reconciled;
       deferred ||= scope.outcome === 'deferred';
     } catch (error) {
@@ -1957,8 +1994,13 @@ export async function reconcileRealtime(environment: Record<string, string | und
   // The stage budget covers stage work only: lease waits and the queries around it sit outside it, so a
   // contended sweep still ran for minutes. A save waits for this call before it answers, which turned a
   // slow sweep into a lost toggle. Bound the whole sweep and let the next trigger finish what is left.
-  const sweep = reconcileWorkflowStages(environment, filter, trigger, { deadlineMs: budgetMs }).catch(() => ({ outcome: 'failed' as const, reconciled: 0 }));
+  // The ceiling abandons the sweep without unwinding it, so the rows it opened would stay 'running'
+  // until the scheduled reaper wrote them off as a recycled instance minutes later. Collecting the ids as
+  // they are created is what lets this close them for what they are, and hand their turns back at once.
+  const startedRunIds: number[] = [];
+  const sweep = reconcileWorkflowStages(environment, filter, trigger, { deadlineMs: budgetMs, onRunStarted: runId => startedRunIds.push(runId) }).catch(() => ({ outcome: 'failed' as const, reconciled: 0 }));
   const raced = await withStageDeadline(sweep, realtimeReconcileCeilingMs(budgetMs));
+  if (raced.outcome !== 'completed') await closeAbandonedReconciliationRuns(environment, startedRunIds);
   return raced.outcome === 'completed' ? raced.value : { outcome: 'deferred', reconciled: 0 };
 }
 

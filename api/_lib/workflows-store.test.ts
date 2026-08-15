@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, automationInlineMergeShouldAttempt, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -947,6 +947,66 @@ describe('reaping an interrupted sweep restores the turn it spent', () => {
   });
 });
 
+// The stage budget closes its own row when it defers, but the ceiling around the whole sweep does not:
+// the lease wait and the route queries sit outside the budget, so a contended sweep loses the race with
+// its row still 'running' and nobody to close it. Six webhook sweeps read as crashes that way in one
+// afternoon, each of them a deferral the design intended, which is exactly the metric that says whether
+// the budget split worked.
+describe('a sweep abandoned at the realtime ceiling', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const realtime = source.slice(source.indexOf('export async function reconcileRealtime'), source.indexOf('type StageStateRow ='));
+
+  it('reports the ceiling as a deferral rather than as an interrupted instance', () => {
+    expect(RECONCILIATION_ABANDONED_MESSAGE).not.toContain('被回收');
+    expect(RECONCILIATION_ABANDONED_MESSAGE).not.toBe(RECONCILIATION_DEFERRED_MESSAGE);
+  });
+
+  it('learns which rows to close instead of guessing from the trigger and repository', () => {
+    expect(realtime).toContain('onRunStarted');
+    expect(realtime).toMatch(/onRunStarted[\s\S]*?withStageDeadline/);
+  });
+
+  it('closes the abandoned rows itself rather than waiting for the reaper', () => {
+    expect(realtime).toMatch(/raced\.outcome !== 'completed'[\s\S]*?closeAbandonedReconciliationRuns|closeAbandonedReconciliationRuns[\s\S]*?raced\.outcome/);
+    const close = source.slice(source.indexOf('async function closeAbandonedReconciliationRuns'));
+    const body = close.slice(0, close.indexOf('\n}\n'));
+    // Only a row still in flight may be closed: the sweep may well have finished between the race
+    // resolving and this write, and overwriting its verdict would replace a real result with a deferral.
+    expect(body).toContain("state = 'running'");
+    // The turn has to come back in the same statement, for the reason the reaper does it that way.
+    expect(body).toMatch(/WITH\s+abandoned/);
+    expect(body).toContain('reconcile_pending_since');
+  });
+});
+
+// The reconcile has just computed this gate from GitHub, and the executor's first act is to fetch the
+// same pull request, checks, reviews and protection again to reach the same verdict. One production
+// action reached forty-seven attempts over seventy-five minutes that way — one per webhook delivery,
+// each paying a full gate re-read that could not have changed the answer, and leaving `attempts`
+// useless as a health signal. The drain's backoff never applied, because it only reads the queue.
+describe('an inline merge attempt from a reconcile', () => {
+  const green = { checksState: 'success', approvals: 1, requiredApprovals: 1, mergeable: true, mergeableState: 'clean' };
+  const pull = { number: 7, state: 'open', merged: false };
+
+  it('skips the attempt while the gate can only be cleared by a later event', () => {
+    expect(automationInlineMergeShouldAttempt(automationMergeOutcome(pull, { ...green, checksState: 'pending' }))).toBe(false);
+    expect(automationInlineMergeShouldAttempt(automationMergeOutcome(pull, { ...green, approvals: 0 }))).toBe(false);
+    expect(automationInlineMergeShouldAttempt(automationMergeOutcome(pull, { ...green, mergeable: null }))).toBe(false);
+  });
+
+  it('attempts as soon as the gate is green, so a cleared gate still merges on the event that cleared it', () => {
+    expect(automationInlineMergeShouldAttempt(automationMergeOutcome(pull, green))).toBe(true);
+  });
+
+  // A verdict nobody can clear is worth writing down promptly: it is what the failure centre shows, and
+  // the new head sha a fix brings enqueues its own action anyway.
+  it('still attempts a verdict that no event will clear', () => {
+    expect(automationInlineMergeShouldAttempt(automationMergeOutcome(pull, { ...green, checksState: 'failure' }))).toBe(true);
+    expect(automationInlineMergeShouldAttempt(automationMergeOutcome(pull, { ...green, mergeableState: 'behind' }))).toBe(true);
+    expect(automationInlineMergeShouldAttempt(automationMergeOutcome(pull, { ...green, mergeable: false }))).toBe(true);
+  });
+});
+
 describe('realtimeReconcileBudgetMs', () => {
   it('falls back to the packaged budget when the environment says nothing', () => {
     expect(realtimeReconcileBudgetMs({})).toBe(REALTIME_RECONCILE_BUDGET_MS);
@@ -1076,6 +1136,26 @@ describe('reaped run rows', () => {
   // path entirely; a duration nobody measured is better left unset.
   it('never reports the delay before reaping as the duration of the sweep', () => {
     expect(reaper).not.toContain('extract(epoch from now() - started_at)');
+  });
+});
+
+describe('an idempotent merge hit', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const runMerge = source.slice(source.indexOf('async function runAutomationMergeAction'), source.indexOf('async function executeWorkflowAutomationActionForUser'));
+
+  // The idempotent verdict and the merge verdict share the success write, so only this guard keeps an
+  // already merged pull request from taking a merge PUT. GitHub answers 405 to that, the throw lands the
+  // action in `paused`, and a run that had in fact reached its goal reads as a failure in the inbox.
+  it('reaches the success write without asking GitHub to merge again', () => {
+    const merge = runMerge.slice(runMerge.indexOf("if (outcome.kind === 'merge')"));
+    expect(merge.indexOf(`/pulls/\${pullNumber}/merge`)).toBeLessThan(merge.indexOf("state = 'succeeded'"));
+    expect(runMerge).toMatch(/if \(outcome\.kind === 'merge'\) \{[\s\S]*?\/merge`, \{ method: 'PUT'/);
+  });
+
+  // Without the flag the two verdicts are indistinguishable afterwards, and the question this scenario
+  // exists to answer — did automation merge it, or find it merged — has no answer in the record.
+  it('marks the audit row so the hit stays distinguishable from a real merge', () => {
+    expect(runMerge).toContain("...(outcome.kind === 'idempotent' ? { idempotent: true } : {})");
   });
 });
 

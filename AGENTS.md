@@ -22,7 +22,7 @@ npm run dev      # start the local app
 npm test         # run unit tests
 npm run lint     # run the production build used as a static check
 npm run build    # create dist/
-npx tsc --noEmit # browser TypeScript check
+npx tsc --noEmit # TypeScript check for browser and api/ code
 ```
 
 ## Code layout
@@ -38,7 +38,7 @@ npx tsc --noEmit # browser TypeScript check
 - `api/*.ts`: Vercel API entry points.
 - `api/account.ts`: account deletion endpoint (`DELETE /api/account`).
 - `public/privacy.html`: static Privacy Policy page.
-- `db/migrations/`: the only source of truth for database schema; the current baseline is `001`–`018`.
+- `db/migrations/`: the only source of truth for database schema; the current baseline is `001`–`031`.
 - `.github/workflows/`: CI, Vercel/Cloudflare deployment, reconciliation, and confirmed Production rollback.
 - `docs/current-state.md`: current architecture, capabilities, boundaries, and backlog.
 - `docs/superpowers/specs/` and `docs/superpowers/plans/`: historical design and execution records.

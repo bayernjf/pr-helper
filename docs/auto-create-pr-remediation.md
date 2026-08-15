@@ -192,7 +192,7 @@
 | 3 滞留动作不再停在 `queued`+`attempts=0` | **通过**：P9 部署后动作 3 为 `succeeded` / `attempts=2` / `payload.pullNumber=42`（`updated_at = 2026-08-14 00:20:08`）。P8 部署后的中间态是 `paused` / `attempts=1`，执行器首次真正越过原子领取。原始记录（P8 之前）如下——**未通过，但暴露了 P8**：动作 3 拿到了可读原因 `column "stage_index" does not exist`（`updated_at = 23:24:37`），说明 P1/P2 生效、执行确实被触发，卡点在 P8。动作 1、2 的 `headSha` 已过期，不会再被执行 |
 | 4 自动创建在一个轮转周期内触发且只建一个 PR | **通过**：P9 部署后第 3 轮 `workflow_dispatch` 建出 `bayernjf/bayjf#42`（`feature/20260719 → dev`，作者 `app/pr-helper-by-bayernjf`，`2026-08-14 00:20:08`），第 4、5 轮未重复建。`workflow_operation_audit_logs` 中 `metadata.via = 'workflow-automation'` 的记录只有一条（id 1347）。P8 部署后、P9 之前连跑 5 轮（reconciled 8/13/11/10/15）无 PR，卡点当时在 P9 |
 | 5 收件箱与抽屉判断一致 | 待你在浏览器确认 |
-| 6 门禁为红不触发自动创建 | **已验，但结论要改写**：守卫在合并侧生效、创建侧不可达。见第十节 |
+| 6 门禁为红不自动合并（原措辞为「不触发自动创建」） | **已验，但结论要改写**：守卫在合并侧生效、创建侧不可达。见第十节 |
 | 7 幂等命中记成功 | 未走到：第 4、5 轮之所以没重复建 PR，是因为动作已是 `succeeded`，`enqueueServerAutoCreate` 直接返回 null、根本没重新入队，比幂等分支更靠前就拦住了。要验 `automationCreateOutcome` 的 `idempotent` 分支需要另造场景（如手动先建同路由 PR 再入队）|
 
 AI 生成的正文严格按生成规则模板输出（Overview / Changes / Related Issues / Test Info / Risk Notes），确认围栏剥离正确、规则快照生效。
@@ -213,7 +213,7 @@ AI 生成的正文严格按生成规则模板输出（Overview / Changes / Relat
 - `workflow_automation_actions` 的动作 1、2 仍停在 `queued` / `attempts=0`。它们的幂等键包含已过期的 `headSha`，既不会被 `enqueueServerAutoCreate` 复用，也不会被任何轮转执行，属于纯历史残留行。**决定保留**，作为这次排障的现场痕迹。`listWorkflowAutomationActions` 目前只有 `api/workflows.ts` 一个接口在用、前端无调用方，因此界面上不会显示这两行，不存在误导。若日后要清理，应先加「`headSha` 已失效则标 `cancelled`」的逻辑再跑，不手工 UPDATE 生产表。
 - `P7` 的沙箱工作流 `pr-helper-e2e-sandbox-1785691296724-69q14`：**决定保留**。它唯一的成本是占一个 cron 轮转名额（每轮 8 个、共 34 个），不影响正确性；真要删就在界面上删，属于产品内的正常操作，不需要 SQL。
 
-## 十、实时校准修复（2026-08-14，本地已落地待部署验收）
+## 十、实时校准修复（2026-08-14，已部署并验收）
 
 计划与生产证据见 [`docs/superpowers/plans/2026-08-14-realtime-reconciliation.md`](superpowers/plans/2026-08-14-realtime-reconciliation.md)。起因：`feature/20260722 → dev` 已有 18 个新提交、四项 AI 前置与阈值全部满足，但 `workflow_automation_actions` 里没有任何入队行，自动创建始终不触发。
 
@@ -225,29 +225,29 @@ AI 生成的正文严格按生成规则模板输出（Overview / Changes / Relat
 - **失败可见**：`stages_total` 在执行前写入，定时校准把超过 5 分钟仍为 `running` 的行收尾为 `failure`，`listSyncHealth` 改为按 `started_at` 排序并返回近 24 小时每种触发方式的最新一次结果，界面在某条触发链路失效时给出提示。
 - **轮转公平**：迁移 `027` 增加 `pr_helper_workflows.last_reconcile_attempt_at`，批量选择改按尝试时间排序并在执行前落戳，解析不出路由的工作流不再永久占用名额。
 
-待部署验收：`skipped` 状态与 `last_reconcile_attempt_at` 需要先在生产执行迁移 `027`。
+迁移 `027`–`031` 均已在生产执行；`skipped` 状态与 `last_reconcile_attempt_at` 已生效。
 
-## 十一、校准租约与待校准接力（2026-08-14，本地已落地待部署验收）
+## 十一、校准租约与待校准接力（2026-08-14，已部署并验收）
 
 第十节部署后由生产数据暴露的三个残留缺陷，计划与证据见 [`docs/superpowers/plans/2026-08-14-reconciliation-lease.md`](superpowers/plans/2026-08-14-reconciliation-lease.md)。
 
 - **自过期租约**：新表 `reconciliation_leases` 取代 `pg_try_advisory_lock`。会话级锁随连接生死而非任务生死，被冻结的实例永远不会执行自己的 unlock——生产上一条 cron 行因此把同仓 sweep 挡了 8.7 分钟。租约以单条 `INSERT ... ON CONFLICT ... WHERE expires_at < now() RETURNING holder` 抢占，TTL 默认 30 秒（`RECONCILIATION_LEASE_TTL_SECONDS` 可调），持有期间按 TTL/3 心跳续租，释放带 holder 条件；过期行由保留清理顺手回收。
 - **让出预算时收尾**：`withReconciliationBudget` 换成 `withStageDeadline`，deadline 由 `reconcileWorkflowScope` 自己持有，`reconciled` / `failed` 随每个 stage settle 递增，到点即按当前计数写终态并落 `finished_at`。`trigger='webhook'` 的行从此可以到达 `success` / `degraded`，不再停在 `running` 等 5 分钟宽限期收成 `failure`。
-- **待校准接力**：迁移 `028` 增加 `pr_helper_workflows.reconcile_pending_since`。推迟或失败的 sweep 打戳，未按分支收窄的 sweep 完整成功时清戳；`selectReconciliationBatch` 改为 pending 优先，实时触发额外捎带最多 4 个同用户的 pending 工作流且不受本次分支过滤影响。前提是 GitHub Actions 的 `*/10` 计划在生产实际间隔 50–100 分钟，「交给 cron 兜底」并不成立。
+- **待校准接力**：迁移 `028` 增加 `pr_helper_workflows.reconcile_pending_since`。推迟或失败的 sweep 打戳，未按分支收窄的 sweep 完整成功时清戳；`selectReconciliationBatch` 改为 pending 优先，实时触发额外捎带最多 4 个同用户的 pending 工作流且不受本次分支过滤影响。当时的前提是 GitHub Actions 的 `*/10` 计划在生产实际间隔 50–100 分钟，「交给 cron 兜底」并不成立；迁移 `030` 之后时钟改由 `pg_cron` 驱动（排空每 2 分钟、校准每 5 分钟），该前提已不再成立，但接力本身仍必要——见第十五节。
 - **服务端边界守卫**：`api/_lib/workflows-store.ts` 曾从浏览器模块 `src/lib/github.ts` 引入 `mergePullRequestPayload`，该模块顶层读 `import.meta.env`，在 Node 下模块加载即崩，导致 `/api/github/session` 返回 `FUNCTION_INVOCATION_FAILED`。已改为在调用点内联两个字段，并新增源码守卫测试：从 `api/**` 可达的相对导入链上不允许出现任何读 `import.meta.env` 的模块。
 
 待部署验收：需先在生产执行迁移 `028`，未执行前所有 sweep 会在抢租约时报错。
 
-## 十二、连接池与勾选即校准（2026-08-14，本地已落地待部署验收）
+## 十二、连接池与勾选即校准（2026-08-14，已部署并验收）
 
 生产埋点（`[reconcile-timing]`）给出的实测：单个 stage 总耗时 5867–6702 ms，其中 11 次 GitHub 调用只占 2339–2536 ms，最慢单次 289–453 ms；`deploy` 阶段独占 3187–4567 ms，`dbRead` 两条普通 SELECT 就要 744 ms。两条 `outcome=deferred` 的 sweep 总耗时 11359 / 11535 ms，超出 8000 ms 预算的部分正是收尾 UPDATE 在等连接。结论：瓶颈不是 GitHub 往返，而是并发 stage 与收尾语句争抢 `max: 1` 的唯一连接。
 
 - **连接池放开到 4**：租约已保证同仓同时只有一个 sweep，Supabase 事务模式 pooler（`prepare: false`）承受得住。守卫测试固定「池宽必须大于 1」，避免回退。
-- **勾选自动创建后立即校准一次**：`autoCreateActivated` 按 `stageId` 比对保存前后，只在服务端模式的自动创建从关变开时返回 true；保存路径打上 `reconcile_pending_since` 并触发一次 `manual` 校准。已落地的行为是「先有提交、后勾选」也会被算上，此前要等下一次 push、手动刷新或定时校准（生产间隔 50–100 分钟）。
+- **勾选自动创建后立即校准一次**：`autoCreateActivated` 按 `stageId` 比对保存前后，只在服务端模式的自动创建从关变开时返回 true；保存路径打上 `reconcile_pending_since` 并触发一次 `manual` 校准。已落地的行为是「先有提交、后勾选」也会被算上，此前要等下一次 push、手动刷新或定时校准（当时生产间隔 50–100 分钟；迁移 `030` 后为每 5 分钟）。
 - **自动合并当时被排除**（此判断已被第十三节推翻）：当时的理由是「步骤可能以 `main` 为目标，保存一个勾选不等于授权合并生产」。自动合并目前仍只由真实 GitHub 事件驱动。
 - **耗时埋点保留**：每个 stage 与每次 sweep 各输出一行 `[reconcile-timing]`，字段含各阶段毫秒数、GitHub 调用次数与最慢 path，便于放开连接池后复量对比。
 
-## 十三、勾选即生效的对称化与勾选时确认（2026-08-14，本地已落地待部署验收）
+## 十三、勾选即生效的对称化与勾选时确认（2026-08-14，已部署并验收）
 
 完整方案见 [`docs/superpowers/plans/2026-08-14-automation-toggle-activation.md`](superpowers/plans/2026-08-14-automation-toggle-activation.md)。
 
@@ -260,7 +260,7 @@ AI 生成的正文严格按生成规则模板输出（Overview / Changes / Relat
 
 顺带明确一条此前未写明的语义：勾选后的反选是**尽力而为**，不是取消保证。两条执行路径在认领动作后都重读工作流 payload（`executeWorkflowAutomationActionForUser` 与 `runAutomationMergeAction:255`），反选若在认领前落库会让动作抛「策略已失效」；但入队与执行同请求同步完成，窗口只有 push 到 webhook 投递的 1–3 秒。不为此新增撤销队列或勾选宽限期——队列本就不停留，宽限期会让每次正常触发都变慢。
 
-## 十、门禁为红场景的实测结论（2026-08-15，沙箱 `bayernjf/pr-helper-e2e-sandbox`）
+## 十四、门禁为红场景的实测结论（2026-08-15，沙箱 `bayernjf/pr-helper-e2e-sandbox`）
 
 在 `fix/red-gate-e2e` 上挂一个分支内生效的必红检查（`.github/workflows/red-gate-e2e.yml`，`on: push` 且缺少标记文件就 `exit 1`），观察 `E2E Failure and Dynamic Rule` 的 `fix/* → dev` 步骤。结果分成三段，前两段推翻了原来的措辞。
 
@@ -270,4 +270,51 @@ AI 生成的正文严格按生成规则模板输出（Overview / Changes / Relat
 
 **门禁转绿后 paused 动作正确让位。** 补上标记文件让检查转绿，204 在一个 drain 周期内变为 `cancelled` / `已被后续提交的自动化动作取代`，由携带新 head SHA 的 205 接手——本轮部署的「后续动作取代 paused 动作」修复因此也在真实新增场景上得到验证，而不只是历史数据回填。
 
-**顺带暴露的缺陷：ruleset 里的审批要求不可见。** 205 停在 `GitHub 合并状态为 blocked` 并反复重试（`attempts=5`）。沙箱 `dev` 的 1 个审批要求写在 **ruleset**，经典分支保护里没有 `required_pull_request_reviews`，而投影只读 `/branches/{target}/protection`，于是 `required_approvals` 落库为 0。`automationMergeOutcome` 因此跳过「PR 还需要 N 个 Approval」那条分支，掉到兜底的 `blocked`——而 `blocked` 标记为可重试，等于把重试预算花在只有人能清除的门槛上。已加 `requiredApprovalsFromProtection`，并行读取 `/rules/branches/{target}` 并取两者较严者；合并后的 PR 跳过该调用，与既有的保护与评审调用同一条件。
+**顺带暴露的缺陷：ruleset 里的审批要求不可见。** 205 停在 `GitHub 合并状态为 blocked` 并反复重试（`attempts=5`）。沙箱 `dev` 的 1 个审批要求写在 **ruleset**，经典分支保护里没有 `required_pull_request_reviews`，而投影只读 `/branches/{target}/protection`，于是 `required_approvals` 落库为 0。`automationMergeOutcome` 因此跳过「PR 还需要 N 个 Approval」那条分支，掉到兜底的 `blocked`——而 `blocked` 标记为可重试，等于把重试预算花在只有人能清除的门槛上。已加 `requiredApprovalsFromProtection`，并行读取 `/rules/branches/{target}` 并取两者较严者；合并后的 PR 跳过该调用，与既有的保护与评审调用同一条件。**生产已验**：`required_approvals` 由 0 变 1，205 的原因由 `GitHub 合并状态为 blocked` 变为 `PR 还需要 1 个 Approval`。
+
+造场景用的脚手架有意保留在沙箱（分支 `fix/red-gate-e2e`，已合入 dev；工作流 `.github/workflows/red-gate-e2e.yml`），下次复用。注意该工作流必须带 `actions/checkout@v4`，否则标记文件不在盘上、门禁永远为红，看起来像场景没生效——这次踩过一次。
+
+## 十五、被回收的扫描白吃一个轮转名额（2026-08-15，迁移 `031`）
+
+一次 push 之后流程迟迟不动，根因不在自动化闸门。扫描按设计在干活**之前**盖 `last_reconcile_attempt_at`——这是为了让解析不出路由的流程也让位，是对的；但让这类流程插队用的 `reconcile_pending_since` 只在扫描跑到**末尾**时才写。于是实例中途被回收时，让位生效而活没干，流程看起来刚校准过、投影却是旧的，而那个标记唯一为之存在的场景恰好是它漏掉的场景。
+
+实测：18:31:59 推送 → 18:32:02 的 webhook 扫描认领 1 个步骤后被回收（18:40:02 记为 `校准中断：函数实例在完成前被回收`，`stages_reconciled=0`），`bayernjf/pr-helper` 因此排到队尾；每轮 8 个流程、共约 30 个，一轮约 20 分钟，推送 13 分钟后投影仍停在 `ahead_by=0` 而 GitHub 已是 3。
+
+修法：迁移 `031` 给 `reconciliation_runs` 加 `claimed_workflow_ids text[]`，**在 INSERT 时就随行写入**（而不是扫描结束后补），这样一个还没跑完第一个步骤就死掉的扫描也留下了它花掉的名额；回收僵尸 run 的那条语句同时把这些流程标回 `reconcile_pending_since`，两个写入必须在**同一条语句**里——若回收落在两者之间，流程会既不 pending 又不显旧，那正是藏它一整轮的状态。
+
+已部署，列已就位（cron run 认领 8 个 / webhook run 认领 1 个）。「回收 → 标回 pending」这条路径还没等到真实样本。
+
+## 十六、等门禁的动作没有重试上限（2026-08-15）
+
+上一节的 205 暴露了第二件事：它在 74 分钟里累计 **46 次尝试**，状态一直是 `queued`。「审批不足」被标为 `retryable` 是有意的（审批随时可能到，动作要能被下一次触发接上），但 `retryable` 走的是「留在 `queued`」这条路，而封顶重排的 `automationRetryIsExhausted` 只读走到过判决的行，`queued` 不在其列——所以这条路径**根本没有上限**。迁移 `030` 把排空收到每 2 分钟后代价才显形：每小时约 30 次 GitHub 调用，花在只有人能清的门槛上。
+
+修法的前提是**定时重试不是时效来源**：清门禁的事件本身会触发校准，而 `scheduleServerAutoMerge` 命中已 `queued` 的行会就地执行。所以 `automationGateWaitDelayMs` 让带 `failure_reason` 的 `queued` 行等一段时间才重跑，等待取同一个 `recoveryPolicy.cooldownSeconds`（默认 300 秒，可配 0–86400，显式 0 表示不等），随尝试次数翻倍，封顶 30 分钟。
+
+生产验证用排空自身的计数：19:22/19:24/19:26 三次都是 `examined 2 / executed 1 / skipped 1`（那个 `executed` 就是 205），部署后 19:30 变成 `examined 2 / executed 0 / skipped 2`，`attempts` 停在 46。时效未受影响：19:31:58 给 PR #12 approve → 19:32:01 收到 `pull_request_review/submitted`（该窗口内唯一事件）→ 19:32:20 合并、19:32:21 动作 `succeeded`，事件到合并 19 秒。这次执行不可能来自排空：19:32:00 那次看到的 `updated_at` 是 19:28:04，而 attempts=46 对应封顶的 30 分钟等待，必然 `skip`。
+
+一个坑：排空查询取 `payload->'recoveryPolicy'->>'cooldownSeconds'`，缺省时必须传 `undefined` 而不是 `Number(null)`——后者是 0，会把没配策略的流程全部读成「不等待」，等于修复白做。
+
+顺带记一笔：`pull_request_review` 不在 `webhookBranchesForEvent` 的 switch 里，返回 null 即不收窄范围，一次 review 会触发全量扫掠（约 69 次调用）。review 频次低，暂不动；调用量逼近 2500 次/小时警戒线时这是一个可收窄的点。
+
+## 十七、幂等命中记成功（2026-08-15，沙箱验完）
+
+自动化验收清单里最后一个未验项。它问的是：动作要合并的 PR 已经被**别人**合掉时，执行器该记成功还是记失败。生产数据里始终没有这个场景，因为正常路径下动作自己就是合并者。
+
+**为什么必须造**：`automationMergeOutcome` 的幂等判定排在所有门禁判断**之前**（[`workflows-store.ts`](../api/_lib/workflows-store.ts) 中 `if (pull.merged === true)` 是该函数第二行），命中后 `runAutomationMergeAction` 跳过 `/pulls/{n}/merge` 直接走成功收尾，并在审计 `metadata` 打 `idempotent: true`。这两点都不在行为单测的射程内，只有真实场景能证明。
+
+**造法**：动作只在 PR `open` 时入队，所以必须让它入队后卡在**可重试**的门禁上——`paused` 是终态，排空不会再执行它，只有 `queued` 会。可重试的门禁有检查 pending、缺审批、`mergeable` 为 null 三种，其中缺审批最稳。
+
+1. 从 `dev` 顶端切 `fix/idempotent-e2e`（必须是顶端：经典保护的 `strict` 会让落后的分支变 `behind`，那是**不可重试**的暂停）并推一个提交。
+2. 自动创建建出 PR #13（动作 218，20:12:51）；合并动作 219 随即入队，停在 `queued` / `门禁尚未全绿（当前 pending）` / `attempts=1`。
+3. 20:15:24 由 `bayernjf` 本人合掉 PR #13，**不给 approval**。
+4. 20:20:00 排空执行动作 219。
+
+**两个坑**：
+
+- `gh pr merge --admin` **不能**绕过 ruleset 的必需审批，只对经典分支保护有效。用临时把 ruleset（id `20664426`）`enforcement` 置 `disabled`、合完立刻置回 `active`，比加 bypass actor 或改规则内容都小且可逆。
+- 不能用 approve 来放行：approve 会触发 `pull_request_review` webhook → 校准 → `scheduleServerAutoMerge` 把动作**内联真合并**，得到的正好是要避开的那个结果。
+- 经典保护另有一道 `PR gate` 必需检查（`strict`），所以外部合并前仍须等检查转绿。
+
+**证据**：动作 219 于 20:20:04 记 `succeeded` / `attempts=2` / `failure_reason` 为 NULL，运行 220 `succeeded`；审计 2633 为 `pull-merged` / `success` / `{"via": "workflow-automation", "idempotent": true}`。App 从未发出合并调用——PR 的 `mergedBy` 始终是 `bayernjf`、`mergedAt` 停在 20:15:24、`reviews` 为 0。顺带第三次印证门禁退避：20:18:00 那次排空 `skipped`，因为距 `updated_at`（20:13:03.788）只有 296.2 秒，比 `attempts=1` 对应的 300 秒**早 3 秒**。
+
+**补的测试**：幂等与合并两条裁决共用成功收尾，唯一拦住已合并 PR 挨一个 merge PUT 的就是 `if (outcome.kind === 'merge')` 守卫；守卫一去，GitHub 回 405、抛错把动作打进 `paused`，一个其实已达成目标的运行会在失败中心显示为失败。已加源文本断言钉住该守卫与审计标记（把守卫改成 `if (true)` 可使其变红，已实测）。
