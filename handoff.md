@@ -1,6 +1,6 @@
 # PR Helper Handoff
 
-> 最后更新：2026-08-15（自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；当前第一优先级已转为收敛 reconciliation 的 GitHub 调用预算）
+> 最后更新：2026-08-15（自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 已上线并完成首轮实测；调用预算经按小时复核后已降级为阈值观察，当前第一优先级见《2026-08-15 drain 首轮实测与优先级调整》）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 > 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
 
@@ -38,6 +38,25 @@
 - 新增 `reconciliation_runs.github_calls` / `github_ms` 遥测后，真正的剩余工程问题被量化出来：12 小时内定时校准跑 120 轮共 8,275 次 GitHub 调用（每轮约 69 次、平均 16.3 秒），webhook 只有 1,095 次、manual 54 次——约 88% 的 installation 配额来自定时扫描，这正是 08-14 配额耗尽、自动合并被迫暂停的来源。**收敛这份预算是当前第一优先级，方案待设计**，在有预算模型之前不要继续提高扫描频率。
 - 本批已修并上线：保存失败不再丢弃配置；实时 sweep 不再拖慢保存；重试预算不再花在 provider 明确拒绝上；无版本历史的历史流程重新可保存（生产确认 version-less 记录归零）；排序不再回滚版本号（生产确认 33 个流程 position 唯一、跨 0–32）；自动化队列 drain 具备自愈与抛错停机保护。
 - 数据与结论细节见 [`docs/current-state.md`](docs/current-state.md) 的《2026-08-15 生产实测结论》与《2026-08-15 本批修复》。
+
+## 2026-08-15 drain 首轮实测与优先级调整
+
+- drain 已在生产跑过一轮（Actions run `31880783398`）：首次 sweep 取消 6 条被后续提交取代的动作、回收 1 条并退还误扣尝试，未结束动作从 7 条降到 1 条。「恢复必须等下一次 push」这个耦合已被打断。
+- 同一轮暴露了 drain 自身的缺陷：`id 84` 每 75 秒被执行一次、每次抛错，行却一直停在 `queued attempts=0`。执行器在原子领取之前抛错时不写裁决，而 drain 只记日志不动行，于是永不收敛。已修并有测试覆盖：抛错时把原因写回该行并置 `paused`，UPDATE 以 `state IN ('queued','running')` 为条件，不覆盖执行器自己写下的裁决；失败明细随响应返回，下一次 sweep 自己就能说出原因。
+- 调用预算按小时复核后降级：24 小时约 9,976 次调用，峰值小时 1,204 次，占个人账号 GitHub App 基线 5,000 次/小时的约 24%；29 个流程翻倍到 60 个也才约 48%。08-14 的配额耗尽发生在分批与租约修复之前，不能作为当前扫描强度的证据。
+- `duration_ms` 口径修复已在生产生效：修复前 `webhook` 行最大值曾达 4,166 秒（把回收前的等待计入），部署后近 70 分钟内 `webhook` 最大 10.4 秒、`cron` 最大 33.6 秒 / p90 22.3 秒。
+- 29 个流程（不含两个 sandbox）状态干净：36 个阶段行中 35 个 `ahead=0`，唯一待发布的是 `soft-desk-landing dev->main ahead=2`，正被 `id 103` 那条超时 `paused` 的 `create-pr` 拦着。
+
+### 待办列表（按优先级）
+
+1. **读出 `id 84` 被 park 的原因**，据此决定是否需要「瞬时失败 vs 终态失败」的分类重试。同一判断覆盖 `id 6`/`58`/`80`/`103` 四条因 GitHub 超时或 `CONNECT_TIMEOUT` 停在 `paused` 且无人重试的动作，其中 `id 103` 正卡着一次真实发布。读到真实原因之前不要先写分类器。
+2. **按实测重定 `REALTIME_RECONCILE_BUDGET_MS`**（现为 8000，是为躲 10 秒平台上限定的；`maxDuration` 已 60 秒、`cron` 实测 p90 22.3 秒）。
+3. **drain 稳定若干天后删掉 sweep 内联的执行路径**，让自动化动作只剩一条执行入口。
+4. **调用预算改为阈值观察**：峰值小时越过约 2,500 次（基线一半）再设计预算模型。
+5. **轮换 `prh_readonly` 口令**：该口令曾出现在会话记录中，需 `alter role prh_readonly password '<新口令>'` 并同步更新 `~/.config/pr-helper/db.env`。
+6. **重新登录 Vercel CLI**：当前 token 返回 `invalidToken`，函数日志读不到，drain 之外的线上排查会受阻。
+7. 仍未验的两项自动化场景：门禁为红不触发、幂等命中记成功（生产无对应场景，需另造）。
+8. 可选加固：给 agent-dev 的 `dev`/`main` 加 `quality` 必需检查（两者当前均未保护）；给 word-base 的 `deploy-cloudflare` 补 `environment: Production` 以便出现部署 URL。
 
 ## 2026-08-12 刷新链路最新结论
 
