@@ -6,7 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, g
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, selectWorkflowAfterCloudLoad, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
+import { activeWorkflows, archiveWorkflow, archivedWorkflows, restoreWorkflow, addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { automationActionPresentation, latestAutomationAction, stageRunPresentation, workflowRunSummary, type AutomationActionState, type WorkflowStageRunState } from './lib/workflow-run';
@@ -103,7 +103,7 @@ let actionQueueError = '';
 let actionQueueRefreshing = false;
 let actionQueueReconciliationScheduled = false;
 const actionQueueRequestQueue = new ActionQueueRequestQueue();
-let overviewFilter: 'all' | 'attention' | 'failed' | 'automation' = 'all';
+let overviewFilter: 'all' | 'attention' | 'failed' | 'automation' | 'archived' = 'all';
 let laneSearchQuery = '';
 const expandedLaneIds = new Set<string>();
 let laneSortMode: WorkflowSortMode = 'custom';
@@ -286,6 +286,19 @@ async function removeStageAndPersist(workflow: Workflow, stageIndex: number) {
     reportWorkflowSaveError(error, workflow.id);
     return false;
   }
+}
+async function persistWorkflowArchive(workflow: Workflow, archive: boolean) {
+  workflowMutationRevision += 1;
+  const next = archive ? archiveWorkflow(workflow) : restoreWorkflow(workflow);
+  workflows = saveWorkflow(workflows, next);
+  persistWorkflowsLocally();
+  render();
+  if (cloudWorkflowStorage && !await workflowSaveQueue.enqueue(next.id)) { render(); return; }
+  // The queue is server-derived, and archiving cancels what was waiting on it, so the board would keep
+  // showing the old items until something else refreshed it.
+  await loadActionQueue(true, next.repository);
+  render();
+  showToast(t(archive ? 'workflowArchive.archived' : 'workflowArchive.restored', { name: next.name }));
 }
 async function removeWorkflowFromStorage(workflowId: string) {
   workflowMutationRevision += 1;
@@ -640,6 +653,17 @@ function showDeleteWorkflowDialog(workflow: Workflow) {
     await loadActionQueue(true, workflow.repository);
     render();
     showToast(t('workflowDelete.success'));
+  }, { once: true });
+}
+function showArchiveWorkflowDialog(workflow: Workflow) {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog confirm-dialog archive-workflow-dialog';
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('workflowArchive.eyebrow')}</p><h2>${t('workflowArchive.title')}</h2><p>${t('workflowArchive.desc', { name: escape(workflow.name) })}</p><p class="meta">${t('workflowArchive.warning')}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('workflowArchive.cancel')}</button><button value="confirm" class="primary">${t('workflowArchive.confirm')}</button></div></form>`;
+  document.body.append(dialog); dialog.showModal();
+  dialog.addEventListener('close', async () => {
+    const confirmed = dialog.returnValue === 'confirm';
+    dialog.remove();
+    if (confirmed) await persistWorkflowArchive(workflow, true);
   }, { once: true });
 }
 async function syncLocalWorkflows() {
@@ -1322,10 +1346,13 @@ function overview() {
   const preflight = preflightPanel();
   const failedCount = actionQueue.filter(item => item.kind === 'checks-failed').length;
   const automationBlockedCount = blockedAutomationActions().length;
-  const workflowCount = workflows.length;
-  const sortedWorkflows = sortWorkflowsForView(workflows, laneSortMode, laneSortDirection);
+  const workflowCount = activeWorkflows(workflows).length;
+  const archivedCount = archivedWorkflows(workflows).length;
+  // The archived view is the only one that shows them; every other count and lane is about live work.
+  const boardWorkflows = overviewFilter === 'archived' ? archivedWorkflows(workflows) : activeWorkflows(workflows);
+  const sortedWorkflows = sortWorkflowsForView(boardWorkflows, laneSortMode, laneSortDirection);
   const filterMatchedWorkflows = sortedWorkflows.filter(flow => {
-    if (overviewFilter === 'all') return true;
+    if (overviewFilter === 'all' || overviewFilter === 'archived') return true;
     if (overviewFilter === 'automation') return blockedAutomationActions().some(action => action.workflowId === flow.id);
     return actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed'));
   });
@@ -1333,7 +1360,7 @@ function overview() {
   const visibleWorkflows = filterMatchedWorkflows.filter(flow => !normalizedSearch || `${flow.name} ${flow.repository}`.toLocaleLowerCase().includes(normalizedSearch));
   const hasSearchMiss = Boolean(normalizedSearch && !visibleWorkflows.length);
   const refreshLabel = actionQueueRefreshing ? t('overview.queue.refreshing') : t('overview.queue.refresh');
-  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div>${laneSortControls()}<button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button data-board-filter="automation" class="${overviewFilter === 'automation' ? 'active' : ''}"><span>${automationBlockedCount}</span>${t('overview.board.automationBlocked')}</button><button id="refresh-action-queue" class="board-refresh${actionQueueRefreshing ? ' is-loading' : ''}"${actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section><div class="board-scroll-controls" hidden aria-label="${escape(t('overview.board.scrollControls'))}"><button type="button" data-board-scroll="top" aria-label="${escape(t('overview.board.scrollTop'))}" title="${escape(t('overview.board.scrollTop'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 10 5-5 5 5M3 14l5-5 5 5"/></svg></button><button type="button" data-board-scroll="bottom" aria-label="${escape(t('overview.board.scrollBottom'))}" title="${escape(t('overview.board.scrollBottom'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 6 5 5 5-5M3 2l5 5 5-5"/></svg></button></div>`;
+  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div>${laneSortControls()}<button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button data-board-filter="automation" class="${overviewFilter === 'automation' ? 'active' : ''}"><span>${automationBlockedCount}</span>${t('overview.board.automationBlocked')}</button>${archivedCount || overviewFilter === 'archived' ? `<button data-board-filter="archived" class="${overviewFilter === 'archived' ? 'active' : ''}"><span>${archivedCount}</span>${t('overview.board.archived')}</button>` : ''}<button id="refresh-action-queue" class="board-refresh${actionQueueRefreshing ? ' is-loading' : ''}"${actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${overviewFilter === 'archived' ? t('overview.board.archivedEmpty') : t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section><div class="board-scroll-controls" hidden aria-label="${escape(t('overview.board.scrollControls'))}"><button type="button" data-board-scroll="top" aria-label="${escape(t('overview.board.scrollTop'))}" title="${escape(t('overview.board.scrollTop'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 10 5-5 5 5M3 14l5-5 5 5"/></svg></button><button type="button" data-board-scroll="bottom" aria-label="${escape(t('overview.board.scrollBottom'))}" title="${escape(t('overview.board.scrollBottom'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 6 5 5 5-5M3 2l5 5 5-5"/></svg></button></div>`;
   const emptyResetButton = content.querySelector<HTMLButtonElement>('.board-empty button[data-board-filter="all"]');
   if (hasSearchMiss && emptyResetButton) {
     emptyResetButton.removeAttribute('data-board-filter');
@@ -1384,6 +1411,15 @@ function overview() {
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-lane-step]').forEach(button => button.addEventListener('click', () => showProjectStepDrawer(button.dataset.workflowId || '', Number(button.dataset.laneStep), button.dataset.laneSource)));
   document.querySelectorAll<HTMLButtonElement>('[data-edit-project]').forEach(button => button.addEventListener('click', () => { active = workflows.find(item => item.id === button.dataset.editProject) || null; screen = 'editor'; render(); }));
+  document.querySelectorAll<HTMLButtonElement>('[data-archive-project]').forEach(button => button.addEventListener('click', () => {
+    const flow = workflows.find(item => item.id === button.dataset.archiveProject);
+    if (flow && canOperateWorkflow(flow, 'workflow-edit')) showArchiveWorkflowDialog(flow);
+  }));
+  document.querySelectorAll<HTMLButtonElement>('[data-restore-project]').forEach(button => button.addEventListener('click', () => {
+    const flow = workflows.find(item => item.id === button.dataset.restoreProject);
+    // Restoring puts the flow back under reconciliation, which is what it was doing before: no confirmation.
+    if (flow && canOperateWorkflow(flow, 'workflow-edit')) void persistWorkflowArchive(flow, false);
+  }));
   bindLaneSorting();
   bindFlowCards();
   bindFailureCenter();
@@ -1508,6 +1544,7 @@ function projectLane(flow: Workflow) {
   const orderIndex = workflows.findIndex(workflow => workflow.id === flow.id);
   const sortingDisabled = laneSortMode !== 'custom' || overviewFilter !== 'all' || laneSearchQuery.trim() !== '' || workflows.some(workflow => !canOperateWorkflow(workflow, 'workflow-edit'));
   const editable = canOperateWorkflow(flow, 'workflow-edit');
+  const archived = flow.archived === true;
   const dragLabel = t('overview.board.dragProject', { name: flow.name });
   const runSummary = laneRunSummary(flow);
   const warnings = laneConfigurationWarnings(flow);
@@ -1520,7 +1557,7 @@ function projectLane(flow: Workflow) {
   const orderInput = laneSortMode === 'custom'
     ? `<label class="lane-order-input"><input type="text" inputmode="numeric" pattern="[0-9]*" value="${orderIndex + 1}" data-lane-position="${escape(flow.id)}" aria-label="${escape(t('overview.board.orderFor', { name: flow.name }))}" ${sortingDisabled ? 'disabled' : ''} /></label>`
     : '';
-  return `<article class="project-lane${expanded ? ' is-expanded' : ''}${returnHighlight === flow.id ? ' is-return-highlight' : ''}" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div>${orderInput}</div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${flowName}</h2>${sharedWorkflowBadge(flow)}<p class="lane-run-summary ${runSummary.tone}">${escape(runSummary.text)}</p></div></div><button type="button" class="lane-collapse-toggle" data-lane-collapse="${escape(flow.id)}" aria-expanded="${expanded}" aria-label="${escape(collapseLabel)}" title="${escape(collapseLabel)}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.75" y="2.75" width="10.5" height="10.5" rx="1.5"/><path d="m5.25 8 2.75-2.75L10.75 8"/></svg></button><div class="lane-actions"><button data-edit-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.edit')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button></div></header><div class="lane-body"${expanded ? '' : ' hidden'}>${warning}<div class="lane-track${hasFanIn ? ' has-fan-in' : ''}">${steps}</div>${timelineSection}${runHistory}</div></article>`;
+  return `<article class="project-lane${expanded ? ' is-expanded' : ''}${archived ? ' is-archived' : ''}${returnHighlight === flow.id ? ' is-return-highlight' : ''}" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div>${orderInput}</div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${flowName}</h2>${archived ? `<span class="lane-archived-badge">${t('overview.board.archivedBadge')}</span>` : ''}${sharedWorkflowBadge(flow)}<p class="lane-run-summary ${runSummary.tone}">${escape(runSummary.text)}</p></div></div><button type="button" class="lane-collapse-toggle" data-lane-collapse="${escape(flow.id)}" aria-expanded="${expanded}" aria-label="${escape(collapseLabel)}" title="${escape(collapseLabel)}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.75" y="2.75" width="10.5" height="10.5" rx="1.5"/><path d="m5.25 8 2.75-2.75L10.75 8"/></svg></button><div class="lane-actions">${archived ? `<button data-restore-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.restore')}</button>` : `<button data-edit-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.edit')}</button><button data-archive-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.archive')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button>`}</div></header><div class="lane-body"${expanded ? '' : ' hidden'}>${warning}<div class="lane-track${hasFanIn ? ' has-fan-in' : ''}">${steps}</div>${timelineSection}${runHistory}</div></article>`;
 }
 function bindLaneSorting() {
   const lanes = [...document.querySelectorAll<HTMLElement>('[data-project-lane]')];
