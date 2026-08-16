@@ -1715,7 +1715,10 @@ describe('an automation action whose workflow was archived', () => {
 
   it('is learned from the workflow the drain already joins, not a second query', () => {
     const source = readFileSync(STORE_SOURCE, 'utf8');
-    const drain = source.slice(source.indexOf("FROM workflow_automation_actions actions"), source.indexOf('const counts = { examined'));
-    expect(drain).toContain('archived');
+    const drain = source.slice(source.indexOf('const rows = await sql<DrainActionRow[]>'), source.indexOf('const decision = automationDrainDecision(') + 400);
+    // Read off the workflow row the drain already left-joins for the repository name, so the net costs
+    // nothing: no second query, and no per-action lookup inside the loop.
+    expect(drain).toMatch(/archived[\s\S]*?LEFT JOIN pr_helper_workflows/);
+    expect(drain).toContain('archived: row.archived');
   });
 });

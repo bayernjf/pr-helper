@@ -311,13 +311,23 @@ export function automationGateWaitDelayMs(attempts: number, policy: { cooldownSe
   return Math.min(base * 2 ** Math.max(0, Math.min(attempts, 8) - 1), AUTOMATION_GATE_WAIT_MAX_MS);
 }
 
-export type AutomationDrainDecision = { kind: 'execute' } | { kind: 'reclaim'; refundAttempt: boolean } | { kind: 'requeue' } | { kind: 'cancel'; reason: 'superseded' | 'stale' } | { kind: 'skip' };
+export type AutomationDrainDecision = { kind: 'execute' } | { kind: 'reclaim'; refundAttempt: boolean } | { kind: 'requeue' } | { kind: 'cancel'; reason: 'superseded' | 'stale' | 'archived' } | { kind: 'skip' };
+
+export function automationCancelReason(reason: 'superseded' | 'stale' | 'archived') {
+  if (reason === 'superseded') return '已被后续提交的自动化动作取代';
+  if (reason === 'archived') return '流程已归档，自动化动作不再执行';
+  return '超过自动化时限，未再尝试';
+}
 
 // Draining is the only reader the action queue has, so this verdict is what stands between a stuck row
 // and either a duplicate pull request or a pull request nobody expects. Supersession decides before age
 // because the idempotency key carries the head sha: once a later push enqueued its own action, the older
 // row describes commits already covered, however recently it was written.
-export function automationDrainDecision(action: { state: string; createdAt: string; updatedAt: string; failureReason: string | null; hasNewer: boolean; attempts: number }, now: number, policy?: { cooldownSeconds?: number }): AutomationDrainDecision {
+export function automationDrainDecision(action: { state: string; createdAt: string; updatedAt: string; failureReason: string | null; hasNewer: boolean; attempts: number; archived?: boolean }, now: number, policy?: { cooldownSeconds?: number }): AutomationDrainDecision {
+  // Ahead of everything else, because every other branch can end in a skip and nothing revisits a row
+  // the drain skipped: a paused verdict stays paused however old, and a queued row inside its gate-wait
+  // window is deliberately left for the event that clears it — an event an archived workflow never sees.
+  if (action.archived) return { kind: 'cancel', reason: 'archived' };
   // A paused row is where a verdict lives, so it is left alone by default. The one exception is a failure
   // that never reached a verdict: nothing else requeues `paused`, and three production actions proved that
   // means such a row is never retried once before it ages out.
@@ -362,7 +372,7 @@ export function automationDrainHasStartBudget(startedAt: number, now: number) {
   return now - startedAt < AUTOMATION_DRAIN_START_BUDGET_MS;
 }
 
-type DrainActionRow = { id: string; user_id: string; kind: WorkflowAutomationAction['kind']; state: string; attempts: number; failure_reason: string | null; created_at: string; updated_at: string; repository: string | null; source: string; target: string; installation_id: string | null; cooldown_seconds: string | null; newer: number };
+type DrainActionRow = { id: string; user_id: string; kind: WorkflowAutomationAction['kind']; state: string; attempts: number; failure_reason: string | null; created_at: string; updated_at: string; repository: string | null; source: string; target: string; installation_id: string | null; cooldown_seconds: string | null; archived: boolean; newer: number };
 
 // The queue has had no reader: an action's only chance to run was the request that enqueued it, and the
 // recovery hidden in that same enqueue path needs someone to push again to the very stage that is stuck.
@@ -381,6 +391,7 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
     SELECT actions.id, actions.user_id, actions.kind, actions.state, actions.attempts, actions.failure_reason,
            actions.created_at, actions.updated_at, actions.source, actions.target,
            workflows.payload->>'repository' AS repository, users.github_installation_id AS installation_id,
+           (workflows.payload->>'archived') = 'true' AS archived,
            workflows.payload->'recoveryPolicy'->>'cooldownSeconds' AS cooldown_seconds,
            (SELECT count(*) FROM workflow_automation_actions newer
               WHERE newer.user_id = actions.user_id AND newer.workflow_id = actions.workflow_id
@@ -394,11 +405,11 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
     LIMIT ${AUTOMATION_DRAIN_BATCH_SIZE}`;
   const counts = { examined: rows.length, executed: 0, reclaimed: 0, requeued: 0, cancelled: 0, failed: 0, skipped: 0, deferred: 0, failures: [] as { action: number; reason: string }[] };
   for (const row of rows) {
-    const decision = automationDrainDecision({ state: row.state, createdAt: row.created_at, updatedAt: row.updated_at, failureReason: row.failure_reason, hasNewer: row.newer > 0, attempts: row.attempts }, Date.now(), { cooldownSeconds: row.cooldown_seconds === null ? undefined : Number(row.cooldown_seconds) });
+    const decision = automationDrainDecision({ state: row.state, createdAt: row.created_at, updatedAt: row.updated_at, failureReason: row.failure_reason, hasNewer: row.newer > 0, attempts: row.attempts, archived: row.archived }, Date.now(), { cooldownSeconds: row.cooldown_seconds === null ? undefined : Number(row.cooldown_seconds) });
     const line = (reason: string, detail: Record<string, string | number | boolean | undefined> = {}) => console.info(automationSkipLine({ kind: row.kind, repository: row.repository || '?', route: `${row.source} → ${row.target}`, reason, action: row.id, ...detail }));
     if (decision.kind === 'skip') { counts.skipped += 1; continue; }
     if (decision.kind === 'cancel') {
-      const cancelled = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'cancelled', failure_reason = ${decision.reason === 'superseded' ? '已被后续提交的自动化动作取代' : '超过自动化时限，未再尝试'}, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${row.id} AND state = ${row.state} RETURNING id`;
+      const cancelled = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'cancelled', failure_reason = ${automationCancelReason(decision.reason)}, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${row.id} AND state = ${row.state} RETURNING id`;
       if (cancelled.length) {
         await sql`UPDATE workflow_automation_runs SET state = 'cancelled', updated_at = now(), completed_at = now() WHERE user_id = ${row.user_id} AND id = (SELECT run_id FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND id = ${row.id})`.catch(() => undefined);
         counts.cancelled += 1;
