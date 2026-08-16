@@ -23,7 +23,7 @@ export type WorkflowStage = { source: string; target: string; independent?: bool
 export type DeploymentProvider = 'vercel' | 'cloudflare';
 export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string; healthCheckPath?: string; rollbackWorkflowName?: string };
 export type RecoveryPolicy = { maxRetries: number; cooldownSeconds: number };
-export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; createdAt?: string; deployments?: DeploymentConfig[]; position?: number; recoveryPolicy?: RecoveryPolicy; version?: number; team?: { id: string; name: string; role: 'owner' | 'editor' | 'operator' | 'viewer' } };
+export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; createdAt?: string; deployments?: DeploymentConfig[]; position?: number; recoveryPolicy?: RecoveryPolicy; version?: number; archived?: true; team?: { id: string; name: string; role: 'owner' | 'editor' | 'operator' | 'viewer' } };
 export type WorkflowStageProjection = { workflowId: string; stageIndex: number; stageId?: string | null; source: string; target: string };
 
 export function sourceRuleMatches(rule: string, source: string) {
@@ -293,6 +293,29 @@ export function saveWorkflow(workflows: Workflow[], workflow: Workflow): Workflo
 
 export function deleteWorkflow(workflows: Workflow[], id: string): Workflow[] {
   return workflows.filter(workflow => workflow.id !== id);
+}
+
+export function isWorkflowArchived(workflow: Pick<Workflow, 'archived'>) {
+  return workflow.archived === true;
+}
+
+export function archiveWorkflow(workflow: Workflow): Workflow {
+  return { ...workflow, archived: true };
+}
+
+// The flag is deleted rather than set to false: the document is snapshotted into every version row, so
+// a falsy leftover would outlive the decision that produced it in all of them.
+export function restoreWorkflow(workflow: Workflow): Workflow {
+  const { archived: _archived, ...rest } = workflow;
+  return rest;
+}
+
+export function activeWorkflows(workflows: readonly Workflow[]): Workflow[] {
+  return workflows.filter(workflow => !isWorkflowArchived(workflow));
+}
+
+export function archivedWorkflows(workflows: readonly Workflow[]): Workflow[] {
+  return workflows.filter(isWorkflowArchived);
 }
 
 export function sortWorkflows(workflows: readonly Workflow[]): Workflow[] {
