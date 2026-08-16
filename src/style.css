@@ -2894,3 +2894,23 @@ a.account-menu-item {
   .project-lane.is-return-highlight::before { animation: none; }
   .project-lane.is-return-highlight::after { display: none; }
 }
+
+.lane-archived-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-top: 4px;
+  padding: 3px 6px;
+  border: 1px solid var(--border-muted);
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: var(--bg-input);
+  font: 700 .68rem Manrope;
+}
+.project-lane.is-archived { border-style: dashed; box-shadow: none; }
+/* Dimmed rather than hidden: the lane is still readable history, just not work in progress. The actions
+   keep full contrast so restore stays reachable. */
+.project-lane.is-archived > header > .lane-heading,
+.project-lane.is-archived .lane-body { opacity: .62; }
+.project-lane.is-archived:hover > header > .lane-heading,
+.project-lane.is-archived:hover .lane-body { opacity: 1; }
