@@ -249,7 +249,9 @@ export async function runPreflightChecks(
   workflowId?: string,
 ): Promise<PreflightResult[]> {
   const workflows = await listWorkflows(environment, identity);
-  const targets = workflowId ? workflows.filter(w => w.id === workflowId) : workflows;
+  // Preflight answers "is this safe to ship", which an archived workflow is not being asked. Filtering
+  // here rather than at the caller also covers a request that names one by id.
+  const targets = workflows.filter(w => !w.archived && (!workflowId || w.id === workflowId));
   if (!targets.length) return [];
 
   const stageStates = await listWorkflowStageStates(environment, identity);
