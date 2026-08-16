@@ -1873,6 +1873,20 @@ export const REALTIME_RECONCILE_BUDGET_MS = 8000;
 // for ten minutes.
 export const WEBHOOK_RECONCILE_BUDGET_MS = 25_000;
 
+// The scheduled sweep runs inside the same serverless request limit as every other trigger, so it needs
+// a budget too: past the limit the instance is killed mid-flight, the caller gets a 504, and the run row
+// stays 'running' until the reaper calls it an instance recycling five minutes later. Yielding instead
+// records a partial sweep and marks the workflows pending, which the next tick picks up. The margin
+// under the ceiling covers the reap and selection before the stages and the retention cleanup after
+// them; the value still clears the slowest sweep that has actually completed, so a healthy sweep never
+// defers.
+export const CRON_RECONCILE_BUDGET_MS = AUTOMATION_FUNCTION_CEILING_MS - 20_000;
+
+export function cronReconcileBudgetMs(environment: Record<string, string | undefined>) {
+  const configured = Number(environment.CRON_RECONCILE_BUDGET_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : CRON_RECONCILE_BUDGET_MS;
+}
+
 export function realtimeReconcileBudgetMs(environment: Record<string, string | undefined>, trigger?: ReconciliationTrigger) {
   const configured = Number(environment.REALTIME_RECONCILE_BUDGET_MS);
   if (Number.isFinite(configured) && configured > 0) return configured;
@@ -1887,9 +1901,8 @@ export function realtimeReconcileCeilingMs(budgetMs: number) {
 }
 
 export async function withStageDeadline<T>(work: Promise<T>, deadlineMs?: number): Promise<{ outcome: 'completed'; value: T } | { outcome: 'deferred' }> {
-  // Only a realtime sweep has a budget to respect. The scheduled sweep owns its whole request, so it
-  // waits: reporting completion without awaiting left its counters at zero and let the platform freeze
-  // the stages that were still resolving.
+  // Without a budget the sweep waits: reporting completion without awaiting left its counters at zero
+  // and let the platform freeze the stages that were still resolving.
   if (deadlineMs === undefined) return { outcome: 'completed' as const, value: await work };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deferred = new Promise<{ outcome: 'deferred' }>(resolve => {
