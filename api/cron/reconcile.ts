@@ -1,5 +1,5 @@
 import { type ApiRequest, type ApiResponse, readCookie } from '../_lib/http.js';
-import { cleanupRetainedData, reconcileWorkflowStages } from '../_lib/workflows-store.js';
+import { cleanupRetainedData, cronReconcileBudgetMs, reconcileWorkflowStages } from '../_lib/workflows-store.js';
 
 function authorized(request: ApiRequest) {
   const bearer = Array.isArray(request.headers?.authorization) ? request.headers?.authorization[0] : request.headers?.authorization;
@@ -11,7 +11,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
   if (request.method !== 'GET') { response.status(405).json({ message: 'Method not allowed' }); return; }
   if (!authorized(request)) { response.status(401).json({ message: 'Unauthorized' }); return; }
   try {
-    const { reconciled, outcome } = await reconcileWorkflowStages(process.env, {}, 'cron');
+    const { reconciled, outcome } = await reconcileWorkflowStages(process.env, {}, 'cron', { deadlineMs: cronReconcileBudgetMs(process.env) });
     const retention = await cleanupRetainedData(process.env).catch(error => ({ error: error instanceof Error ? error.message : '保留清理失败' }));
     response.status(200).json({ reconciled, outcome, retention });
   } catch (error) {
