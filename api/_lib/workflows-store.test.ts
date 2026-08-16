@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, automationInlineMergeShouldAttempt, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, automationInlineMergeShouldAttempt, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -1615,5 +1615,71 @@ describe('missing deployment workflows', () => {
     const emptyPath = body.slice(body.indexOf('if (!configurations.length'), body.indexOf('const parent = deploymentParentState'));
     expect(beforeReturn).not.toContain('return [];');
     expect(emptyPath).toContain('DELETE FROM workflow_stage_deployments');
+  });
+});
+
+// Thirty-five workflows across thirty-three repositories all sit in every sweep's candidate set, and
+// most of them are landing pages nobody ships any more. Archiving is how one leaves the sweep without
+// losing its history. The flag rides the workflow document, so it reaches the server through the save
+// path that already exists — which means validation has to admit it, or every archive is rejected.
+describe('an archived workflow', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const flow = { id: 'flow-1', name: 'Landing', repository: 'octo/landing', stages: [{ source: 'dev', target: 'main', stageId: 's-1' }] };
+
+  it('is a valid stored workflow, and only the flag set is a valid flag', () => {
+    expect(isStoredWorkflow({ ...flow, archived: true })).toBe(true);
+    expect(isStoredWorkflow(flow)).toBe(true);
+    // Restoring deletes the key, so `false` never appears on a document this code wrote; accepting it
+    // would let a stale client resurrect a shape the rest of the reads do not test for.
+    expect(isStoredWorkflow({ ...flow, archived: false })).toBe(false);
+    expect(isStoredWorkflow({ ...flow, archived: 'yes' })).toBe(false);
+  });
+
+  it('reports which way the save crossed the line, so the side effects can differ', () => {
+    expect(workflowArchiveTransition(null, flow)).toBe('none');
+    expect(workflowArchiveTransition(flow, flow)).toBe('none');
+    expect(workflowArchiveTransition(flow, { ...flow, archived: true })).toBe('archived');
+    expect(workflowArchiveTransition({ ...flow, archived: true }, flow)).toBe('restored');
+    expect(workflowArchiveTransition({ ...flow, archived: true }, { ...flow, archived: true })).toBe('none');
+    // A workflow created straight into the archive never reconciled, so nothing has to be undone.
+    expect(workflowArchiveTransition(null, { ...flow, archived: true })).toBe('archived');
+  });
+
+  it('leaves the reconciliation candidate set, which is the only reason archiving saves a call', () => {
+    const tracked = source.slice(source.indexOf('const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, workflows.last_reconcile_attempt_at'));
+    expect(tracked.slice(0, tracked.indexOf('const candidates'))).toContain('archived');
+  });
+
+  it('stops having stage states written for it by a webhook it can no longer reconcile', () => {
+    const projection = source.slice(source.indexOf('export async function projectPullRequestWebhook'), source.indexOf('type ScopeOutcome ='));
+    expect(projection).toContain('archived');
+  });
+
+  it('hands its reconciliation turn back on archive and claims one again on restore', () => {
+    const upsert = source.slice(source.indexOf('export async function upsertWorkflow'), source.indexOf('export async function removeWorkflowStage'));
+    expect(upsert).toContain('workflowArchiveTransition');
+    // Left set, the marker would keep the workflow at the front of every realtime catch-up forever.
+    expect(upsert).toMatch(/'archived'[\s\S]*?reconcile_pending_since = NULL/);
+    // A restored workflow may have missed hours of events, so it is caught up rather than made to wait
+    // for the cron rotation to reach it again.
+    expect(upsert).toMatch(/'restored'[\s\S]*?reconcile_pending_since = coalesce\(reconcile_pending_since, now\(\)\)/);
+    // Archiving is what cancels the queued automation, so nothing merges behind the user's back.
+    expect(upsert).toMatch(/'archived'[\s\S]*?state = 'cancelled'/);
+  });
+
+  it('refuses to have new automation enqueued against it', () => {
+    const enqueue = source.slice(source.indexOf('export async function enqueueWorkflowAutomationAction'), source.indexOf('type AutomationActionRow ='));
+    expect(enqueue).toContain('archived');
+  });
+
+  // These three are the surfaces that nag: the action queue, the preflight warnings and the recovery
+  // escalations. An archived workflow must leave all of them, or the board still counts work nobody
+  // intends to do. Stage states and the timeline are deliberately left alone — they are history, they
+  // cost no GitHub call, and the archived view is more useful showing the last thing that happened.
+  it('stops appearing anywhere that asks the user to act', () => {
+    for (const name of ['listActionableStages', 'listWorkflowConfigurationWarnings', 'listRecoveryStatuses']) {
+      const body = source.slice(source.indexOf(`export async function ${name}`));
+      expect(body.slice(0, body.indexOf('\n}\n'))).toContain('archived');
+    }
   });
 });
