@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, automationInlineMergeShouldAttempt, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, automationInlineMergeShouldAttempt, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -1681,5 +1681,41 @@ describe('an archived workflow', () => {
       const body = source.slice(source.indexOf(`export async function ${name}`));
       expect(body.slice(0, body.indexOf('\n}\n'))).toContain('archived');
     }
+  });
+});
+
+// Archiving cancels the queue it can see, but a reconcile that started before the save can still insert
+// an action after it — the sweep read the workflow while it was live. The drain is the net for that, and
+// it is the only place that sees such a row, so the rule has to sit ahead of every skip: a paused verdict
+// and a queued row inside its gate-wait window both return skip otherwise, and neither is ever revisited.
+describe('an automation action whose workflow was archived', () => {
+  const now = Date.parse('2026-08-17T00:00:00Z');
+  const fresh = { createdAt: '2026-08-17T00:00:00Z', updatedAt: '2026-08-17T00:00:00Z', failureReason: null, hasNewer: false, attempts: 0, archived: true };
+
+  it('is cancelled whatever state it was left in', () => {
+    for (const state of ['queued', 'running', 'paused']) {
+      expect(automationDrainDecision({ ...fresh, state }, now, undefined)).toEqual({ kind: 'cancel', reason: 'archived' });
+    }
+  });
+
+  it('is cancelled even while a gate wait or a verdict would otherwise hold it', () => {
+    expect(automationDrainDecision({ ...fresh, state: 'queued', failureReason: 'PR 还需要 1 个 Approval' }, now, undefined)).toEqual({ kind: 'cancel', reason: 'archived' });
+    expect(automationDrainDecision({ ...fresh, state: 'paused', failureReason: '门禁尚未全绿（当前 failure）' }, now, undefined)).toEqual({ kind: 'cancel', reason: 'archived' });
+  });
+
+  it('says so in the row, rather than borrowing a reason that means something else', () => {
+    expect(automationCancelReason('archived')).not.toBe(automationCancelReason('stale'));
+    expect(automationCancelReason('archived')).not.toBe(automationCancelReason('superseded'));
+    expect(automationCancelReason('archived')).toContain('归档');
+  });
+
+  it('leaves a live workflow\'s actions exactly as they were', () => {
+    expect(automationDrainDecision({ ...fresh, state: 'queued', archived: false }, now, undefined)).toEqual({ kind: 'execute' });
+  });
+
+  it('is learned from the workflow the drain already joins, not a second query', () => {
+    const source = readFileSync(STORE_SOURCE, 'utf8');
+    const drain = source.slice(source.indexOf("FROM workflow_automation_actions actions"), source.indexOf('const counts = { examined'));
+    expect(drain).toContain('archived');
   });
 });
