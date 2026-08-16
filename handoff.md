@@ -76,6 +76,15 @@
 - **轮换 `prh_readonly` 口令**：该口令曾出现在会话记录中。`alter role prh_readonly password '<新口令>'`，并同步更新 `~/.config/pr-helper/db.env`。
 - 可选加固：给 agent-dev 的 `dev`/`main` 加 `quality` 必需检查（两者当前均未保护）；给 word-base 的 `deploy-cloudflare` 补 `environment: Production` 以便出现部署 URL。
 
+## 2026-08-17 定时校准超时导致 Actions 失败（已修，待部署）
+
+- 症状：`Reconcile PR Helper monitoring` 定时作业失败。两次失败（run `31937450235` 08:49、`31949974704` 13:29）日志一致：`curl: (22) ... 504` + `FUNCTION_INVOCATION_TIMEOUT`。`SWEEPS: 1`，一次失败即整个作业失败。
+- 根因是**定时校准没有预算**。`reconcileWorkflowStages` 的注释原本写「定时扫掠独占整个请求，所以它等」——但它并不独占平台上限：跑过 60 秒的函数被就地杀掉，调用方收到 504，`reconciliation_runs` 那行留在 `running`，5 分钟后被收割器记成「校准中断：函数实例在完成前被回收」，`stages_reconciled = 0`、`github_calls` 为 NULL。此前记在待办里的「cron 1.4% 被回收残留」和这次 CI 失败**是同一件事**，不是两件。
+- 数据（30 小时口径）：cron 成功 392 次，p90 22.3 秒、最长 32.8 秒；失败 3 次全是上述被回收，`duration_ms` 为 NULL（死在测量自己之前）。也就是说健康扫掠离上限还有一倍余量，只有离群的那几次会撞线。
+- 修法与实时触发一致：给定时扫掠一个 `CRON_RECONCILE_BUDGET_MS = AUTOMATION_FUNCTION_CEILING_MS - 20_000`（即 40 秒，可用同名环境变量覆盖）。40 秒的留白覆盖扫掠前的收割与选批、扫掠后的收尾写入和保留清理；同时高于 32.8 秒这个「实际跑完的最慢一次」，所以**现在能跑完的扫掠不会因此开始让出**。超时的那一次改为记 `degraded` + 置 `reconcile_pending_since`，由下一个 `*/5` 接手，端点返回 200，作业不再失败。
+- **有意不动**兜底作业的判定逻辑：`SWEEPS` 全失败就退出 1 是对的，真出故障应该响。加宽容忍度只会把下一次真故障藏起来。
+- 部署后核对：cron 的 `failure / 校准中断：函数实例在完成前被回收` 应归零，改由少量 `degraded / 校准未在预算内完成，已让给下一次触发` 取代，且被让出的流程能在下一轮被认领。
+
 ## 2026-08-17 流程归档（待部署）
 
 - 目的是收敛 reconciliation 的调用预算：生产 35 个流程里大半是不再维护的 `*-landing`，每一轮扫掠都在为它们付 GitHub 调用。归档让一个流程彻底退出校准范围（cron / webhook / manual / inbox_refresh 全不进），不上看板、不进失败中心、不做预检与配置告警，但历史、步骤、版本、审计全部保留，随时可恢复。**本版只做归档，不做静音，也不做批量与自动归档。**
