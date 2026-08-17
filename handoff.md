@@ -74,8 +74,27 @@
 **三、只能由用户执行**
 
 - **轮换 `prh_readonly` 口令**：该口令曾出现在会话记录中。`alter role prh_readonly password '<新口令>'`，并同步更新 `~/.config/pr-helper/db.env`。
-- **重新登录 Vercel CLI**：当前 token 返回 `invalidToken`，函数日志读不到。
 - 可选加固：给 agent-dev 的 `dev`/`main` 加 `quality` 必需检查（两者当前均未保护）；给 word-base 的 `deploy-cloudflare` 补 `environment: Production` 以便出现部署 URL。
+
+## 2026-08-17 定时校准超时导致 Actions 失败（已修，待部署）
+
+- 症状：`Reconcile PR Helper monitoring` 定时作业失败。两次失败（run `31937450235` 08:49、`31949974704` 13:29）日志一致：`curl: (22) ... 504` + `FUNCTION_INVOCATION_TIMEOUT`。`SWEEPS: 1`，一次失败即整个作业失败。
+- 根因是**定时校准没有预算**。`reconcileWorkflowStages` 的注释原本写「定时扫掠独占整个请求，所以它等」——但它并不独占平台上限：跑过 60 秒的函数被就地杀掉，调用方收到 504，`reconciliation_runs` 那行留在 `running`，5 分钟后被收割器记成「校准中断：函数实例在完成前被回收」，`stages_reconciled = 0`、`github_calls` 为 NULL。此前记在待办里的「cron 1.4% 被回收残留」和这次 CI 失败**是同一件事**，不是两件。
+- 数据（30 小时口径）：cron 成功 392 次，p90 22.3 秒、最长 32.8 秒；失败 3 次全是上述被回收，`duration_ms` 为 NULL（死在测量自己之前）。也就是说健康扫掠离上限还有一倍余量，只有离群的那几次会撞线。
+- 修法与实时触发一致：给定时扫掠一个 `CRON_RECONCILE_BUDGET_MS = AUTOMATION_FUNCTION_CEILING_MS - 20_000`（即 40 秒，可用同名环境变量覆盖）。40 秒的留白覆盖扫掠前的收割与选批、扫掠后的收尾写入和保留清理；同时高于 32.8 秒这个「实际跑完的最慢一次」，所以**现在能跑完的扫掠不会因此开始让出**。超时的那一次改为记 `degraded` + 置 `reconcile_pending_since`，由下一个 `*/5` 接手，端点返回 200，作业不再失败。
+- **有意不动**兜底作业的判定逻辑：`SWEEPS` 全失败就退出 1 是对的，真出故障应该响。加宽容忍度只会把下一次真故障藏起来。
+- 部署后核对：cron 的 `failure / 校准中断：函数实例在完成前被回收` 应归零，改由少量 `degraded / 校准未在预算内完成，已让给下一次触发` 取代，且被让出的流程能在下一轮被认领。
+
+## 2026-08-17 流程归档（待部署）
+
+- 目的是收敛 reconciliation 的调用预算：生产 35 个流程里大半是不再维护的 `*-landing`，每一轮扫掠都在为它们付 GitHub 调用。归档让一个流程彻底退出校准范围（cron / webhook / manual / inbox_refresh 全不进），不上看板、不进失败中心、不做预检与配置告警，但历史、步骤、版本、审计全部保留，随时可恢复。**本版只做归档，不做静音，也不做批量与自动归档。**
+- **存储写在 `payload` 里，不加迁移**：`Workflow.archived?: true` 随现有 `upsertWorkflow` / 浏览器同步 / `encrypted-sync` 流转，并自动进入 `workflow_versions` 快照。审计同样不动约束——`workflow_operation_audit_logs.action` 的 CHECK 只允许 8 个既有值，故归档记为 `workflow-updated` + `metadata.archived`。用 `?: true` 而非 `boolean`：恢复删键，避免 `archived: false` 噪音沉进每一份版本快照。
+- **权衡（重要）**：标记在 jsonb 里，SQL 不能直接 `WHERE archived` 排除，仍要「取全量行 → 解析 payload → JS 过滤」。也就是说**归档省下的是 GitHub 调用，不是 35 行的解析成本**。现状代码本来就是这个形状，35 行规模下这个代价可忽略；若流程数涨到几百，再单独提一列并回填。
+- **排除只落在一个咽喉点**：`reconcileWorkflowStages` 的 `tracked` flatMap 一处同时覆盖 cron 与全部 realtime 触发。另外 `projectPullRequestWebhook` 也跳过归档流程——否则它仍在写 `workflow_stage_states`，留下再也不会被校准刷新的脏数据。`listWorkflows` 照旧返回全部，前端靠它渲染归档视图。
+- **归档即停**：保存事务之后把该流程 `queued` / `paused` 的动作标 `cancelled`（原因写「流程已归档」），`running` 的让它跑完（正卡在 GitHub 调用上，取消会丢结果）；同时清掉 `reconcile_pending_since`，否则归档流程会一直排在实时补齐的队首。**恢复**则相反，置上 `reconcile_pending_since`，让下一次触发优先接手——它可能已经错过几小时的事件。
+- **排空是竞态兜底**：归档前就已启动的那次校准可能在归档之后才把动作插进来，所以 drain 查询多读一列 `payload->>'archived'`（走已有的 LEFT JOIN，不多一次查询），并把归档判定放在所有分支之前——其余分支都可能以 `skip` 收尾，而没有任何机制会回头看被 skip 的行。
+- 界面：看板与四个计数一律只算 active，归档流程收在第五个筛选按钮后面，只提供「恢复」（不提供编辑与查看详情，避免对一个已退出校准范围的流程重新开工）。权限用 `workflow-edit` 而非 `workflow-delete`：归档可逆。
+- **待做的生产验收**：在 `bayernjf/pr-helper-e2e-sandbox` 归档一个开着自动合并的流程 → 看板消失、归档视图出现、排队动作变 `cancelled`、审计带 `metadata.archived`；随后 push 匹配分支 → 不产生新 stage state、不产生新动作、`reconciliation_runs` 不认领它；再恢复 → `reconcile_pending_since` 被置上且下一次触发补齐。随后归档生产上不再维护的 `*-landing`，用 SQL 对比每轮认领数与 `github_calls` 量化调用量下降。
 
 ## 2026-08-12 刷新链路最新结论
 

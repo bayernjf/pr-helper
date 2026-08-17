@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { addDeployment, replaceDeployment, deploymentSuggestions, defaultDeployments, deploymentsForRepository, syncedDeployments, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type Workflow } from './workflow';
+import { activeWorkflows, addDeployment, archiveWorkflow, archivedWorkflows, isWorkflowArchived, restoreWorkflow, replaceDeployment, deploymentSuggestions, defaultDeployments, deploymentsForRepository, syncedDeployments, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type Workflow } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -539,4 +539,36 @@ describe('deploymentSuggestions', () => {
 it('seeds a new workflow with the deployments derived from its repository', () => {
   const seeded = deploymentsForRepository([{ name: 'Deploy frontend to Cloudflare Pages' }], ['preview-cloudflare-pages', 'production-cloudflare-pages']);
   expect(createWorkflow('a/b', 'dev', 'main', 'a/b', seeded).deployments).toEqual(seeded);
+});
+
+// A project that is no longer worked on still costs a place on the board and a share of every
+// reconciliation sweep. Archiving is how it leaves both without losing its history, so the flag has to
+// be a plain part of the workflow document: it then rides the existing save, sync and version paths.
+describe('archiving a workflow', () => {
+  const flow: Workflow = { id: 'flow-1', name: 'Landing', repository: 'octo/landing', stages: [{ source: 'dev', target: 'main', stageId: 's-1' }] };
+
+  it('marks the workflow without disturbing anything else about it', () => {
+    const archived = archiveWorkflow(flow);
+    expect(isWorkflowArchived(archived)).toBe(true);
+    expect({ ...archived, archived: undefined }).toEqual({ ...flow, archived: undefined });
+  });
+
+  // Restoring deletes the key rather than writing `false`: the workflow document is snapshotted into
+  // every version row, and a lingering `archived: false` would sit in all of them forever.
+  it('leaves no trace of the flag once restored', () => {
+    expect('archived' in restoreWorkflow(archiveWorkflow(flow))).toBe(false);
+    expect(isWorkflowArchived(restoreWorkflow(archiveWorkflow(flow)))).toBe(false);
+  });
+
+  it('is idempotent both ways, so a double click cannot produce a third state', () => {
+    expect(archiveWorkflow(archiveWorkflow(flow))).toEqual(archiveWorkflow(flow));
+    expect(restoreWorkflow(restoreWorkflow(flow))).toEqual(flow);
+  });
+
+  it('splits a board into the lanes to show and the lanes to keep out of the way', () => {
+    const other: Workflow = { ...flow, id: 'flow-2' };
+    const board = [archiveWorkflow(flow), other];
+    expect(activeWorkflows(board).map(item => item.id)).toEqual(['flow-2']);
+    expect(archivedWorkflows(board).map(item => item.id)).toEqual(['flow-1']);
+  });
 });

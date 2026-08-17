@@ -31,6 +31,7 @@ export type StoredWorkflow = {
   position?: number;
   recoveryPolicy?: RecoveryPolicy;
   version?: number;
+  archived?: true;
   team?: { id: string; name: string; role: TeamRole };
 };
 
@@ -86,6 +87,7 @@ export async function enqueueWorkflowAutomationAction(environment: Record<string
   const workflow = access.workflow;
   const stage = workflow ? stageForIndex(workflow, input.stageIndex) : undefined;
   if (!workflow || !stage || !stage.stageId || !branchRuleMatches(stage.source, input.source)) throw new Error('未找到对应流程步骤');
+  if (workflow.archived) throw new Error('流程已归档，请先恢复后再执行自动化');
   if (input.kind === 'create-pr' && stage.automation?.autoCreatePullRequest !== true) throw new Error('当前步骤未开启自动创建 PR');
   if (input.kind === 'create-pr' && !input.generationRule?.trim()) throw new Error('自动创建 PR 必须提供有效的生成规则快照');
   const existing = await sql<{ id: number; run_id: number; workflow_id: string; stage_id: string; source: string; target: string; kind: WorkflowAutomationAction['kind']; idempotency_key: string; state: WorkflowAutomationAction['state']; attempts: number; failure_reason: string | null; created_at: string; updated_at: string }[]>`SELECT id, run_id, workflow_id, stage_id, source, target, kind, idempotency_key, state, attempts, failure_reason, created_at, updated_at FROM workflow_automation_actions WHERE user_id = ${access.ownerUserId} AND idempotency_key = ${input.idempotencyKey} LIMIT 1`;
@@ -309,13 +311,23 @@ export function automationGateWaitDelayMs(attempts: number, policy: { cooldownSe
   return Math.min(base * 2 ** Math.max(0, Math.min(attempts, 8) - 1), AUTOMATION_GATE_WAIT_MAX_MS);
 }
 
-export type AutomationDrainDecision = { kind: 'execute' } | { kind: 'reclaim'; refundAttempt: boolean } | { kind: 'requeue' } | { kind: 'cancel'; reason: 'superseded' | 'stale' } | { kind: 'skip' };
+export type AutomationDrainDecision = { kind: 'execute' } | { kind: 'reclaim'; refundAttempt: boolean } | { kind: 'requeue' } | { kind: 'cancel'; reason: 'superseded' | 'stale' | 'archived' } | { kind: 'skip' };
+
+export function automationCancelReason(reason: 'superseded' | 'stale' | 'archived') {
+  if (reason === 'superseded') return '已被后续提交的自动化动作取代';
+  if (reason === 'archived') return '流程已归档，自动化动作不再执行';
+  return '超过自动化时限，未再尝试';
+}
 
 // Draining is the only reader the action queue has, so this verdict is what stands between a stuck row
 // and either a duplicate pull request or a pull request nobody expects. Supersession decides before age
 // because the idempotency key carries the head sha: once a later push enqueued its own action, the older
 // row describes commits already covered, however recently it was written.
-export function automationDrainDecision(action: { state: string; createdAt: string; updatedAt: string; failureReason: string | null; hasNewer: boolean; attempts: number }, now: number, policy?: { cooldownSeconds?: number }): AutomationDrainDecision {
+export function automationDrainDecision(action: { state: string; createdAt: string; updatedAt: string; failureReason: string | null; hasNewer: boolean; attempts: number; archived?: boolean }, now: number, policy?: { cooldownSeconds?: number }): AutomationDrainDecision {
+  // Ahead of everything else, because every other branch can end in a skip and nothing revisits a row
+  // the drain skipped: a paused verdict stays paused however old, and a queued row inside its gate-wait
+  // window is deliberately left for the event that clears it — an event an archived workflow never sees.
+  if (action.archived) return { kind: 'cancel', reason: 'archived' };
   // A paused row is where a verdict lives, so it is left alone by default. The one exception is a failure
   // that never reached a verdict: nothing else requeues `paused`, and three production actions proved that
   // means such a row is never retried once before it ages out.
@@ -360,7 +372,7 @@ export function automationDrainHasStartBudget(startedAt: number, now: number) {
   return now - startedAt < AUTOMATION_DRAIN_START_BUDGET_MS;
 }
 
-type DrainActionRow = { id: string; user_id: string; kind: WorkflowAutomationAction['kind']; state: string; attempts: number; failure_reason: string | null; created_at: string; updated_at: string; repository: string | null; source: string; target: string; installation_id: string | null; cooldown_seconds: string | null; newer: number };
+type DrainActionRow = { id: string; user_id: string; kind: WorkflowAutomationAction['kind']; state: string; attempts: number; failure_reason: string | null; created_at: string; updated_at: string; repository: string | null; source: string; target: string; installation_id: string | null; cooldown_seconds: string | null; archived: boolean; newer: number };
 
 // The queue has had no reader: an action's only chance to run was the request that enqueued it, and the
 // recovery hidden in that same enqueue path needs someone to push again to the very stage that is stuck.
@@ -379,6 +391,7 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
     SELECT actions.id, actions.user_id, actions.kind, actions.state, actions.attempts, actions.failure_reason,
            actions.created_at, actions.updated_at, actions.source, actions.target,
            workflows.payload->>'repository' AS repository, users.github_installation_id AS installation_id,
+           (workflows.payload->>'archived') = 'true' AS archived,
            workflows.payload->'recoveryPolicy'->>'cooldownSeconds' AS cooldown_seconds,
            (SELECT count(*) FROM workflow_automation_actions newer
               WHERE newer.user_id = actions.user_id AND newer.workflow_id = actions.workflow_id
@@ -392,11 +405,11 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
     LIMIT ${AUTOMATION_DRAIN_BATCH_SIZE}`;
   const counts = { examined: rows.length, executed: 0, reclaimed: 0, requeued: 0, cancelled: 0, failed: 0, skipped: 0, deferred: 0, failures: [] as { action: number; reason: string }[] };
   for (const row of rows) {
-    const decision = automationDrainDecision({ state: row.state, createdAt: row.created_at, updatedAt: row.updated_at, failureReason: row.failure_reason, hasNewer: row.newer > 0, attempts: row.attempts }, Date.now(), { cooldownSeconds: row.cooldown_seconds === null ? undefined : Number(row.cooldown_seconds) });
+    const decision = automationDrainDecision({ state: row.state, createdAt: row.created_at, updatedAt: row.updated_at, failureReason: row.failure_reason, hasNewer: row.newer > 0, attempts: row.attempts, archived: row.archived }, Date.now(), { cooldownSeconds: row.cooldown_seconds === null ? undefined : Number(row.cooldown_seconds) });
     const line = (reason: string, detail: Record<string, string | number | boolean | undefined> = {}) => console.info(automationSkipLine({ kind: row.kind, repository: row.repository || '?', route: `${row.source} → ${row.target}`, reason, action: row.id, ...detail }));
     if (decision.kind === 'skip') { counts.skipped += 1; continue; }
     if (decision.kind === 'cancel') {
-      const cancelled = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'cancelled', failure_reason = ${decision.reason === 'superseded' ? '已被后续提交的自动化动作取代' : '超过自动化时限，未再尝试'}, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${row.id} AND state = ${row.state} RETURNING id`;
+      const cancelled = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'cancelled', failure_reason = ${automationCancelReason(decision.reason)}, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${row.id} AND state = ${row.state} RETURNING id`;
       if (cancelled.length) {
         await sql`UPDATE workflow_automation_runs SET state = 'cancelled', updated_at = now(), completed_at = now() WHERE user_id = ${row.user_id} AND id = (SELECT run_id FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND id = ${row.id})`.catch(() => undefined);
         counts.cancelled += 1;
@@ -1064,6 +1077,8 @@ export function isStoredWorkflow(value: unknown): value is StoredWorkflow {
     && (workflow.createdAt === undefined || typeof workflow.createdAt === 'string' && !Number.isNaN(Date.parse(workflow.createdAt)))
     && (workflow.position === undefined || Number.isInteger(workflow.position) && workflow.position >= 0)
     && (workflow.version === undefined || Number.isInteger(workflow.version) && workflow.version >= 0)
+    // Restoring deletes the key, so `false` is a shape this code never writes and no read tests for.
+    && (workflow.archived === undefined || workflow.archived === true)
     && Array.isArray(workflow.stages) && workflow.stages.length > 0
     && (workflow.deployments === undefined || Array.isArray(workflow.deployments) && workflow.deployments.every(deployment => Boolean(deployment) && typeof deployment.target === 'string' && deployment.target.length > 0 && ['vercel', 'cloudflare'].includes(deployment.provider || '') && typeof deployment.workflowName === 'string' && deployment.workflowName.length > 0 && ['preview', 'production'].includes(deployment.environment || '') && (deployment.githubEnvironment === undefined || typeof deployment.githubEnvironment === 'string') && (deployment.healthCheckPath === undefined || typeof deployment.healthCheckPath === 'string' && deployment.healthCheckPath.startsWith('/')) && (deployment.rollbackWorkflowName === undefined || typeof deployment.rollbackWorkflowName === 'string' && deployment.rollbackWorkflowName.length > 0)))
     && (workflow.recoveryPolicy === undefined || typeof workflow.recoveryPolicy === 'object' && typeof workflow.recoveryPolicy.maxRetries === 'number' && workflow.recoveryPolicy.maxRetries >= 0 && workflow.recoveryPolicy.maxRetries <= 20 && typeof workflow.recoveryPolicy.cooldownSeconds === 'number' && workflow.recoveryPolicy.cooldownSeconds >= 0 && workflow.recoveryPolicy.cooldownSeconds <= 86400)
@@ -1300,6 +1315,17 @@ export async function listWorkflows(environment: Record<string, string | undefin
 // without waiting for the next push. Auto-merge counts too: it acts on a pull request that already
 // exists, so deferring it to the next event removes no consequence, it only moves the merge to a
 // moment the user has stopped watching. Authorization comes from the confirmation shown at tick time.
+// Which way a save crossed the archive line, because the two directions undo different things: one has
+// a reconciliation turn and a queue of automation to give up, the other has hours of missed events to
+// catch up on. A workflow created straight into the archive counts as archived — it never reconciled,
+// so the cleanup is a no-op, and saying 'none' would only make the caller test for that separately.
+export function workflowArchiveTransition(previous: StoredWorkflow | null, next: StoredWorkflow) {
+  const before = previous?.archived === true;
+  const after = next.archived === true;
+  if (before === after) return 'none' as const;
+  return after ? 'archived' as const : 'restored' as const;
+}
+
 export function serverAutomationActivated(previous: StoredWorkflow | null, next: StoredWorkflow) {
   const serverMode = (stage: StoredWorkflowStage | undefined) => stage?.automation?.executionMode === 'server';
   const create = (stage: StoredWorkflowStage | undefined) => serverMode(stage) && stage!.automation!.autoCreatePullRequest === true;
@@ -1349,13 +1375,23 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
     await recordOperationAuditForUser(transaction, ownerUserId, identity.installationId, {
       action: previous ? 'workflow-updated' : 'workflow-created', outcome: 'success', repository: savedWorkflow.repository,
       workflowId: savedWorkflow.id, stageId: null, source: null, target: null, pullNumber: null, runId: null,
-      metadata: { version: savedWorkflow.version, stageCount: savedWorkflow.stages.length }, failureReason: null,
+      metadata: { version: savedWorkflow.version, stageCount: savedWorkflow.stages.length, archived: savedWorkflow.archived === true }, failureReason: null,
     });
   });
+  const archiveTransition = workflowArchiveTransition(previous ?? null, savedWorkflow);
+  if (archiveTransition === 'archived') {
+    // A reconcile that started before this save may still insert an action after it, so the drain
+    // carries the same rule as a net; this pass is what stops the ones already waiting. A `running`
+    // action is left to finish: it is mid-call against GitHub and cancelling it would lose the result.
+    await sql`UPDATE workflow_automation_actions SET state = 'cancelled', failure_reason = ${'流程已归档，自动化动作不再执行'}, updated_at = now() WHERE user_id = ${ownerUserId} AND workflow_id = ${savedWorkflow.id} AND state IN ('queued', 'paused')`.catch(() => undefined);
+    // Left set, the marker would keep an archived workflow at the front of every realtime catch-up.
+    await sql`UPDATE pr_helper_workflows SET reconcile_pending_since = NULL WHERE user_id = ${ownerUserId} AND id = ${savedWorkflow.id}`.catch(() => undefined);
+  }
   const activated = serverAutomationActivated(previous ?? null, savedWorkflow);
   // The marker is what makes the activation survive a sweep that runs out of budget: the next trigger
-  // picks the workflow up first instead of waiting for the schedule.
-  if (activated.create || activated.merge) await sql`UPDATE pr_helper_workflows SET reconcile_pending_since = coalesce(reconcile_pending_since, now()) WHERE user_id = ${ownerUserId} AND id = ${savedWorkflow.id}`.catch(() => undefined);
+  // picks the workflow up first instead of waiting for the schedule. A restore needs it for the same
+  // reason and more urgently — it may have missed hours of events while it sat archived.
+  if (activated.create || activated.merge || archiveTransition === 'restored') await sql`UPDATE pr_helper_workflows SET reconcile_pending_since = coalesce(reconcile_pending_since, now()) WHERE user_id = ${ownerUserId} AND id = ${savedWorkflow.id}`.catch(() => undefined);
   return { workflow: existingAccess?.team ? { ...savedWorkflow, team: existingAccess.team } : savedWorkflow, automationActivated: activated };
 }
 
@@ -1418,7 +1454,9 @@ export async function projectPullRequestWebhook(environment: Record<string, stri
   const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
   const tracked = rows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
-    return workflow ? [{ userId: row.user_id, workflowId: row.id, workflow: ensureStageIds(workflow) }] : [];
+    // An archived workflow is out of every sweep, so a state written here would never be refreshed
+    // again: it would sit on the archived view as a fact from an afternoon that has since moved on.
+    return workflow && !workflow.archived ? [{ userId: row.user_id, workflowId: row.id, workflow: ensureStageIds(workflow) }] : [];
   });
   const matches = tracked.flatMap(item => matchingWorkflowStages([item.workflow], pull).map(match => ({ ...item, stageIndex: match.stageIndex, stageId: stageIdentity(item.workflow, match.stageIndex) })));
   const checksState = initialWebhookChecksState(pull.mergedAt);
@@ -1835,6 +1873,20 @@ export const REALTIME_RECONCILE_BUDGET_MS = 8000;
 // for ten minutes.
 export const WEBHOOK_RECONCILE_BUDGET_MS = 25_000;
 
+// The scheduled sweep runs inside the same serverless request limit as every other trigger, so it needs
+// a budget too: past the limit the instance is killed mid-flight, the caller gets a 504, and the run row
+// stays 'running' until the reaper calls it an instance recycling five minutes later. Yielding instead
+// records a partial sweep and marks the workflows pending, which the next tick picks up. The margin
+// under the ceiling covers the reap and selection before the stages and the retention cleanup after
+// them; the value still clears the slowest sweep that has actually completed, so a healthy sweep never
+// defers.
+export const CRON_RECONCILE_BUDGET_MS = AUTOMATION_FUNCTION_CEILING_MS - 20_000;
+
+export function cronReconcileBudgetMs(environment: Record<string, string | undefined>) {
+  const configured = Number(environment.CRON_RECONCILE_BUDGET_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : CRON_RECONCILE_BUDGET_MS;
+}
+
 export function realtimeReconcileBudgetMs(environment: Record<string, string | undefined>, trigger?: ReconciliationTrigger) {
   const configured = Number(environment.REALTIME_RECONCILE_BUDGET_MS);
   if (Number.isFinite(configured) && configured > 0) return configured;
@@ -1849,9 +1901,8 @@ export function realtimeReconcileCeilingMs(budgetMs: number) {
 }
 
 export async function withStageDeadline<T>(work: Promise<T>, deadlineMs?: number): Promise<{ outcome: 'completed'; value: T } | { outcome: 'deferred' }> {
-  // Only a realtime sweep has a budget to respect. The scheduled sweep owns its whole request, so it
-  // waits: reporting completion without awaiting left its counters at zero and let the platform freeze
-  // the stages that were still resolving.
+  // Without a budget the sweep waits: reporting completion without awaiting left its counters at zero
+  // and let the platform freeze the stages that were still resolving.
   if (deadlineMs === undefined) return { outcome: 'completed' as const, value: await work };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deferred = new Promise<{ outcome: 'deferred' }>(resolve => {
@@ -1954,7 +2005,7 @@ export async function reconcileWorkflowStages(environment: Record<string, string
   const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, workflows.last_reconcile_attempt_at, workflows.reconcile_pending_since FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
   const tracked = rows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
-    if (!workflow || (filter.repository && workflow.repository !== filter.repository) || (filter.installationId && row.github_installation_id !== filter.installationId)) return [];
+    if (!workflow || workflow.archived || (filter.repository && workflow.repository !== filter.repository) || (filter.installationId && row.github_installation_id !== filter.installationId)) return [];
     return [{ row, workflow: ensureStageIds(workflow), lastAttemptAt: row.last_reconcile_attempt_at ?? null, pendingSince: row.reconcile_pending_since ?? null, key: `${row.user_id}:${row.id}`, branchScoped: Boolean(filter.branches) }];
   });
   const candidates = tracked.filter(item => !filter.branches || item.workflow.stages.some(stage => reconciliationBranchScope(stage, filter.branches!) !== 'none'));
@@ -2064,7 +2115,9 @@ export async function listWorkflowConfigurationWarnings(environment: Record<stri
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
   const rows = await sql<WorkflowRow[]>`SELECT workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, user.id, 'workflows.user_id', 'workflows.id')}`;
-  const stored = rows.map(row => storedWorkflowFromPayload(row.payload)).filter((workflow): workflow is StoredWorkflow => Boolean(workflow));
+  // An archived workflow is not being shipped, so a gate it never reaches is not a warning worth
+  // showing — and checking it would spend two GitHub calls per workflow to say so.
+  const stored = rows.map(row => storedWorkflowFromPayload(row.payload)).filter((workflow): workflow is StoredWorkflow => Boolean(workflow) && !workflow!.archived);
   if (!identity.installationId) return stored.flatMap(workflow => workflowConfigurationWarnings(workflow, { actionsAvailable: false, workflows: [], environmentsAvailable: false, environments: [] }));
   const config = parseGithubAppConfig(environment);
   const results = await Promise.all(stored.map(async workflow => {
@@ -2093,7 +2146,7 @@ export async function listActionableStages(environment: Record<string, string | 
   const states = await sql<StageStateRow[]>`SELECT states.workflow_id, states.stage_index, states.stage_id, states.repository, states.source, states.target, states.pull_number, states.pull_state, states.merged_at, states.head_sha, states.checks_state, states.checks_passed, states.checks_total, states.approvals, states.required_approvals, states.mergeable, states.mergeable_state, states.ahead_by, states.last_event, states.updated_at FROM workflow_stage_states states WHERE ${visibleWorkflowPredicate(sql, user.id, 'states.user_id', 'states.workflow_id')}`;
   return workflows.flatMap(row => {
     const stored = storedWorkflowFromPayload(row.payload);
-    const workflow = stored ? ensureStageIds(stored) : undefined;
+    const workflow = stored && !stored.archived ? ensureStageIds(stored) : undefined;
     if (!workflow) return [];
     return workflow.stages.reduce<ActionableStage[]>((items, stage, stageIndex) => {
       const routeStates = states.filter(state => state.workflow_id === workflow.id && state.stage_id === stage.stageId);
@@ -2116,7 +2169,7 @@ export async function listRecoveryStatuses(environment: Record<string, string | 
   const stageIndexByIdentity = new Map<string, number>();
   for (const row of workflowRows) {
     const wf = storedWorkflowFromPayload(row.payload);
-    if (!wf) continue;
+    if (!wf || wf.archived) continue;
     const normalized = ensureStageIds(wf);
     if (normalized.recoveryPolicy) policyByWorkflow.set(normalized.id, normalized.recoveryPolicy);
     normalized.stages.forEach((stage, index) => { if (stage.stageId) stageIndexByIdentity.set(`${normalized.id}:${stage.stageId}`, index); });
