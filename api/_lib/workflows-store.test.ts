@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, automationInlineMergeShouldAttempt, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -983,27 +983,31 @@ describe('a sweep abandoned at the realtime ceiling', () => {
 // same pull request, checks, reviews and protection again to reach the same verdict. One production
 // action reached forty-seven attempts over seventy-five minutes that way — one per webhook delivery,
 // each paying a full gate re-read that could not have changed the answer, and leaving `attempts`
-// useless as a health signal. The drain's backoff never applied, because it only reads the queue.
-describe('an inline merge attempt from a reconcile', () => {
-  const green = { checksState: 'success', approvals: 1, requiredApprovals: 1, mergeable: true, mergeableState: 'clean' };
-  const pull = { number: 7, state: 'open', merged: false };
+// useless as a health signal. The drain's backoff never applied, because it only reads the queue. So the
+// reconcile no longer merges at all: it enqueues, records the gate it saw, and the drain executes.
+describe('a reconcile that meets an auto-merge gate', () => {
+  const source = readFileSync(new URL('./workflows-store.ts', import.meta.url), 'utf8');
+  const body = source.slice(source.indexOf('async function scheduleServerAutoMerge'), source.indexOf('async function scheduleServerAutoCreate'));
 
-  it('skips the attempt while the gate can only be cleared by a later event', () => {
-    expect(automationInlineMergeShouldAttempt(automationMergeOutcome(pull, { ...green, checksState: 'pending' }))).toBe(false);
-    expect(automationInlineMergeShouldAttempt(automationMergeOutcome(pull, { ...green, approvals: 0 }))).toBe(false);
-    expect(automationInlineMergeShouldAttempt(automationMergeOutcome(pull, { ...green, mergeable: null }))).toBe(false);
+  it('never executes the action itself, because only the drain enforces the backoff and the cancellations', () => {
+    expect(body).not.toContain('executeWorkflowAutomationActionForUser');
   });
 
-  it('attempts as soon as the gate is green, so a cleared gate still merges on the event that cleared it', () => {
-    expect(automationInlineMergeShouldAttempt(automationMergeOutcome(pull, green))).toBe(true);
+  // Without this the row keeps the reason of a gate nobody is behind any more, and the drain skips it for
+  // as long as the backoff computed from that reason says to — up to thirty minutes for a merge that is
+  // ready now. The reason is what puts the action in the window, so clearing it is what takes it out.
+  it('releases the action from the backoff window once the gate it was waiting on is green', () => {
+    const released = body.slice(body.indexOf("if (outcome.kind === 'paused')"));
+    expect(released).toContain('failure_reason = NULL');
+    expect(released).toContain('updated_at = now()');
   });
 
-  // A verdict nobody can clear is worth writing down promptly: it is what the failure centre shows, and
-  // the new head sha a fix brings enqueues its own action anyway.
-  it('still attempts a verdict that no event will clear', () => {
-    expect(automationInlineMergeShouldAttempt(automationMergeOutcome(pull, { ...green, checksState: 'failure' }))).toBe(true);
-    expect(automationInlineMergeShouldAttempt(automationMergeOutcome(pull, { ...green, mergeableState: 'behind' }))).toBe(true);
-    expect(automationInlineMergeShouldAttempt(automationMergeOutcome(pull, { ...green, mergeable: false }))).toBe(true);
+  // Bumping it on every delivery would keep pushing the window forward, and the drain would never get its
+  // turn as the net — which is the whole reason the reason is written on a row that stays queued.
+  it('leaves updated_at alone while the gate still holds, so the wait does not restart on every delivery', () => {
+    const paused = body.slice(body.indexOf("if (outcome.kind === 'paused')"), body.indexOf('failure_reason = NULL'));
+    expect(paused).toContain('failure_reason = ${outcome.reason');
+    expect(paused).not.toContain('updated_at = now()');
   });
 });
 

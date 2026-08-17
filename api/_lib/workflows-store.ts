@@ -186,22 +186,22 @@ async function enqueueServerAutoMerge(sql: ReturnType<typeof query>, row: Tracke
   return concurrent[0]?.state === 'queued' ? automationActionId(concurrent[0].id) : null;
 }
 
-async function scheduleServerAutoMerge(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, pullNumber: number, headSha: string, gate: { checksState: string; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string }) {
+async function scheduleServerAutoMerge(sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, pullNumber: number, headSha: string, gate: { checksState: string; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string }) {
   const actionId = await enqueueServerAutoMerge(sql, row, workflow, stageIndex, source, pullNumber, headSha);
   if (!actionId) return;
   const outcome = automationMergeOutcome({ number: pullNumber, state: 'open' }, gate);
-  if (outcome.kind === 'paused' && !automationInlineMergeShouldAttempt(outcome)) {
+  if (outcome.kind === 'paused') {
     // Naming the wait on the queued row is what the failure centre shows, and a reason is also what
     // engages the drain's backoff. `updated_at` is deliberately left alone: bumping it on every delivery
     // would keep pushing the backoff window forward and the drain would never get its turn as the net.
     await sql`UPDATE workflow_automation_actions SET failure_reason = ${outcome.reason.slice(0, 800)} WHERE user_id = ${row.user_id} AND id = ${actionId} AND state = 'queued'`.catch(() => undefined);
     return;
   }
-  try { await executeWorkflowAutomationActionForUser(environment, row.user_id, row.github_installation_id!, actionId); }
-  catch (error) {
-    const reason = error instanceof Error ? error.message : '自动合并 PR 失败';
-    await sql`UPDATE workflow_automation_actions SET failure_reason = ${reason.slice(0, 800)}, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${actionId} AND state = 'queued'`.catch(() => undefined);
-  }
+  // The drain is the only executor, so this delivery's job is to release the action rather than run it:
+  // the reason is what holds a queued row inside its backoff window, and that window was computed for a
+  // gate nothing is behind any more. Clearing it lets the next tick execute instead of waiting out a delay
+  // that has grown to as much as half an hour for a merge that is ready now.
+  await sql`UPDATE workflow_automation_actions SET failure_reason = NULL, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${actionId} AND state = 'queued' AND failure_reason IS NOT NULL`.catch(() => undefined);
 }
 
 async function scheduleServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string) {
@@ -276,14 +276,6 @@ export function automationMergeOutcome(pull: { number: number; state: string; me
   return { kind: 'merge' as const, pullNumber: pull.number };
 }
 
-// A retryable pause is a wait for an event, and the reconcile that observes that event attempts the merge
-// then. Attempting in between re-reads from GitHub the very gate this verdict was computed from, so it
-// cannot reach a different answer: it only spends calls and inflates the attempt count, which is the
-// signal the drain's backoff and the failure centre both read.
-export function automationInlineMergeShouldAttempt(outcome: ReturnType<typeof automationMergeOutcome>) {
-  return !(outcome.kind === 'paused' && 'retryable' in outcome && outcome.retryable === true);
-}
-
 // A claim that stops updating for longer than this can only be an instance that was recycled: every
 // path that reaches a verdict writes one.
 export const AUTOMATION_ACTION_ABANDON_MS = 120_000;
@@ -297,9 +289,10 @@ export const AUTOMATION_ACTION_STALE_MS = 12 * 60 * 60 * 1000;
 export const AUTOMATION_TRANSIENT_REQUEUE_COOLDOWN_MS = 15 * 60 * 1000;
 export const AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS = 3;
 
-// A gate-held action is not retried on a clock to make it succeed sooner — the event that clears the gate
-// runs it inline — so this only bounds how late a missed event is recovered. Short enough to stay inside
-// the hour the person who pushed is still watching.
+// A gate-held action is not retried on a clock to make it succeed sooner: the delivery that observes the
+// cleared gate releases the action from this window and the next drain tick runs it, so this only bounds
+// how late a gate that cleared without a delivery is recovered. Short enough to stay inside the hour the
+// person who pushed is still watching.
 export const AUTOMATION_GATE_WAIT_MAX_MS = 30 * 60 * 1000;
 
 // Each unanswered attempt earns a longer wait than the one before it: an approval nobody has given is no
@@ -353,8 +346,8 @@ export function automationDrainDecision(action: { state: string; createdAt: stri
   // A queued row carrying a reason was put back to wait: either the executor found a gate only an event can
   // clear, or the request that enqueued it threw before claiming. Neither is bounded by the attempt cap,
   // which only reads rows that reached a verdict, and one PR waiting on a single approval reached
-  // thirty-five attempts because of it. The reconcile that the clearing event triggers runs the action
-  // inline, so nothing arrives sooner for the drain having asked again in between.
+  // thirty-five attempts because of it. The reconcile that observes the cleared gate clears this reason, so
+  // a row still carrying one is still behind its gate and nothing arrives sooner for asking again.
   if (action.state === 'queued' && action.failureReason && now - Date.parse(action.updatedAt) < automationGateWaitDelayMs(action.attempts, policy)) return { kind: 'skip' };
   return { kind: 'execute' };
 }
@@ -1701,7 +1694,7 @@ async function reconcileStageWork(environment: Record<string, string | undefined
   if (comparison.ahead_by > 0 && comparisonHeadSha) await scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha);
   // Only an open pull request can be merged, and the gate verdict is pinned to the head sha just stored.
   // The gate goes in already computed, so a wait that only a later event can end costs no second read.
-  if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await phase('write', () => scheduleServerAutoMerge(environment, sql, row, workflow, stageIndex, source, pull.number, pull.head.sha, { checksState: checks.state, approvals, requiredApprovals, mergeable: pull.mergeable ?? null, mergeableState: pull.mergeable_state || '' }));
+  if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await phase('write', () => scheduleServerAutoMerge(sql, row, workflow, stageIndex, source, pull.number, pull.head.sha, { checksState: checks.state, approvals, requiredApprovals, mergeable: pull.mergeable ?? null, mergeableState: pull.mergeable_state || '' }));
   return { reconciled: true, phases };
 }
 
