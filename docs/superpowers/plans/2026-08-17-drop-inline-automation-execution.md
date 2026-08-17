@@ -1,4 +1,4 @@
-# 收敛自动化动作的执行入口：删掉 sweep 内联执行（2026-08-17，已定方案 B，待批准实施）
+# 收敛自动化动作的执行入口：删掉 sweep 内联执行（2026-08-17，方案 B 已实施、已部署并验收）
 
 对应 [`handoff.md`](../../../handoff.md) 后续事项第 6 项：「drain 稳定观察若干天后，删掉 sweep 内联的执行路径，让自动化动作只剩一条执行入口」。drain 自 2026-08-15 17:06 由 `pg_cron` 每 2 分钟驱动（迁移 030），已连续运行两天以上，包含 2026-08-17 13:55–15:45 那场 GitHub 上游故障，具备动手的前提。
 
@@ -78,16 +78,17 @@
 
 全量门槛照旧：`npm test`（当前 488 通过 / 27 文件）与 `npx tsc --noEmit`。
 
-## 五、生产验收
+## 五、生产验收（2026-08-17 23:39 UTC 部署，已通过）
 
-沙箱阶段在 `bayernjf/pr-helper-e2e-sandbox` 的 `E2E Failure and Dynamic Rule` 流程做（既有约定），只看四件事：
+沙箱阶段在 `bayernjf/pr-helper-e2e-sandbox` 的 `E2E Failure and Dynamic Rule` 流程做（既有约定）。按 B 的范围只看三件事，第 4 项作废，理由见下。
 
-1. **create 延迟**：push 一个分支，量 `created_at → updated_at`。预期从 ≤15 秒变成 ≤120 秒且 `attempts = 1`。**这是回归，不是缺陷**——验收要确认的是它落在 120 秒内、不是掉进分钟级。
-2. **门禁清除后的合并延迟**：造一个等 Approval 的 PR，给出 Approval，量从 Approval 到 merge。预期 ≤120 秒。若出现 5 分钟以上，第二节的信号源改动没生效。
-3. **attempts 收敛**：同一批动作的 `max(attempts)` 应落在个位数。历史峰值 47 / 26 全部来自内联路径，这是删除的主要收益，也是唯一能证明收益的指标。
-4. **`workflow_automation_actions` 无新增 `paused` 堆积**：删除后所有失败都经 drain 记录，`failure_reason` 应带「排空时执行失败：」前缀（`automationDrainFailureReason`）而不再有裸的「自动创建 PR 失败」/「自动合并 PR 失败」——后两条字符串是内联 catch 的独有产物，它们归零即证明内联路径确实没了。
+1. **create 延迟不变**（B 保留内联创建，这一项是「确认没被误删」而不是「确认回归可接受」）。**通过**：push `fix/inline-removal-acceptance` → 动作 247 `create-pr` **7.4 秒**成功、`attempts = 1`，与部署前 p50 8.6 秒同一量级。
+2. **门禁清除后的合并延迟 ≤120 秒**。**通过，且是这批改动的关键判据**。对象是动作 239（PR #15，`fix/archive-while-archived → dev`，`attempts = 16`、`failure_reason = 'PR 还需要 1 个 Approval'`、`updated_at = 23:28:04`）。`automationGateWaitDelayMs(16)` 已撞 30 分钟上限，即 drain 本会跳过它到 **23:58:04**。实测：Approval 于 **23:46:47** 给出 → 23:47:08（21 秒后）webhook 那次 sweep 把 `failure_reason` 清空并把 `updated_at` 推到当刻 → **23:48:07 合并成功**（GitHub 侧 `mergedAt = 23:48:06`），距 Approval **80.2 秒**，`attempts` 16 → 17。没有第二节的信号源改动，同一个动作要等到 23:58:04，即慢约 11 分钟——这 11 分钟就是「删内联」若不配套改造会付出的代价，这里被量到了。
+3. **attempts 收敛**。**通过**。部署后新建动作 `max(attempts) = 1`。更直接的证据是动作 248（`fix/inline-removal-acceptance → dev`，同样卡在缺 1 个 Approval）：它入队后有 **4 次成功 sweep** 触达该仓，而它的 `attempts` 始终是 **0**，`updated_at` 一次未被推后。部署前这 4 次每次都是一轮内联合并尝试，每轮一次完整门禁重读（约 6 次 GitHub 调用）且 `attempts` 逐次加一——这正是历史峰值 47 的生成机制，现已归零。
+4. ~~**`失败字符串归零`**~~。**作废，判据本身错了**：`failure_reason` 在动作成功时被写成 `NULL`，「自动合并 PR 失败」这类瞬时原因不会在成功行上留存。部署前查一次即证：全表该字符串计数已经是 0。要证明内联合并没了应看第 3 项的 `attempts` 与 `updated_at`，或直接看 `origin/main` 的源码（`scheduleServerAutoMerge` 内不再出现 `executeWorkflowAutomationActionForUser`），不能靠这个计数。
 
-生产侧不做额外动作：不触发回滚，不改生产合并行为。
+生产侧不做额外动作：未触发回滚，未改生产合并行为。沙箱 PR #15 已合入沙箱 `dev`（Approval 由用户授权后经 `gh` 代提，记在 bayernjf 名下），PR #16 与动作 248 留作后续门禁场景的现成样本。
+
 
 ## 六、备选方案
 
