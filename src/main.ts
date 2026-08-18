@@ -2054,9 +2054,9 @@ function detail() {
   document.querySelector('#back-from-detail')!.addEventListener('click', () => returnToSourceLane(active!.id));
   document.querySelector('#edit-flow')!.addEventListener('click', () => { screen = 'editor'; render(); });
   document.querySelector('#refresh-status')!.addEventListener('click', () => { void refreshDetailStatuses(); });
-  document.querySelectorAll<HTMLButtonElement>('[data-dynamic-stage]').forEach(button => button.addEventListener('click', () => {
+  document.querySelectorAll<HTMLButtonElement>('[data-step-drawer-stage]').forEach(button => button.addEventListener('click', () => {
     if (!active) return;
-    showProjectStepDrawer(active.id, Number(button.dataset.dynamicStage), button.dataset.dynamicSource);
+    showProjectStepDrawer(active.id, Number(button.dataset.stepDrawerStage), button.dataset.stepDrawerSource);
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-codex-repair]').forEach(button => button.addEventListener('click', () => {
     const index = Number(button.dataset.codexRepair);
@@ -2243,7 +2243,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const autoControl = `<div class="timeline-automation"><label class="timeline-auto-create"><input type="checkbox" data-detail-auto-create-stage="${index}" ${autoEnabled ? 'checked' : ''} ${autoDisabled ? 'disabled' : ''} /><span>${t('draft.autoCreate')}</span><span>${t('draft.autoCreateThreshold')}</span><input class="auto-create-threshold" type="number" min="1" max="20" step="1" value="${threshold}" data-detail-auto-create-threshold="${index}" aria-label="${escape(t('draft.autoCreateThreshold'))}" title="${escape(t('draft.autoCreateThresholdTooltip'))}" ${autoDisabled ? 'disabled' : ''} /></label>${mergeControl}<small>${escape(autoHint)}</small>${mergeHint === autoHint ? '' : `<small>${escape(mergeHint)}</small>`}${automationDetailBlock(active!.id, index, stage.source, false)}</div>`;
   if (stage.source.includes('*')) {
     const states = active ? statesForStage(active, index) : [];
-    const runs = states.map(state => `<button type="button" class="timeline-action" data-dynamic-stage="${index}" data-dynamic-source="${escape(state.source)}"><b>${escape(state.source)}</b><small>${escape(dynamicBranchStatusText(state))}</small></button>`).join('');
+    const runs = states.map(state => `<button type="button" class="timeline-action" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(state.source)}"><b>${escape(state.source)}</b><small>${escape(dynamicBranchStatusText(state))}</small></button>`).join('');
     return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p class="meta">${t('detail.dynamicRoute')}</p>${runs ? `<div class="timeline-actions dynamic-stage-actions">${runs}</div>` : `<p>${t('detail.timeline.placeholder')}</p>`}</div></article>`;
   }
   const status = statuses?.[index];
@@ -2278,9 +2278,12 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const stateClass = status.kind === 'merged' ? mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
   const mergeAction = status.kind === 'open' && !recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(active!, 'pull-merge') ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
   const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';
+  // The drawer owns every per-step operation (rerun, sync, deployment retry). Without an entry point
+  // here a static step's recovery actions were reachable only from the board, unlike a dynamic one.
+  const drawerAction = `<button type="button" class="timeline-action" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(stage.source)}">${t('overview.board.stepDetail')}</button>`;
   const gateList = gates.filter(Boolean);
   const sourceBranchWarning = status.sourceBranchMissing ? `<p class="meta">${t('status.sourceBranchDeletedHint')}</p>` : '';
-  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
+  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${drawerAction}${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
 }
 async function refreshDetailStatuses() {
   await refreshStatuses(false, false);
