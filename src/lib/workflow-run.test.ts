@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { automationActionPresentation, latestAutomationAction, stageRunPresentation, workflowRunSummary } from './workflow-run';
+import { automationActionPresentation, latestAutomationAction, stageProgressNode, stageRunPresentation, workflowProgress, workflowRunSummary, worstStageProgress } from './workflow-run';
 
 describe('workflow run presentation', () => {
   it('prioritizes a failed Actions gate over other stage information', () => {
@@ -59,5 +59,86 @@ describe('latestAutomationAction', () => {
     expect(latestAutomationAction(actions, 's3', 'dev')).toBeUndefined();
     // A step matches on its route too: the same stage can carry several dynamic branches.
     expect(latestAutomationAction(actions, 's1', 'other')).toBeUndefined();
+  });
+});
+
+describe('stageProgressNode', () => {
+  const decision = (kind: string) => ({ kind, actionable: false, canCreateNext: false, message: '' });
+
+  it('reports a merged step with green post-merge gates as done', () => {
+    expect(stageProgressNode({ decision: decision('merged') }).status).toBe('succeeded');
+  });
+
+  // A failed action and a red gate are different facts, and either one is the reason the flow stopped
+  // here. Neither may be softened by an automation row that still looks busy.
+  it('reports a failure whether it came from the action or from the gates', () => {
+    expect(stageProgressNode({ decision: decision('merged'), automation: { state: 'failed', failureReason: 'boom' } }).status).toBe('failed');
+    expect(stageProgressNode({ decision: decision('checks-failed') }).status).toBe('failed');
+  });
+
+  it('reports a paused action as blocked so it reads as needing a person', () => {
+    expect(stageProgressNode({ decision: decision('waiting'), automation: { state: 'paused', failureReason: '门禁尚未全绿' } }).status).toBe('blocked');
+  });
+
+  // The server names a gate wait on the still-`queued` row rather than pausing it, so a reason on a
+  // queued action means waiting, not moving. Without this the bar would claim work is in flight while
+  // the action is parked behind an Approval.
+  it('separates an action waiting on a gate from one actually running', () => {
+    expect(stageProgressNode({ decision: decision('waiting'), automation: { state: 'queued', failureReason: 'PR 还需要 1 个 Approval' } }).status).toBe('waiting-gates');
+    expect(stageProgressNode({ decision: decision('waiting'), automation: { state: 'queued', failureReason: null } }).status).toBe('running');
+    expect(stageProgressNode({ decision: decision('waiting'), automation: { state: 'running', failureReason: null } }).status).toBe('running');
+  });
+
+  it('reports a step waiting on an approval as waiting on gates', () => {
+    expect(stageProgressNode({ decision: decision('needs-approval') }).status).toBe('waiting-gates');
+  });
+
+  it('reports a step a person could act on as ready', () => {
+    expect(stageProgressNode({ decision: decision('ready-to-create') }).status).toBe('ready');
+    expect(stageProgressNode({ decision: decision('ready-to-merge') }).status).toBe('ready');
+  });
+
+  it('reports an upstream-blocked step as locked', () => {
+    expect(stageProgressNode({ decision: decision('locked') }).status).toBe('locked');
+  });
+
+  // A step with no projection yet is not idle by choice — it has never been reconciled. Calling it
+  // locked or ready would both be claims the data does not support.
+  it('reports a step with no projection as idle', () => {
+    expect(stageProgressNode({}).status).toBe('idle');
+    expect(stageProgressNode({ decision: decision('none') }).status).toBe('idle');
+    expect(stageProgressNode({ decision: decision('waiting') }).status).toBe('idle');
+  });
+});
+
+describe('worstStageProgress', () => {
+  // A wildcard step carries one projection per branch. If any branch is broken the step is broken:
+  // averaging or taking the newest would hide the one route that needs attention.
+  it('reports the most severe route of a step with several branches', () => {
+    expect(worstStageProgress(['succeeded', 'failed'])).toBe('failed');
+    expect(worstStageProgress(['succeeded', 'waiting-gates'])).toBe('waiting-gates');
+    expect(worstStageProgress(['blocked', 'failed'])).toBe('failed');
+    expect(worstStageProgress(['ready', 'locked'])).toBe('ready');
+  });
+
+  it('reports done only when every route of the step is done', () => {
+    expect(worstStageProgress(['succeeded', 'succeeded'])).toBe('succeeded');
+    expect(worstStageProgress([])).toBe('idle');
+  });
+});
+
+describe('workflowProgress', () => {
+  it('counts finished steps and points at the first unfinished one', () => {
+    expect(workflowProgress(['succeeded', 'succeeded', 'waiting-gates', 'locked'])).toEqual({ completed: 2, total: 4, currentIndex: 2 });
+  });
+
+  // A finished flow has no current step to point at, and reporting index 4 of 4 would render a node
+  // that does not exist.
+  it('points at the last step once every step is done', () => {
+    expect(workflowProgress(['succeeded', 'succeeded'])).toEqual({ completed: 2, total: 2, currentIndex: 1 });
+  });
+
+  it('handles a flow with no steps', () => {
+    expect(workflowProgress([])).toEqual({ completed: 0, total: 0, currentIndex: 0 });
   });
 });
