@@ -16,8 +16,11 @@ describe('route mode editing', () => {
     expect(source).toContain('<input id="independent-route" type="checkbox" />');
   });
 
-  it('offers an edit entry on every step that has a step before it', () => {
-    expect(body('renderDraft')).toContain("index > 0 ? `<button type=\"button\" data-edit-route=\"${index}\">");
+  // A reorder keeps the independent marker, so a step dragged to the first position still shows the badge.
+  // Skipping the first row would leave that one step with no way back to sequential.
+  it('offers an edit entry on every step, including the first', () => {
+    expect(body('renderDraft')).toContain("editable ? `<button type=\"button\" data-edit-route=\"${index}\">");
+    expect(body('renderDraft')).not.toContain('index > 0 ?');
     expect(body('bindDraftActions')).toContain('stageRouteEditIndex = Number(button.dataset.editRoute)');
   });
 
