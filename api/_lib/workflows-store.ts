@@ -770,6 +770,20 @@ export function workflowRunCompletionState(merged: boolean, checksState: string)
   return null;
 }
 export const STAGE_STALE_THRESHOLD_SECONDS = 15 * 60;
+export const STAGE_UNCONVERGED_THRESHOLD_SECONDS = 45 * 60;
+
+export function stageUnconvergedThresholdSeconds(environment: Record<string, string | undefined>) {
+  const configured = Number(environment.STAGE_UNCONVERGED_THRESHOLD_SECONDS);
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  return STAGE_UNCONVERGED_THRESHOLD_SECONDS;
+}
+
+export function stageConvergenceVerdict(sample: { stageCount: number; oldestStageAgeSeconds: number | null }, thresholdSeconds: number) {
+  const age = sample.oldestStageAgeSeconds;
+  if (!sample.stageCount || age === null) return { healthy: true as const, reason: null };
+  if (age <= thresholdSeconds) return { healthy: true as const, reason: null };
+  return { healthy: false as const, reason: `oldest stage projection is ${age}s old, over the ${thresholdSeconds}s threshold` };
+}
 
 export const DEFAULT_RECOVERY_POLICY = { maxRetries: 3, cooldownSeconds: 300 };
 export type RecoveryPolicy = { maxRetries: number; cooldownSeconds: number };
@@ -2282,6 +2296,28 @@ export async function listSyncHealth(environment: Record<string, string | undefi
     return { workflowId: row.workflow_id, stageIndex: row.stage_index, stageId: row.stage_id, source: row.source, target: row.target, updatedAt, ageSeconds, stale: ageSeconds > STAGE_STALE_THRESHOLD_SECONDS };
   });
   return { lastReconciliation, triggerHealth: triggerRuns.map(asReconciliationRun), stages, webhookDeliveriesLast24h: webhookCount[0]?.count || 0 };
+}
+
+export async function readConvergenceHealth(environment: Record<string, string | undefined>) {
+  const sql = query(environment);
+  const [stageSample, cronSample] = await Promise.all([
+    sql<{ stage_count: number; oldest_age_seconds: number | null; stale_count: number }[]>`SELECT count(*)::int AS stage_count, floor(extract(epoch from (now() - min(updated_at))))::int AS oldest_age_seconds, count(*) FILTER (WHERE updated_at < now() - make_interval(secs => ${STAGE_STALE_THRESHOLD_SECONDS}))::int AS stale_count FROM workflow_stage_states`,
+    sql<{ total: number; degraded: number }[]>`SELECT count(*)::int AS total, count(*) FILTER (WHERE state = 'degraded')::int AS degraded FROM reconciliation_runs WHERE trigger = 'cron' AND state <> 'skipped' AND started_at > now() - interval '1 hour'`,
+  ]);
+  const stageCount = stageSample[0]?.stage_count || 0;
+  const oldestStageAgeSeconds = stageCount ? stageSample[0]?.oldest_age_seconds ?? null : null;
+  const thresholdSeconds = stageUnconvergedThresholdSeconds(environment);
+  const verdict = stageConvergenceVerdict({ stageCount, oldestStageAgeSeconds }, thresholdSeconds);
+  return {
+    healthy: verdict.healthy,
+    reason: verdict.reason,
+    thresholdSeconds,
+    stageCount,
+    oldestStageAgeSeconds,
+    staleStageCount: stageSample[0]?.stale_count || 0,
+    cronRunsLastHour: cronSample[0]?.total || 0,
+    cronDegradedLastHour: cronSample[0]?.degraded || 0,
+  };
 }
 
 export async function listWorkflowTimeline(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<TimelineEntry[]> {
