@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -1054,6 +1054,49 @@ describe('realtimeReconcileCeilingMs', () => {
   it('leaves the budget room to yield on its own before the backstop fires', () => {
     expect(realtimeReconcileCeilingMs(WEBHOOK_RECONCILE_BUDGET_MS)).toBeGreaterThan(WEBHOOK_RECONCILE_BUDGET_MS);
     expect(realtimeReconcileCeilingMs(REALTIME_RECONCILE_BUDGET_MS)).toBeGreaterThan(REALTIME_RECONCILE_BUDGET_MS);
+  });
+});
+
+describe('stageUnconvergedThresholdSeconds', () => {
+  it('falls back to the packaged threshold when the environment says nothing usable', () => {
+    expect(stageUnconvergedThresholdSeconds({})).toBe(STAGE_UNCONVERGED_THRESHOLD_SECONDS);
+    expect(stageUnconvergedThresholdSeconds({ STAGE_UNCONVERGED_THRESHOLD_SECONDS: 'later' })).toBe(STAGE_UNCONVERGED_THRESHOLD_SECONDS);
+    expect(stageUnconvergedThresholdSeconds({ STAGE_UNCONVERGED_THRESHOLD_SECONDS: '0' })).toBe(STAGE_UNCONVERGED_THRESHOLD_SECONDS);
+  });
+
+  it('takes a configured threshold so the alarm can be retuned without a deploy of new code', () => {
+    expect(stageUnconvergedThresholdSeconds({ STAGE_UNCONVERGED_THRESHOLD_SECONDS: '600' })).toBe(600);
+  });
+
+  // The scheduled sweep runs every 5 minutes over an 8-workflow batch, so a healthy account still shows
+  // projections some minutes old — the observed maximum was 13 minutes. The alarm sits far above that
+  // because its job is to catch a system that stopped converging, not one that is merely behind.
+  it('stays well above the age a healthy sweep leaves behind', () => {
+    expect(STAGE_UNCONVERGED_THRESHOLD_SECONDS).toBeGreaterThan(STAGE_STALE_THRESHOLD_SECONDS * 2);
+  });
+});
+
+describe('stageConvergenceVerdict', () => {
+  it('reports healthy while the oldest projection is younger than the threshold', () => {
+    expect(stageConvergenceVerdict({ stageCount: 55, oldestStageAgeSeconds: 780 }, STAGE_UNCONVERGED_THRESHOLD_SECONDS).healthy).toBe(true);
+  });
+
+  // Equality is the boundary of "still inside the window", so it must not fire: a threshold that fires at
+  // exactly its own value would alarm on the first sample of a system that is behaving as designed.
+  it('treats an age exactly at the threshold as still healthy', () => {
+    expect(stageConvergenceVerdict({ stageCount: 55, oldestStageAgeSeconds: 2700 }, 2700).healthy).toBe(true);
+  });
+
+  it('reports unhealthy once the oldest projection outlives the threshold', () => {
+    const verdict = stageConvergenceVerdict({ stageCount: 55, oldestStageAgeSeconds: 2701 }, 2700);
+    expect(verdict.healthy).toBe(false);
+    expect(verdict.reason).toContain('2701');
+  });
+
+  // An account with no workflows has nothing to converge. Reading emptiness as an outage would page
+  // someone on a brand new install, and on every account whose stage rows were just pruned.
+  it('reports healthy when there are no stage rows at all', () => {
+    expect(stageConvergenceVerdict({ stageCount: 0, oldestStageAgeSeconds: null }, STAGE_UNCONVERGED_THRESHOLD_SECONDS).healthy).toBe(true);
   });
 });
 
