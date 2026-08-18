@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -1560,8 +1560,51 @@ describe('serverAutomationActivated', () => {
   });
 });
 
+// Changing a step's route mode changes whether it is unlocked, and the unlock is computed from the
+// persisted stage states rather than from the payload. Without a sweep the user keeps seeing the gate the
+// old mode implied until the next scheduled round.
+describe('stageGateChanged', () => {
+  const stage = (stageId: string, gate?: { independent?: boolean; waitFor?: number[] }) => ({ source: 'dev', target: 'main', stageId, ...gate });
+  const workflow = (stages: ReturnType<typeof stage>[]) => ({ id: 'w1', repository: 'acme/app', stages }) as never;
+
+  it('reports a change when a step stops being independent', () => {
+    expect(stageGateChanged(workflow([stage('s1', { independent: true })]), workflow([stage('s1')]))).toBe(true);
+  });
+
+  it('reports a change when a step starts being independent', () => {
+    expect(stageGateChanged(workflow([stage('s1')]), workflow([stage('s1', { independent: true })]))).toBe(true);
+  });
+
+  it('reports a change when the dependencies change', () => {
+    expect(stageGateChanged(workflow([stage('s1', { waitFor: [0] })]), workflow([stage('s1', { waitFor: [0, 1] })]))).toBe(true);
+    expect(stageGateChanged(workflow([stage('s1', { waitFor: [0] })]), workflow([stage('s1')]))).toBe(true);
+  });
+
+  it('stays quiet when the gate is untouched', () => {
+    expect(stageGateChanged(workflow([stage('s1', { independent: true })]), workflow([stage('s1', { independent: true })]))).toBe(false);
+    expect(stageGateChanged(workflow([stage('s1', { waitFor: [0] })]), workflow([stage('s1', { waitFor: [0] })]))).toBe(false);
+  });
+
+  // A new workflow has nothing to recompute, and a reorder rewrites waitFor indexes without changing
+  // which steps a step waits for, so matching by id keeps both from asking for a sweep.
+  it('stays quiet for a newly saved workflow', () => {
+    expect(stageGateChanged(null, workflow([stage('s1', { independent: true })]))).toBe(false);
+  });
+
+  it('stays quiet when a step is only moved', () => {
+    const before = workflow([stage('s1'), stage('s2', { independent: true })]);
+    const after = workflow([stage('s2', { independent: true }), stage('s1')]);
+    expect(stageGateChanged(before, after)).toBe(false);
+  });
+});
+
 describe('workflow save route', () => {
   const source = readFileSync(new URL('../workflows.ts', import.meta.url), 'utf8');
+
+  it('reconciles when a step\'s route mode changes, because the unlock it implies is computed server-side', () => {
+    const trigger = source.slice(source.indexOf('const reconciliation'), source.indexOf('response.status(200).json({ ok: true, workflow: saved.workflow'));
+    expect(trigger).toContain('saved.gatesChanged');
+  });
 
   it('reconciles when either automation toggle activates, because auto-merge acts on an already created pull request', () => {
     const trigger = source.slice(source.indexOf('const reconciliation'), source.indexOf('response.status(200).json({ ok: true, workflow: saved.workflow'));

@@ -257,6 +257,26 @@ export function setStageAutoMerge(workflow: Workflow, stageIndex: number, enable
   return { ...workflow, stages: workflow.stages.map((current, index) => index === stageIndex ? { ...current, automation } : current) };
 }
 
+export type StageRouteMode =
+  | { kind: 'sequential' }
+  | { kind: 'independent' }
+  | { kind: 'wait-for'; waitFor: number[] };
+
+// The three modes are exclusive: `waitFor` wins over `independent` wherever both are read, so carrying
+// two of them would leave a gate silently ignored. A dependency must name an earlier step, matching the
+// server's save validation, otherwise the save would be rejected after the UI already showed it applied.
+export function setStageRouteMode(workflow: Workflow, stageIndex: number, mode: StageRouteMode): Workflow {
+  if (!Number.isInteger(stageIndex) || !workflow.stages[stageIndex]) return workflow;
+  if (mode.kind === 'wait-for' && (!mode.waitFor.length || !mode.waitFor.every(dependency => Number.isInteger(dependency) && dependency >= 0 && dependency < stageIndex))) return workflow;
+  return { ...workflow, stages: workflow.stages.map((stage, index) => {
+    if (index !== stageIndex) return stage;
+    const { independent, waitFor, ...rest } = stage;
+    if (mode.kind === 'independent') return { ...rest, independent: true };
+    if (mode.kind === 'wait-for') return { ...rest, waitFor: [...new Set(mode.waitFor)].sort((left, right) => left - right) };
+    return rest;
+  }) };
+}
+
 export function removeStage(workflow: Workflow, index: number): Workflow {
   return {
     ...workflow,

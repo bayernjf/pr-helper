@@ -83,8 +83,9 @@ export default async function handler(request: ApiRequest, response: ApiResponse
       const saved = await upsertWorkflow(process.env, identity, payload.workflow);
       // Either toggle earns an immediate sweep. Auto-merge acts on a pull request that already exists,
       // so waiting for the next GitHub event removes no consequence; the tick-time confirmation is
-      // what makes the merge an explicit user action.
-      const reconciliation = (saved.automationActivated.create || saved.automationActivated.merge) && session.installationId
+      // what makes the merge an explicit user action. A changed route mode earns one for a different
+      // reason: it changes which steps are unlocked, and that is read from persisted stage state.
+      const reconciliation = (saved.automationActivated.create || saved.automationActivated.merge || saved.gatesChanged) && session.installationId
         ? await reconcileRealtime(process.env, { installationId: session.installationId, repository: saved.workflow.repository, eventName: 'automation_enabled' }, 'manual')
         : null;
       response.status(200).json({ ok: true, workflow: saved.workflow, ...(reconciliation ? { reconciliation } : {}) });

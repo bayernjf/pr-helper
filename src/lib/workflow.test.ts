@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { activeWorkflows, addDeployment, archiveWorkflow, archivedWorkflows, isWorkflowArchived, restoreWorkflow, replaceDeployment, deploymentSuggestions, defaultDeployments, deploymentsForRepository, syncedDeployments, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type Workflow } from './workflow';
+import { activeWorkflows, addDeployment, archiveWorkflow, archivedWorkflows, isWorkflowArchived, restoreWorkflow, replaceDeployment, deploymentSuggestions, defaultDeployments, deploymentsForRepository, syncedDeployments, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type Workflow } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -169,6 +169,52 @@ describe('workflow configuration', () => {
       { source: 'feature/login', target: 'dev' },
       { source: 'fix/payment', target: 'dev', independent: true },
     ]);
+  });
+
+  // The route mode could only be chosen while adding a step, so a step set independent by mistake could
+  // only be undone by deleting and re-adding it — which mints a new stageId and drops that step's status,
+  // event and deployment history. Editing the mode in place is the whole point of keeping the stageId.
+  describe('setStageRouteMode', () => {
+    const branching = (): Workflow => ({
+      ...createWorkflow('bayernjf/pr-helper', 'feature/20260722', 'dev'),
+      stages: [
+        { source: 'feature/20260722', target: 'dev', stageId: 'stage-feature' },
+        { source: 'dev', target: 'main', stageId: 'stage-release', independent: true, automation: { autoMergePullRequest: true, executionMode: 'server' } },
+      ],
+    });
+
+    it('drops the independent marker so the step waits for the one before it again', () => {
+      expect(setStageRouteMode(branching(), 1, { kind: 'sequential' }).stages[1]).toEqual({
+        source: 'dev',
+        target: 'main',
+        stageId: 'stage-release',
+        automation: { autoMergePullRequest: true, executionMode: 'server' },
+      });
+    });
+
+    it('treats the three modes as exclusive so only one gate is ever in effect', () => {
+      const waiting = setStageRouteMode(branching(), 1, { kind: 'wait-for', waitFor: [0] });
+      expect(waiting.stages[1].waitFor).toEqual([0]);
+      expect(waiting.stages[1].independent).toBeUndefined();
+
+      const independent = setStageRouteMode(waiting, 1, { kind: 'independent' });
+      expect(independent.stages[1].independent).toBe(true);
+      expect(independent.stages[1].waitFor).toBeUndefined();
+    });
+
+    // The server rejects a save whose waitFor points at the step itself or a later one, so a dependency
+    // outside that range has to be refused here rather than sent and bounced.
+    it('refuses a dependency that is not an earlier step', () => {
+      const workflow = branching();
+      expect(setStageRouteMode(workflow, 1, { kind: 'wait-for', waitFor: [1] })).toEqual(workflow);
+      expect(setStageRouteMode(workflow, 1, { kind: 'wait-for', waitFor: [2] })).toEqual(workflow);
+      expect(setStageRouteMode(workflow, 1, { kind: 'wait-for', waitFor: [] })).toEqual(workflow);
+    });
+
+    it('leaves a workflow unchanged when the step does not exist', () => {
+      const workflow = branching();
+      expect(setStageRouteMode(workflow, 9, { kind: 'sequential' })).toEqual(workflow);
+    });
   });
 
   it('leaves a workflow unchanged when a step reorder target is invalid', () => {
