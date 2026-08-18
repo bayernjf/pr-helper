@@ -9,7 +9,7 @@
 - 当前分支：`feature/20260722`。
 - 用户已确认本批代码已上线 Production。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地验证已通过：`npm test`（27 个文件 / 412 项）、`npx tsc --noEmit`、`npm run build`。后台自动创建 PR 代码未改变现有手动流程行为；浏览器 E2E 已修复并全部通过（9/9）：Playwright 端口从 Vite 默认的 4173 挪到 4373，避免 `reuseExistingServer` 复用别的项目的开发服务；用例改为先展开看板卡片再点步骤，看板编辑按钮标签改判「编辑」。
+- 当前本地验证已通过：`npm test`（28 个文件 / 505 项）、`npx tsc --noEmit`、`npm run build`。后台自动创建 PR 代码未改变现有手动流程行为；浏览器 E2E 已修复并全部通过（9/9）：Playwright 端口从 Vite 默认的 4173 挪到 4373，避免 `reuseExistingServer` 复用别的项目的开发服务；用例改为先展开看板卡片再点步骤，看板编辑按钮标签改判「编辑」。
 - 最近本地提交 `b61e2d3e` 新增“测试已保存配置”：服务端解密保存的 AI 凭据并实际调用模型连接测试，15 秒超时，只返回成功或脱敏错误，不返回 API Key；生产端已验证连接成功（`agnes-2.0-flash`）。
 - 最近本地提交 `510a63c9` 为自动 PR 动作增加 AI 请求 20 秒超时、输出上限和过期 `running/paused` 动作回收重试，避免一次超时永久阻塞幂等动作。
 - Supabase 迁移 `001`–`031` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
