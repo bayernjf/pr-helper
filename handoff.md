@@ -70,7 +70,8 @@
 
     vercel env add REALTIME_RECONCILE_BUDGET_MS production   # 交互式输入 25000；branch 留空表示所有 production 部署
     vercel env ls production                                 # 只能看到名字，本项目所有变量都是 Sensitive
-    vercel redeploy --prod                                   # 或照常 merge 到 main 触发 git 部署；这一步不能省
+    vercel ls --prod                                         # 取当前生产部署 URL
+    vercel redeploy <上一步的 URL> --target production        # redeploy 没有 --prod，要 URL + --target；或照常 merge 到 main 触发 git 部署。这一步不能省
 
     vercel env rm REALTIME_RECONCILE_BUDGET_MS production     # 回退，同样要再部署一次
 
