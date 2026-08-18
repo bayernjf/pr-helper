@@ -476,3 +476,28 @@ test('从流程详情返回时目标泳道先高亮再自行褪去', async ({ pa
   }))).toEqual({ highlighted: true, ring: 'lane-return-highlight', bar: 'lane-return-bar', sheen: 'lane-return-sheen' });
   await expect(lane).not.toHaveClass(/is-return-highlight/);
 });
+
+test('流程详情的固定步骤可打开步骤抽屉并从中重新触发 Actions', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-detail-drawer',
+    name: '详情抽屉流程',
+    repository,
+    stages: [{ stageId: 'stage-detail', source: 'feature/e2e', target: 'dev' }],
+  };
+  const api = await openWorkspace(page, {
+    workflows: [workflow],
+    openPull: { number: 42, headSha: 'deadbeef' },
+    states: [{ workflowId: workflow.id, stageIndex: 0, stageId: 'stage-detail', repository, source: 'feature/e2e', target: 'dev', pullNumber: 42, pullState: 'open', mergedAt: null, headSha: 'deadbeef', checksState: 'failure', checksPassed: 0, checksTotal: 1, approvals: 0, requiredApprovals: 0, mergeable: false, mergeableState: 'blocked', aheadBy: 1, lastEvent: 'Actions failed', updatedAt: '2026-08-03T00:00:00.000Z' }],
+  });
+
+  await page.locator(`.lane-actions [data-open="${workflow.id}"]`).click();
+  // A static step used to have no way into the drawer from the detail page, which left its recovery
+  // actions reachable only from the board.
+  await page.locator('[data-step-drawer-stage="0"]').click();
+
+  const drawer = page.getByRole('dialog');
+  await drawer.getByRole('button', { name: '重新触发 Actions' }).click();
+
+  await expect.poll(() => api.requests.filter(request => request.pathname === '/api/rerun-actions')).toHaveLength(1);
+  expect(api.requests.find(request => request.pathname === '/api/rerun-actions')?.body).toEqual({ workflowId: workflow.id, stageIndex: 0, source: 'feature/e2e' });
+});
