@@ -210,6 +210,35 @@ test('编辑流程可重新排序步骤并保存新的顺序', async ({ page }) 
   ]);
 });
 
+test('步骤可就地改回等待前一步，并保留原有 stageId', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-route-mode',
+    name: '路由模式流程',
+    repository,
+    version: 3,
+    stages: [
+      { stageId: 'stage-1', source: 'feature/e2e', target: 'dev' },
+      { stageId: 'stage-2', source: 'dev', target: 'main', independent: true },
+    ],
+  };
+  const api = await openWorkspace(page, { workflows: [workflow] });
+
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  await page.locator('[data-edit-route="1"]').click();
+  await expect(page.locator('.route-mode-banner')).toContainText('dev → main');
+  await expect(page.locator('input[name="route-mode-choice"]:checked')).toHaveValue('independent');
+  // 第一步之前没有可等待的路径，所以依赖选项只列出它。
+  await expect(page.locator('.route-mode-dependencies label')).toHaveText(['feature/e2e → dev']);
+  await expect(page.locator('.route-mode-dependencies')).toBeHidden();
+
+  await page.getByRole('radio', { name: '等待前一步合并' }).check();
+  await page.locator('#update-route-mode').click();
+
+  // 删除再新建会换一个 stageId，从而丢掉该步骤的状态与事件历史；就地编辑的意义就在于 stageId 不变。
+  await expect.poll(() => api.workflows[0]?.stages[1]).toEqual({ stageId: 'stage-2', source: 'dev', target: 'main' });
+  await expect(page.locator('[data-draft-step]').nth(1)).not.toContainText('独立');
+});
+
 test('失败步骤抽屉显示重跑入口并调用受保护的服务端重跑接口', async ({ page }) => {
   const workflow: Workflow = {
     id: 'flow-failure',
