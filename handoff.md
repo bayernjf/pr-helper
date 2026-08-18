@@ -9,7 +9,7 @@
 - 当前分支：`feature/20260722`。
 - 用户已确认本批代码已上线 Production。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地验证已通过：`npm test`（28 个文件 / 505 项）、`npx tsc --noEmit`、`npm run build`。后台自动创建 PR 代码未改变现有手动流程行为；浏览器 E2E 已修复并全部通过（9/9）：Playwright 端口从 Vite 默认的 4173 挪到 4373，避免 `reuseExistingServer` 复用别的项目的开发服务；用例改为先展开看板卡片再点步骤，看板编辑按钮标签改判「编辑」。
+- 当前本地验证已通过：`npm test`（28 个文件 / 513 项）、`npx tsc --noEmit`、`npm run build`。后台自动创建 PR 代码未改变现有手动流程行为；浏览器 E2E 已修复并全部通过（9/9）：Playwright 端口从 Vite 默认的 4173 挪到 4373，避免 `reuseExistingServer` 复用别的项目的开发服务；用例改为先展开看板卡片再点步骤，看板编辑按钮标签改判「编辑」。
 - 最近本地提交 `b61e2d3e` 新增“测试已保存配置”：服务端解密保存的 AI 凭据并实际调用模型连接测试，15 秒超时，只返回成功或脱敏错误，不返回 API Key；生产端已验证连接成功（`agnes-2.0-flash`）。
 - 最近本地提交 `510a63c9` 为自动 PR 动作增加 AI 请求 20 秒超时、输出上限和过期 `running/paused` 动作回收重试，避免一次超时永久阻塞幂等动作。
 - Supabase 迁移 `001`–`031` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
@@ -77,7 +77,7 @@
 
 生效判据：部署后在界面点一次手动刷新，看最新那条 `inbox_refresh` 的 `duration_ms`——明显超过 10 秒（约 26 秒）即新预算已在用；仍卡在 9.9 秒说明变量没生效或部署没带上。**2026-08-18 00:28 UTC 已确认生效**：run 5368（`inbox_refresh`）55 个 stage、校准 36 个、**39962ms**，而旧 ceiling 是 `min(8000+15000, 45000) = 23000`，跑不到 40 秒。同时暴露一件更要紧的事：该账号 stage 总量就是 55，全量刷新的规模超出任何请求预算，40 秒只做完 65%，且其中约 15 秒花在阶段预算之外的路由解析上（`:1781-1788` 在 `withStageDeadline` 之前）。所以若一周后占比没降，出口是「交互请求不再同步等 sweep」而非继续加预算。
 
-**二、已明确后置**
+12. **收敛健康探针（代码已合，待部署后验收）**。08-17 的 GitHub 故障期里定时校准连续 degraded（那四个小时分别 3/14、13/14、11/14、3/14），但 `/api/cron/reconcile` 一律返回 200，Actions 全绿，**没有任何人被告知**。这次补的不是「degraded 就报警」——同期每次 degraded 仍校准了 14~15 个 stage，系统一直在收敛，根因是无从处置的上游故障，degraded 是机制不是危害。所以判据落在结果上：新增只读 `GET /api/cron/health`（`api/cron/health.ts`，同样只认 `CRON_SECRET`），最老的 stage 投影年龄超过 `STAGE_UNCONVERGED_THRESHOLD_SECONDS`（默认 45 分钟，可用同名环境变量覆盖）时返回 **503**，否则 200；响应体带 `oldestStageAgeSeconds` / `staleStageCount` / 最近一小时 cron 的 `total` 与 `degraded`。45 分钟取自实测：健康态下 55 行 stage 的最老投影 13 分钟、p90 13、p50 6（cron `*/5`、每轮 8 个流程），阈值约为观察峰值的 3.5 倍。`.github/workflows/reconcile-pr-helper.yml` 加了 `Report convergence health` 步骤，非 200 即 `exit 1`，且 `if: always()`——sweep 本身失败时这些数字最有用。空 stage 表判健康（新装账号和刚清理过的账号不该报警），单测已覆盖「刚好等于阈值不触发」「超过触发」「空表不触发」。**刻意没做的两件事**：不把判决塞进 `/api/cron/reconcile` 的状态码（会把「设计内让出」和「系统不健康」混成一件事，还会把 `net._http_response` 里灌满非 200）；不靠 UI 提示（「当时没人在看」这件事 UI 修不了）。**待你验收**：合并部署后，看下一次 scheduled run 的 Job Summary 里 `HTTP 200` 与那几个数字；另外我无法验证 GitHub 是否会就 scheduled workflow 失败给你发邮件，兜底信号是 Actions 页上的红叉。
 
 - **自动化进度条 UI 的完整方案**：只读诊断切片已于 2026-08-15 落地（`/api/inbox` 多带 `automation` 字段，受阻动作显示在失败中心、看板计数、泳道徽标、步骤抽屉和流程详情页五处）。仍后置的是 [`docs/automated-workflow-plan.md`](docs/automated-workflow-plan.md)《自动合并进度条》的完整方案：百分比、接管对话框、`unpause` 都是写路径，依赖第 2 项的「瞬时 vs 终态」分类先定下来。
 - **reconciliation 调用预算**：改为阈值观察，峰值小时越过约 2,500 次（基线 5,000 次/小时的一半）再设计模型。

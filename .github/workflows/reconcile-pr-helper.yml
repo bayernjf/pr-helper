@@ -14,6 +14,7 @@ jobs:
     env:
       CRON_SECRET: ${{ secrets.PR_HELPER_CRON_SECRET }}
       RECONCILE_URL: https://pr-helper-ten.vercel.app/api/cron/reconcile
+      HEALTH_URL: https://pr-helper-ten.vercel.app/api/cron/health
       DRAIN_URL: https://pr-helper-ten.vercel.app/api/cron/drain
     steps:
       - name: Check reconcile configuration
@@ -69,5 +70,29 @@ jobs:
           # One bad sweep is what the next sweep is for; every sweep failing is a real outage.
           if [[ "$failures" -eq "$SWEEPS" ]]; then
             echo "::error title=Reconcile failed::All $SWEEPS sweeps failed."
+            exit 1
+          fi
+
+      - name: Report convergence health
+        # A degraded sweep still returns 200, so nothing here noticed the day projections stopped
+        # converging. This step is the only push channel to a human, so it runs even when the sweep
+        # above failed: the numbers are most interesting exactly then.
+        if: always() && steps.config.outputs.configured == 'true'
+        run: |
+          status=$(curl --silent --show-error --max-time 30 --output health.json --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${CRON_SECRET}" \
+            "$HEALTH_URL") || status=000
+          {
+            echo "### Convergence health"
+            echo ""
+            echo "HTTP $status"
+            echo ""
+            echo '```json'
+            cat health.json 2>/dev/null || echo '{}'
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$status" != "200" ]]; then
+            echo "::error title=Stages not converging::/api/cron/health returned $status."
             exit 1
           fi
