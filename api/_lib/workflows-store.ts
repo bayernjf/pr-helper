@@ -1330,6 +1330,15 @@ export function serverAutomationActivated(previous: StoredWorkflow | null, next:
   };
 }
 
+// Matching by stage id keeps a reorder quiet: it rewrites waitFor indexes without changing which steps a
+// step waits for. A new workflow has no persisted stage state to recompute, so it asks for nothing here.
+export function stageGateChanged(previous: StoredWorkflow | null, next: StoredWorkflow) {
+  if (!previous) return false;
+  const gate = (stage: StoredWorkflowStage | undefined) => `${stage?.independent === true}|${(stage?.waitFor || []).join(',')}`;
+  const before = new Map(previous.stages.map(stage => [stage.stageId, stage]));
+  return next.stages.some(stage => before.has(stage.stageId) && gate(stage) !== gate(before.get(stage.stageId)));
+}
+
 // A row written before versioning has no version history, so an incoming save has nothing to
 // conflict with. Requiring the client to echo a version it was never given left those rows
 // permanently unsaveable, which failed every reorder — a reorder saves every workflow.
@@ -1381,11 +1390,12 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
     await sql`UPDATE pr_helper_workflows SET reconcile_pending_since = NULL WHERE user_id = ${ownerUserId} AND id = ${savedWorkflow.id}`.catch(() => undefined);
   }
   const activated = serverAutomationActivated(previous ?? null, savedWorkflow);
+  const gatesChanged = stageGateChanged(previous ?? null, savedWorkflow);
   // The marker is what makes the activation survive a sweep that runs out of budget: the next trigger
   // picks the workflow up first instead of waiting for the schedule. A restore needs it for the same
   // reason and more urgently — it may have missed hours of events while it sat archived.
-  if (activated.create || activated.merge || archiveTransition === 'restored') await sql`UPDATE pr_helper_workflows SET reconcile_pending_since = coalesce(reconcile_pending_since, now()) WHERE user_id = ${ownerUserId} AND id = ${savedWorkflow.id}`.catch(() => undefined);
-  return { workflow: existingAccess?.team ? { ...savedWorkflow, team: existingAccess.team } : savedWorkflow, automationActivated: activated };
+  if (activated.create || activated.merge || gatesChanged || archiveTransition === 'restored') await sql`UPDATE pr_helper_workflows SET reconcile_pending_since = coalesce(reconcile_pending_since, now()) WHERE user_id = ${ownerUserId} AND id = ${savedWorkflow.id}`.catch(() => undefined);
+  return { workflow: existingAccess?.team ? { ...savedWorkflow, team: existingAccess.team } : savedWorkflow, automationActivated: activated, gatesChanged };
 }
 
 export async function removeWorkflowStage(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string, stageId: string, stageIndex?: number, source?: string, target?: string) {

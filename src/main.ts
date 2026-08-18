@@ -6,7 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, g
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, selectWorkflowAfterCloudLoad, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
-import { activeWorkflows, archiveWorkflow, archivedWorkflows, restoreWorkflow, addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
+import { activeWorkflows, archiveWorkflow, archivedWorkflows, restoreWorkflow, addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type StageRouteMode, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { automationActionPresentation, latestAutomationAction, stageRunPresentation, workflowRunSummary, type AutomationActionState, type WorkflowStageRunState } from './lib/workflow-run';
@@ -63,6 +63,7 @@ let deploymentAdvancedOpen = false;
 let deploymentHighlight: string | null = null;
 let deploymentEditIndex: number | null = null;
 let deploymentDraft: DeploymentConfig | null = null;
+let stageRouteEditIndex: number | null = null;
 let returnHighlight: string | null = null;
 let workflowMutationRevision = 0;
 let screen: Screen = 'overview';
@@ -1787,6 +1788,11 @@ function bindDraftStepSorting() {
 }
 
 function bindDraftActions() {
+  document.querySelectorAll<HTMLButtonElement>('[data-edit-route]').forEach(button => button.addEventListener('click', () => {
+    if (!active) return;
+    stageRouteEditIndex = Number(button.dataset.editRoute);
+    rerenderStepForm(active.repository);
+  }));
   document.querySelector('#view-flow')?.addEventListener('click', () => goTo('detail'));
   document.querySelector('#delete-flow')?.addEventListener('click', () => { if (active) showDeleteWorkflowDialog(active); });
 }
@@ -1830,6 +1836,8 @@ async function loadBranches(repository: string) {
   } catch (err) { form.innerHTML = `<p class="error">${escape(err instanceof Error ? err.message : t('editor.error.branches'))}</p>`; }
 }
 function renderStepForm(repository: string) {
+  if (stageRouteEditIndex !== null && active?.repository === repository && active.stages[stageRouteEditIndex]) { renderStageRouteForm(repository, active, stageRouteEditIndex); return; }
+  stageRouteEditIndex = null;
   const last = active?.repository === repository ? active.stages.at(-1) : undefined;
   const isNewDraft = !active && editorDraft.repository === repository;
   const source = (isNewDraft && editorDraft.source) || branches.find(branch => /^(feature|fix)\//.test(branch) && !active?.stages.some(stage => stage.source === branch)) || last?.target || branches.find(branch => branch.startsWith('feature/')) || branches[0] || '';
@@ -1840,7 +1848,7 @@ function renderStepForm(repository: string) {
   const deploymentSettings = active?.repository === repository ? renderDeploymentSettings() : '';
   const recoveryPolicySection = active?.repository === repository ? renderRecoveryPolicySettings() : '';
   const sourceBranches = branches.map(branch => `<button type="button" role="option" data-source-branch="${escape(branch)}">${escape(branch)}</button>`).join('');
-  document.querySelector('#step-form')!.innerHTML = `<div class="two"><div class="source-field"><label for="source">${t('editor.label.source')}</label><div class="branch-picker"><input id="source" value="${escape(source)}" placeholder="feature/*" role="combobox" aria-autocomplete="list" aria-controls="source-branches" aria-expanded="false" /><button id="source-branch-toggle" type="button" class="source-branch-toggle" aria-label="${t('editor.label.source')}" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button><div id="source-branches" class="source-branch-options" role="listbox" hidden>${sourceBranches}</div></div><small>${t('editor.sourceRuleHint')}</small></div><label>${t('editor.label.target')}<select id="target">${options(target)}</select></label></div><label class="route-mode"><input id="independent-route" type="checkbox" ${active?.repository === repository ? 'checked' : ''} /><span><b>${t('editor.independent.label')}</b><small>${t('editor.independent.desc')}</small></span></label>${dependencyOptions}<div class="actions"><a id="compare" target="_blank" class="text-link">${t('editor.compare')}</a><button id="add-step" class="primary">${active?.repository === repository ? t('editor.addRoute') : t('editor.saveFlow')}</button></div>${deploymentSettings}${recoveryPolicySection}`;
+  document.querySelector('#step-form')!.innerHTML = `<div class="two"><div class="source-field"><label for="source">${t('editor.label.source')}</label><div class="branch-picker"><input id="source" value="${escape(source)}" placeholder="feature/*" role="combobox" aria-autocomplete="list" aria-controls="source-branches" aria-expanded="false" /><button id="source-branch-toggle" type="button" class="source-branch-toggle" aria-label="${t('editor.label.source')}" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button><div id="source-branches" class="source-branch-options" role="listbox" hidden>${sourceBranches}</div></div><small>${t('editor.sourceRuleHint')}</small></div><label>${t('editor.label.target')}<select id="target">${options(target)}</select></label></div><label class="route-mode"><input id="independent-route" type="checkbox" /><span><b>${t('editor.independent.label')}</b><small>${t('editor.independent.desc')}</small></span></label>${dependencyOptions}<div class="actions"><a id="compare" target="_blank" class="text-link">${t('editor.compare')}</a><button id="add-step" class="primary">${active?.repository === repository ? t('editor.addRoute') : t('editor.saveFlow')}</button></div>${deploymentSettings}${recoveryPolicySection}`;
   const sync = () => document.querySelector<HTMLAnchorElement>('#compare')!.href = githubCompareUrl(repository, value('source'), value('target'));
   const sourceInput = document.querySelector<HTMLInputElement>('#source')!;
   const sourcePicker = document.querySelector<HTMLElement>('.branch-picker')!;
@@ -1942,6 +1950,37 @@ function renderStepForm(repository: string) {
   });
 }
 function deploymentKey(deployment: DeploymentConfig) { return `${deployment.target}|${deployment.provider}`; }
+// Source and target stay read-only here: changing them would change which branches the persisted stage state
+// belongs to, so the first version only edits the gate, which is what a mis-set route mode actually needs.
+function renderStageRouteForm(repository: string, flow: Workflow, stageIndex: number) {
+  const stage = flow.stages[stageIndex];
+  const route = `${stage.source} → ${stage.target}`;
+  const current = stage.waitFor?.length ? 'wait-for' : stage.independent ? 'independent' : 'sequential';
+  const choice = (kind: string, label: string) => `<label><input type="radio" name="route-mode-choice" value="${kind}" ${current === kind ? 'checked' : ''} /><span>${label}</span></label>`;
+  // Only earlier steps may be waited on, matching the server's save validation, so a rejected save is impossible.
+  const dependencies = flow.stages.slice(0, stageIndex).map((candidate, index) => `<label><input type="checkbox" name="route-mode-wait-for" value="${index}" ${stage.waitFor?.includes(index) ? 'checked' : ''} /><span>${escape(candidate.source)} → ${escape(candidate.target)}</span></label>`).join('');
+  document.querySelector('#step-form')!.innerHTML = `<p class="route-mode-banner">${escape(t('editor.routeMode.editing', { route }))}</p><fieldset class="route-mode-choices"><legend>${t('editor.routeMode.label')}</legend>${choice('sequential', t('editor.routeMode.sequential'))}${choice('independent', t('editor.routeMode.independent'))}${dependencies ? choice('wait-for', t('editor.routeMode.waitFor')) : ''}${dependencies ? `<div class="route-mode-dependencies">${dependencies}</div>` : ''}</fieldset><div class="actions"><button id="cancel-route-mode" type="button" class="ghost">${t('editor.routeMode.cancel')}</button><button id="update-route-mode" type="button" class="primary">${t('editor.routeMode.update')}</button></div>`;
+  const dependencyBox = document.querySelector<HTMLElement>('.route-mode-dependencies');
+  const syncDependencies = () => { if (dependencyBox) dependencyBox.hidden = selectedRouteMode() !== 'wait-for'; };
+  document.querySelectorAll<HTMLInputElement>('input[name="route-mode-choice"]').forEach(input => input.addEventListener('change', syncDependencies));
+  syncDependencies();
+  const leave = () => { stageRouteEditIndex = null; rerenderStepForm(repository); };
+  document.querySelector('#cancel-route-mode')!.addEventListener('click', leave);
+  document.querySelector('#update-route-mode')!.addEventListener('click', () => {
+    const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="route-mode-wait-for"]:checked')].map(input => Number(input.value));
+    const kind = selectedRouteMode();
+    if (kind === 'wait-for' && !waitFor.length) { showToast(t('editor.routeMode.waitForEmpty')); return; }
+    const mode: StageRouteMode = kind === 'independent' ? { kind: 'independent' } : kind === 'wait-for' ? { kind: 'wait-for', waitFor } : { kind: 'sequential' };
+    save(setStageRouteMode(flow, stageIndex, mode));
+    stageRouteEditIndex = null;
+    document.querySelector('#draft')!.innerHTML = renderDraft();
+    bindDraftActions();
+    bindDraftStepSorting();
+    showToast(t('editor.routeMode.updated', { route }));
+    rerenderStepForm(repository);
+  });
+}
+function selectedRouteMode() { return document.querySelector<HTMLInputElement>('input[name="route-mode-choice"]:checked')?.value || 'sequential'; }
 function rerenderStepForm(repository: string) {
   const top = window.scrollY;
   renderStepForm(repository);
@@ -1997,11 +2036,12 @@ function value(id: string) { return document.querySelector<HTMLSelectElement | H
 function renderDraft() {
   if (!active) return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${t('draft.empty.title')}</h2><p class="meta">${t('draft.empty.desc')}</p>`;
   const flow = active;
+  const editable = canOperateWorkflow(flow, 'workflow-edit');
   const deleteAction = canOperateWorkflow(flow, 'workflow-delete') ? `<button id="delete-flow" class="draft-delete-flow" type="button">${t('workflowDelete.action')}</button>` : '';
   return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${escape(flow.name)}</h2><p class="meta">${escape(flow.repository)}</p>${sharedWorkflowBadge(flow)}${flow.stages.map((stage, index) => {
     const badge = stage.waitFor?.length ? `<small>${t('draft.waitFor', { count: stage.waitFor.length })}</small>` : stage.independent ? `<small>${t('draft.independent')}</small>` : '';
     const route = `${stage.source} → ${stage.target}`;
-    return `<div class="draft-step" data-draft-step="${index}"><button type="button" class="draft-step-drag-handle" draggable="true" data-draft-drag="${index}" aria-label="${escape(t('draft.drag', { name: route }))}" title="${escape(t('draft.drag', { name: route }))}"><svg viewBox="0 0 16 22" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><span>${index + 1}</span><div class="draft-step-main"><b>${escape(route)}</b>${badge}</div><div class="draft-step-move-buttons"><button type="button" data-draft-move="${index}" data-draft-direction="up" aria-label="${escape(t('draft.moveUp', { name: route }))}" title="${escape(t('draft.moveUp', { name: route }))}" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" data-draft-move="${index}" data-draft-direction="down" aria-label="${escape(t('draft.moveDown', { name: route }))}" title="${escape(t('draft.moveDown', { name: route }))}" ${index === flow.stages.length - 1 ? 'disabled' : ''}>↓</button></div><button data-remove="${index}">${t('draft.remove')}</button></div>`;
+    return `<div class="draft-step" data-draft-step="${index}"><button type="button" class="draft-step-drag-handle" draggable="true" data-draft-drag="${index}" aria-label="${escape(t('draft.drag', { name: route }))}" title="${escape(t('draft.drag', { name: route }))}"><svg viewBox="0 0 16 22" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><span>${index + 1}</span><div class="draft-step-main"><b>${escape(route)}</b>${badge}</div><div class="draft-step-move-buttons"><button type="button" data-draft-move="${index}" data-draft-direction="up" aria-label="${escape(t('draft.moveUp', { name: route }))}" title="${escape(t('draft.moveUp', { name: route }))}" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" data-draft-move="${index}" data-draft-direction="down" aria-label="${escape(t('draft.moveDown', { name: route }))}" title="${escape(t('draft.moveDown', { name: route }))}" ${index === flow.stages.length - 1 ? 'disabled' : ''}>↓</button></div>${editable && index > 0 ? `<button type="button" data-edit-route="${index}">${t('draft.editRoute')}</button>` : ''}<button data-remove="${index}">${t('draft.remove')}</button></div>`;
   }).join('')}<div class="draft-footer"><button id="view-flow" class="ghost">${t('draft.viewDetail')}</button>${deleteAction}</div>`;
 }
 
@@ -2014,9 +2054,9 @@ function detail() {
   document.querySelector('#back-from-detail')!.addEventListener('click', () => returnToSourceLane(active!.id));
   document.querySelector('#edit-flow')!.addEventListener('click', () => { screen = 'editor'; render(); });
   document.querySelector('#refresh-status')!.addEventListener('click', () => { void refreshDetailStatuses(); });
-  document.querySelectorAll<HTMLButtonElement>('[data-dynamic-stage]').forEach(button => button.addEventListener('click', () => {
+  document.querySelectorAll<HTMLButtonElement>('[data-step-drawer-stage]').forEach(button => button.addEventListener('click', () => {
     if (!active) return;
-    showProjectStepDrawer(active.id, Number(button.dataset.dynamicStage), button.dataset.dynamicSource);
+    showProjectStepDrawer(active.id, Number(button.dataset.stepDrawerStage), button.dataset.stepDrawerSource);
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-codex-repair]').forEach(button => button.addEventListener('click', () => {
     const index = Number(button.dataset.codexRepair);
@@ -2203,7 +2243,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const autoControl = `<div class="timeline-automation"><label class="timeline-auto-create"><input type="checkbox" data-detail-auto-create-stage="${index}" ${autoEnabled ? 'checked' : ''} ${autoDisabled ? 'disabled' : ''} /><span>${t('draft.autoCreate')}</span><span>${t('draft.autoCreateThreshold')}</span><input class="auto-create-threshold" type="number" min="1" max="20" step="1" value="${threshold}" data-detail-auto-create-threshold="${index}" aria-label="${escape(t('draft.autoCreateThreshold'))}" title="${escape(t('draft.autoCreateThresholdTooltip'))}" ${autoDisabled ? 'disabled' : ''} /></label>${mergeControl}<small>${escape(autoHint)}</small>${mergeHint === autoHint ? '' : `<small>${escape(mergeHint)}</small>`}${automationDetailBlock(active!.id, index, stage.source, false)}</div>`;
   if (stage.source.includes('*')) {
     const states = active ? statesForStage(active, index) : [];
-    const runs = states.map(state => `<button type="button" class="timeline-action" data-dynamic-stage="${index}" data-dynamic-source="${escape(state.source)}"><b>${escape(state.source)}</b><small>${escape(dynamicBranchStatusText(state))}</small></button>`).join('');
+    const runs = states.map(state => `<button type="button" class="timeline-action" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(state.source)}"><b>${escape(state.source)}</b><small>${escape(dynamicBranchStatusText(state))}</small></button>`).join('');
     return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p class="meta">${t('detail.dynamicRoute')}</p>${runs ? `<div class="timeline-actions dynamic-stage-actions">${runs}</div>` : `<p>${t('detail.timeline.placeholder')}</p>`}</div></article>`;
   }
   const status = statuses?.[index];
@@ -2238,9 +2278,12 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const stateClass = status.kind === 'merged' ? mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
   const mergeAction = status.kind === 'open' && !recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(active!, 'pull-merge') ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
   const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';
+  // The drawer owns every per-step operation (rerun, sync, deployment retry). Without an entry point
+  // here a static step's recovery actions were reachable only from the board, unlike a dynamic one.
+  const drawerAction = `<button type="button" class="timeline-action" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(stage.source)}">${t('overview.board.stepDetail')}</button>`;
   const gateList = gates.filter(Boolean);
   const sourceBranchWarning = status.sourceBranchMissing ? `<p class="meta">${t('status.sourceBranchDeletedHint')}</p>` : '';
-  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
+  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${drawerAction}${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
 }
 async function refreshDetailStatuses() {
   await refreshStatuses(false, false);
