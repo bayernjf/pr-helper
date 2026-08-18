@@ -542,13 +542,15 @@ async function openDeploymentAdvanced(page: Page) {
 }
 
 test('GitHub Environment 字段列出仓库现有 Environment 供选择', async ({ page }) => {
-  await openWorkspace(page, { workflows: [gateFlow] });
+  await openWorkspace(page, { workflows: [gateFlow], environments: ['Production', 'staging-vercel'] });
 
   const input = await openDeploymentAdvanced(page);
   await expect(input).toHaveAttribute('list', 'deployment-environments');
-  await expect.poll(() => page.locator('#deployment-environments option').evaluateAll(options => options.map(option => option.getAttribute('value')))).toEqual(['preview-vercel', 'production-vercel']);
+  await expect.poll(() => page.locator('#deployment-environments option').evaluateAll(options => options.map(option => option.getAttribute('value')))).toEqual(['Production', 'staging-vercel']);
   await expect(page.locator('label', { has: input })).toContainText('留空则按约定名推导');
-  await expect(input).toHaveAttribute('placeholder', 'preview-vercel');
+  // A hardcoded example is what invited the rejected value: it named an Environment the repository
+  // does not have. The placeholder has to come from this repository's own list.
+  await expect(input).toHaveAttribute('placeholder', 'Production');
 });
 
 test('仓库没有 Environment 时提示这个字段应当留空', async ({ page }) => {
@@ -558,6 +560,7 @@ test('仓库没有 Environment 时提示这个字段应当留空', async ({ page
   // An empty dropdown alone reads as a loading failure, so the hint has to say that blank is the answer.
   await expect(page.locator('#deployment-environments option')).toHaveCount(0);
   await expect(page.locator('label', { has: input })).toContainText('此仓库没有 Environment，留空即可');
-  // A placeholder naming an Environment contradicts that hint and is what invites a typed-in guess.
-  await expect(input).toHaveAttribute('placeholder', '');
+  // Every other input in this form always carries a placeholder, so this one keeps hers too — it just
+  // must not name an Environment that does not exist.
+  await expect(input).toHaveAttribute('placeholder', '留空');
 });
