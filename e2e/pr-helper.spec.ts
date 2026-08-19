@@ -679,6 +679,32 @@ test('进度条只统计连续完成的前缀，后续步骤上一轮的已合�
   await expect(page.locator('.flow-progress-sync')).toContainText('2 分钟前');
 });
 
+test('全部步骤完成后进度条不再高亮任何一步为当前步', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-progress-done',
+    name: '已完成流程',
+    repository,
+    stages: [
+      { stageId: 'stage-one', source: 'feature/e2e', target: 'dev' },
+      { stageId: 'stage-two', source: 'dev', target: 'main' },
+    ],
+  };
+  const base = { repository, mergedAt: null, headSha: 'deadbeef', checksPassed: 1, checksTotal: 1, mergeable: true, mergeableState: 'clean', aheadBy: 0, lastEvent: '', updatedAt: '2026-08-19T00:00:00.000Z', checksState: 'success', approvals: 1, requiredApprovals: 1, pullState: 'merged', decision: { kind: 'merged', actionable: false, canCreateNext: false, message: '已合并且门禁通过' } };
+  await openWorkspace(page, {
+    workflows: [workflow],
+    states: [
+      { ...base, workflowId: workflow.id, stageIndex: 0, stageId: 'stage-one', source: 'feature/e2e', target: 'dev', pullNumber: 41 },
+      { ...base, workflowId: workflow.id, stageIndex: 1, stageId: 'stage-two', source: 'dev', target: 'main', pullNumber: 42 },
+    ],
+  });
+  await page.locator(`.lane-actions [data-open="${workflow.id}"]`).click();
+
+  // 「当前步」表示还在进行中的那一步；全都完成时给最后一步加框会让已经走完的步骤看起来还在等操作。
+  await expect(page.locator('.flow-progress-headline')).toHaveText('全部完成 · 共 2 步，等待新提交');
+  await expect(page.locator('.fp-node.is-current')).toHaveCount(0);
+  await expect(page.locator('.fp-node.is-succeeded')).toHaveCount(2);
+});
+
 const gateFlow = { id: 'flow-env', name: 'Environment 流程', repository, createdAt: '2026-08-01T00:00:00.000Z', stages: [{ source: 'feature/e2e', target: 'dev', stageId: 'stage-env' }], deployments: [] } as Workflow;
 
 async function openDeploymentAdvanced(page: Page) {

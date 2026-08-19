@@ -146,13 +146,13 @@ describe('workflowProgress', () => {
     expect(workflowProgress(['succeeded', 'waiting-gates', 'succeeded'])).toEqual({ completed: 1, total: 3, currentIndex: 1, nodes: ['succeeded', 'waiting-gates', 'idle'] });
   });
 
-  // A finished flow has no current step to point at, and reporting index 4 of 4 would render a node
-  // that does not exist.
-  it('points at the last step once every step is done', () => {
-    expect(workflowProgress(['succeeded', 'succeeded'])).toEqual({ completed: 2, total: 2, currentIndex: 1, nodes: ['succeeded', 'succeeded'] });
+  // A finished flow has no current step, and marking the last one current puts a "you are here" ring on a
+  // step that is already done.
+  it('has no current step once every step is done', () => {
+    expect(workflowProgress(['succeeded', 'succeeded'])).toEqual({ completed: 2, total: 2, currentIndex: null, nodes: ['succeeded', 'succeeded'] });
   });
 
   it('handles a flow with no steps', () => {
-    expect(workflowProgress([])).toEqual({ completed: 0, total: 0, currentIndex: 0, nodes: [] });
+    expect(workflowProgress([])).toEqual({ completed: 0, total: 0, currentIndex: null, nodes: [] });
   });
 });
