@@ -10,6 +10,7 @@ type ApiFixture = {
   deploymentRuns?: unknown[];
   auditEntries?: unknown[];
   automationReady?: boolean;
+  environments?: string[];
   openPull?: { number: number; headSha: string; mergeable?: boolean; mergeableState?: string };
   compareAheadBy?: number;
 };
@@ -56,7 +57,7 @@ async function mockApi(page: Page, fixture: ApiFixture = {}): Promise<MockApi> {
       if (path.startsWith('/user/repos')) return json(route, 200, [{ full_name: repository, private: false }]);
       if (path.startsWith('/repos/acme/demo/branches')) return json(route, 200, branches.map(name => ({ name })));
       if (path.startsWith('/repos/acme/demo/actions/workflows')) return json(route, 200, { workflows: [{ name: 'PR gate', state: 'active', path: '.github/workflows/pr-gate.yml' }] });
-      if (path.startsWith('/repos/acme/demo/environments')) return json(route, 200, { environments: [{ name: 'preview-vercel' }, { name: 'production-vercel' }] });
+      if (path.startsWith('/repos/acme/demo/environments')) return json(route, 200, { environments: (fixture.environments ?? ['preview-vercel', 'production-vercel']).map(name => ({ name })) });
       const openPull = fixture.openPull;
       if (path.startsWith('/repos/acme/demo/pulls?state=open')) return json(route, 200, openPull
         ? [{ number: openPull.number, state: 'open', merged_at: null, html_url: `https://github.com/acme/demo/pull/${openPull.number}`, head: { ref: 'feature/e2e', sha: openPull.headSha } }]
@@ -522,11 +523,44 @@ test('流程详情的固定步骤可打开步骤抽屉并从中重新触发 Acti
   await page.locator(`.lane-actions [data-open="${workflow.id}"]`).click();
   // A static step used to have no way into the drawer from the detail page, which left its recovery
   // actions reachable only from the board.
-  await page.locator('[data-step-drawer-stage="0"]').click();
+  await page.locator('.timeline-action[data-step-drawer-stage="0"]').click();
 
   const drawer = page.getByRole('dialog');
   await drawer.getByRole('button', { name: '重新触发 Actions' }).click();
 
   await expect.poll(() => api.requests.filter(request => request.pathname === '/api/rerun-actions')).toHaveLength(1);
   expect(api.requests.find(request => request.pathname === '/api/rerun-actions')?.body).toEqual({ workflowId: workflow.id, stageIndex: 0, source: 'feature/e2e' });
+});
+
+const gateFlow = { id: 'flow-env', name: 'Environment 流程', repository, createdAt: '2026-08-01T00:00:00.000Z', stages: [{ source: 'feature/e2e', target: 'dev', stageId: 'stage-env' }], deployments: [] } as Workflow;
+
+async function openDeploymentAdvanced(page: Page) {
+  await page.locator(`[data-edit-project="${gateFlow.id}"]`).click();
+  await page.locator('#toggle-deployment-form').click();
+  await page.locator('.deployment-advanced summary').click();
+  return page.locator('#deployment-github-environment');
+}
+
+test('GitHub Environment 字段列出仓库现有 Environment 供选择', async ({ page }) => {
+  await openWorkspace(page, { workflows: [gateFlow], environments: ['Production', 'staging-vercel'] });
+
+  const input = await openDeploymentAdvanced(page);
+  await expect(input).toHaveAttribute('list', 'deployment-environments');
+  await expect.poll(() => page.locator('#deployment-environments option').evaluateAll(options => options.map(option => option.getAttribute('value')))).toEqual(['Production', 'staging-vercel']);
+  await expect(page.locator('label', { has: input })).toContainText('留空则按约定名推导');
+  // A hardcoded example is what invited the rejected value: it named an Environment the repository
+  // does not have. The placeholder has to come from this repository's own list.
+  await expect(input).toHaveAttribute('placeholder', 'Production');
+});
+
+test('仓库没有 Environment 时提示这个字段应当留空', async ({ page }) => {
+  await openWorkspace(page, { workflows: [gateFlow], environments: [] });
+
+  const input = await openDeploymentAdvanced(page);
+  // An empty dropdown alone reads as a loading failure, so the hint has to say that blank is the answer.
+  await expect(page.locator('#deployment-environments option')).toHaveCount(0);
+  await expect(page.locator('label', { has: input })).toContainText('此仓库没有 Environment，留空即可');
+  // Every other input in this form always carries a placeholder, so this one keeps hers too — it just
+  // must not name an Environment that does not exist.
+  await expect(input).toHaveAttribute('placeholder', '留空');
 });

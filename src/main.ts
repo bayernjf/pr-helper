@@ -9,7 +9,7 @@ import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, up
 import { activeWorkflows, archiveWorkflow, archivedWorkflows, restoreWorkflow, addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type StageRouteMode, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
-import { automationActionPresentation, latestAutomationAction, stageRunPresentation, workflowRunSummary, type AutomationActionState, type WorkflowStageRunState } from './lib/workflow-run';
+import { automationActionPresentation, latestAutomationAction, stageProgressNode, stageRunPresentation, workflowProgress, workflowRunSummary, worstStageProgress, type AutomationActionState, type StageProgressStatus, type WorkflowStageRunState } from './lib/workflow-run';
 import { getCloudSyncStatus, unlockCloudSync, lockCloudSync, isCloudSyncUnlocked, encryptForCloud, decryptFromCloud, rotateCloudSyncKey, type CloudSyncStatus, type SyncableData } from './lib/encrypted-sync';
 import { canPerformTeamOperation, teamRoleLabel } from './lib/team-permissions';
 import { t, getLocale, setLocale, detectLocale, registerTranslations, type Locale } from './lib/i18n';
@@ -1291,6 +1291,33 @@ function automationDetailBlock(workflowId: string, stageIndex: number, source: s
   const reason = presentation.blocked ? `<p class="automation-reason">${escape(action.failureReason?.trim() || t('automation.reasonUnknown'))}</p>` : '';
   return `<div class="automation-detail is-${presentation.tone}"><p class="eyebrow">${t('automation.detail.eyebrow')}</p><p class="automation-line">${escape(automationActionSummary(action))}</p>${reason}<small>${automationUpdatedLabel(action.updatedAt)}</small></div>`;
 }
+function stageProgressStatus(flow: Workflow, stageIndex: number): StageProgressStatus {
+  const states = statesForStage(flow, stageIndex);
+  if (!states.length) return stageProgressNode({ automation: automationActionFor(flow.id, stageIndex, flow.stages[stageIndex]!.source) }).status;
+  return worstStageProgress(states.map(state => stageProgressNode({ decision: state.decision, automation: automationActionFor(flow.id, stageIndex, state.source) }).status));
+}
+function stageProgressTooltip(flow: Workflow, stageIndex: number): string {
+  const states = statesForStage(flow, stageIndex);
+  const action = automationActionFor(flow.id, stageIndex, states[0]?.source || flow.stages[stageIndex]!.source);
+  const lines = [`${flow.stages[stageIndex]!.source} → ${flow.stages[stageIndex]!.target}`];
+  const message = states.map(state => state.decision?.message).find(Boolean);
+  if (message) lines.push(message);
+  if (action && automationActionPresentation(action).blocked && action.failureReason?.trim()) lines.push(action.failureReason.trim());
+  return lines.join(' · ');
+}
+function flowProgressBar(flow: Workflow): string {
+  const statuses = flow.stages.map((_, index) => stageProgressStatus(flow, index));
+  const progress = workflowProgress(statuses);
+  if (!progress.total) return '';
+  // Every node idle means no projection has arrived yet, and a bar of empty nodes would read as a
+  // flow that is stalled rather than one that has never been reconciled.
+  const synced = statuses.some(status => status !== 'idle');
+  const headline = synced
+    ? t('detail.progress.position', { step: progress.currentIndex + 1, total: progress.total, completed: progress.completed })
+    : t('detail.progress.waitingSync');
+  const nodes = statuses.map((status, index) => `<button type="button" class="fp-node is-${status} ${index === progress.currentIndex && synced ? 'is-current' : ''}" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(statesForStage(flow, index)[0]?.source || flow.stages[index]!.source)}" title="${escape(stageProgressTooltip(flow, index))}" aria-label="${escape(`${t('detail.progress.step', { step: index + 1 })} · ${t(`detail.progress.node.${status}`)}`)}"><span class="fp-node-index">${index + 1}</span><span class="fp-node-status">${t(`detail.progress.node.${status}`)}</span></button>`).join('');
+  return `<div class="flow-progress"><p class="eyebrow">${t('detail.progress.eyebrow')}</p><p class="flow-progress-headline">${escape(headline)}</p><div class="flow-progress-nodes">${nodes}</div></div>`;
+}
 function blockedAutomationActions(): AutomationAction[] {
   return automationActions.filter(action => automationActionPresentation(action).blocked);
 }
@@ -2020,7 +2047,18 @@ function renderDeploymentForm() {
   const workflows = repositoryActionWorkflows.map(workflow => `<option value="${escape(workflow.name)}">${escape(workflow.path)}</option>`).join('');
   const workflowHint = repositoryActionWorkflows.length ? t('editor.deployments.workflowHint') : t('editor.deployments.workflowUnavailable');
   const pick = (candidate: string, current: string | undefined) => candidate === current ? 'selected' : '';
-  const advanced = `<details class="deployment-advanced" ${deploymentAdvancedOpen || prefill ? 'open' : ''}><summary>${t('editor.deployments.advanced')}</summary><label>${t('editor.deployments.githubEnvironment')}<input id="deployment-github-environment" placeholder="preview-vercel" value="${escape(prefill?.githubEnvironment || '')}" /></label><label>${t('editor.deployments.healthPath')}<input id="deployment-health-path" placeholder="/health" value="${escape(prefill?.healthCheckPath || '')}" /><small>${t('editor.deployments.healthPathHint')}</small></label><label>${t('editor.deployments.rollbackWorkflow')}<input id="deployment-rollback-workflow" list="deployment-workflows" placeholder="Rollback production" value="${escape(prefill?.rollbackWorkflowName || '')}" /><small>${t('editor.deployments.rollbackWorkflowHint')}</small></label></details>`;
+  const environments = repositoryEnvironments.map(environment => `<option value="${escape(environment)}"></option>`).join('');
+  // Blank is a valid answer here — reconciliation derives the conventional name from the provider and the
+  // environment. A repository with no Environment at all therefore gets an empty dropdown, which reads as a
+  // loading failure unless the hint says outright that nothing needs to be typed.
+  const environmentHint = !repositoryEnvironmentsLoaded ? t('editor.deployments.githubEnvironmentUnavailable')
+    : repositoryEnvironments.length ? t('editor.deployments.githubEnvironmentHint')
+      : t('editor.deployments.githubEnvironmentNone');
+  // A hardcoded example named an Environment the repository need not have, and typing it back is exactly
+  // what the not-found warning then rejected. Only the repository's own list can be shown as an example.
+  const environmentPlaceholder = !repositoryEnvironmentsLoaded ? 'preview-vercel'
+    : repositoryEnvironments[0] || t('editor.deployments.githubEnvironmentBlank');
+  const advanced = `<details class="deployment-advanced" ${deploymentAdvancedOpen || prefill ? 'open' : ''}><summary>${t('editor.deployments.advanced')}</summary><label>${t('editor.deployments.githubEnvironment')}<input id="deployment-github-environment" list="deployment-environments" placeholder="${escape(environmentPlaceholder)}" value="${escape(prefill?.githubEnvironment || '')}" /><datalist id="deployment-environments">${environments}</datalist><small>${environmentHint}</small></label><label>${t('editor.deployments.healthPath')}<input id="deployment-health-path" placeholder="/health" value="${escape(prefill?.healthCheckPath || '')}" /><small>${t('editor.deployments.healthPathHint')}</small></label><label>${t('editor.deployments.rollbackWorkflow')}<input id="deployment-rollback-workflow" list="deployment-workflows" placeholder="Rollback production" value="${escape(prefill?.rollbackWorkflowName || '')}" /><small>${t('editor.deployments.rollbackWorkflowHint')}</small></label></details>`;
   const banner = editing ? `<p class="deployment-editing-banner">${t('editor.deployments.editing', { workflow: escape(editing.workflowName), target: escape(editing.target) })}</p>` : '';
   return `<div class="deployment-add-form">${banner}<label>${t('editor.deployments.workflow')}<input id="deployment-workflow" list="deployment-workflows" placeholder="Deploy frontend to Vercel" value="${escape(prefill?.workflowName || '')}" /><datalist id="deployment-workflows">${workflows}</datalist><small>${workflowHint}</small></label><div class="two"><label>${t('editor.deployments.target')}<select id="deployment-target">${options(target)}</select></label><label>${t('editor.deployments.provider')}<select id="deployment-provider"><option value="vercel" ${pick('vercel', prefill?.provider)}>Vercel</option><option value="cloudflare" ${pick('cloudflare', prefill?.provider)}>Cloudflare Pages</option></select></label></div><label>${t('editor.deployments.environment')}<select id="deployment-environment"><option value="preview" ${pick('preview', prefill?.environment)}>${t('editor.deployments.preview')}</option><option value="production" ${pick('production', prefill?.environment)}>${t('editor.deployments.production')}</option></select></label>${advanced}<button id="add-deployment" type="button" class="primary">${editing ? t('editor.deployments.update') : t('editor.deployments.submit')}</button></div>`;
 }
@@ -2050,7 +2088,7 @@ function detail() {
   if (!active) { screen = 'overview'; return overview(); }
   const summary = workflowSummary(active);
   const editable = canOperateWorkflow(active, 'workflow-edit');
-  content.innerHTML = `<section class="page-head detail-page-head"><div class="detail-header-row"><div class="detail-page-actions"><button id="back-from-detail" class="ghost">${t('editor.back.overview')}</button><button id="refresh-status" class="ghost detail-refresh">${t('detail.refresh')}</button></div><div class="detail-page-head-main"><p class="eyebrow">${t('detail.eyebrow')}</p><h1>${escape(active.name)}</h1><p>${escape(active.repository)} · ${escape(summary.route)}</p>${sharedWorkflowBadge(active)}</div><span aria-hidden="true"></span></div></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">${t('detail.timeline.eyebrow')}</p>${active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><aside class="panel next-action"><p class="eyebrow">${t('detail.nextAction.eyebrow')}</p><h2>${nextActionTitle()}</h2><p>${statuses ? t('detail.desc.withStatuses') : t('detail.desc.noStatuses')}</p><button id="edit-flow" class="primary" ${editable ? '' : 'disabled'}>${t('detail.edit')}</button></aside></section>`;
+  content.innerHTML = `<section class="page-head detail-page-head"><div class="detail-header-row"><div class="detail-page-actions"><button id="back-from-detail" class="ghost">${t('editor.back.overview')}</button><button id="refresh-status" class="ghost detail-refresh">${t('detail.refresh')}</button></div><div class="detail-page-head-main"><p class="eyebrow">${t('detail.eyebrow')}</p><h1>${escape(active.name)}</h1><p>${escape(active.repository)} · ${escape(summary.route)}</p>${sharedWorkflowBadge(active)}</div><span aria-hidden="true"></span></div></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">${t('detail.timeline.eyebrow')}</p>${flowProgressBar(active)}${active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><aside class="panel next-action"><p class="eyebrow">${t('detail.nextAction.eyebrow')}</p><h2>${nextActionTitle()}</h2><p>${statuses ? t('detail.desc.withStatuses') : t('detail.desc.noStatuses')}</p><button id="edit-flow" class="primary" ${editable ? '' : 'disabled'}>${t('detail.edit')}</button></aside></section>`;
   document.querySelector('#back-from-detail')!.addEventListener('click', () => returnToSourceLane(active!.id));
   document.querySelector('#edit-flow')!.addEventListener('click', () => { screen = 'editor'; render(); });
   document.querySelector('#refresh-status')!.addEventListener('click', () => { void refreshDetailStatuses(); });
