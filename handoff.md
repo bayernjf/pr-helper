@@ -1,16 +1,16 @@
 # PR Helper Handoff
 
-> 最后更新：2026-08-19（流程详情页的只读进度条已上线生产并核对；自动化队列已清空，无 `paused` / `queued` / `failed` 行；当前第一优先级见《2026-08-15 drain 首轮实测与优先级调整》第 11 项的观察窗口）
+> 最后更新：2026-08-19（流程详情页的只读进度条已上线生产并核对；深色主题的三类失配已修并加了静态守卫；paused 动作跨 kind 取代规则已部署但未验证；自动化队列已清空，无 `paused` / `queued` / `failed` 行；当前第一优先级见《2026-08-15 drain 首轮实测与优先级调整》第 11 项的观察窗口）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 > 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
 
 ## 当前状态
 
-- 当前分支：`feature/20260722`，与 `origin/main` 齐平（0 commits ahead）；`origin/main` 头为 `48544a99`（PR #278），本批进度条相关提交已全部合并部署。
+- 当前分支：`feature/20260722`，与 `origin/feature/20260722` 完全一致，且没有任何提交未进入 `origin/main`；`origin/main` 头为 `d1fd0bd9`（PR #288，2026-08-19 13:12 UTC），本批深色主题与自动化修复的 6 个提交经 PR #285–#288 全部合并。
 - 用户已确认本批代码已上线 Production。
-- 2026-08-19 生产核对：最近 6 小时 cron 78 success / 1 degraded / 2 skipped、inbox_refresh 1 degraded，无 failure；55 行 stage 投影最老 1370 秒、平均 673 秒，距 `/api/cron/health` 的 2700 秒阈值余量充足；`workflow_automation_actions` 只有 246 succeeded / 31 cancelled，没有 `paused` / `queued` / `running` / `failed` 行。
+- 2026-08-19 生产核对（当日第二次，合并 PR #288 之后）：最近 6 小时 cron 80 success / 1 degraded / 1 skipped、webhook 53 success / 4 degraded / 252 skipped、inbox_refresh 2 success，无 failure；55 行 stage 投影最老 1187 秒、平均 609 秒，距 `/api/cron/health` 的 2700 秒阈值余量充足；`workflow_automation_actions` 只有 263 succeeded / 35 cancelled，没有 `paused` / `queued` / `running` / `failed` 行。当日较早一次核对为 cron 78 success / 1 degraded / 2 skipped、投影最老 1370 秒、246 succeeded / 31 cancelled。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地验证已通过：`npm test`（28 个文件 / 529 项）、`npx tsc --noEmit`、`npm run build`；浏览器 E2E `npm run test:e2e` 25/25 通过（Playwright 端口为 4373，避免 `reuseExistingServer` 复用别的项目的开发服务）。
+- 当前本地验证已通过：`npm test`（29 个文件 / 536 项）、`npx tsc --noEmit`、`npm run build`；浏览器 E2E `npm run test:e2e` 26/26 通过（Playwright 端口为 4373，避免 `reuseExistingServer` 复用别的项目的开发服务）。
 - 最近本地提交 `b61e2d3e` 新增“测试已保存配置”：服务端解密保存的 AI 凭据并实际调用模型连接测试，15 秒超时，只返回成功或脱敏错误，不返回 API Key；生产端已验证连接成功（`agnes-2.0-flash`）。
 - 最近本地提交 `510a63c9` 为自动 PR 动作增加 AI 请求 20 秒超时、输出上限和过期 `running/paused` 动作回收重试，避免一次超时永久阻塞幂等动作。
 - Supabase 迁移 `001`–`031` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
@@ -214,7 +214,8 @@ Production 已验证行为：
 
 2026-08-19 补做三项（提交 `12fec877`、`3de8f223`、`399f4900`）：（a）「已完成 n」只统计从第一步开始连续完成的前缀，且服务端的 `merged` 描述的是该路径上一次的 PR、会延续到下一轮，所以排在当前步骤之后、留在上一轮已完成的步骤显示为未开始；`merged` 且 `canCreateNext` 为真（「已合并，有新提交可以创建新 PR」）算就绪而不是已完成，否则会出现「第 1 步进行中、第 2 步已完成」这种自相矛盾的读数。（b）详情页 30 秒轮询原先只在有通配步骤时才拉服务端投影，静态分支的流程要手点刷新才动；现在每次轮询都调 `loadActionQueue(false)`，不带 `?refresh=1`，服务端只读库不调 GitHub，代价是每次一次数据库读，刷新延迟等于服务端对账节奏。（c）进度条读的是服务端投影而不是浏览器直连 GitHub 的结果，所以下方标注这份数据的对账时间；视觉上节点已从若干独立卡片合成一条铺满宽度的分段条（`.flow-progress-nodes` 作为轨道、`.fp-node` 等宽分段），每段颜色仍是该步状态，点击与 tooltip 不变。
 
-未做、留待后续迭代按方案原文补齐：步骤级放置位置（方案要求在每个步骤「自动创建 PR」控件下方）、节点状态与方案表格的完全对齐（含 `running` 节点展示具体动作名）、上一步/下一步及解锁条件的单独呈现，以及全部写入路径（「接管 AI 内容」弹窗、重新生成、Unpause、安全重试）。写入路径后置的依据是生产数据：`create-pr` 共 117 次成功、4 次取消、2 次 `paused`，两条 `paused` 的原因都是「当前步骤尚未满足自动创建 PR 的门禁」而非 AI 生成失败；`workflow_operation_audit_logs` 至今没有任何一次 AI 生成失败；且 `paused` 不是终态，120 秒 stale 逻辑会把它重排回 `queued`。
+2026-08-19 再补一项（提交 `f1c108ed`、`21c3b06e`、`b78c9cec`）：全部步骤完成时不再把最后一步标成当前步。`workflowProgress` 原先在找不到未完成步骤时回退到 `statuses.length - 1`，于是一个已经全部合并的流程会在最后一步上留一个 `is-current` 的方框，读起来像那一步还在等操作（生产上两步流程正是这种数据：两步都 merged 且 `ahead_by = 0`）。现在 `currentIndex` 类型为 `number | null`，全完成返回 `null`，渲染层不给任何节点加 `is-current`，标题改用新的 `detail.progress.allDone`（「全部完成 · 共 N 步，等待新提交」）。e2e 新增一条覆盖两步全 merged 的流程。
+
 
 AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 PR”控件下方；点击 `paused` 节点打开接管弹窗，用户可重新生成或手动填写 PR 标题/描述，点击“确认并继续自动流程”后复用原动作 ID 恢复。内容确认不直接放行，必须等 PR 创建和全部 GitHub 门禁、合并后 Checks/Actions、部署及健康检查完成后节点才变绿并激活下一步。
 
@@ -239,6 +240,17 @@ AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 P
 7. 团队协作闭环：已部署团队管理界面、成员角色管理、流程共享、共享状态投影和服务端操作授权；`023` 已执行。需用至少两个 GitHub 账号验收角色边界与 GitHub App 安装范围。
 
 不建议第一阶段投入任意 DAG、流程模板市场、自建 CI/CD 引擎或无额外安全设计的 AI 自动修复。画布仅在条件分支、并行节点、汇聚节点和回滚路径的可视化需求明确后再投入。
+
+## 2026-08-19 深色主题失配与自动化僵尸行修复（已合并部署）
+
+三类深色主题问题的共同点是浅色下完全正常，没有报错也没有构建失败，只能靠肉眼逐屏看——所以这次同时补了静态守卫测试 `src/style-theme-tokens.test.ts`（5 条断言）。
+
+- **发明出来的 token 名**（提交 `eb5cf970`、`4d4a27f1`）：较新的样式块用了 16 个从未定义过的变量名并给每处 `var()` 写了十六进制兜底，共 114 处，CSS 静默采用兜底色，深色 token 覆盖对它们完全无效。已全部映射到真实 token 并删掉兜底，4 处承载语义色的边框保留 `--text-success`。
+- **`<dialog>` 不继承页面文字色**（提交 `950ced4a`、`c17c0d80`）：UA 样式表把 `dialog` 的 `color` 钉在 `CanvasText`，它跟随系统配色而与 `data-theme` 无关，深色下 7 个弹窗标题实测 `rgb(0,0,0)`。已加基础规则 `dialog { color: var(--text-primary) }`。
+- **背景 token 当文字色用**（提交 `95b47b0f`、`405aea9a`）：`.primary` 是 `color: var(--bg-accent)` 配 `background: var(--bg-accent-light)`，这个配对只在浅色下成立，深色实测 1.6:1。已新增 `--text-on-accent`（浅色 `#153d31`、深色 `#f5f7fa`），`.primary` 深色升到 5.9:1、浅色保持 10:1；同类 5 处一并改，`.toast-undo` 改用 `--text-white`。
+- **paused 动作不再冒充步骤的最新状态（已部署，未验证）**（提交 `ecf86b41`、`96897203`）：生产上 `bayernjf/pr-helper` 第 2 步 dev→main 的 PR 已在 11:36 合并，界面却持续显示「自动创建 PR · 已暂停，需要处理」。两层成因：`latestAutomationAction` 按 `updated_at` 跨 kind 取最新，那条门禁未满足而 paused 的 create-pr 每次重试都被推新时间戳（11:50），永远比真正走完该路径的 merge-pr（11:36）更新；排空判定的取代子查询又带 `newer.kind = actions.kind`，merge-pr 取代不了 create-pr，而「门禁未满足」属已给出裁决的 verdict，过期清理也会 `skip`，该行永久留存。已新增 `hasNewerSucceeded`：同 workflow + stage + source 上存在更晚创建且已 `succeeded` 的动作（不限 kind）时 cancel 成 superseded，原有同 kind 判定与 queued / running 分支不变。**为什么算未验证**：那条具体的行（id 291）在 12:22:02 被 12:21:35 排入的新 create-pr（id 295）按**原有**同 kind 规则取代掉了，与事前预测的自愈一致；新规则至今没有独立触发的机会。下次遇到「步骤已合并却显示已暂停」时，先查该 stage 是否存在更晚的 succeeded 动作，若有而 paused 行仍在，说明新规则没生效。
+
+**仍未做的可选项**：深色主题的第三条思路——Playwright 遍历深色下所有可见按钮算对比度、低于 4.5 即失败。覆盖面比静态守卫广（能抓到弹窗里未展开的按钮），代价是需要走遍各屏的 fixture、跑得慢、设计微调容易误报。当前靠静态守卫 + 手工实测。
 
 ## 常用命令
 

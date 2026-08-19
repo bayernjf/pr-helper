@@ -1631,12 +1631,19 @@ function logFields(fields: Record<string, string | number | boolean | undefined>
     .join(' ');
 }
 
-async function reconcileOneStage(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string, budget?: { calls: number; ms: number }) {
+// Stages reconcile concurrently, so these totals are sums across them rather than wall clock; the
+// question they answer is which phase a sweep spends its time in, which no single stage can show.
+export function addPhaseTotals(totals: Record<string, number>, phases: Record<string, number>) {
+  for (const [name, ms] of Object.entries(phases)) totals[name] = (totals[name] || 0) + ms;
+}
+
+async function reconcileOneStage(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string, budget?: { calls: number; ms: number; phases: Record<string, number> }) {
   const startedAt = performance.now();
   const tracked = await trackGitHubCalls(() => reconcileStageWork(environment, row, workflow, stageIndex, source, eventName));
   if (budget) {
     budget.calls += tracked.stats.calls;
     budget.ms += tracked.stats.totalMs;
+    addPhaseTotals(budget.phases, tracked.value.phases);
   }
   console.log(reconcileTimingLine({
     scope: 'stage',
@@ -1800,7 +1807,12 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     else if (!filter.branches) await sql`UPDATE pr_helper_workflows SET reconcile_pending_since = NULL WHERE user_id = ${userId} AND id IN ${sql(workflowIds)}`.catch(() => undefined);
   };
   try {
+    // The installation quota is flat and shared by every sweep, so the only way to attribute a burn
+    // afterwards is to store what each sweep spent alongside the stages it settled.
+    const githubBudget = { calls: 0, ms: 0, phases: {} as Record<string, number> };
+    const pruneAt = performance.now();
     for (const item of workflowsToReconcile) await pruneStaleWorkflowStageData(sql, item.row.user_id, item.workflow);
+    githubBudget.phases.prune = Math.round(performance.now() - pruneAt);
     const tracked = workflowsToReconcile.flatMap(({ row, workflow, branchScoped }) => workflow.stages.map((_, stageIndex) => ({ row, workflow, branchScoped, stageIndex })));
     // Resolving a stage costs GitHub calls, so a branch-scoped sweep drops out-of-scope stages first
     // and keeps only the routes the moved branches can actually reach.
@@ -1810,22 +1822,24 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
       return scope === 'none' ? [] : [{ ...item, scope }];
     });
     const routesAt = performance.now();
-    const routeTasks = await Promise.all(scoped.map(async item => {
+    // A wildcard source resolves its routes with three list queries of its own. Tracking them here is
+    // what keeps the stored call count from under-reporting the sweep: only stage work was counted.
+    const routes = await trackGitHubCalls(() => Promise.all(scoped.map(async item => {
       const sources = await routeSourcesForStage(environment, sql, item.row, item.workflow, item.stageIndex);
       const inScope = item.scope === 'matching' && filter.branches ? sources.filter(source => filter.branches!.includes(source)) : sources;
       return inScope.map(source => ({ ...item, source }));
-    }));
-    const flatTasks = routeTasks.flat();
+    })));
+    githubBudget.calls += routes.stats.calls;
+    githubBudget.ms += routes.stats.totalMs;
+    const flatTasks = routes.value.flat();
     const routesMs = Math.round(performance.now() - routesAt);
+    githubBudget.phases.routes = routesMs;
     // Recording the intent before the work means a sweep that is killed mid-flight still shows how
     // much it meant to do, instead of looking like a sweep that found nothing.
     await sql`UPDATE reconciliation_runs SET stages_total = ${flatTasks.length} WHERE id = ${runId}`;
     let reconciled = 0;
     let failed = 0;
     let firstFailure: unknown;
-    // The installation quota is flat and shared by every sweep, so the only way to attribute a burn
-    // afterwards is to store what each sweep spent alongside the stages it settled.
-    const githubBudget = { calls: 0, ms: 0 };
     // Counting as each stage settles is what lets a deferred sweep report the work it did finish; the
     // aggregate from allSettled is only available if we wait for every stage.
     const stageWork = Promise.allSettled(flatTasks.map(item => reconcileOneStage(environment, item.row, item.workflow, item.stageIndex, item.source, filter.eventName, githubBudget).then(
@@ -1851,12 +1865,12 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     if (raced.outcome === 'deferred') {
       // Closing the row here is the whole point: a deferred sweep used to stay 'running' until the
       // scheduled sweep reaped it, which read as in flight for minutes and hid the deferral.
-      await sql`UPDATE reconciliation_runs SET state = ${deferredRunState(reconciled, failed, flatTasks.length)}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, github_calls = ${githubBudget.calls}, github_ms = ${Math.round(githubBudget.ms)}, error_message = ${errorMessage || RECONCILIATION_DEFERRED_MESSAGE}, finished_at = now() WHERE id = ${runId}`;
+      await sql`UPDATE reconciliation_runs SET state = ${deferredRunState(reconciled, failed, flatTasks.length)}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, github_calls = ${githubBudget.calls}, github_ms = ${Math.round(githubBudget.ms)}, phase_ms = ${sql.json(githubBudget.phases)}, error_message = ${errorMessage || RECONCILIATION_DEFERRED_MESSAGE}, finished_at = now() WHERE id = ${runId}`;
       await markPending(true);
       return { reconciled, outcome: 'deferred' as const };
     }
     const finalState = reconciliationState(failed, reconciled);
-    await sql`UPDATE reconciliation_runs SET state = ${finalState}, stages_total = ${flatTasks.length}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, github_calls = ${githubBudget.calls}, github_ms = ${Math.round(githubBudget.ms)}, error_message = ${errorMessage}, finished_at = now() WHERE id = ${runId}`;
+    await sql`UPDATE reconciliation_runs SET state = ${finalState}, stages_total = ${flatTasks.length}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, github_calls = ${githubBudget.calls}, github_ms = ${Math.round(githubBudget.ms)}, phase_ms = ${sql.json(githubBudget.phases)}, error_message = ${errorMessage}, finished_at = now() WHERE id = ${runId}`;
     await markPending(failed > 0);
     if (failed > 0 && reconciled === 0) throw firstFailure || new Error('Reconciliation failed');
     return { reconciled, outcome: 'completed' as const };

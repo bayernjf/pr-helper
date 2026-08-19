@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-19（服务端自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 是唯一执行入口；流程详情页的只读进度条已上线；调用预算经复核后已从第一优先级降级，见《2026-08-15 调用预算复核与 drain 实测》）
+> 最后更新：2026-08-19（服务端自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 是唯一执行入口；流程详情页的只读进度条已上线；深色主题的三类失配已修并加了静态守卫；调用预算经复核后已从第一优先级降级，见《2026-08-15 调用预算复核与 drain 实测》）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -18,7 +18,7 @@ PR Helper 是 GitHub-first 的 PR / Release Control Tower。用户以项目 Lane
 
 ## 当前整体评估
 
-- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（529 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
+- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（536 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
 - **功能质量：8.5/10**。流程 CRUD、Lane 看板、动态来源、多路径汇聚、PR 创建/合并、五类门禁、合并后 Actions/部署状态、失败恢复和审计均已具备；后台自动创建 PR 和逐步骤自动合并已有生产成功记录。
 - **产品完善度：7.5/10**。个人使用和小团队发布控制塔已可用；多账号权限、private/organization 边界、Web Push 关闭页面投递和部署回滚仍需外部条件验收。
 - **生产准备度：7.5/10**。主链路和两级自动化都已有真实 Production 证据；健康检查/失败部署投影、确认式回滚和部分协作能力不能仅凭本地测试视为通过。GitHub 调用预算是当前唯一还在影响自动化可靠性的工程问题。
@@ -142,6 +142,18 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - **部署门禁可维护**：门禁可就地编辑而非删除重建、可从仓库实际的 Actions 工作流重新派生和同步、新建流程时按所选仓库预填候选；没有任何 Actions 工作流的仓库不再被塞入默认门禁，清空配置的步骤会退役对应数据行。
 - 其余：详情页刷新一律触发服务端校准；未设预算的 sweep 等待自身阶段结束再报完成；等待中的门禁保持 `queued` 而不是 `paused`；`duration_ms` 不再把回收前的等待计入耗时。
 
+### 2026-08-19 深色主题失配与自动化僵尸行修复
+
+三类问题都在生产界面上出现过，成因各不相同，共同点是浅色模式下完全正常，因此既没有报错也没有构建失败。
+
+- **发明出来的 token 名**：进度条、自动化徽标与明细、失败中心、预检面板、同步健康条、运行历史、抽屉时间线、恢复策略设置等较新的样式块用了 16 个从未定义过的变量名（如 `--border`、`--muted-text`、`--card-bg`），并给每处 `var()` 写了十六进制兜底，共 114 处。CSS 于是静默采用兜底色，深色主题的 token 覆盖对它们完全无效。已全部映射到项目真实 token 并删掉所有兜底；其中 4 处承载语义色的边框（`.sync-health-banner.success`、`.fp-node.is-succeeded`、`.lane-run-history li.completed`、`.pf-pass`）保留为 `--text-success`。
+- **`<dialog>` 不继承页面文字色**：浏览器 UA 样式表把 `dialog` 的 `color` 钉在 `CanvasText`，它跟随系统配色而与我们自己的 `data-theme` 属性无关，因此深色下 7 个弹窗的标题是黑字（实测 `rgb(0,0,0)`，而同一时刻 `--text-primary` 已是 `#e8ecf0`）。`.step-drawer` 显式写了 `color` 所以一直正常。已加一条基础规则 `dialog { color: var(--text-primary) }`。
+- **背景 token 当文字色用**：`.primary` 是 `background: var(--bg-accent-light); color: var(--bg-accent)`，这个配对只在浅色下成立（深绿字 + 极浅绿底）；深色主题独立重绘了两侧，变成深绿字 + 中绿底，实测对比度 1.6:1。同类写法共 5 处（另有 `.toast-undo` 是反向的同一错误）。已新增 `--text-on-accent`（浅色 `#153d31`、深色 `#f5f7fa`），`.primary` 深色对比度升到 5.9:1，浅色保持 10:1 不变；`.toast-undo` 改用 `--text-white`，与同一深色 toast 上的 `.toast-close` 统一。
+
+守卫测试 `src/style-theme-tokens.test.ts` 现有 5 条断言，覆盖上述三类：所有 `var()` 名字必须能在 `:root` 解析、不得出现字面色兜底、浅色 token 必须在深色全部被覆盖、`dialog` 必须有主题文字色、不得用 `--bg-*` 作为 `color`。这类问题此前无法被任何测试或构建发现，只能靠肉眼在深色下逐屏看。
+
+**paused 动作不再冒充步骤的最新状态**：生产上 `bayernjf/pr-helper` 第 2 步（dev→main）的 PR 已在 11:36 合并，界面却持续显示「自动创建 PR · 已暂停，需要处理」。成因有两层：`latestAutomationAction` 按 `updated_at` 跨 kind 取最新，而那条因门禁未满足而 paused 的 create-pr 每次重试都会被推新时间戳（11:50），于是永远比真正完成该路径的 merge-pr（11:36）更「新」；同时排空判定的取代子查询带了 `newer.kind = actions.kind`，merge-pr 取代不了 create-pr，而「门禁未满足」属于已给出裁决的 verdict，连过期清理也会 `skip`，这一行因此永久留存。已在排空判定中新增 `hasNewerSucceeded`：同一 workflow + stage + source 上存在更晚创建且已 `succeeded` 的动作（不限 kind）时把 paused 行 cancel 成 superseded；原有同 kind 判定与 queued / running 分支行为不变。**这一条属于已部署未验证**——那条具体的行在 12:22 被 12:21 排入的新 create-pr 按原有同 kind 规则取代掉了（与预测的自愈一致），新规则至今没有独立触发的机会。
+
 ### 2026-08-15 调用预算复核与 drain 实测
 
 drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
@@ -215,8 +227,8 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 ## 测试覆盖
 
-- 本地单元/服务端测试：`npm test` 运行 28 个文件 / 529 个测试；`npx tsc --noEmit` 和 `npm run build` 同时通过。
-- 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 25 个用例，包括 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉、创建/合并 PR、删除流程、确认式部署回滚、操作审计查询、编辑既有流程时步骤表单折叠、换仓库确认，以及流程详情进度条的步骤状态、前缀计数与同步时间标注。它验证真实 DOM、二次确认和浏览器请求负载，不替代真实 GitHub 写入、门禁和部署验收。
+- 本地单元/服务端测试：`npm test` 运行 29 个文件 / 536 个测试；`npx tsc --noEmit` 和 `npm run build` 同时通过。
+- 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 26 个用例，包括 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉、创建/合并 PR、删除流程、确认式部署回滚、操作审计查询、编辑既有流程时步骤表单折叠、换仓库确认，以及流程详情进度条的步骤状态、前缀计数、同步时间标注与全部完成后不再高亮当前步。它验证真实 DOM、二次确认和浏览器请求负载，不替代真实 GitHub 写入、门禁和部署验收。
 - 已新增流程保存队列回归：连续编辑会串行使用服务端返回的新版本，且不会由旧响应覆盖最新编辑；真实跨窗口乐观锁冲突仍会明确报错。
 - Production E2E 通过项目与尚未通过的集成项目均以 [验证报告](verification-report.md) 为准。
 - `src/lib/` 核心业务逻辑覆盖率 81%+，包括 domain、workflow、generation-rules、pr-drafts、encrypted-sync、navigation 等。
@@ -327,7 +339,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 4. **drain 稳定后删掉 sweep 内联的执行路径已完成（无待办，仅留结论）**。自动化合并现在只有 drain 一条执行入口，sweep 改为信号源：门禁转绿时清 `failure_reason` 并 bump `updated_at`，否则合并延迟会从秒级掉到最长 30 分钟。`scheduleServerAutoCreate` 的内联创建有意保留（创建侧 `max(attempts)` 只有 3，套上 drain 那套规则拦不到东西）。方案与验收记录见 [`docs/superpowers/plans/2026-08-17-drop-inline-automation-execution.md`](superpowers/plans/2026-08-17-drop-inline-automation-execution.md)。
 
-5. **自动化进度条 UI（只读部分已上线，写入路径仍后置）**。2026-08-15 先做了只读的可观测切片：`/api/inbox` 多带一个 `automation` 字段（复用看板已有的 30 秒轮询，不新增函数、不新增请求、不耗调用预算），受阻动作显示在失败中心、看板汇总条第四个计数、泳道步骤徽标、步骤抽屉明细和流程详情页 `stageTimeline` 五处；`automationActionPresentation` / `latestAutomationAction` 是五处共用的唯一判定。**2026-08-19 已上线只读进度条**：流程详情页时间线顶部一条整体进度条，节点状态由 `stageProgressNode` 从服务端 `decision` 与动作队列共同推出，不在浏览器重算；「已完成 n」只统计从第一步开始连续完成的前缀，因为服务端的 `merged` 描述的是该路径上一次的 PR 并会延续到下一轮，后面步骤留在上一轮的已完成显示为未开始，`merged` 且 `canCreateNext` 为真算就绪；进度条读的是服务端投影，故下方标注对账时间，且详情页 30 秒轮询会一并拉取投影（不带 `?refresh=1`，服务端只读库），刷新延迟等于服务端对账节奏；视觉上节点已合成一条铺满宽度的分段条而不是若干独立卡片。仍后置的是完整方案（[`docs/automated-workflow-plan.md`](automated-workflow-plan.md)《自动合并进度条》）中的步骤级放置、节点状态与方案表格的完全对齐，以及全部写入路径——接管对话框和 `unpause` 依赖第 1 项的「瞬时 vs 终态」分类，且生产至今没有任何一次 AI 生成失败可供验证。
+5. **自动化进度条 UI（只读部分已上线，写入路径仍后置）**。2026-08-15 先做了只读的可观测切片：`/api/inbox` 多带一个 `automation` 字段（复用看板已有的 30 秒轮询，不新增函数、不新增请求、不耗调用预算），受阻动作显示在失败中心、看板汇总条第四个计数、泳道步骤徽标、步骤抽屉明细和流程详情页 `stageTimeline` 五处；`automationActionPresentation` / `latestAutomationAction` 是五处共用的唯一判定。**2026-08-19 已上线只读进度条**：流程详情页时间线顶部一条整体进度条，节点状态由 `stageProgressNode` 从服务端 `decision` 与动作队列共同推出，不在浏览器重算；「已完成 n」只统计从第一步开始连续完成的前缀，因为服务端的 `merged` 描述的是该路径上一次的 PR 并会延续到下一轮，后面步骤留在上一轮的已完成显示为未开始，`merged` 且 `canCreateNext` 为真算就绪；进度条读的是服务端投影，故下方标注对账时间，且详情页 30 秒轮询会一并拉取投影（不带 `?refresh=1`，服务端只读库），刷新延迟等于服务端对账节奏；视觉上节点已合成一条铺满宽度的分段条而不是若干独立卡片；全部步骤完成时 `workflowProgress` 的 `currentIndex` 返回 `null`，不给任何节点加 `is-current`，标题改为「全部完成 · 共 N 步，等待新提交」——把已走完的最后一步标为当前步会让它看起来还在等操作。仍后置的是完整方案（[`docs/automated-workflow-plan.md`](automated-workflow-plan.md)《自动合并进度条》）中的步骤级放置、节点状态与方案表格的完全对齐，以及全部写入路径——接管对话框和 `unpause` 依赖第 1 项的「瞬时 vs 终态」分类，且生产至今没有任何一次 AI 生成失败可供验证。
 
 6. **reconciliation 调用预算改为阈值观察（已从第一优先级降级）**。等峰值小时越过约 2,500 次再设计预算模型，依据见《2026-08-15 调用预算复核与 drain 实测》。**2026-08-18 复核**：常态 876–1,182 次/小时，历史峰值 1,702 次（08-17 23:00），占 5,000 次/小时基线的 18%–34%（08-15 记的 1,204 次已被此峰值取代）。同时更正方向：`degraded` 的约束是**时延不是调用数**——249 次让出里有只花 10–11 次调用就超时的样本（08-18 12:01 webhook、12:13 inbox_refresh），按调用数设上限治不到它；先做 ETag / `If-None-Match`（304 不计配额、往返也短），再按剩余时间预算切分单轮工作量。
 
