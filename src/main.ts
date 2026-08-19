@@ -1317,15 +1317,17 @@ function flowProgressBar(flow: Workflow): string {
   // Every node idle means no projection has arrived yet, and a bar of empty nodes would read as a
   // flow that is stalled rather than one that has never been reconciled.
   const synced = statuses.some(status => status !== 'idle');
-  const headline = synced
-    ? t('detail.progress.position', { step: progress.currentIndex + 1, total: progress.total, completed: progress.completed })
-    : t('detail.progress.waitingSync');
+  const headline = !synced
+    ? t('detail.progress.waitingSync')
+    : progress.currentIndex === null
+      ? t('detail.progress.allDone', { total: progress.total })
+      : t('detail.progress.position', { step: progress.currentIndex + 1, total: progress.total, completed: progress.completed });
   // The bar reads the server projection, which only moves when reconciliation runs. Saying when that
   // last happened keeps it from being mistaken for a live view of GitHub.
   const syncedAt = flow.stages.flatMap((_, index) => statesForStage(flow, index).map(state => state.updatedAt)).filter(Boolean).sort().at(-1);
   const age = syncedAt ? relativeAgeText(Math.max(0, Math.floor((Date.now() - new Date(syncedAt).getTime()) / 1000))) : '';
   const syncedNote = age ? `<p class="flow-progress-sync">${escape(t('detail.progress.syncedAt', { time: age }))}</p>` : '';
-  const nodes = progress.nodes.map((status, index) => `<button type="button" class="fp-node is-${status} ${index === progress.currentIndex && synced ? 'is-current' : ''}" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(statesForStage(flow, index)[0]?.source || flow.stages[index]!.source)}" title="${escape(stageProgressTooltip(flow, index))}" aria-label="${escape(`${t('detail.progress.step', { step: index + 1 })} · ${t(`detail.progress.node.${status}`)}`)}"><span class="fp-node-index">${index + 1}</span><span class="fp-node-status">${t(`detail.progress.node.${status}`)}</span></button>`).join('');
+  const nodes = progress.nodes.map((status, index) => `<button type="button" class="fp-node is-${status} ${progress.currentIndex !== null && index === progress.currentIndex && synced ? 'is-current' : ''}" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(statesForStage(flow, index)[0]?.source || flow.stages[index]!.source)}" title="${escape(stageProgressTooltip(flow, index))}" aria-label="${escape(`${t('detail.progress.step', { step: index + 1 })} · ${t(`detail.progress.node.${status}`)}`)}"><span class="fp-node-index">${index + 1}</span><span class="fp-node-status">${t(`detail.progress.node.${status}`)}</span></button>`).join('');
   return `<div class="flow-progress"><p class="eyebrow">${t('detail.progress.eyebrow')}</p><p class="flow-progress-headline">${escape(headline)}</p><div class="flow-progress-nodes">${nodes}</div>${syncedNote}</div>`;
 }
 function blockedAutomationActions(): AutomationAction[] {
