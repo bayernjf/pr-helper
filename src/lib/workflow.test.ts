@@ -399,6 +399,16 @@ describe('workflow configuration', () => {
     expect(deploymentConfigurationWarnings(workflow, { actionsLoaded: true, actionWorkflows: [], environmentsLoaded: true, environments: [] }).map(warning => warning.code)).toEqual(['no-deployments']);
     expect(deploymentConfigurationWarnings({ ...workflow, deployments: [{ target: 'main', provider: 'vercel', workflowName: 'Deploy', environment: 'production' }] }, { actionsLoaded: false, actionWorkflows: [], environmentsLoaded: false, environments: [] }).map(warning => warning.code)).toEqual(['actions-unavailable', 'environment-missing']);
   });
+
+  it('stays quiet about a blank Environment once the repository is known to have none', () => {
+    const workflow = { ...createWorkflow('octo/app', 'dev', 'main'), deployments: [{ target: 'main', provider: 'vercel' as const, workflowName: 'Deploy', environment: 'production' as const }] };
+    const context = { actionsLoaded: true, actionWorkflows: [{ name: 'Deploy', path: '.github/workflows/deploy.yml' }] };
+    // Blank is the only answer a repository without Environments can give, so warning about it contradicts
+    // the form's own hint. An unread list is different: nothing is known, so the heads-up still stands.
+    expect(deploymentConfigurationWarnings(workflow, { ...context, environmentsLoaded: true, environments: [] }).map(warning => warning.code)).toEqual([]);
+    expect(deploymentConfigurationWarnings(workflow, { ...context, environmentsLoaded: true, environments: ['production-vercel'] }).map(warning => warning.code)).toEqual(['environment-missing']);
+    expect(deploymentConfigurationWarnings(workflow, { ...context, environmentsLoaded: false, environments: [] }).map(warning => warning.code)).toEqual(['environment-missing']);
+  });
 });
 
 describe('immediateAutomationEffect', () => {
