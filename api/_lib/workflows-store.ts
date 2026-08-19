@@ -1544,6 +1544,25 @@ function deploymentConfigsForTarget(workflow: StoredWorkflow, target: string) {
   return deploymentConfigs(workflow).filter(deployment => deployment.target === target);
 }
 
+export type StageDeploymentSnapshot = { stage_index: number; environment: string; run_id: number | null; run_name: string | null; run_url: string | null; deployment_url: string | null; state: string; conclusion: string | null; failure_summary: string | null; failure_job_url: string | null; health_state: string | null; health_url: string | null; health_detail: string | null };
+
+const STAGE_DEPLOYMENT_COLUMNS: (keyof StageDeploymentSnapshot)[] = ['stage_index', 'environment', 'run_id', 'run_name', 'run_url', 'deployment_url', 'state', 'conclusion', 'failure_summary', 'failure_job_url', 'health_state', 'health_url', 'health_detail'];
+
+// Most sweeps recompute a deployment row identical to the one already stored, and each of those
+// upserts waits its turn on a pool of four connections: on a 20-stage sweep the rewrite was the
+// largest phase by far, four times its own GitHub reads. Comparing first is what removes the write.
+// The driver returns numerics as strings, so columns are compared as text rather than by identity.
+export function deploymentRowChanged(previous: StageDeploymentSnapshot | undefined, next: StageDeploymentSnapshot) {
+  if (!previous) return true;
+  return STAGE_DEPLOYMENT_COLUMNS.some(column => String(previous[column] ?? '') !== String(next[column] ?? ''));
+}
+
+// The pass used to clear the stage and rewrite it, which is what made a stale provider disappear.
+// Skipping unchanged rows only stays lossless if the delete names the providers that actually went.
+export function staleDeploymentProviders(stored: { provider: DeploymentProvider }[], configured: DeploymentProvider[]) {
+  return stored.map(row => row.provider).filter(provider => !configured.includes(provider));
+}
+
 export function deploymentParentState(workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string) {
   const stage = workflow.stages[stageIndex];
   if (!stage) throw new Error('未找到部署所属的流程步骤');
@@ -1573,9 +1592,10 @@ async function reconcileStageDeployments(environment: Record<string, string | un
   await phase('deployWrite', () => sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_state, head_sha, checks_state, checks_passed, checks_total) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${parent.repository}, ${parent.source}, ${parent.target}, 'merged', ${parent.headSha}, 'pending', ${0}, ${0}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, head_sha = EXCLUDED.head_sha`);
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
-  const previousDeployments = await phase('deployRead', () => sql<{ provider: DeploymentProvider; state: DeploymentState; run_id: number | null }[]>`SELECT provider, state, run_id FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
+  const previousDeployments = await phase('deployRead', () => sql<(StageDeploymentSnapshot & { provider: DeploymentProvider })[]>`SELECT provider, stage_index, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, health_state, health_url, health_detail FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
   const previousByProvider = new Map(previousDeployments.map(deployment => [deployment.provider, deployment]));
-  await phase('deployWrite', () => sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
+  const stale = staleDeploymentProviders(previousDeployments, configurations.map(configuration => configuration.provider));
+  if (stale.length) await phase('deployWrite', () => sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source} AND provider IN ${sql(stale)}`);
   const actionRuns = await phase('deployRuns', () => installationRequest<{ workflow_runs: GitHubWorkflowRun[] }>(config, row.github_installation_id!, `/repos/${owner}/${name}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`).catch(() => ({ workflow_runs: [] })));
   const deployments = actionRuns.workflow_runs
     .map(run => ({ run, provider: deploymentProviderForWorkflowRun(run.name, configurations) }))
@@ -1600,7 +1620,8 @@ async function reconcileStageDeployments(environment: Record<string, string | un
       ? await phase('deployHealth', () => fetch(healthUrl, { signal: AbortSignal.timeout(10_000), redirect: 'follow' }).then(response => ({ state: response.ok ? 'success' : 'failure', detail: `HTTP ${response.status}` })).catch(error => ({ state: 'failure', detail: error instanceof Error ? error.message.slice(0, 240) : '请求失败' })))
       : { state: null, detail: null };
     const state: DeploymentState = actionState === 'success' && health.state === 'failure' ? 'failure' : actionState;
-    await phase('deployWrite', () => sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, stage_id, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${source}, ${provider}, ${configuration.environment}, ${run.id}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${state}, ${run.conclusion}, ${failure.summary}, ${failure.jobUrl}, ${health.state}, ${healthUrl}, ${health.detail}) ON CONFLICT (user_id, workflow_id, stage_id, source, provider) DO UPDATE SET stage_index = EXCLUDED.stage_index, environment = EXCLUDED.environment, run_id = EXCLUDED.run_id, run_name = EXCLUDED.run_name, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, failure_summary = EXCLUDED.failure_summary, failure_job_url = EXCLUDED.failure_job_url, health_state = EXCLUDED.health_state, health_url = EXCLUDED.health_url, health_detail = EXCLUDED.health_detail, updated_at = now()`);
+    const snapshot: StageDeploymentSnapshot = { stage_index: stageIndex, environment: configuration.environment, run_id: run.id, run_name: run.name, run_url: run.html_url || null, deployment_url: latestStatus?.environment_url || null, state, conclusion: run.conclusion, failure_summary: failure.summary, failure_job_url: failure.jobUrl, health_state: health.state, health_url: healthUrl, health_detail: health.detail };
+    if (deploymentRowChanged(previousByProvider.get(provider), snapshot)) await phase('deployWrite', () => sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, stage_id, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${source}, ${provider}, ${configuration.environment}, ${run.id}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${state}, ${run.conclusion}, ${failure.summary}, ${failure.jobUrl}, ${health.state}, ${healthUrl}, ${health.detail}) ON CONFLICT (user_id, workflow_id, stage_id, source, provider) DO UPDATE SET stage_index = EXCLUDED.stage_index, environment = EXCLUDED.environment, run_id = EXCLUDED.run_id, run_name = EXCLUDED.run_name, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, failure_summary = EXCLUDED.failure_summary, failure_job_url = EXCLUDED.failure_job_url, health_state = EXCLUDED.health_state, health_url = EXCLUDED.health_url, health_detail = EXCLUDED.health_detail, updated_at = now()`);
     await phase('deployWrite', () => sql`INSERT INTO workflow_stage_deployment_runs (user_id, workflow_id, stage_index, stage_id, source, provider, run_id, environment, run_name, run_url, deployment_url, state, conclusion, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${source}, ${provider}, ${run.id}, ${configuration.environment}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${state}, ${run.conclusion}, ${health.state}, ${healthUrl}, ${health.detail}) ON CONFLICT (user_id, workflow_id, stage_id, source, provider, run_id) DO UPDATE SET stage_index = EXCLUDED.stage_index, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, health_state = EXCLUDED.health_state, health_url = EXCLUDED.health_url, health_detail = EXCLUDED.health_detail, updated_at = now()`);
     const previous = previousByProvider.get(provider);
     if (['success', 'failure'].includes(state) && (previous?.state !== state || previous.run_id !== run.id)) {
@@ -1609,8 +1630,10 @@ async function reconcileStageDeployments(environment: Record<string, string | un
       await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:deployment:${provider}:${run.id}:${state}`, kind: notification.kind, title: notification.title, body: `${workflow.repository} · ${source} → ${target} · ${notification.message}`, url: run.html_url || '/' }));
     }
   }));
-  await phase('deployWrite', () => Promise.all(configurations
+  const placeholders = configurations
     .filter(configuration => !latestByProvider.has(configuration.provider))
+    .filter(configuration => deploymentRowChanged(previousByProvider.get(configuration.provider), { stage_index: stageIndex, environment: configuration.environment, run_id: null, run_name: configuration.workflowName, run_url: null, deployment_url: null, state: 'pending', conclusion: null, failure_summary: missingDeploymentSummary(configuration.workflowName), failure_job_url: null, health_state: null, health_url: null, health_detail: null }));
+  if (placeholders.length) await phase('deployWrite', () => Promise.all(placeholders
     .map(configuration => sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, stage_id, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${source}, ${configuration.provider}, ${configuration.environment}, ${null}, ${configuration.workflowName}, ${null}, ${null}, 'pending', ${null}, ${missingDeploymentSummary(configuration.workflowName)}, ${null}, ${null}, ${null}, ${null}) ON CONFLICT (user_id, workflow_id, stage_id, source, provider) DO UPDATE SET stage_index = EXCLUDED.stage_index, environment = EXCLUDED.environment, run_id = NULL, run_name = EXCLUDED.run_name, run_url = NULL, deployment_url = NULL, state = EXCLUDED.state, conclusion = NULL, failure_summary = EXCLUDED.failure_summary, failure_job_url = NULL, health_state = NULL, health_url = NULL, health_detail = NULL, updated_at = now()`)));
   return configurations.map(configuration => {
     const run = latestByProvider.get(configuration.provider);
