@@ -1555,7 +1555,7 @@ function githubEnvironment(provider: DeploymentProvider, environment: 'preview' 
   return `${environment}-cloudflare-pages`;
 }
 
-async function reconcileStageDeployments(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, target: string, sha: string): Promise<DeploymentState[]> {
+async function reconcileStageDeployments(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, target: string, sha: string, phase: PhaseRecorder): Promise<DeploymentState[]> {
   const configurations = deploymentConfigsForTarget(workflow, target);
   const stageId = stageIdentity(workflow, stageIndex);
   // A configuration that no longer declares a deployment for this target still owns the rows it once
@@ -1563,20 +1563,20 @@ async function reconcileStageDeployments(environment: Record<string, string | un
   // run-less placeholders for workflows the repository does not have, and those hold checks_state at
   // pending, which locks the next stage with no way out but this delete.
   if (!configurations.length) {
-    await sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`;
+    await phase('deployWrite', () => sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
     return [];
   }
   if (!row.github_installation_id) return [];
   const parent = deploymentParentState(workflow, stageIndex, source, sha);
   // Deployment rows are children of workflow_stage_states. Reconciliation discovers
   // deployments before the final stage status is written, so establish the parent first.
-  await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_state, head_sha, checks_state, checks_passed, checks_total) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${parent.repository}, ${parent.source}, ${parent.target}, 'merged', ${parent.headSha}, 'pending', ${0}, ${0}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, head_sha = EXCLUDED.head_sha`;
+  await phase('deployWrite', () => sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_state, head_sha, checks_state, checks_passed, checks_total) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${parent.repository}, ${parent.source}, ${parent.target}, 'merged', ${parent.headSha}, 'pending', ${0}, ${0}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, head_sha = EXCLUDED.head_sha`);
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
-  const previousDeployments = await sql<{ provider: DeploymentProvider; state: DeploymentState; run_id: number | null }[]>`SELECT provider, state, run_id FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`;
+  const previousDeployments = await phase('deployRead', () => sql<{ provider: DeploymentProvider; state: DeploymentState; run_id: number | null }[]>`SELECT provider, state, run_id FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
   const previousByProvider = new Map(previousDeployments.map(deployment => [deployment.provider, deployment]));
-  await sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`;
-  const actionRuns = await installationRequest<{ workflow_runs: GitHubWorkflowRun[] }>(config, row.github_installation_id, `/repos/${owner}/${name}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`).catch(() => ({ workflow_runs: [] }));
+  await phase('deployWrite', () => sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
+  const actionRuns = await phase('deployRuns', () => installationRequest<{ workflow_runs: GitHubWorkflowRun[] }>(config, row.github_installation_id!, `/repos/${owner}/${name}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`).catch(() => ({ workflow_runs: [] })));
   const deployments = actionRuns.workflow_runs
     .map(run => ({ run, provider: deploymentProviderForWorkflowRun(run.name, configurations) }))
     .filter((item): item is { run: GitHubWorkflowRun; provider: DeploymentProvider } => Boolean(item.provider))
@@ -1586,32 +1586,32 @@ async function reconcileStageDeployments(environment: Record<string, string | un
   await Promise.all([...latestByProvider].map(async ([provider, run]) => {
     const configuration = configurations.find(item => item.provider === provider)!;
     const environmentName = configuration.githubEnvironment || githubEnvironment(provider, configuration.environment);
-    const githubDeployments = await installationRequest<GitHubDeployment[]>(config, row.github_installation_id!, `/repos/${owner}/${name}/deployments?sha=${encodeURIComponent(sha)}&environment=${encodeURIComponent(environmentName)}&per_page=1`).catch(() => []);
+    const githubDeployments = await phase('deployLookup', () => installationRequest<GitHubDeployment[]>(config, row.github_installation_id!, `/repos/${owner}/${name}/deployments?sha=${encodeURIComponent(sha)}&environment=${encodeURIComponent(environmentName)}&per_page=1`).catch(() => []));
     const status = githubDeployments[0]
-      ? await installationRequest<GitHubDeploymentStatus[]>(config, row.github_installation_id!, `/repos/${owner}/${name}/deployments/${githubDeployments[0].id}/statuses?per_page=1`).catch(() => [])
+      ? await phase('deployLookup', () => installationRequest<GitHubDeploymentStatus[]>(config, row.github_installation_id!, `/repos/${owner}/${name}/deployments/${githubDeployments[0].id}/statuses?per_page=1`).catch(() => []))
       : [];
     const latestStatus = status[0];
     const failure = deploymentRunState(run) === 'failure'
-      ? deploymentFailureSummary((await installationRequest<{ jobs: GitHubWorkflowJob[] }>(config, row.github_installation_id!, `/repos/${owner}/${name}/actions/runs/${run.id}/jobs?per_page=100`).catch(() => ({ jobs: [] }))).jobs)
+      ? deploymentFailureSummary((await phase('deployJobs', () => installationRequest<{ jobs: GitHubWorkflowJob[] }>(config, row.github_installation_id!, `/repos/${owner}/${name}/actions/runs/${run.id}/jobs?per_page=100`).catch(() => ({ jobs: [] })))).jobs)
       : { summary: null, jobUrl: null };
     const actionState = deploymentRunState(run);
     const healthUrl = actionState === 'success' && latestStatus?.environment_url && configuration.healthCheckPath ? new URL(configuration.healthCheckPath, latestStatus.environment_url).toString() : null;
     const health = healthUrl && canCheckDeploymentUrl(healthUrl)
-      ? await fetch(healthUrl, { signal: AbortSignal.timeout(10_000), redirect: 'follow' }).then(response => ({ state: response.ok ? 'success' : 'failure', detail: `HTTP ${response.status}` })).catch(error => ({ state: 'failure', detail: error instanceof Error ? error.message.slice(0, 240) : '请求失败' }))
+      ? await phase('deployHealth', () => fetch(healthUrl, { signal: AbortSignal.timeout(10_000), redirect: 'follow' }).then(response => ({ state: response.ok ? 'success' : 'failure', detail: `HTTP ${response.status}` })).catch(error => ({ state: 'failure', detail: error instanceof Error ? error.message.slice(0, 240) : '请求失败' })))
       : { state: null, detail: null };
     const state: DeploymentState = actionState === 'success' && health.state === 'failure' ? 'failure' : actionState;
-    await sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, stage_id, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${source}, ${provider}, ${configuration.environment}, ${run.id}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${state}, ${run.conclusion}, ${failure.summary}, ${failure.jobUrl}, ${health.state}, ${healthUrl}, ${health.detail}) ON CONFLICT (user_id, workflow_id, stage_id, source, provider) DO UPDATE SET stage_index = EXCLUDED.stage_index, environment = EXCLUDED.environment, run_id = EXCLUDED.run_id, run_name = EXCLUDED.run_name, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, failure_summary = EXCLUDED.failure_summary, failure_job_url = EXCLUDED.failure_job_url, health_state = EXCLUDED.health_state, health_url = EXCLUDED.health_url, health_detail = EXCLUDED.health_detail, updated_at = now()`;
-    await sql`INSERT INTO workflow_stage_deployment_runs (user_id, workflow_id, stage_index, stage_id, source, provider, run_id, environment, run_name, run_url, deployment_url, state, conclusion, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${source}, ${provider}, ${run.id}, ${configuration.environment}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${state}, ${run.conclusion}, ${health.state}, ${healthUrl}, ${health.detail}) ON CONFLICT (user_id, workflow_id, stage_id, source, provider, run_id) DO UPDATE SET stage_index = EXCLUDED.stage_index, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, health_state = EXCLUDED.health_state, health_url = EXCLUDED.health_url, health_detail = EXCLUDED.health_detail, updated_at = now()`;
+    await phase('deployWrite', () => sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, stage_id, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${source}, ${provider}, ${configuration.environment}, ${run.id}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${state}, ${run.conclusion}, ${failure.summary}, ${failure.jobUrl}, ${health.state}, ${healthUrl}, ${health.detail}) ON CONFLICT (user_id, workflow_id, stage_id, source, provider) DO UPDATE SET stage_index = EXCLUDED.stage_index, environment = EXCLUDED.environment, run_id = EXCLUDED.run_id, run_name = EXCLUDED.run_name, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, failure_summary = EXCLUDED.failure_summary, failure_job_url = EXCLUDED.failure_job_url, health_state = EXCLUDED.health_state, health_url = EXCLUDED.health_url, health_detail = EXCLUDED.health_detail, updated_at = now()`);
+    await phase('deployWrite', () => sql`INSERT INTO workflow_stage_deployment_runs (user_id, workflow_id, stage_index, stage_id, source, provider, run_id, environment, run_name, run_url, deployment_url, state, conclusion, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${source}, ${provider}, ${run.id}, ${configuration.environment}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${state}, ${run.conclusion}, ${health.state}, ${healthUrl}, ${health.detail}) ON CONFLICT (user_id, workflow_id, stage_id, source, provider, run_id) DO UPDATE SET stage_index = EXCLUDED.stage_index, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, health_state = EXCLUDED.health_state, health_url = EXCLUDED.health_url, health_detail = EXCLUDED.health_detail, updated_at = now()`);
     const previous = previousByProvider.get(provider);
     if (['success', 'failure'].includes(state) && (previous?.state !== state || previous.run_id !== run.id)) {
       const notification = deploymentNotification(provider, configuration.environment, state);
-      await recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:deployment:${provider}:${run.id}:${state}`, notification.kind, notification.title, stageId, target);
-      await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:deployment:${provider}:${run.id}:${state}`, kind: notification.kind, title: notification.title, body: `${workflow.repository} · ${source} → ${target} · ${notification.message}`, url: run.html_url || '/' });
+      await phase('deployWrite', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:deployment:${provider}:${run.id}:${state}`, notification.kind, notification.title, stageId, target));
+      await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:deployment:${provider}:${run.id}:${state}`, kind: notification.kind, title: notification.title, body: `${workflow.repository} · ${source} → ${target} · ${notification.message}`, url: run.html_url || '/' }));
     }
   }));
-  await Promise.all(configurations
+  await phase('deployWrite', () => Promise.all(configurations
     .filter(configuration => !latestByProvider.has(configuration.provider))
-    .map(configuration => sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, stage_id, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${source}, ${configuration.provider}, ${configuration.environment}, ${null}, ${configuration.workflowName}, ${null}, ${null}, 'pending', ${null}, ${missingDeploymentSummary(configuration.workflowName)}, ${null}, ${null}, ${null}, ${null}) ON CONFLICT (user_id, workflow_id, stage_id, source, provider) DO UPDATE SET stage_index = EXCLUDED.stage_index, environment = EXCLUDED.environment, run_id = NULL, run_name = EXCLUDED.run_name, run_url = NULL, deployment_url = NULL, state = EXCLUDED.state, conclusion = NULL, failure_summary = EXCLUDED.failure_summary, failure_job_url = NULL, health_state = NULL, health_url = NULL, health_detail = NULL, updated_at = now()`));
+    .map(configuration => sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, stage_id, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${source}, ${configuration.provider}, ${configuration.environment}, ${null}, ${configuration.workflowName}, ${null}, ${null}, 'pending', ${null}, ${missingDeploymentSummary(configuration.workflowName)}, ${null}, ${null}, ${null}, ${null}) ON CONFLICT (user_id, workflow_id, stage_id, source, provider) DO UPDATE SET stage_index = EXCLUDED.stage_index, environment = EXCLUDED.environment, run_id = NULL, run_name = EXCLUDED.run_name, run_url = NULL, deployment_url = NULL, state = EXCLUDED.state, conclusion = NULL, failure_summary = EXCLUDED.failure_summary, failure_job_url = NULL, health_state = NULL, health_url = NULL, health_detail = NULL, updated_at = now()`)));
   return configurations.map(configuration => {
     const run = latestByProvider.get(configuration.provider);
     return run ? deploymentRunState(run) : 'pending';
@@ -1651,6 +1651,24 @@ export function pendingPhaseTotals(trackers: Iterable<StagePhaseTracker>) {
   return totals;
 }
 
+type PhaseRecorder = <T>(name: string, work: () => Promise<T>) => Promise<T>;
+
+// A nested phase restores the enclosing name instead of clearing it, so a stage abandoned inside a
+// sub-phase still reports the coarse phase it belongs to rather than looking as if it never started.
+export function createPhaseRecorder(tracker?: StagePhaseTracker) {
+  const phases: Record<string, number> = {};
+  const phase: PhaseRecorder = async (name, work) => {
+    const at = performance.now();
+    const parent = tracker?.current ?? null;
+    if (tracker) tracker.current = name;
+    try { return await work(); } finally {
+      phases[name] = (phases[name] || 0) + Math.round(performance.now() - at);
+      if (tracker) tracker.current = parent;
+    }
+  };
+  return { phases, phase };
+}
+
 type ReconcileBudget = { calls: number; ms: number; phases: Record<string, number>; pending: Set<StagePhaseTracker> };
 
 async function reconcileOneStage(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string, budget?: ReconcileBudget) {
@@ -1678,15 +1696,7 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
 }
 
 async function reconcileStageWork(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string, tracker?: StagePhaseTracker): Promise<{ reconciled: boolean; phases: Record<string, number> }> {
-  const phases: Record<string, number> = {};
-  const phase = async <T>(name: string, work: () => Promise<T>): Promise<T> => {
-    const at = performance.now();
-    if (tracker) tracker.current = name;
-    try { return await work(); } finally {
-      phases[name] = (phases[name] || 0) + Math.round(performance.now() - at);
-      if (tracker) tracker.current = null;
-    }
-  };
+  const { phases, phase } = createPhaseRecorder(tracker);
   if (!row.github_installation_id) return { reconciled: false, phases };
   const installationId = row.github_installation_id;
   const stage = { ...stageForIndex(workflow, stageIndex), source };
@@ -1709,7 +1719,7 @@ async function reconcileStageWork(environment: Record<string, string | undefined
     if (unlocked && comparison.ahead_by > 0 && (previous[0]?.ahead_by || 0) === 0) {
       await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:none`, kind: 'new-pr-ready', title: '可以创建下一步 PR', body: `${workflow.repository} · ${stage.source} → ${stage.target}`, url: '/' }));
     }
-    if (comparison.ahead_by > 0 && comparisonHeadSha) await phase('write', () => scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha));
+    if (comparison.ahead_by > 0 && comparisonHeadSha) await phase('queue', () => scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha));
     return { reconciled: true, phases };
   }
   const sha = pull.merged_at ? pull.merge_commit_sha : pull.head.sha;
@@ -1721,7 +1731,7 @@ async function reconcileStageWork(environment: Record<string, string | undefined
     pull.merged_at ? Promise.resolve(null as BranchProtection | null) : installationRequest<BranchProtection>(config, installationId, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}/protection`).catch(() => null),
     pull.merged_at ? Promise.resolve([] as BranchRule[]) : installationRequest<BranchRule[]>(config, installationId, `/repos/${owner}/${name}/rules/branches/${encodeURIComponent(stage.target)}`).catch(() => []),
   ]));
-  const deploymentStates = pull.merged_at && sha ? await phase('deploy', () => reconcileStageDeployments(environment, sql, row, workflow, stageIndex, source, stage.target, sha)) : [];
+  const deploymentStates = pull.merged_at && sha ? await phase('deploy', () => reconcileStageDeployments(environment, sql, row, workflow, stageIndex, source, stage.target, sha, phase)) : [];
   const observedChecks = runs.check_runs.length || statuses.statuses.length
     ? summarizeGitHubChecks(runs.check_runs, statuses.statuses)
     : { state: 'success' as const, passed: 0, total: 0 };
@@ -1751,10 +1761,10 @@ async function reconcileStageWork(environment: Record<string, string | undefined
   if (pull.merged_at && unlocked && comparison.ahead_by > 0 && (before?.ahead_by || 0) === 0) {
     await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:${pull.number}`, kind: 'new-pr-ready', title: '有新提交，可以创建新 PR', body: `${workflow.repository} · ${route}`, url: '/' }));
   }
-  if (comparison.ahead_by > 0 && comparisonHeadSha) await phase('write', () => scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha));
+  if (comparison.ahead_by > 0 && comparisonHeadSha) await phase('queue', () => scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha));
   // Only an open pull request can be merged, and the gate verdict is pinned to the head sha just stored.
   // The gate goes in already computed, so a wait that only a later event can end costs no second read.
-  if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await phase('write', () => scheduleServerAutoMerge(sql, row, workflow, stageIndex, source, pull.number, pull.head.sha, { checksState: checks.state, approvals, requiredApprovals, mergeable: pull.mergeable ?? null, mergeableState: pull.mergeable_state || '' }));
+  if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await phase('queue', () => scheduleServerAutoMerge(sql, row, workflow, stageIndex, source, pull.number, pull.head.sha, { checksState: checks.state, approvals, requiredApprovals, mergeable: pull.mergeable ?? null, mergeableState: pull.mergeable_state || '' }));
   return { reconciled: true, phases };
 }
 

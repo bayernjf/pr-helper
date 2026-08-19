@@ -2603,6 +2603,15 @@ a.account-menu-item {
   font-size: 0.72rem;
   color: var(--text-primary);
 }
+.failure-center a,
+.lane-timeline li a {
+  color: var(--text-accent);
+  text-decoration: none;
+}
+.failure-center a:hover,
+.lane-timeline li a:hover {
+  text-decoration: underline;
+}
 .fc-actions {
   display: flex;
   align-items: center;
