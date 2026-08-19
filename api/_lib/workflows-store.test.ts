@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, deploymentRowChanged, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -1630,6 +1630,47 @@ describe('a sweep records where its time went', () => {
     expect(migration).toContain('ALTER TABLE reconciliation_runs');
     expect(migration).toContain('ADD COLUMN IF NOT EXISTS phase_ms');
     expect(source).not.toContain('ALTER TABLE reconciliation_runs');
+  });
+});
+
+// A 20-stage sweep spent 118 seconds of accumulated time rewriting deployment rows, more than any
+// other phase and four times its GitHub reads, because every sweep deletes and reinserts rows whose
+// content did not move. With a pool of four connections each of those statements waits its turn.
+describe('a sweep stops rewriting deployment rows that did not change', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const stored = { stage_index: 0, environment: 'production', run_id: 42, run_name: 'Deploy', run_url: 'https://run', deployment_url: 'https://app', state: 'success', conclusion: 'success', failure_summary: null, failure_job_url: null, health_state: null, health_url: null, health_detail: null };
+
+  it('writes a row it has never stored', () => {
+    expect(deploymentRowChanged(undefined, stored)).toBe(true);
+  });
+
+  it('leaves an identical row alone, whatever type the driver returned it as', () => {
+    expect(deploymentRowChanged({ ...stored, run_id: '42' as unknown as number }, stored)).toBe(false);
+  });
+
+  it('writes again as soon as any stored column moves', () => {
+    (Object.keys(stored) as (keyof typeof stored)[]).forEach(column => {
+      const moved = { ...stored, [column]: column === 'run_id' || column === 'stage_index' ? 7 : 'moved' };
+      expect(deploymentRowChanged(stored, moved), column).toBe(true);
+    });
+  });
+
+  it('treats an absent column and an empty one as the same absence', () => {
+    expect(deploymentRowChanged({ ...stored, health_detail: null }, { ...stored, health_detail: null })).toBe(false);
+  });
+
+  it('deletes only the providers the workflow no longer declares', () => {
+    expect(staleDeploymentProviders([{ provider: 'vercel' }, { provider: 'cloudflare' }], ['vercel'])).toEqual(['cloudflare']);
+    expect(staleDeploymentProviders([{ provider: 'vercel' }], ['vercel', 'cloudflare'])).toEqual([]);
+  });
+
+  // The old pass deleted every row first, so skipping the reinsert would have dropped the row instead
+  // of keeping it: the targeted delete is what makes the skip safe rather than lossy.
+  it('no longer clears the whole stage before rewriting it', () => {
+    const deploy = source.slice(source.indexOf('async function reconcileStageDeployments'), source.indexOf('async function reconcileOneStage'));
+    expect(deploy).toContain('staleDeploymentProviders');
+    expect(deploy).toContain('deploymentRowChanged');
+    expect(deploy.match(/DELETE FROM workflow_stage_deployments/g) || []).toHaveLength(2);
   });
 });
 
