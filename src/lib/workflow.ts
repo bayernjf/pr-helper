@@ -178,7 +178,11 @@ export function deploymentConfigurationWarnings(workflow: Workflow, context: { a
   const workflowExists = (value: string) => context.actionWorkflows.some(candidate => candidate.name === value || candidate.path === value);
   configured.forEach((deployment, deploymentIndex) => {
     if (context.actionsLoaded && !workflowExists(deployment.workflowName)) warnings.push({ code: 'workflow-not-found', deploymentIndex, value: deployment.workflowName });
-    if (!deployment.githubEnvironment) warnings.push({ code: 'environment-missing', deploymentIndex });
+    if (!deployment.githubEnvironment) {
+      // Blank is the only answer a repository without Environments can give, and the form says so, so
+      // demanding a name there just contradicts it. An unread list is different: nothing is known yet.
+      if (!context.environmentsLoaded || context.environments.length) warnings.push({ code: 'environment-missing', deploymentIndex });
+    }
     else if (context.environmentsLoaded && !context.environments.includes(deployment.githubEnvironment)) warnings.push({ code: 'environment-not-found', deploymentIndex, value: deployment.githubEnvironment });
     if (deployment.healthCheckPath && !deployment.healthCheckPath.startsWith('/')) warnings.push({ code: 'health-path-invalid', deploymentIndex, value: deployment.healthCheckPath });
     if (deployment.rollbackWorkflowName && context.actionsLoaded && !workflowExists(deployment.rollbackWorkflowName)) warnings.push({ code: 'rollback-workflow-not-found', deploymentIndex, value: deployment.rollbackWorkflowName });
