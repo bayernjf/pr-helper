@@ -92,6 +92,11 @@ body {
   transition: background-color 0.2s ease, color 0.2s ease;
 }
 
+/* The UA sheet pins dialog text to CanvasText, which ignores our data-theme attribute and stays black. */
+dialog {
+  color: var(--text-primary);
+}
+
 .product, .connect {
   max-width: 1180px;
   margin: auto;
