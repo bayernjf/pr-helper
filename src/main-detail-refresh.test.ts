@@ -18,8 +18,12 @@ describe('refreshDetailStatuses', () => {
     expect(refresh).not.toContain("includes('*')");
   });
 
-  // The background poll is a different contract: it must not spend a GitHub round trip on every tick.
-  it('leaves the background poll narrowed to workflows whose sources must be enumerated', () => {
-    expect(body('refreshStatuses')).toContain("includes('*')");
+  // The background poll is a different contract: it refreshes the projection the progress bar and the
+  // automation blocks read, but must stay a plain read. `/api/inbox` only calls GitHub when `refresh=1`
+  // is set, which `loadActionQueue(false)` does not send, so the tick costs one database read.
+  it('refreshes the projection on every tick without asking the server to reconcile', () => {
+    const poll = body('refreshStatuses');
+    expect(poll).toContain('loadActionQueue(false)');
+    expect(poll).not.toContain('loadActionQueue(true');
   });
 });

@@ -69,6 +69,12 @@ describe('stageProgressNode', () => {
     expect(stageProgressNode({ decision: decision('merged') }).status).toBe('succeeded');
   });
 
+  // `merged` on the server means the route's last PR was merged, and it stays true into the next round.
+  // With new commits on top, this round has not run yet, so calling it done would overstate the progress.
+  it('reports a merged step that already has new commits as ready, not done', () => {
+    expect(stageProgressNode({ decision: { ...decision('merged'), canCreateNext: true } }).status).toBe('ready');
+  });
+
   // A failed action and a red gate are different facts, and either one is the reason the flow stopped
   // here. Neither may be softened by an automation row that still looks busy.
   it('reports a failure whether it came from the action or from the gates', () => {
@@ -129,16 +135,24 @@ describe('worstStageProgress', () => {
 
 describe('workflowProgress', () => {
   it('counts finished steps and points at the first unfinished one', () => {
-    expect(workflowProgress(['succeeded', 'succeeded', 'waiting-gates', 'locked'])).toEqual({ completed: 2, total: 4, currentIndex: 2 });
+    expect(workflowProgress(['succeeded', 'succeeded', 'waiting-gates', 'locked'])).toEqual({ completed: 2, total: 4, currentIndex: 2, nodes: ['succeeded', 'succeeded', 'waiting-gates', 'locked'] });
+  });
+
+  // Each step keeps the state of its own last round, so a later step can still read merged from the
+  // previous release while an earlier step is running. Counting those would report progress the flow
+  // has not made this round, and showing them as done would say the flow already passed a step it has not reached.
+  it('ignores a later step left over as done from an earlier round', () => {
+    expect(workflowProgress(['running', 'succeeded'])).toEqual({ completed: 0, total: 2, currentIndex: 0, nodes: ['running', 'idle'] });
+    expect(workflowProgress(['succeeded', 'waiting-gates', 'succeeded'])).toEqual({ completed: 1, total: 3, currentIndex: 1, nodes: ['succeeded', 'waiting-gates', 'idle'] });
   });
 
   // A finished flow has no current step to point at, and reporting index 4 of 4 would render a node
   // that does not exist.
   it('points at the last step once every step is done', () => {
-    expect(workflowProgress(['succeeded', 'succeeded'])).toEqual({ completed: 2, total: 2, currentIndex: 1 });
+    expect(workflowProgress(['succeeded', 'succeeded'])).toEqual({ completed: 2, total: 2, currentIndex: 1, nodes: ['succeeded', 'succeeded'] });
   });
 
   it('handles a flow with no steps', () => {
-    expect(workflowProgress([])).toEqual({ completed: 0, total: 0, currentIndex: 0 });
+    expect(workflowProgress([])).toEqual({ completed: 0, total: 0, currentIndex: 0, nodes: [] });
   });
 });
