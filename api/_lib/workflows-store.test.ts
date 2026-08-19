@@ -1354,6 +1354,20 @@ describe('automationDrainDecision', () => {
     expect(automationDrainDecision(action({ state: 'paused', failureReason: '门禁尚未全绿（当前 failure）', createdAt: '2026-08-14T13:00:00.000Z', updatedAt: '2026-08-14T13:30:00.000Z', hasNewer: true }), now)).toEqual({ kind: 'cancel', reason: 'superseded' });
   });
 
+  // Supersession only looks at the same kind, so the merge that actually finished the route cannot retire
+  // the create-pr that paused on a gate. In production a paused create-pr for dev→main outlived the
+  // merge-pr that shipped that very route, and because every retry bumps its timestamp it stayed the
+  // newest row on the step and reported it as paused for hours after the PR had merged.
+  it('cancels a paused action once a later action of another kind succeeded on the route', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: '当前步骤尚未满足自动创建 PR 的门禁', updatedAt: '2026-08-15T02:25:00.000Z', hasNewerSucceeded: true }), now)).toEqual({ kind: 'cancel', reason: 'superseded' });
+  });
+
+  // A succeeded action that predates the pause says nothing about it: the gate this row is waiting on was
+  // recorded after that work finished.
+  it('keeps a paused action whose only succeeded neighbour came before it', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: '当前步骤尚未满足自动创建 PR 的门禁', updatedAt: '2026-08-15T02:25:00.000Z', hasNewerSucceeded: false }), now)).toEqual({ kind: 'skip' });
+  });
+
   // A fault that throws before the executor's claim charges no attempt, so the cap cannot bound this on
   // its own; without a wait the same row would be retried on every sweep for the whole window.
   it('waits out the cooldown before requeueing the same paused action again', () => {
