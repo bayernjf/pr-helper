@@ -435,6 +435,7 @@ const zh: TranslationDict = {
   'detail.timeline.eyebrow': 'EXECUTION TIMELINE',
   'detail.progress.eyebrow': 'FLOW PROGRESS',
   'detail.progress.position': '第 {step} 步 / 共 {total} 步 · 已完成 {completed}',
+  'detail.progress.allDone': '全部完成 · 共 {total} 步，等待新提交',
   'detail.progress.waitingSync': '等待状态同步',
   'detail.progress.syncedAt': '服务端对账数据 · {time}',
   'detail.progress.step': '第 {step} 步',
