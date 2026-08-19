@@ -1637,9 +1637,27 @@ export function addPhaseTotals(totals: Record<string, number>, phases: Record<st
   for (const [name, ms] of Object.entries(phases)) totals[name] = (totals[name] || 0) + ms;
 }
 
-async function reconcileOneStage(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string, budget?: { calls: number; ms: number; phases: Record<string, number> }) {
+// A phase is only totalled once its work returns, so a stage abandoned at the deadline contributes
+// nothing and its time lands in no phase at all. Counting which phase each unsettled stage is still
+// inside is the only record of where that time went.
+export type StagePhaseTracker = { current: string | null };
+
+export function pendingPhaseTotals(trackers: Iterable<StagePhaseTracker>) {
+  const totals: Record<string, number> = {};
+  for (const tracker of trackers) {
+    const name = tracker.current || 'unstarted';
+    totals[name] = (totals[name] || 0) + 1;
+  }
+  return totals;
+}
+
+type ReconcileBudget = { calls: number; ms: number; phases: Record<string, number>; pending: Set<StagePhaseTracker> };
+
+async function reconcileOneStage(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string, budget?: ReconcileBudget) {
   const startedAt = performance.now();
-  const tracked = await trackGitHubCalls(() => reconcileStageWork(environment, row, workflow, stageIndex, source, eventName));
+  const tracker: StagePhaseTracker = { current: null };
+  budget?.pending.add(tracker);
+  const tracked = await trackGitHubCalls(() => reconcileStageWork(environment, row, workflow, stageIndex, source, eventName, tracker)).finally(() => budget?.pending.delete(tracker));
   if (budget) {
     budget.calls += tracked.stats.calls;
     budget.ms += tracked.stats.totalMs;
@@ -1659,11 +1677,15 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   return tracked.value.reconciled;
 }
 
-async function reconcileStageWork(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string): Promise<{ reconciled: boolean; phases: Record<string, number> }> {
+async function reconcileStageWork(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string, tracker?: StagePhaseTracker): Promise<{ reconciled: boolean; phases: Record<string, number> }> {
   const phases: Record<string, number> = {};
   const phase = async <T>(name: string, work: () => Promise<T>): Promise<T> => {
     const at = performance.now();
-    try { return await work(); } finally { phases[name] = (phases[name] || 0) + Math.round(performance.now() - at); }
+    if (tracker) tracker.current = name;
+    try { return await work(); } finally {
+      phases[name] = (phases[name] || 0) + Math.round(performance.now() - at);
+      if (tracker) tracker.current = null;
+    }
   };
   if (!row.github_installation_id) return { reconciled: false, phases };
   const installationId = row.github_installation_id;
@@ -1680,18 +1702,18 @@ async function reconcileStageWork(environment: Record<string, string | undefined
   const comparison = await phase('compare', () => installationRequest<{ ahead_by: number; head_commit?: { id?: string }; commits?: { sha?: string }[] }>(config, installationId, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`).catch(() => ({ ahead_by: 0, head_commit: undefined, commits: undefined })));
   const comparisonHeadSha = comparison.head_commit?.id || comparison.commits?.at(-1)?.sha;
   if (!pull) {
-    await sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`;
-    await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_state, checks_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${workflow.repository}, ${stage.source}, ${stage.target}, 'none', 'unknown', ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, pull_number = NULL, pull_state = 'none', merged_at = NULL, head_sha = NULL, checks_state = 'unknown', checks_passed = 0, checks_total = 0, approvals = 0, required_approvals = 0, mergeable = NULL, mergeable_state = NULL, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`;
-    if (previous[0]?.pull_state && previous[0].pull_state !== 'none') await recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:pull-cleared:${Date.now()}`, 'pull-cleared', 'PR 状态已清除，等待新提交', stageId, stage.target);
+    await phase('write', () => sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
+    await phase('write', () => sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_state, checks_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${workflow.repository}, ${stage.source}, ${stage.target}, 'none', 'unknown', ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, pull_number = NULL, pull_state = 'none', merged_at = NULL, head_sha = NULL, checks_state = 'unknown', checks_passed = 0, checks_total = 0, approvals = 0, required_approvals = 0, mergeable = NULL, mergeable_state = NULL, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`);
+    if (previous[0]?.pull_state && previous[0].pull_state !== 'none') await phase('write', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:pull-cleared:${Date.now()}`, 'pull-cleared', 'PR 状态已清除，等待新提交', stageId, stage.target));
     const unlocked = stageIsUnlocked(workflow, stageIndex, preceding);
     if (unlocked && comparison.ahead_by > 0 && (previous[0]?.ahead_by || 0) === 0) {
-      await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:none`, kind: 'new-pr-ready', title: '可以创建下一步 PR', body: `${workflow.repository} · ${stage.source} → ${stage.target}`, url: '/' });
+      await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:none`, kind: 'new-pr-ready', title: '可以创建下一步 PR', body: `${workflow.repository} · ${stage.source} → ${stage.target}`, url: '/' }));
     }
     if (comparison.ahead_by > 0 && comparisonHeadSha) await phase('write', () => scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha));
     return { reconciled: true, phases };
   }
   const sha = pull.merged_at ? pull.merge_commit_sha : pull.head.sha;
-  if (!pull.merged_at) await sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`;
+  if (!pull.merged_at) await phase('write', () => sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
   const [runs, statuses, reviews, protection, rules] = await phase('checks', () => Promise.all([
     sha ? installationRequest<{ check_runs: CheckRun[] }>(config, installationId, `/repos/${owner}/${name}/commits/${sha}/check-runs?per_page=100`).catch(() => ({ check_runs: [] })) : Promise.resolve({ check_runs: [] }),
     sha ? installationRequest<{ statuses: CommitStatus[] }>(config, installationId, `/repos/${owner}/${name}/commits/${sha}/status`).catch(() => ({ statuses: [] })) : Promise.resolve({ statuses: [] }),
@@ -1706,30 +1728,30 @@ async function reconcileStageWork(environment: Record<string, string | undefined
   const checks = mergeChecksWithDeployments(observedChecks, deploymentStates);
   const requiredApprovals = requiredApprovalsFromProtection(protection, rules);
   const approvals = reviews.filter(review => review.state === 'APPROVED').length;
-  await sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${workflow.repository}, ${stage.source}, ${stage.target}, ${pull.number}, ${pull.merged_at ? 'merged' : pull.state}, ${pull.merged_at || null}, ${sha || null}, ${checks.state}, ${checks.passed}, ${checks.total}, ${approvals}, ${requiredApprovals}, ${pull.mergeable ?? null}, ${pull.mergeable_state || null}, ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, head_sha = EXCLUDED.head_sha, checks_state = EXCLUDED.checks_state, checks_passed = EXCLUDED.checks_passed, checks_total = EXCLUDED.checks_total, approvals = EXCLUDED.approvals, required_approvals = EXCLUDED.required_approvals, mergeable = EXCLUDED.mergeable, mergeable_state = EXCLUDED.mergeable_state, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`;
+  await phase('write', () => sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${workflow.repository}, ${stage.source}, ${stage.target}, ${pull.number}, ${pull.merged_at ? 'merged' : pull.state}, ${pull.merged_at || null}, ${sha || null}, ${checks.state}, ${checks.passed}, ${checks.total}, ${approvals}, ${requiredApprovals}, ${pull.mergeable ?? null}, ${pull.mergeable_state || null}, ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, head_sha = EXCLUDED.head_sha, checks_state = EXCLUDED.checks_state, checks_passed = EXCLUDED.checks_passed, checks_total = EXCLUDED.checks_total, approvals = EXCLUDED.approvals, required_approvals = EXCLUDED.required_approvals, mergeable = EXCLUDED.mergeable, mergeable_state = EXCLUDED.mergeable_state, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`);
   const before = previous[0];
-  if (!before || before.pull_number !== pull.number) await recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:pull:${pull.number}`, 'pull-detected', `已发现 PR #${pull.number}`, stageId, stage.target);
+  if (!before || before.pull_number !== pull.number) await phase('write', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:pull:${pull.number}`, 'pull-detected', `已发现 PR #${pull.number}`, stageId, stage.target));
   if (before?.pull_state !== (pull.merged_at ? 'merged' : pull.state) && pull.merged_at) {
-    await recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:merged:${pull.number}`, 'pull-merged', `PR #${pull.number} 已合并`, stageId, stage.target);
-    const versionRow = await sql<{ version: number }[]>`SELECT version FROM workflow_versions WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} ORDER BY version DESC LIMIT 1`;
+    await phase('write', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:merged:${pull.number}`, 'pull-merged', `PR #${pull.number} 已合并`, stageId, stage.target));
+    const versionRow = await phase('dbRead', () => sql<{ version: number }[]>`SELECT version FROM workflow_versions WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} ORDER BY version DESC LIMIT 1`);
     const stageSnapshot = { source: stage.source, target: stage.target, stageId };
-    await sql`INSERT INTO workflow_runs (user_id, workflow_id, version, stage_index, stage_id, source, target, stage_snapshot, pull_number) VALUES (${row.user_id}, ${workflow.id}, ${versionRow[0]?.version || 1}, ${stageIndex}, ${stageId}, ${source}, ${stage.target}, ${sql.json(stageSnapshot)}, ${pull.number})`;
+    await phase('write', () => sql`INSERT INTO workflow_runs (user_id, workflow_id, version, stage_index, stage_id, source, target, stage_snapshot, pull_number) VALUES (${row.user_id}, ${workflow.id}, ${versionRow[0]?.version || 1}, ${stageIndex}, ${stageId}, ${source}, ${stage.target}, ${sql.json(stageSnapshot)}, ${pull.number})`);
   }
-  if (before?.checks_state !== checks.state && ['success', 'failure'].includes(checks.state)) await recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:checks:${sha}:${checks.state}`, `checks-${checks.state}`, checks.state === 'success' ? 'Actions 已全绿' : 'Actions 失败，需要处理', stageId, stage.target);
+  if (before?.checks_state !== checks.state && ['success', 'failure'].includes(checks.state)) await phase('write', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:checks:${sha}:${checks.state}`, `checks-${checks.state}`, checks.state === 'success' ? 'Actions 已全绿' : 'Actions 失败，需要处理', stageId, stage.target));
   const route = `${stage.source} → ${stage.target}`;
   if (before?.checks_state !== checks.state && ['success', 'failure'].includes(checks.state)) {
-    await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:checks:${sha}:${checks.state}`, kind: `checks-${checks.state}`, title: checks.state === 'failure' ? 'Actions 失败，需要处理' : 'Actions 已全绿', body: `${workflow.repository} · ${route}`, url: `/` });
+    await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:checks:${sha}:${checks.state}`, kind: `checks-${checks.state}`, title: checks.state === 'failure' ? 'Actions 失败，需要处理' : 'Actions 已全绿', body: `${workflow.repository} · ${route}`, url: `/` }));
   }
   const runState = workflowRunCompletionState(Boolean(pull.merged_at), checks.state);
-  if (runState) await sql`UPDATE workflow_runs SET state = ${runState}, completed_at = now() WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND pull_number = ${pull.number} AND state = 'active'`;
+  if (runState) await phase('write', () => sql`UPDATE workflow_runs SET state = ${runState}, completed_at = now() WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND pull_number = ${pull.number} AND state = 'active'`);
   if (!pull.merged_at && requiredApprovals > 0 && approvals >= requiredApprovals && (!before || before.approvals < before.required_approvals)) {
-    await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:merge-ready:${pull.number}:${pull.head.sha}`, kind: 'merge-ready', title: 'PR 已满足合并条件', body: `${workflow.repository} · ${route} · PR #${pull.number}`, url: `/` });
+    await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:merge-ready:${pull.number}:${pull.head.sha}`, kind: 'merge-ready', title: 'PR 已满足合并条件', body: `${workflow.repository} · ${route} · PR #${pull.number}`, url: `/` }));
   }
   const unlocked = stageIsUnlocked(workflow, stageIndex, preceding);
   if (pull.merged_at && unlocked && comparison.ahead_by > 0 && (before?.ahead_by || 0) === 0) {
-    await sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:${pull.number}`, kind: 'new-pr-ready', title: '有新提交，可以创建新 PR', body: `${workflow.repository} · ${route}`, url: '/' });
+    await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:${pull.number}`, kind: 'new-pr-ready', title: '有新提交，可以创建新 PR', body: `${workflow.repository} · ${route}`, url: '/' }));
   }
-  if (comparison.ahead_by > 0 && comparisonHeadSha) await scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha);
+  if (comparison.ahead_by > 0 && comparisonHeadSha) await phase('write', () => scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha));
   // Only an open pull request can be merged, and the gate verdict is pinned to the head sha just stored.
   // The gate goes in already computed, so a wait that only a later event can end costs no second read.
   if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await phase('write', () => scheduleServerAutoMerge(sql, row, workflow, stageIndex, source, pull.number, pull.head.sha, { checksState: checks.state, approvals, requiredApprovals, mergeable: pull.mergeable ?? null, mergeableState: pull.mergeable_state || '' }));
@@ -1809,7 +1831,7 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
   try {
     // The installation quota is flat and shared by every sweep, so the only way to attribute a burn
     // afterwards is to store what each sweep spent alongside the stages it settled.
-    const githubBudget = { calls: 0, ms: 0, phases: {} as Record<string, number> };
+    const githubBudget = { calls: 0, ms: 0, phases: {} as Record<string, number>, pending: new Set<StagePhaseTracker>() };
     const pruneAt = performance.now();
     for (const item of workflowsToReconcile) await pruneStaleWorkflowStageData(sql, item.row.user_id, item.workflow);
     githubBudget.phases.prune = Math.round(performance.now() - pruneAt);
@@ -1863,9 +1885,13 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     }));
     const errorMessage = firstFailure ? String(firstFailure instanceof Error ? firstFailure.message : firstFailure).slice(0, 800) : null;
     if (raced.outcome === 'deferred') {
+      // The stages the deadline abandoned are the ones whose time is missing, so the phase they are
+      // still inside is recorded alongside the totals; without it most of the wall clock has no owner.
+      const pending = pendingPhaseTotals(githubBudget.pending);
+      const breakdown = Object.keys(pending).length ? { ...githubBudget.phases, pending } : githubBudget.phases;
       // Closing the row here is the whole point: a deferred sweep used to stay 'running' until the
       // scheduled sweep reaped it, which read as in flight for minutes and hid the deferral.
-      await sql`UPDATE reconciliation_runs SET state = ${deferredRunState(reconciled, failed, flatTasks.length)}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, github_calls = ${githubBudget.calls}, github_ms = ${Math.round(githubBudget.ms)}, phase_ms = ${sql.json(githubBudget.phases)}, error_message = ${errorMessage || RECONCILIATION_DEFERRED_MESSAGE}, finished_at = now() WHERE id = ${runId}`;
+      await sql`UPDATE reconciliation_runs SET state = ${deferredRunState(reconciled, failed, flatTasks.length)}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, github_calls = ${githubBudget.calls}, github_ms = ${Math.round(githubBudget.ms)}, phase_ms = ${sql.json(breakdown)}, error_message = ${errorMessage || RECONCILIATION_DEFERRED_MESSAGE}, finished_at = now() WHERE id = ${runId}`;
       await markPending(true);
       return { reconciled, outcome: 'deferred' as const };
     }
