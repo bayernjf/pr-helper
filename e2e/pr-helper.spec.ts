@@ -705,6 +705,24 @@ test('全部步骤完成后进度条不再高亮任何一步为当前步', async
   await expect(page.locator('.fp-node.is-succeeded')).toHaveCount(2);
 });
 
+test('需要处理列表里的 PR 编号在深色主题下不是浏览器默认链接色', async ({ page }) => {
+  const workflow: Workflow = { id: 'flow-probe', name: '失败流程', repository, stages: [{ stageId: 'stage-failure', source: 'fix/urgent', target: 'dev' }] };
+  await openWorkspace(page, {
+    workflows: [workflow],
+    items: [{ workflowId: workflow.id, workflowName: workflow.name, repository, stageIndex: 0, source: 'fix/urgent', target: 'dev', pullNumber: 42, kind: 'checks-failed', message: '第 1 步 Actions 失败' }],
+  });
+  const link = page.locator('.failure-center a', { hasText: '#42' });
+  await expect(link).toBeVisible();
+
+  // The panel never styled its own links, so they fell through to the user agent's #0000EE, which is
+  // unreadable on the dark card. Pinning "not the UA default" keeps the palette free to change.
+  await expect(page.locator(':root')).toHaveAttribute('data-theme', 'light');
+  await expect(link).not.toHaveCSS('color', 'rgb(0, 0, 238)');
+  await page.locator('#theme-toggle').click();
+  await expect(page.locator(':root')).toHaveAttribute('data-theme', 'dark');
+  await expect(link).not.toHaveCSS('color', 'rgb(0, 0, 238)');
+});
+
 const gateFlow = { id: 'flow-env', name: 'Environment 流程', repository, createdAt: '2026-08-01T00:00:00.000Z', stages: [{ source: 'feature/e2e', target: 'dev', stageId: 'stage-env' }], deployments: [] } as Workflow;
 
 async function openDeploymentAdvanced(page: Page) {
