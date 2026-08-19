@@ -1,15 +1,16 @@
 # PR Helper Handoff
 
-> 最后更新：2026-08-15（自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 已上线并完成首轮实测；调用预算经按小时复核后已降级为阈值观察，当前第一优先级见《2026-08-15 drain 首轮实测与优先级调整》）
+> 最后更新：2026-08-19（流程详情页的只读进度条已上线生产并核对；自动化队列已清空，无 `paused` / `queued` / `failed` 行；当前第一优先级见《2026-08-15 drain 首轮实测与优先级调整》第 11 项的观察窗口）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 > 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
 
 ## 当前状态
 
-- 当前分支：`feature/20260722`。
+- 当前分支：`feature/20260722`，与 `origin/main` 齐平（0 commits ahead）；`origin/main` 头为 `48544a99`（PR #278），本批进度条相关提交已全部合并部署。
 - 用户已确认本批代码已上线 Production。
+- 2026-08-19 生产核对：最近 6 小时 cron 78 success / 1 degraded / 2 skipped、inbox_refresh 1 degraded，无 failure；55 行 stage 投影最老 1370 秒、平均 673 秒，距 `/api/cron/health` 的 2700 秒阈值余量充足；`workflow_automation_actions` 只有 246 succeeded / 31 cancelled，没有 `paused` / `queued` / `running` / `failed` 行。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地验证已通过：`npm test`（28 个文件 / 513 项）、`npx tsc --noEmit`、`npm run build`。后台自动创建 PR 代码未改变现有手动流程行为；浏览器 E2E 已修复并全部通过（9/9）：Playwright 端口从 Vite 默认的 4173 挪到 4373，避免 `reuseExistingServer` 复用别的项目的开发服务；用例改为先展开看板卡片再点步骤，看板编辑按钮标签改判「编辑」。
+- 当前本地验证已通过：`npm test`（28 个文件 / 529 项）、`npx tsc --noEmit`、`npm run build`；浏览器 E2E `npm run test:e2e` 25/25 通过（Playwright 端口为 4373，避免 `reuseExistingServer` 复用别的项目的开发服务）。
 - 最近本地提交 `b61e2d3e` 新增“测试已保存配置”：服务端解密保存的 AI 凭据并实际调用模型连接测试，15 秒超时，只返回成功或脱敏错误，不返回 API Key；生产端已验证连接成功（`agnes-2.0-flash`）。
 - 最近本地提交 `510a63c9` 为自动 PR 动作增加 AI 请求 20 秒超时、输出上限和过期 `running/paused` 动作回收重试，避免一次超时永久阻塞幂等动作。
 - Supabase 迁移 `001`–`031` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
@@ -79,7 +80,7 @@
 
 12. **收敛健康探针（已部署并验收）**。08-17 的 GitHub 故障期里定时校准连续 degraded（那四个小时分别 3/14、13/14、11/14、3/14），但 `/api/cron/reconcile` 一律返回 200，Actions 全绿，**没有任何人被告知**。这次补的不是「degraded 就报警」——同期每次 degraded 仍校准了 14~15 个 stage，系统一直在收敛，根因是无从处置的上游故障，degraded 是机制不是危害。所以判据落在结果上：新增只读 `GET /api/cron/health`（`api/cron/health.ts`，同样只认 `CRON_SECRET`），最老的 stage 投影年龄超过 `STAGE_UNCONVERGED_THRESHOLD_SECONDS`（默认 45 分钟，可用同名环境变量覆盖）时返回 **503**，否则 200；响应体带 `oldestStageAgeSeconds` / `staleStageCount` / 最近一小时 cron 的 `total` 与 `degraded`。45 分钟取自实测：健康态下 55 行 stage 的最老投影 13 分钟、p90 13、p50 6（cron `*/5`、每轮 8 个流程），阈值约为观察峰值的 3.5 倍。`.github/workflows/reconcile-pr-helper.yml` 加了 `Report convergence health` 步骤，非 200 即 `exit 1`，且 `if: always()`——sweep 本身失败时这些数字最有用。空 stage 表判健康（新装账号和刚清理过的账号不该报警），单测已覆盖「刚好等于阈值不触发」「超过触发」「空表不触发」。**刻意没做的两件事**：不把判决塞进 `/api/cron/reconcile` 的状态码（会把「设计内让出」和「系统不健康」混成一件事，还会把 `net._http_response` 里灌满非 200）；不靠 UI 提示（「当时没人在看」这件事 UI 修不了）。**待你验收**：合并部署后，看下一次 scheduled run 的 Job Summary 里 `HTTP 200` 与那几个数字；另外我无法验证 GitHub 是否会就 scheduled workflow 失败给你发邮件，兜底信号是 Actions 页上的红叉。**2026-08-19 已验收**：生产部署创建于 08-18 20:17（晚于这批 commit 的 08-18 08:48），此后 5 次 scheduled run 全绿且 `Report convergence health` 步骤 success——该步骤只有 HTTP 200 才不 `exit 1`（curl 失败会置 `status=000`，同样失败），故成功即等于端点可达、`CRON_SECRET` 认证通过、判定健康。同时直接查库复算了同一组样本：55 行 stage，最老投影 **1062 秒（17.7 分钟）**，距 2700 秒阈值余量充足，超过 15 分钟的 19 行；最近一小时 cron 14 次运行、0 次 degraded。curl 把响应写进文件，所以 run log 里看不到那几个数字，要读得去 Job Summary。
 
-- **自动化进度条 UI 的完整方案**：只读诊断切片已于 2026-08-15 落地（`/api/inbox` 多带 `automation` 字段，受阻动作显示在失败中心、看板计数、泳道徽标、步骤抽屉和流程详情页五处）。仍后置的是 [`docs/automated-workflow-plan.md`](docs/automated-workflow-plan.md)《自动合并进度条》的完整方案：百分比、接管对话框、`unpause` 都是写路径，依赖第 2 项的「瞬时 vs 终态」分类先定下来。
+- **自动化进度条 UI 的完整方案**：只读诊断切片已于 2026-08-15 落地（`/api/inbox` 多带 `automation` 字段，受阻动作显示在失败中心、看板计数、泳道徽标、步骤抽屉和流程详情页五处），只读整体进度条已于 2026-08-19 上线生产。仍后置的是 [`docs/automated-workflow-plan.md`](docs/automated-workflow-plan.md)《自动合并进度条》里的步骤级放置、节点状态与方案表格的完全对齐、上一步/下一步解锁条件呈现，以及全部写入路径（接管对话框、重新生成、`unpause`、安全重试）——它们依赖第 2 项的「瞬时 vs 终态」分类，且生产至今没有任何一次 AI 生成失败可供验证。
 - **reconciliation 调用预算**：改为阈值观察，峰值小时越过约 2,500 次（基线 5,000 次/小时的一半）再设计模型。**2026-08-18 复核**：常态 876–1,182 次/小时，历史峰值 1,702 次（08-17 23:00），距警戒线仍有余量。
 - **让出（`degraded`）的瓶颈是时延而非调用数**：249 次 `degraded` 里有只花 10–11 次调用就超时的样本（08-18 12:01 webhook、12:13 inbox_refresh），说明单次 GitHub 往返的耗时才是约束，按调用数设上限治不到它。真要收敛，先做 ETag / `If-None-Match`（304 不计配额、往返也短），再按剩余时间预算切分单轮工作量。
 
@@ -210,6 +211,8 @@ Production 已验证行为：
 后续自动化 UI 需要在流程详情增加步骤级进度条：展示上一步、当前步骤、下一步、门禁等待、暂停原因和可执行操作。进度必须由服务端统一阶段决策与动作队列投影，不能只根据浏览器刷新结果计算；多路径汇聚只有所有前置路径成功后才解锁。
 
 2026-08-19：方案保持不变，当前只落地了其中的只读切片（本地提交 `a18e1ad9`、`30c1b90c`、`34a7a536`、`6ab15776`、`aa28fe1d`、`c06d7342`）。已做：流程详情时间线顶部一条整体进度条，每个步骤一个节点，状态由 `stageProgressNode` 从服务端 `decision` 与动作队列共同推出（动作 `failed` 或门禁红 → 失败；动作 `paused` → 已暂停；`queued`/`running` 且带 `failure_reason` → 等待门禁，因为服务端把门禁等待写在仍为 `queued` 的行上，无原因 → 进行中；`merged` → 已完成），通配步骤取最严重分支，节点点击复用既有步骤抽屉，不显示百分比，投影未到时显示「等待状态同步」。
+
+2026-08-19 补做三项（提交 `12fec877`、`3de8f223`、`399f4900`）：（a）「已完成 n」只统计从第一步开始连续完成的前缀，且服务端的 `merged` 描述的是该路径上一次的 PR、会延续到下一轮，所以排在当前步骤之后、留在上一轮已完成的步骤显示为未开始；`merged` 且 `canCreateNext` 为真（「已合并，有新提交可以创建新 PR」）算就绪而不是已完成，否则会出现「第 1 步进行中、第 2 步已完成」这种自相矛盾的读数。（b）详情页 30 秒轮询原先只在有通配步骤时才拉服务端投影，静态分支的流程要手点刷新才动；现在每次轮询都调 `loadActionQueue(false)`，不带 `?refresh=1`，服务端只读库不调 GitHub，代价是每次一次数据库读，刷新延迟等于服务端对账节奏。（c）进度条读的是服务端投影而不是浏览器直连 GitHub 的结果，所以下方标注这份数据的对账时间；视觉上节点已从若干独立卡片合成一条铺满宽度的分段条（`.flow-progress-nodes` 作为轨道、`.fp-node` 等宽分段），每段颜色仍是该步状态，点击与 tooltip 不变。
 
 未做、留待后续迭代按方案原文补齐：步骤级放置位置（方案要求在每个步骤「自动创建 PR」控件下方）、节点状态与方案表格的完全对齐（含 `running` 节点展示具体动作名）、上一步/下一步及解锁条件的单独呈现，以及全部写入路径（「接管 AI 内容」弹窗、重新生成、Unpause、安全重试）。写入路径后置的依据是生产数据：`create-pr` 共 117 次成功、4 次取消、2 次 `paused`，两条 `paused` 的原因都是「当前步骤尚未满足自动创建 PR 的门禁」而非 AI 生成失败；`workflow_operation_audit_logs` 至今没有任何一次 AI 生成失败；且 `paused` 不是终态，120 秒 stale 逻辑会把它重排回 `queued`。
 

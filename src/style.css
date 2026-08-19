@@ -423,7 +423,7 @@ body {
   border-radius: 9px;
   padding: 11px 14px;
   background: var(--text-error);
-  color: #fff;
+  color: var(--text-white);
   font: 700 .8rem Manrope;
   cursor: pointer;
 }
@@ -1313,7 +1313,7 @@ a.account-menu-item {
 
 .dynamic-stage-actions .timeline-action {
   align-items: center;
-  background: var(--bg-subtle);
+  background: var(--bg-input);
   border: 1px solid var(--border-light);
   display: flex;
   gap: 12px;
@@ -2147,29 +2147,29 @@ a.account-menu-item {
   border: 1px solid;
 }
 .sync-health-banner.success {
-  background: var(--success-bg, #f0fdf4);
-  border-color: var(--success-border, #bbf7d0);
-  color: var(--success-text, #166534);
+  background: var(--bg-success);
+  border-color: var(--text-success);
+  color: var(--text-success);
 }
 .sync-health-banner.failure {
-  background: var(--danger-bg, #fef2f2);
-  border-color: var(--danger-border, #fecaca);
-  color: var(--danger-text, #991b1b);
+  background: var(--bg-error);
+  border-color: var(--text-error);
+  color: var(--text-error);
 }
 .sync-health-banner.degraded {
-  background: var(--warning-bg, #fffbeb);
-  border-color: var(--warning-border, #fde68a);
-  color: var(--warning-text, #92400e);
+  background: var(--bg-warning);
+  border-color: var(--text-warning);
+  color: var(--text-warning);
 }
 .sync-health-banner.running {
-  background: var(--warning-bg, #fffbeb);
-  border-color: var(--warning-border, #fde68a);
-  color: var(--warning-text, #92400e);
+  background: var(--bg-warning);
+  border-color: var(--text-warning);
+  color: var(--text-warning);
 }
 .sync-health-banner.unknown {
-  background: var(--muted-bg, #f8fafc);
-  border-color: var(--muted-border, #e2e8f0);
-  color: var(--muted-text, #64748b);
+  background: var(--bg-input);
+  border-color: var(--border-muted);
+  color: var(--text-muted);
 }
 .sync-health-icon {
   flex-shrink: 0;
@@ -2180,9 +2180,9 @@ a.account-menu-item {
   font-size: 0.72rem;
   padding: 1px 6px;
   border-radius: 999px;
-  background: var(--warning-bg, #fffbeb);
-  color: var(--warning-text, #92400e);
-  border: 1px solid var(--warning-border, #fde68a);
+  background: var(--bg-warning);
+  color: var(--text-warning);
+  border: 1px solid var(--text-warning);
   margin-left: 4px;
   white-space: nowrap;
   cursor: help;
@@ -2191,9 +2191,9 @@ a.account-menu-item {
 .flow-progress {
   margin: 0 0 16px;
   padding: 10px 12px;
-  border: 1px solid var(--border, #e2e8f0);
+  border: 1px solid var(--border-default);
   border-radius: 10px;
-  background: var(--muted-bg, #f8fafc);
+  background: var(--bg-input);
 }
 .flow-progress-headline {
   margin: 2px 0 8px;
@@ -2201,16 +2201,16 @@ a.account-menu-item {
 }
 .flow-progress-nodes {
   display: flex;
-  border: 1px solid var(--border, #e2e8f0);
+  border: 1px solid var(--border-default);
   border-radius: 8px;
   /* Clips each segment's background to the rail's rounded corners so the row reads as one bar. */
   overflow: hidden;
-  background: #fff;
+  background: var(--bg-card);
 }
 .flow-progress-sync {
   margin: 8px 0 0;
   font-size: 12px;
-  color: var(--muted-text);
+  color: var(--text-muted);
 }
 .fp-node {
   display: flex;
@@ -2222,18 +2222,18 @@ a.account-menu-item {
   text-align: left;
   border: 0;
   border-radius: 0;
-  background: #fff;
+  background: var(--bg-card);
   cursor: pointer;
 }
 .fp-node + .fp-node {
-  border-left: 1px solid var(--border, #e2e8f0);
+  border-left: 1px solid var(--border-default);
 }
 .fp-node.is-current {
-  box-shadow: 0 0 0 2px var(--accent, #2563eb) inset;
+  box-shadow: 0 0 0 2px var(--border-accent) inset;
 }
 .fp-node-index {
   font-size: 0.72rem;
-  color: var(--muted-text, #64748b);
+  color: var(--text-muted);
 }
 .fp-node-status {
   font-size: 0.78rem;
@@ -2243,30 +2243,30 @@ a.account-menu-item {
   text-overflow: ellipsis;
 }
 .fp-node.is-succeeded {
-  border-color: var(--success-border, #bbf7d0);
-  background: var(--success-bg, #f0fdf4);
-  color: var(--success-text, #166534);
+  border-color: var(--text-success);
+  background: var(--bg-success);
+  color: var(--text-success);
 }
 .fp-node.is-running,
 .fp-node.is-ready {
-  border-color: var(--accent-border, #bfdbfe);
-  background: var(--accent-bg, #eff6ff);
-  color: var(--accent-text, #1d4ed8);
+  border-color: var(--border-accent);
+  background: var(--bg-info);
+  color: var(--text-accent);
 }
 .fp-node.is-waiting-gates,
 .fp-node.is-blocked {
-  border-color: var(--warning-border, #fde68a);
-  background: var(--warning-bg, #fffbeb);
-  color: var(--warning-text, #92400e);
+  border-color: var(--text-warning);
+  background: var(--bg-warning);
+  color: var(--text-warning);
 }
 .fp-node.is-failed {
-  border-color: var(--danger-border, #fecaca);
-  background: var(--danger-bg, #fef2f2);
-  color: var(--danger-text, #991b1b);
+  border-color: var(--text-error);
+  background: var(--bg-error);
+  color: var(--text-error);
 }
 .fp-node.is-locked,
 .fp-node.is-idle {
-  color: var(--muted-text, #64748b);
+  color: var(--text-muted);
 }
 
 .automation-badge {
@@ -2277,29 +2277,29 @@ a.account-menu-item {
   margin-left: 4px;
   white-space: nowrap;
   cursor: help;
-  background: var(--warning-bg, #fffbeb);
-  color: var(--warning-text, #92400e);
-  border: 1px solid var(--warning-border, #fde68a);
+  background: var(--bg-warning);
+  color: var(--text-warning);
+  border: 1px solid var(--text-warning);
 }
 .automation-badge.is-failed {
-  background: var(--danger-bg, #fef2f2);
-  color: var(--danger-text, #991b1b);
-  border-color: var(--danger-border, #fecaca);
+  background: var(--bg-error);
+  color: var(--text-error);
+  border-color: var(--text-error);
 }
 .automation-detail {
   margin-top: 10px;
   padding: 8px 10px;
-  border: 1px solid var(--border, #e2e8f0);
+  border: 1px solid var(--border-default);
   border-radius: 8px;
-  background: var(--muted-bg, #f8fafc);
+  background: var(--bg-input);
 }
 .automation-detail.is-attention {
-  border-color: var(--warning-border, #fde68a);
-  background: var(--warning-bg, #fffbeb);
+  border-color: var(--text-warning);
+  background: var(--bg-warning);
 }
 .automation-detail.is-failed {
-  border-color: var(--danger-border, #fecaca);
-  background: var(--danger-bg, #fef2f2);
+  border-color: var(--text-error);
+  background: var(--bg-error);
 }
 .automation-detail .automation-line {
   margin: 2px 0 0;
@@ -2309,7 +2309,7 @@ a.account-menu-item {
 .automation-detail .automation-empty {
   margin: 4px 0 0;
   font-size: 0.78rem;
-  color: var(--muted-text, #64748b);
+  color: var(--text-muted);
   word-break: break-word;
 }
 
@@ -2317,13 +2317,13 @@ a.account-menu-item {
 .lane-run-history {
   margin: 12px 18px 16px;
   padding-top: 8px;
-  border-top: 1px solid var(--border, #e2e8f0);
+  border-top: 1px solid var(--border-default);
 }
 .lane-run-history:not([open]) {
   padding: 10px 12px 12px;
-  border: 1px solid var(--border-default, #e2e8f0);
+  border: 1px solid var(--border-default);
   border-radius: 12px;
-  background: var(--bg-input, #f8fafc);
+  background: var(--bg-input);
 }
 .lane-run-history summary,
 .lane-timeline summary,
@@ -2335,7 +2335,7 @@ a.account-menu-item {
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--muted-text, #64748b);
+  color: var(--text-muted);
   cursor: pointer;
   list-style: none;
 }
@@ -2354,12 +2354,12 @@ a.account-menu-item {
   padding: 4px 8px;
   border-radius: 6px;
   font-size: 0.78rem;
-  background: var(--muted-bg, #f8fafc);
-  border: 1px solid var(--border, #e2e8f0);
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
 }
-.lane-run-history li.completed { border-left: 3px solid var(--success-border, #86efac); }
-.lane-run-history li.failed { border-left: 3px solid var(--danger-border, #fca5a5); }
-.lane-run-history li.active { border-left: 3px solid var(--warning-border, #fde68a); }
+.lane-run-history li.completed { border-left: 3px solid var(--text-success); }
+.lane-run-history li.failed { border-left: 3px solid var(--text-error); }
+.lane-run-history li.active { border-left: 3px solid var(--text-warning); }
 .lane-run-history li div {
   flex: 1;
   min-width: 0;
@@ -2373,16 +2373,16 @@ a.account-menu-item {
 }
 .lane-run-history li div small {
   font-size: 0.68rem;
-  color: var(--muted-text, #64748b);
+  color: var(--text-muted);
 }
 .lane-run-history li time {
   font-size: 0.68rem;
-  color: var(--muted-text, #64748b);
+  color: var(--text-muted);
   white-space: nowrap;
 }
 .lane-run-history li span a {
   font-size: 0.72rem;
-  color: var(--accent, #2563eb);
+  color: var(--text-accent);
   text-decoration: none;
 }
 
@@ -2390,16 +2390,16 @@ a.account-menu-item {
 .lane-timeline {
   margin: 12px 18px 16px;
   padding: 10px 12px 12px;
-  border: 1px solid var(--border-default, #e2e8f0);
+  border: 1px solid var(--border-default);
   border-radius: 12px;
-  background: var(--bg-input, #f8fafc);
+  background: var(--bg-input);
 }
 .drawer-timeline {
   margin-top: 20px;
   padding: 10px 12px 12px;
-  border: 1px solid var(--border-default, #e2e8f0);
+  border: 1px solid var(--border-default);
   border-radius: 12px;
-  background: var(--bg-input, #f8fafc);
+  background: var(--bg-input);
 }
 .lane-run-history summary::-webkit-details-marker,
 .lane-timeline summary::-webkit-details-marker,
@@ -2431,7 +2431,7 @@ a.account-menu-item {
 .lane-timeline summary:focus-visible,
 .drawer-timeline summary:focus-visible,
 .drawer-events summary:focus-visible {
-  outline: 2px solid var(--accent, #2563eb);
+  outline: 2px solid var(--border-accent);
   outline-offset: 3px;
 }
 .lane-timeline ol,
@@ -2457,7 +2457,7 @@ a.account-menu-item {
   top: 0;
   bottom: 0;
   width: 2px;
-  background: var(--border, #e2e8f0);
+  background: var(--border-default);
   z-index: 0;
 }
 .lane-timeline li,
@@ -2479,8 +2479,8 @@ a.account-menu-item {
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: var(--muted-bg, #f8fafc);
-  border: 1px solid var(--border, #e2e8f0);
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
   font-size: 0.7rem;
   flex-shrink: 0;
   z-index: 1;
@@ -2501,12 +2501,12 @@ a.account-menu-item {
 .lane-timeline li div small,
 .drawer-timeline li div small {
   font-size: 0.65rem;
-  color: var(--muted-text, #64748b);
+  color: var(--text-muted);
 }
 .lane-timeline li time,
 .drawer-timeline li time {
   font-size: 0.65rem;
-  color: var(--muted-text, #64748b);
+  color: var(--text-muted);
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -2514,9 +2514,9 @@ a.account-menu-item {
 /* Failure center panel */
 .failure-center {
   margin: 12px 0;
-  border: 1px solid var(--danger-border, #fecaca);
+  border: 1px solid var(--text-error);
   border-radius: 8px;
-  background: var(--danger-bg, #fef2f2);
+  background: var(--bg-error);
   overflow: hidden;
 }
 .fc-head {
@@ -2524,19 +2524,19 @@ a.account-menu-item {
   align-items: center;
   justify-content: space-between;
   padding: 8px 12px;
-  border-bottom: 1px solid var(--danger-border, #fecaca);
+  border-bottom: 1px solid var(--text-error);
 }
 .fc-head p {
   margin: 0;
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--danger-text, #991b1b);
+  color: var(--text-error);
 }
 .fc-count {
   font-size: 0.72rem;
   font-weight: 600;
-  color: var(--danger-text, #991b1b);
+  color: var(--text-error);
   background: rgba(239, 68, 68, 0.1);
   padding: 2px 8px;
   border-radius: 999px;
@@ -2551,18 +2551,18 @@ a.account-menu-item {
   align-items: flex-start;
   gap: 10px;
   padding: 8px 12px;
-  border-bottom: 1px solid var(--border, #e2e8f0);
+  border-bottom: 1px solid var(--border-default);
   background: white;
 }
 .failure-center li:last-child {
   border-bottom: none;
 }
 .failure-center li.attention {
-  background: var(--warning-bg, #fffbeb);
+  background: var(--bg-warning);
 }
 .failure-center li.failed,
 .failure-center li.failed {
-  background: var(--danger-bg, #fef2f2);
+  background: var(--bg-error);
 }
 .fc-icon {
   display: inline-flex;
@@ -2573,8 +2573,8 @@ a.account-menu-item {
   border-radius: 50%;
   font-size: 0.8rem;
   flex-shrink: 0;
-  background: var(--muted-bg, #f8fafc);
-  border: 1px solid var(--border, #e2e8f0);
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
 }
 .failure-center li > div {
   flex: 1;
@@ -2589,12 +2589,12 @@ a.account-menu-item {
 }
 .failure-center li > div small {
   font-size: 0.7rem;
-  color: var(--muted-text, #64748b);
+  color: var(--text-muted);
 }
 .failure-center li > div p {
   margin: 2px 0 0;
   font-size: 0.72rem;
-  color: var(--text, #1e293b);
+  color: var(--text-primary);
 }
 .fc-actions {
   display: flex;
@@ -2610,9 +2610,9 @@ a.account-menu-item {
 /* Preflight panel */
 .preflight-panel {
   margin: 12px 0;
-  border: 1px solid var(--border, #e2e8f0);
+  border: 1px solid var(--border-default);
   border-radius: 8px;
-  background: var(--card-bg, #ffffff);
+  background: var(--bg-card);
   overflow: hidden;
 }
 .pf-head {
@@ -2620,14 +2620,14 @@ a.account-menu-item {
   align-items: center;
   justify-content: space-between;
   padding: 8px 12px;
-  border-bottom: 1px solid var(--border, #e2e8f0);
+  border-bottom: 1px solid var(--border-default);
 }
 .pf-head p {
   margin: 0;
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--muted-text, #64748b);
+  color: var(--text-muted);
 }
 .pf-summary {
   display: flex;
@@ -2642,24 +2642,24 @@ a.account-menu-item {
   white-space: nowrap;
 }
 .pf-pass {
-  background: var(--success-bg, #f0fdf4);
-  color: var(--success-text, #166534);
-  border: 1px solid var(--success-border, #bbf7d0);
+  background: var(--bg-success);
+  color: var(--text-success);
+  border: 1px solid var(--text-success);
 }
 .pf-warn {
-  background: var(--warning-bg, #fffbeb);
-  color: var(--warning-text, #92400e);
-  border: 1px solid var(--warning-border, #fde68a);
+  background: var(--bg-warning);
+  color: var(--text-warning);
+  border: 1px solid var(--text-warning);
 }
 .pf-fail {
-  background: var(--danger-bg, #fef2f2);
-  color: var(--danger-text, #991b1b);
-  border: 1px solid var(--danger-border, #fecaca);
+  background: var(--bg-error);
+  color: var(--text-error);
+  border: 1px solid var(--text-error);
 }
 .pf-loading {
-  background: var(--muted-bg, #f8fafc);
-  color: var(--muted-text, #64748b);
-  border: 1px solid var(--border, #e2e8f0);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  border: 1px solid var(--border-default);
 }
 .pf-checks {
   list-style: none;
@@ -2671,19 +2671,19 @@ a.account-menu-item {
   align-items: flex-start;
   gap: 8px;
   padding: 8px 12px;
-  border-bottom: 1px solid var(--border, #e2e8f0);
+  border-bottom: 1px solid var(--border-default);
 }
 .pf-checks li:last-child {
   border-bottom: none;
 }
 .pf-checks li.pf-error {
-  background: var(--danger-bg, #fef2f2);
+  background: var(--bg-error);
 }
 .pf-checks li.pf-warning {
-  background: var(--warning-bg, #fffbeb);
+  background: var(--bg-warning);
 }
 .pf-checks li.pf-info {
-  background: var(--muted-bg, #f8fafc);
+  background: var(--bg-input);
 }
 .pf-sev {
   font-size: 0.85rem;
@@ -2700,13 +2700,13 @@ a.account-menu-item {
 }
 .pf-checks li small {
   font-size: 0.7rem;
-  color: var(--muted-text, #64748b);
+  color: var(--text-muted);
 }
 .pf-fix {
   display: block;
   margin-top: 2px;
   font-size: 0.68rem;
-  color: var(--success-text, #166534);
+  color: var(--text-success);
 }
 
 /* Recovery status badges */
@@ -2720,24 +2720,24 @@ a.account-menu-item {
   white-space: nowrap;
 }
 .fc-retries {
-  background: var(--muted-bg, #f8fafc);
-  color: var(--muted-text, #64748b);
-  border: 1px solid var(--border, #e2e8f0);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  border: 1px solid var(--border-default);
 }
 .fc-cooldown {
-  background: var(--warning-bg, #fffbeb);
-  color: var(--warning-text, #92400e);
-  border: 1px solid var(--warning-border, #fde68a);
+  background: var(--bg-warning);
+  color: var(--text-warning);
+  border: 1px solid var(--text-warning);
 }
 .fc-exhausted {
-  background: var(--danger-bg, #fef2f2);
-  color: var(--danger-text, #991b1b);
-  border: 1px solid var(--danger-border, #fecaca);
+  background: var(--bg-error);
+  color: var(--text-error);
+  border: 1px solid var(--text-error);
 }
 .fc-escalation {
-  background: var(--danger-bg, #fef2f2);
-  color: var(--danger-text, #991b1b);
-  border: 1px solid var(--danger-border, #fecaca);
+  background: var(--bg-error);
+  color: var(--text-error);
+  border: 1px solid var(--text-error);
   animation: pulse-escalation 2s infinite;
 }
 @keyframes pulse-escalation {
@@ -2749,9 +2749,9 @@ a.account-menu-item {
 .recovery-policy-settings {
   margin-top: 16px;
   padding: 12px;
-  border: 1px solid var(--border, #e2e8f0);
+  border: 1px solid var(--border-default);
   border-radius: 8px;
-  background: var(--card-bg, #ffffff);
+  background: var(--bg-card);
 }
 .recovery-policy-settings legend {
   font-size: 0.8rem;
@@ -2761,7 +2761,7 @@ a.account-menu-item {
 .recovery-policy-settings > small {
   display: block;
   font-size: 0.72rem;
-  color: var(--muted-text, #64748b);
+  color: var(--text-muted);
   margin-bottom: 8px;
 }
 .recovery-policy-settings .two {
@@ -2773,7 +2773,7 @@ a.account-menu-item {
 .recovery-policy-settings input[type="number"] {
   width: 100%;
   padding: 6px 8px;
-  border: 1px solid var(--border, #e2e8f0);
+  border: 1px solid var(--border-default);
   border-radius: 6px;
   font-size: 0.8rem;
 }
@@ -2788,7 +2788,7 @@ a.account-menu-item {
   background: none;
   border: none;
   padding: 0;
-  color: var(--text-secondary, #64748b);
+  color: var(--text-secondary);
   font-size: 0.82rem;
   cursor: pointer;
   text-decoration: underline;
@@ -2796,7 +2796,7 @@ a.account-menu-item {
   transition: text-decoration-color .15s;
 }
 .link-button:hover {
-  color: var(--text-primary, #1e293b);
+  color: var(--text-primary);
   text-decoration-color: currentColor;
 }
 
@@ -2807,7 +2807,7 @@ a.account-menu-item {
 .permissions-dialog .permissions-list dt {
   font-weight: 700;
   font-size: 0.88rem;
-  color: var(--text-primary, #1e293b);
+  color: var(--text-primary);
   margin-top: 12px;
 }
 .permissions-dialog .permissions-list dt:first-child {
@@ -2815,7 +2815,7 @@ a.account-menu-item {
 }
 .permissions-dialog .permissions-list dd {
   font-size: 0.84rem;
-  color: var(--text-secondary, #64748b);
+  color: var(--text-secondary);
   margin: 2px 0 0;
 }
 .permissions-dialog .dialog-actions {
@@ -2829,8 +2829,8 @@ a.account-menu-item {
   align-items: center;
   padding: 8px 14px;
   border-radius: 8px;
-  background: var(--bg-accent-light, #2563eb);
-  color: #fff;
+  background: var(--bg-accent-light);
+  color: var(--text-white);
   font-size: 0.82rem;
   font-weight: 600;
   text-decoration: none;
