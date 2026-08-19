@@ -297,6 +297,7 @@ const en: TranslationDict = {
   'editor.deployments.githubEnvironment': 'GitHub Environment (optional)',
   'editor.deployments.githubEnvironmentHint': 'Pick one of the repository Environments; leave it empty to derive the conventional name.',
   'editor.deployments.githubEnvironmentNone': 'This repository has no Environment, so leave it empty.',
+  'editor.deployments.githubEnvironmentBlank': 'leave empty',
   'editor.deployments.githubEnvironmentUnavailable': 'No repository Environments were loaded; leaving it empty is fine, or enter a name manually.',
   'editor.deployments.preview': 'Preview',
   'editor.deployments.production': 'Production',

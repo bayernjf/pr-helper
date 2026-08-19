@@ -297,6 +297,7 @@ const zh: TranslationDict = {
   'editor.deployments.githubEnvironment': 'GitHub Environment（可选）',
   'editor.deployments.githubEnvironmentHint': '从仓库现有 Environment 中选择；留空则按约定名推导。',
   'editor.deployments.githubEnvironmentNone': '此仓库没有 Environment，留空即可。',
+  'editor.deployments.githubEnvironmentBlank': '留空',
   'editor.deployments.githubEnvironmentUnavailable': '暂未读取到仓库 Environment；留空即可，也可手动输入名称。',
   'editor.deployments.preview': 'Preview',
   'editor.deployments.production': 'Production',
