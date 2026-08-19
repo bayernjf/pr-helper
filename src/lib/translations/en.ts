@@ -436,6 +436,7 @@ const en: TranslationDict = {
   'detail.progress.eyebrow': 'FLOW PROGRESS',
   'detail.progress.position': 'Step {step} of {total} · {completed} done',
   'detail.progress.waitingSync': 'Waiting for status sync',
+  'detail.progress.syncedAt': 'Server projection · {time}',
   'detail.progress.step': 'Step {step}',
   'detail.progress.node.succeeded': 'Done',
   'detail.progress.node.failed': 'Failed',

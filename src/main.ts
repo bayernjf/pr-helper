@@ -1142,6 +1142,10 @@ function brokenTriggerNote(): string {
   return ` · ${t('syncHealth.triggerBroken', { triggers: broken.map(run => t(`syncHealth.trigger.${run.trigger}`)).join('、') })}`;
 }
 
+function relativeAgeText(ageSeconds: number | null) {
+  if (ageSeconds === null) return '';
+  return ageSeconds < 60 ? t('syncHealth.secondsAgo', { seconds: ageSeconds }) : ageSeconds < 3600 ? t('syncHealth.minutesAgo', { minutes: Math.floor(ageSeconds / 60) }) : t('syncHealth.hoursAgo', { hours: Math.floor(ageSeconds / 3600) });
+}
 function syncHealthBanner(): string {
   if (!syncHealth) return '';
   const last = syncHealth.lastReconciliation;
@@ -1152,7 +1156,7 @@ function syncHealthBanner(): string {
   const finishedAt = last.finishedAt ? new Date(last.finishedAt) : null;
   const ageSeconds = finishedAt ? Math.max(0, Math.floor((Date.now() - finishedAt.getTime()) / 1000)) : null;
   const staleCount = syncHealth.stages.filter(stage => stage.stale).length;
-  const timeAgo = ageSeconds === null ? '' : ageSeconds < 60 ? t('syncHealth.secondsAgo', { seconds: ageSeconds }) : ageSeconds < 3600 ? t('syncHealth.minutesAgo', { minutes: Math.floor(ageSeconds / 60) }) : t('syncHealth.hoursAgo', { hours: Math.floor(ageSeconds / 3600) });
+  const timeAgo = relativeAgeText(ageSeconds);
   const staleWarning = staleCount > 0 ? ` · ${t('syncHealth.staleCount', { count: staleCount })}` : '';
   const duration = last.durationMs !== null ? ` · ${t('syncHealth.duration', { ms: last.durationMs })}` : '';
   if (last.state === 'degraded') return `<div class="sync-health-banner degraded"><span class="sync-health-icon">⚠️</span><span>${t('syncHealth.degraded', { reconciled: last.stagesReconciled, failed: last.stagesFailed })} · ${timeAgo}${duration}${staleWarning}</span></div>`;
@@ -1316,8 +1320,13 @@ function flowProgressBar(flow: Workflow): string {
   const headline = synced
     ? t('detail.progress.position', { step: progress.currentIndex + 1, total: progress.total, completed: progress.completed })
     : t('detail.progress.waitingSync');
-  const nodes = statuses.map((status, index) => `<button type="button" class="fp-node is-${status} ${index === progress.currentIndex && synced ? 'is-current' : ''}" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(statesForStage(flow, index)[0]?.source || flow.stages[index]!.source)}" title="${escape(stageProgressTooltip(flow, index))}" aria-label="${escape(`${t('detail.progress.step', { step: index + 1 })} · ${t(`detail.progress.node.${status}`)}`)}"><span class="fp-node-index">${index + 1}</span><span class="fp-node-status">${t(`detail.progress.node.${status}`)}</span></button>`).join('');
-  return `<div class="flow-progress"><p class="eyebrow">${t('detail.progress.eyebrow')}</p><p class="flow-progress-headline">${escape(headline)}</p><div class="flow-progress-nodes">${nodes}</div></div>`;
+  // The bar reads the server projection, which only moves when reconciliation runs. Saying when that
+  // last happened keeps it from being mistaken for a live view of GitHub.
+  const syncedAt = flow.stages.flatMap((_, index) => statesForStage(flow, index).map(state => state.updatedAt)).filter(Boolean).sort().at(-1);
+  const age = syncedAt ? relativeAgeText(Math.max(0, Math.floor((Date.now() - new Date(syncedAt).getTime()) / 1000))) : '';
+  const syncedNote = age ? `<p class="flow-progress-sync">${escape(t('detail.progress.syncedAt', { time: age }))}</p>` : '';
+  const nodes = progress.nodes.map((status, index) => `<button type="button" class="fp-node is-${status} ${index === progress.currentIndex && synced ? 'is-current' : ''}" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(statesForStage(flow, index)[0]?.source || flow.stages[index]!.source)}" title="${escape(stageProgressTooltip(flow, index))}" aria-label="${escape(`${t('detail.progress.step', { step: index + 1 })} · ${t(`detail.progress.node.${status}`)}`)}"><span class="fp-node-index">${index + 1}</span><span class="fp-node-status">${t(`detail.progress.node.${status}`)}</span></button>`).join('');
+  return `<div class="flow-progress"><p class="eyebrow">${t('detail.progress.eyebrow')}</p><p class="flow-progress-headline">${escape(headline)}</p><div class="flow-progress-nodes">${nodes}</div>${syncedNote}</div>`;
 }
 function blockedAutomationActions(): AutomationAction[] {
   return automationActions.filter(action => automationActionPresentation(action).blocked);
@@ -2657,7 +2666,10 @@ async function refreshStatuses(renderDetail = true, refreshProjectedStates = tru
     showToast(message);
     if (Notification.permission === 'granted') new Notification(t('notif.title'), { body: message });
   });
-  if (refreshProjectedStates && active?.stages.some(stage => stage.source.includes('*'))) await loadActionQueue(false);
+  // The GitHub reads above only feed the step rows. The progress bar and the automation blocks read the
+  // server projection, so without this the poll left them frozen until someone pressed refresh. `false`
+  // keeps it a plain read: no `?refresh=1`, so the server does not call GitHub for it.
+  if (refreshProjectedStates) await loadActionQueue(false);
   if (renderDetail && screen === 'detail') detail();
 }
 

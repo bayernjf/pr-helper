@@ -651,6 +651,34 @@ test('流程详情顶部的进度条按服务端阶段决策标注每一步', as
   await expect(page.getByRole('dialog')).toBeVisible();
 });
 
+test('进度条只统计连续完成的前缀，后续步骤上一轮的已合并不算这一轮', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-progress-stale',
+    name: '跨轮进度流程',
+    repository,
+    stages: [
+      { stageId: 'stage-one', source: 'feature/e2e', target: 'dev' },
+      { stageId: 'stage-two', source: 'dev', target: 'main' },
+    ],
+  };
+  const base = { repository, mergedAt: null, headSha: 'deadbeef', checksPassed: 1, checksTotal: 1, mergeable: true, mergeableState: 'clean', aheadBy: 1, lastEvent: '', updatedAt: new Date(Date.now() - 120_000).toISOString() };
+  await openWorkspace(page, {
+    workflows: [workflow],
+    states: [
+      { ...base, workflowId: workflow.id, stageIndex: 0, stageId: 'stage-one', source: 'feature/e2e', target: 'dev', pullNumber: 41, pullState: 'open', checksState: 'success', approvals: 0, requiredApprovals: 1, decision: { kind: 'needs-approval', actionable: true, canCreateNext: false, message: 'PR 还需要 1 个 Approval' } },
+      // 第二步的 merged 来自上一轮发布，它不该让这一轮看起来已经走过第二步。
+      { ...base, workflowId: workflow.id, stageIndex: 1, stageId: 'stage-two', source: 'dev', target: 'main', pullNumber: 30, pullState: 'merged', checksState: 'success', approvals: 1, requiredApprovals: 1, decision: { kind: 'merged', actionable: false, canCreateNext: false, message: '已合并且门禁通过' } },
+    ],
+  });
+  await page.locator(`.lane-actions [data-open="${workflow.id}"]`).click();
+
+  await expect(page.locator('.flow-progress-headline')).toHaveText('第 1 步 / 共 2 步 · 已完成 0');
+  await expect(page.locator('.fp-node').nth(0)).toHaveClass(/is-waiting-gates/);
+  await expect(page.locator('.fp-node').nth(1)).toHaveClass(/is-idle/);
+  // 这份数据来自服务端对账而不是浏览器直连 GitHub，所以要标出它的新鲜度。
+  await expect(page.locator('.flow-progress-sync')).toContainText('2 分钟前');
+});
+
 const gateFlow = { id: 'flow-env', name: 'Environment 流程', repository, createdAt: '2026-08-01T00:00:00.000Z', stages: [{ source: 'feature/e2e', target: 'dev', stageId: 'stage-env' }], deployments: [] } as Workflow;
 
 async function openDeploymentAdvanced(page: Page) {

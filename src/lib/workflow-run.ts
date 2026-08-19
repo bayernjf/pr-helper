@@ -49,11 +49,17 @@ export function latestAutomationAction<T extends { stageId: string | null; sourc
 
 export type StageProgressStatus = 'succeeded' | 'failed' | 'blocked' | 'waiting-gates' | 'running' | 'ready' | 'locked' | 'idle';
 export type StageProgressNode = { status: StageProgressStatus };
+export type WorkflowProgress = {
+  completed: number;
+  total: number;
+  currentIndex: number;
+  nodes: StageProgressStatus[];
+};
 
 // The bar reads the server's own stage decision rather than re-deriving one in the browser, and folds
 // the automation row in on top of it: the decision says where GitHub is, the action says whether we
 // are still trying to move it.
-export function stageProgressNode(input: { decision?: { kind: string; message?: string }; automation?: { state: AutomationActionState; failureReason?: string | null } }): StageProgressNode {
+export function stageProgressNode(input: { decision?: { kind: string; canCreateNext?: boolean; message?: string }; automation?: { state: AutomationActionState; failureReason?: string | null } }): StageProgressNode {
   const kind = input.decision?.kind;
   const automation = input.automation;
   if (automation?.state === 'failed' || kind === 'checks-failed') return { status: 'failed' };
@@ -63,7 +69,9 @@ export function stageProgressNode(input: { decision?: { kind: string; message?: 
     // means the action is parked behind a gate rather than in flight.
     return { status: automation.failureReason ? 'waiting-gates' : 'running' };
   }
-  if (kind === 'merged') return { status: 'succeeded' };
+  // `merged` describes the route's last PR and survives into the next round, so new commits on top mean
+  // this round still has to run.
+  if (kind === 'merged') return { status: input.decision?.canCreateNext ? 'ready' : 'succeeded' };
   if (kind === 'needs-approval') return { status: 'waiting-gates' };
   if (kind === 'ready-to-merge' || kind === 'ready-to-create') return { status: 'ready' };
   if (kind === 'locked') return { status: 'locked' };
@@ -77,11 +85,15 @@ export function worstStageProgress(statuses: readonly StageProgressStatus[]): St
   return PROGRESS_SEVERITY.find(candidate => statuses.includes(candidate)) || 'idle';
 }
 
-export function workflowProgress(statuses: readonly StageProgressStatus[]) {
+export function workflowProgress(statuses: readonly StageProgressStatus[]): WorkflowProgress {
   const firstUnfinished = statuses.findIndex(status => status !== 'succeeded');
+  const currentIndex = firstUnfinished === -1 ? Math.max(statuses.length - 1, 0) : firstUnfinished;
   return {
-    completed: statuses.filter(status => status === 'succeeded').length,
+    // Only an unbroken prefix counts: a step still holding last round's merge sits behind the current
+    // step, so counting it would report progress this round has not made.
+    completed: firstUnfinished === -1 ? statuses.length : firstUnfinished,
     total: statuses.length,
-    currentIndex: firstUnfinished === -1 ? Math.max(statuses.length - 1, 0) : firstUnfinished,
+    currentIndex,
+    nodes: statuses.map((status, index) => index > currentIndex && status === 'succeeded' ? 'idle' : status),
   };
 }

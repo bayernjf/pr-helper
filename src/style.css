@@ -2204,6 +2204,11 @@ a.account-menu-item {
   flex-wrap: wrap;
   gap: 6px;
 }
+.flow-progress-sync {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted-text);
+}
 .fp-node {
   display: flex;
   flex-direction: column;
