@@ -64,6 +64,7 @@ let deploymentHighlight: string | null = null;
 let deploymentEditIndex: number | null = null;
 let deploymentDraft: DeploymentConfig | null = null;
 let stageRouteEditIndex: number | null = null;
+let stepFormOpen = false;
 let returnHighlight: string | null = null;
 let workflowMutationRevision = 0;
 let screen: Screen = 'overview';
@@ -1831,6 +1832,7 @@ function editor() {
     return;
   }
   const content = document.querySelector('#content')!;
+  stepFormOpen = false;
   const selected = active?.repository || editorDraft.repository;
   const editorName = active?.name || editorDraft.name;
   const occupiedRepositories = new Set(workflows.filter(workflow => workflow.id !== active?.id).map(workflow => workflow.repository));
@@ -1840,7 +1842,21 @@ function editor() {
   document.querySelector<HTMLInputElement>('#flow-name')!.addEventListener('input', event => { if (!active) editorDraft.name = (event.target as HTMLInputElement).value; });
   document.querySelector('#editor-manage-repositories')?.addEventListener('click', openRepositoryManagement);
   bindDraftActions();
-  document.querySelector<HTMLSelectElement>('#repo')!.addEventListener('change', async event => { const repository = (event.target as HTMLSelectElement).value; if (active?.repository !== repository) active = null; editorDraft = { ...editorDraft, repository, source: '', target: '' }; await loadBranches(repository); });
+  document.querySelector<HTMLSelectElement>('#repo')!.addEventListener('change', async event => {
+    const select = event.target as HTMLSelectElement;
+    const repository = select.value;
+    // 一个流程只绑定一个仓库，换仓库其实等于新建，所以先说清楚再走，否则原流程会被静默留在原地。
+    if (active && repository && repository !== active.repository) {
+      if (!await confirmRepositorySwitch(active.name, repository)) { select.value = active.repository; return; }
+      active = null;
+      editorDraft = { repository, name: '', source: '', target: '' };
+      editor();
+      return;
+    }
+    if (active?.repository !== repository) active = null;
+    editorDraft = { ...editorDraft, repository, source: '', target: '' };
+    await loadBranches(repository);
+  });
   bindDraftStepSorting();
   if (selected) loadBranches(selected);
 }
@@ -1875,7 +1891,16 @@ function renderStepForm(repository: string) {
   const deploymentSettings = active?.repository === repository ? renderDeploymentSettings() : '';
   const recoveryPolicySection = active?.repository === repository ? renderRecoveryPolicySettings() : '';
   const sourceBranches = branches.map(branch => `<button type="button" role="option" data-source-branch="${escape(branch)}">${escape(branch)}</button>`).join('');
-  document.querySelector('#step-form')!.innerHTML = `<div class="two"><div class="source-field"><label for="source">${t('editor.label.source')}</label><div class="branch-picker"><input id="source" value="${escape(source)}" placeholder="feature/*" role="combobox" aria-autocomplete="list" aria-controls="source-branches" aria-expanded="false" /><button id="source-branch-toggle" type="button" class="source-branch-toggle" aria-label="${t('editor.label.source')}" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button><div id="source-branches" class="source-branch-options" role="listbox" hidden>${sourceBranches}</div></div><small>${t('editor.sourceRuleHint')}</small></div><label>${t('editor.label.target')}<select id="target">${options(target)}</select></label></div><label class="route-mode"><input id="independent-route" type="checkbox" /><span><b>${t('editor.independent.label')}</b><small>${t('editor.independent.desc')}</small></span></label>${dependencyOptions}<div class="actions"><a id="compare" target="_blank" class="text-link">${t('editor.compare')}</a><button id="add-step" class="primary">${active?.repository === repository ? t('editor.addRoute') : t('editor.saveFlow')}</button></div>${deploymentSettings}${recoveryPolicySection}`;
+  // 编辑既有流程时先只留一个「添加步骤」入口：进来通常是为了看或改已有步骤，默认展开的空表单会把流程本身挤下去。
+  const editingExisting = active?.repository === repository && active.stages.length > 0;
+  const collapsed = editingExisting && !stepFormOpen;
+  const stepFields = collapsed
+    ? `<div class="actions"><button id="toggle-step-form" type="button" class="ghost">${t('editor.addStep')}</button></div>`
+    : `<div class="two"><div class="source-field"><label for="source">${t('editor.label.source')}</label><div class="branch-picker"><input id="source" value="${escape(source)}" placeholder="feature/*" role="combobox" aria-autocomplete="list" aria-controls="source-branches" aria-expanded="false" /><button id="source-branch-toggle" type="button" class="source-branch-toggle" aria-label="${t('editor.label.source')}" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button><div id="source-branches" class="source-branch-options" role="listbox" hidden>${sourceBranches}</div></div><small>${t('editor.sourceRuleHint')}</small></div><label>${t('editor.label.target')}<select id="target">${options(target)}</select></label></div><label class="route-mode"><input id="independent-route" type="checkbox" /><span><b>${t('editor.independent.label')}</b><small>${t('editor.independent.desc')}</small></span></label>${dependencyOptions}<div class="actions"><a id="compare" target="_blank" class="text-link">${t('editor.compare')}</a>${editingExisting ? `<button id="cancel-step-form" type="button" class="ghost">${t('editor.cancelStep')}</button>` : ''}<button id="add-step" class="primary">${active?.repository === repository ? t('editor.addRoute') : t('editor.saveFlow')}</button></div>`;
+  document.querySelector('#step-form')!.innerHTML = `${stepFields}${deploymentSettings}${recoveryPolicySection}`;
+  document.querySelector<HTMLButtonElement>('#toggle-step-form')?.addEventListener('click', () => { stepFormOpen = true; rerenderStepForm(repository); document.querySelector<HTMLInputElement>('#source')?.focus(); });
+  document.querySelector<HTMLButtonElement>('#cancel-step-form')?.addEventListener('click', () => { stepFormOpen = false; rerenderStepForm(repository); });
+  if (!collapsed) {
   const sync = () => document.querySelector<HTMLAnchorElement>('#compare')!.href = githubCompareUrl(repository, value('source'), value('target'));
   const sourceInput = document.querySelector<HTMLInputElement>('#source')!;
   const sourcePicker = document.querySelector<HTMLElement>('.branch-picker')!;
@@ -1893,7 +1918,8 @@ function renderStepForm(repository: string) {
   sourceBranchToggle.addEventListener('click', () => { if (sourceBranchOptions.hidden) { sourceInput.focus(); openSourceBranches(); } else closeSourceBranches(); });
   sourceBranchOptions.querySelectorAll<HTMLButtonElement>('[data-source-branch]').forEach(button => button.addEventListener('click', () => { sourceInput.value = button.dataset.sourceBranch || ''; sync(); closeSourceBranches(); sourceInput.focus(); }));
   document.querySelector('#target')!.addEventListener('change', event => { if (!active) editorDraft.target = (event.target as HTMLSelectElement).value; sync(); }); sync();
-    document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } const isNew = active?.repository !== repository; if (isNew && workflows.some(workflow => workflow.repository === repository)) { showToast(t('editor.error.repoUsed')); return; } if (active?.repository === repository && active.stages.some(stage => stage.source === source && stage.target === target)) { showToast(t('editor.error.duplicateRoute')); return; } const name = value('flow-name') || repository; const independent = document.querySelector<HTMLInputElement>('#independent-route')!.checked; const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="wait-for-route"]:checked')].map(input => Number(input.value)); const next = active?.repository === repository ? { ...addStage(active, source, target, independent, waitFor), name } : createWorkflow(repository, source, target, name, deploymentsForRepository(repositoryActionWorkflows, repositoryEnvironments, repositoryActionsLoaded)); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); bindDraftActions(); bindDraftStepSorting(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.routeSaved', { source, target })); renderStepForm(repository); });
+    document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } const isNew = active?.repository !== repository; if (isNew && workflows.some(workflow => workflow.repository === repository)) { showToast(t('editor.error.repoUsed')); return; } if (active?.repository === repository && active.stages.some(stage => stage.source === source && stage.target === target)) { showToast(t('editor.error.duplicateRoute')); return; } const name = value('flow-name') || repository; const independent = document.querySelector<HTMLInputElement>('#independent-route')!.checked; const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="wait-for-route"]:checked')].map(input => Number(input.value)); const next = active?.repository === repository ? { ...addStage(active, source, target, independent, waitFor), name } : createWorkflow(repository, source, target, name, deploymentsForRepository(repositoryActionWorkflows, repositoryEnvironments, repositoryActionsLoaded)); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); bindDraftActions(); bindDraftStepSorting(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.routeSaved', { source, target })); stepFormOpen = false; renderStepForm(repository); });
+  }
   document.querySelector<HTMLButtonElement>('#toggle-deployment-form')?.addEventListener('click', () => {
     deploymentFormOpen = !deploymentFormOpen;
     deploymentEditIndex = null;
@@ -2263,6 +2289,10 @@ function confirmDialog(eyebrow: string, title: string, description: string, canc
 
 function confirmAutoCreateExecution(source: string, target: string, ruleName: string) {
   return confirmDialog(t('automation.confirm.eyebrow'), t('automation.confirm.title'), t('automation.confirm.desc', { source: escape(source), target: escape(target), rule: escape(ruleName) }), t('automation.confirm.cancel'), t('automation.confirm.confirm'));
+}
+
+function confirmRepositorySwitch(name: string, repository: string) {
+  return confirmDialog(t('editor.repoSwitch.eyebrow'), t('editor.repoSwitch.title', { repository: escape(repository) }), t('editor.repoSwitch.desc', { repository: escape(repository), name: escape(name) }), t('editor.repoSwitch.cancel'), t('editor.repoSwitch.confirm'));
 }
 
 function stageTimeline(stage: Workflow['stages'][number], index: number) {

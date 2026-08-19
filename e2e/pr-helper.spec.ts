@@ -11,6 +11,7 @@ type ApiFixture = {
   auditEntries?: unknown[];
   automationReady?: boolean;
   environments?: string[];
+  repositories?: string[];
   openPull?: { number: number; headSha: string; mergeable?: boolean; mergeableState?: string };
   compareAheadBy?: number;
 };
@@ -54,10 +55,10 @@ async function mockApi(page: Page, fixture: ApiFixture = {}): Promise<MockApi> {
 
     if (pathname === '/api/github/request') {
       const path = url.searchParams.get('path') || '';
-      if (path.startsWith('/user/repos')) return json(route, 200, [{ full_name: repository, private: false }]);
-      if (path.startsWith('/repos/acme/demo/branches')) return json(route, 200, branches.map(name => ({ name })));
-      if (path.startsWith('/repos/acme/demo/actions/workflows')) return json(route, 200, { workflows: [{ name: 'PR gate', state: 'active', path: '.github/workflows/pr-gate.yml' }] });
-      if (path.startsWith('/repos/acme/demo/environments')) return json(route, 200, { environments: (fixture.environments ?? ['preview-vercel', 'production-vercel']).map(name => ({ name })) });
+      if (path.startsWith('/user/repos')) return json(route, 200, (fixture.repositories ?? [repository]).map(full_name => ({ full_name, private: false })));
+      if (/^\/repos\/[^/]+\/[^/]+\/branches/.test(path)) return json(route, 200, branches.map(name => ({ name })));
+      if (/^\/repos\/[^/]+\/[^/]+\/actions\/workflows/.test(path)) return json(route, 200, { workflows: [{ name: 'PR gate', state: 'active', path: '.github/workflows/pr-gate.yml' }] });
+      if (/^\/repos\/[^/]+\/[^/]+\/environments/.test(path)) return json(route, 200, { environments: (fixture.environments ?? ['preview-vercel', 'production-vercel']).map(name => ({ name })) });
       const openPull = fixture.openPull;
       if (path.startsWith('/repos/acme/demo/pulls?state=open')) return json(route, 200, openPull
         ? [{ number: openPull.number, state: 'open', merged_at: null, html_url: `https://github.com/acme/demo/pull/${openPull.number}`, head: { ref: 'feature/e2e', sha: openPull.headSha } }]
@@ -209,6 +210,91 @@ test('编辑流程可重新排序步骤并保存新的顺序', async ({ page }) 
     'fix/urgent->dev',
     'dev->main',
   ]);
+});
+
+test('编辑既有流程时步骤表单默认折叠，添加完成后重新折叠', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-collapsed-form',
+    name: '折叠表单流程',
+    repository,
+    version: 2,
+    stages: [{ stageId: 'stage-1', source: 'feature/e2e', target: 'dev' }],
+  };
+  const api = await openWorkspace(page, { workflows: [workflow] });
+
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '编辑流程' })).toBeVisible();
+  // 进入编辑时先看到的应该是流程本身，而不是一张已经展开的新步骤表单。
+  await expect(page.locator('#toggle-step-form')).toBeVisible();
+  await expect(page.locator('#source')).toHaveCount(0);
+  await expect(page.locator('[data-draft-step]')).toHaveCount(1);
+
+  await page.locator('#toggle-step-form').click();
+  await expect(page.locator('#source')).toHaveValue('fix/urgent');
+  await page.locator('#add-step').click();
+
+  await expect.poll(() => api.workflows[0]?.stages.map(stage => `${stage.source}->${stage.target}`)).toEqual([
+    'feature/e2e->dev',
+    'fix/urgent->dev',
+  ]);
+  // 加完一步就收起来，避免留着一张空表单。
+  await expect(page.locator('#source')).toHaveCount(0);
+  await expect(page.locator('#toggle-step-form')).toBeVisible();
+});
+
+test('新建流程时步骤表单保持展开', async ({ page }) => {
+  await openWorkspace(page);
+
+  await page.getByRole('button', { name: '+ 添加项目' }).click();
+  await page.locator('#repo').selectOption(repository);
+  await expect(page.locator('#source')).toHaveValue('feature/e2e');
+  await expect(page.locator('#toggle-step-form')).toHaveCount(0);
+});
+
+test('编辑流程中换仓库需要确认，取消后仍停在原流程', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-repo-switch',
+    name: '换仓库流程',
+    repository,
+    version: 2,
+    stages: [{ stageId: 'stage-1', source: 'feature/e2e', target: 'dev' }],
+  };
+  const api = await openWorkspace(page, { workflows: [workflow], repositories: [repository, 'acme/other'] });
+
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  await page.locator('#repo').selectOption('acme/other');
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('acme/other');
+  await dialog.getByRole('button', { name: '取消' }).click();
+
+  // 取消后下拉要回滚，草稿面板也不能悄悄变成一个新流程。
+  await expect(page.locator('#repo')).toHaveValue(repository);
+  await expect(page.getByRole('heading', { name: '编辑流程' })).toBeVisible();
+  await expect(page.locator('[data-draft-step]')).toHaveCount(1);
+  expect(api.workflows[0]?.repository).toBe(repository);
+});
+
+test('编辑流程中确认换仓库会转为新建流程且不改动原流程', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-repo-switch-confirm',
+    name: '换仓库流程',
+    repository,
+    version: 2,
+    stages: [{ stageId: 'stage-1', source: 'feature/e2e', target: 'dev' }],
+  };
+  const api = await openWorkspace(page, { workflows: [workflow], repositories: [repository, 'acme/other'] });
+
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  await page.locator('#repo').selectOption('acme/other');
+  await page.getByRole('dialog').getByRole('button', { name: '开始新建流程' }).click();
+
+  // 换仓库其实是新建，所以标题与草稿面板都要跟着切过去，原流程原样保留。
+  await expect(page.getByRole('heading', { name: '新建流程' })).toBeVisible();
+  await expect(page.locator('#repo')).toHaveValue('acme/other');
+  await expect(page.locator('[data-draft-step]')).toHaveCount(0);
+  await expect(page.locator('#source')).toBeVisible();
+  expect(api.workflows).toHaveLength(1);
+  expect(api.workflows[0]?.stages).toHaveLength(1);
 });
 
 test('步骤可就地改回等待前一步，并保留原有 stageId', async ({ page }) => {
@@ -530,6 +616,39 @@ test('流程详情的固定步骤可打开步骤抽屉并从中重新触发 Acti
 
   await expect.poll(() => api.requests.filter(request => request.pathname === '/api/rerun-actions')).toHaveLength(1);
   expect(api.requests.find(request => request.pathname === '/api/rerun-actions')?.body).toEqual({ workflowId: workflow.id, stageIndex: 0, source: 'feature/e2e' });
+});
+
+test('流程详情顶部的进度条按服务端阶段决策标注每一步', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-progress',
+    name: '进度条流程',
+    repository,
+    stages: [
+      { stageId: 'stage-one', source: 'feature/e2e', target: 'dev' },
+      { stageId: 'stage-two', source: 'dev', target: 'main' },
+    ],
+  };
+  const base = { repository, mergedAt: null, headSha: 'deadbeef', checksPassed: 1, checksTotal: 1, mergeable: true, mergeableState: 'clean', aheadBy: 1, lastEvent: '', updatedAt: '2026-08-19T00:00:00.000Z' };
+  await openWorkspace(page, {
+    workflows: [workflow],
+    states: [
+      { ...base, workflowId: workflow.id, stageIndex: 0, stageId: 'stage-one', source: 'feature/e2e', target: 'dev', pullNumber: 41, pullState: 'merged', checksState: 'success', approvals: 1, requiredApprovals: 1, decision: { kind: 'merged', actionable: false, canCreateNext: false, message: '已合并且门禁通过' } },
+      { ...base, workflowId: workflow.id, stageIndex: 1, stageId: 'stage-two', source: 'dev', target: 'main', pullNumber: 42, pullState: 'open', checksState: 'success', approvals: 0, requiredApprovals: 1, decision: { kind: 'needs-approval', actionable: true, canCreateNext: false, message: 'PR 还需要 1 个 Approval' } },
+    ],
+  });
+  await page.locator(`.lane-actions [data-open="${workflow.id}"]`).click();
+
+  // The bar must read the decision the server already computed, not re-derive one in the browser:
+  // a merged step is only done once its post-merge gates are green, which only the server knows.
+  await expect(page.locator('.flow-progress-headline')).toHaveText('第 2 步 / 共 2 步 · 已完成 1');
+  await expect(page.locator('.fp-node').nth(0)).toHaveClass(/is-succeeded/);
+  await expect(page.locator('.fp-node').nth(1)).toHaveClass(/is-waiting-gates/);
+  await expect(page.locator('.fp-node').nth(1)).toHaveAttribute('title', /Approval/);
+
+  // Each node is the same entry point as the timeline row, so the bar stays a navigation aid rather
+  // than a decorative percentage.
+  await page.locator('.fp-node').nth(1).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
 });
 
 const gateFlow = { id: 'flow-env', name: 'Environment 流程', repository, createdAt: '2026-08-01T00:00:00.000Z', stages: [{ source: 'feature/e2e', target: 'dev', stageId: 'stage-env' }], deployments: [] } as Workflow;
