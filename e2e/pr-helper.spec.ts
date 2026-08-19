@@ -523,7 +523,7 @@ test('流程详情的固定步骤可打开步骤抽屉并从中重新触发 Acti
   await page.locator(`.lane-actions [data-open="${workflow.id}"]`).click();
   // A static step used to have no way into the drawer from the detail page, which left its recovery
   // actions reachable only from the board.
-  await page.locator('[data-step-drawer-stage="0"]').click();
+  await page.locator('.timeline-action[data-step-drawer-stage="0"]').click();
 
   const drawer = page.getByRole('dialog');
   await drawer.getByRole('button', { name: '重新触发 Actions' }).click();
