@@ -32,4 +32,10 @@ describe('theme tokens', () => {
   it('overrides every light token in the dark theme', () => {
     expect([...light].filter(name => !dark.has(name)).sort()).toEqual([]);
   });
+
+  // A dialog does not inherit the page text colour: the UA sheet pins it to CanvasText, which stays black
+  // under our own data-theme attribute. One base rule keeps every dialog, including future ones, readable.
+  it('gives the dialog element a themed text colour', () => {
+    expect(css.match(/\ndialog \{([^}]*)\}/)?.[1] || '').toMatch(/color:\s*var\(--text-primary\)/);
+  });
 });
