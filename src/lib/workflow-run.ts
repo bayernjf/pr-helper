@@ -46,3 +46,42 @@ export function latestAutomationAction<T extends { stageId: string | null; sourc
     .filter(action => action.stageId === stageId && action.source === source)
     .reduce<T | undefined>((newest, action) => (!newest || action.updatedAt > newest.updatedAt ? action : newest), undefined);
 }
+
+export type StageProgressStatus = 'succeeded' | 'failed' | 'blocked' | 'waiting-gates' | 'running' | 'ready' | 'locked' | 'idle';
+export type StageProgressNode = { status: StageProgressStatus };
+
+// The bar reads the server's own stage decision rather than re-deriving one in the browser, and folds
+// the automation row in on top of it: the decision says where GitHub is, the action says whether we
+// are still trying to move it.
+export function stageProgressNode(input: { decision?: { kind: string; message?: string }; automation?: { state: AutomationActionState; failureReason?: string | null } }): StageProgressNode {
+  const kind = input.decision?.kind;
+  const automation = input.automation;
+  if (automation?.state === 'failed' || kind === 'checks-failed') return { status: 'failed' };
+  if (automation?.state === 'paused') return { status: 'blocked' };
+  if (automation && (automation.state === 'queued' || automation.state === 'running')) {
+    // The server names a gate wait on the still-queued row instead of pausing it, so a reason here
+    // means the action is parked behind a gate rather than in flight.
+    return { status: automation.failureReason ? 'waiting-gates' : 'running' };
+  }
+  if (kind === 'merged') return { status: 'succeeded' };
+  if (kind === 'needs-approval') return { status: 'waiting-gates' };
+  if (kind === 'ready-to-merge' || kind === 'ready-to-create') return { status: 'ready' };
+  if (kind === 'locked') return { status: 'locked' };
+  return { status: 'idle' };
+}
+
+const PROGRESS_SEVERITY: readonly StageProgressStatus[] = ['failed', 'blocked', 'waiting-gates', 'running', 'ready', 'locked', 'idle', 'succeeded'];
+
+export function worstStageProgress(statuses: readonly StageProgressStatus[]): StageProgressStatus {
+  if (!statuses.length) return 'idle';
+  return PROGRESS_SEVERITY.find(candidate => statuses.includes(candidate)) || 'idle';
+}
+
+export function workflowProgress(statuses: readonly StageProgressStatus[]) {
+  const firstUnfinished = statuses.findIndex(status => status !== 'succeeded');
+  return {
+    completed: statuses.filter(status => status === 'succeeded').length,
+    total: statuses.length,
+    currentIndex: firstUnfinished === -1 ? Math.max(statuses.length - 1, 0) : firstUnfinished,
+  };
+}
