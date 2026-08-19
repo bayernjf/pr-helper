@@ -52,7 +52,7 @@ export type StageProgressNode = { status: StageProgressStatus };
 export type WorkflowProgress = {
   completed: number;
   total: number;
-  currentIndex: number;
+  currentIndex: number | null;
   nodes: StageProgressStatus[];
 };
 
@@ -87,13 +87,15 @@ export function worstStageProgress(statuses: readonly StageProgressStatus[]): St
 
 export function workflowProgress(statuses: readonly StageProgressStatus[]): WorkflowProgress {
   const firstUnfinished = statuses.findIndex(status => status !== 'succeeded');
-  const currentIndex = firstUnfinished === -1 ? Math.max(statuses.length - 1, 0) : firstUnfinished;
+  // A flow with every step done has nowhere to point: "current" would land on a step that already
+  // finished and read as if work were still happening there.
+  const currentIndex = firstUnfinished === -1 ? null : firstUnfinished;
   return {
     // Only an unbroken prefix counts: a step still holding last round's merge sits behind the current
     // step, so counting it would report progress this round has not made.
     completed: firstUnfinished === -1 ? statuses.length : firstUnfinished,
     total: statuses.length,
     currentIndex,
-    nodes: statuses.map((status, index) => index > currentIndex && status === 'succeeded' ? 'idle' : status),
+    nodes: statuses.map((status, index) => currentIndex !== null && index > currentIndex && status === 'succeeded' ? 'idle' : status),
   };
 }
