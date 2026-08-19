@@ -316,7 +316,7 @@ export function automationCancelReason(reason: 'superseded' | 'stale' | 'archive
 // and either a duplicate pull request or a pull request nobody expects. Supersession decides before age
 // because the idempotency key carries the head sha: once a later push enqueued its own action, the older
 // row describes commits already covered, however recently it was written.
-export function automationDrainDecision(action: { state: string; createdAt: string; updatedAt: string; failureReason: string | null; hasNewer: boolean; attempts: number; archived?: boolean }, now: number, policy?: { cooldownSeconds?: number }): AutomationDrainDecision {
+export function automationDrainDecision(action: { state: string; createdAt: string; updatedAt: string; failureReason: string | null; hasNewer: boolean; hasNewerSucceeded?: boolean; attempts: number; archived?: boolean }, now: number, policy?: { cooldownSeconds?: number }): AutomationDrainDecision {
   // Ahead of everything else, because every other branch can end in a skip and nothing revisits a row
   // the drain skipped: a paused verdict stays paused however old, and a queued row inside its gate-wait
   // window is deliberately left for the event that clears it — an event an archived workflow never sees.
@@ -329,6 +329,9 @@ export function automationDrainDecision(action: { state: string; createdAt: stri
     // nobody is asking any more. Ordering this after the reason check is what left nine dead rows sitting
     // in the failure centre, every one of them already followed by an action that succeeded.
     if (action.hasNewer) return { kind: 'cancel', reason: 'superseded' };
+    // Supersession above only sees the same kind, so the merge that finished the route leaves the create-pr
+    // that paused on a gate behind as the newest row on the step, reporting a step that shipped as paused.
+    if (action.hasNewerSucceeded) return { kind: 'cancel', reason: 'superseded' };
     if (!action.failureReason || automationAttemptWasReached(action.failureReason)) return { kind: 'skip' };
     // Nothing else retries this, so parking it past the window leaves a dead intent in the failure centre
     // for good. Only reachable for a fault that reached no verdict; a verdict stays paused however old.
@@ -365,7 +368,7 @@ export function automationDrainHasStartBudget(startedAt: number, now: number) {
   return now - startedAt < AUTOMATION_DRAIN_START_BUDGET_MS;
 }
 
-type DrainActionRow = { id: string; user_id: string; kind: WorkflowAutomationAction['kind']; state: string; attempts: number; failure_reason: string | null; created_at: string; updated_at: string; repository: string | null; source: string; target: string; installation_id: string | null; cooldown_seconds: string | null; archived: boolean; newer: number };
+type DrainActionRow = { id: string; user_id: string; kind: WorkflowAutomationAction['kind']; state: string; attempts: number; failure_reason: string | null; created_at: string; updated_at: string; repository: string | null; source: string; target: string; installation_id: string | null; cooldown_seconds: string | null; archived: boolean; newer: number; newer_succeeded: number };
 
 // The queue has had no reader: an action's only chance to run was the request that enqueued it, and the
 // recovery hidden in that same enqueue path needs someone to push again to the very stage that is stuck.
@@ -389,7 +392,11 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
            (SELECT count(*) FROM workflow_automation_actions newer
               WHERE newer.user_id = actions.user_id AND newer.workflow_id = actions.workflow_id
                 AND newer.stage_id = actions.stage_id AND newer.source = actions.source
-                AND newer.kind = actions.kind AND newer.created_at > actions.created_at)::int AS newer
+                AND newer.kind = actions.kind AND newer.created_at > actions.created_at)::int AS newer,
+           (SELECT count(*) FROM workflow_automation_actions done
+              WHERE done.user_id = actions.user_id AND done.workflow_id = actions.workflow_id
+                AND done.stage_id = actions.stage_id AND done.source = actions.source
+                AND done.state = 'succeeded' AND done.created_at > actions.created_at)::int AS newer_succeeded
     FROM workflow_automation_actions actions
     JOIN pr_helper_users users ON users.id = actions.user_id
     LEFT JOIN pr_helper_workflows workflows ON workflows.user_id = actions.user_id AND workflows.id = actions.workflow_id
@@ -398,7 +405,7 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
     LIMIT ${AUTOMATION_DRAIN_BATCH_SIZE}`;
   const counts = { examined: rows.length, executed: 0, reclaimed: 0, requeued: 0, cancelled: 0, failed: 0, skipped: 0, deferred: 0, failures: [] as { action: number; reason: string }[] };
   for (const row of rows) {
-    const decision = automationDrainDecision({ state: row.state, createdAt: row.created_at, updatedAt: row.updated_at, failureReason: row.failure_reason, hasNewer: row.newer > 0, attempts: row.attempts, archived: row.archived }, Date.now(), { cooldownSeconds: row.cooldown_seconds === null ? undefined : Number(row.cooldown_seconds) });
+    const decision = automationDrainDecision({ state: row.state, createdAt: row.created_at, updatedAt: row.updated_at, failureReason: row.failure_reason, hasNewer: row.newer > 0, hasNewerSucceeded: row.newer_succeeded > 0, attempts: row.attempts, archived: row.archived }, Date.now(), { cooldownSeconds: row.cooldown_seconds === null ? undefined : Number(row.cooldown_seconds) });
     const line = (reason: string, detail: Record<string, string | number | boolean | undefined> = {}) => console.info(automationSkipLine({ kind: row.kind, repository: row.repository || '?', route: `${row.source} → ${row.target}`, reason, action: row.id, ...detail }));
     if (decision.kind === 'skip') { counts.skipped += 1; continue; }
     if (decision.kind === 'cancel') {
