@@ -2201,8 +2201,11 @@ a.account-menu-item {
 }
 .flow-progress-nodes {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  /* Clips each segment's background to the rail's rounded corners so the row reads as one bar. */
+  overflow: hidden;
+  background: #fff;
 }
 .flow-progress-sync {
   margin: 8px 0 0;
@@ -2211,15 +2214,19 @@ a.account-menu-item {
 }
 .fp-node {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 88px;
-  padding: 6px 8px;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
   text-align: left;
-  border: 1px solid var(--border, #e2e8f0);
-  border-radius: 8px;
+  border: 0;
+  border-radius: 0;
   background: #fff;
   cursor: pointer;
+}
+.fp-node + .fp-node {
+  border-left: 1px solid var(--border, #e2e8f0);
 }
 .fp-node.is-current {
   box-shadow: 0 0 0 2px var(--accent, #2563eb) inset;
@@ -2231,6 +2238,9 @@ a.account-menu-item {
 .fp-node-status {
   font-size: 0.78rem;
   font-weight: 600;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .fp-node.is-succeeded {
   border-color: var(--success-border, #bbf7d0);
