@@ -19,6 +19,7 @@
   --text-tertiary: #637068;
   --text-muted: #78867e;
   --text-accent: #174334;
+  --text-on-accent: #153d31;
   --text-accent-light: #35855e;
   --text-success: #216342;
   --text-warning: #876515;
@@ -60,6 +61,7 @@
   --text-tertiary: #6a7d8e;
   --text-muted: #5a6b7a;
   --text-accent: #56c271;
+  --text-on-accent: #f5f7fa;
   --text-accent-light: #7dd198;
   --text-success: #4eb86e;
   --text-warning: #c7a54a;
@@ -403,7 +405,7 @@ dialog {
 
 .primary {
   background: var(--bg-accent-light);
-  color: var(--bg-accent);
+  color: var(--text-on-accent);
 }
 
 .primary:hover {
@@ -746,7 +748,7 @@ button.text-link {
 
 .draft-step span, .timeline article>span {
   background: var(--bg-accent-light);
-  color: var(--bg-accent);
+  color: var(--text-on-accent);
   width: 24px;
   height: 24px;
   flex: 0 0 24px;
@@ -965,7 +967,7 @@ button.text-link {
   height: 26px;
   border-radius: 8px;
   background: var(--bg-accent-light);
-  color: var(--bg-accent);
+  color: var(--text-on-accent);
   font: 800 .8rem Manrope;
 }
 
@@ -1211,7 +1213,7 @@ a.account-menu-item {
   margin-top: 7px;
   border: 0;
   background: var(--bg-accent-light);
-  color: var(--bg-accent);
+  color: var(--text-on-accent);
   border-radius: 8px;
   padding: 8px 10px;
   font: 700 .74rem Manrope;
@@ -1456,7 +1458,7 @@ a.account-menu-item {
 }
 
 .toast-undo {
-  color: var(--bg-accent-light);
+  color: var(--text-white);
   background: var(--bg-white-subtle);
 }
 
@@ -1599,7 +1601,7 @@ a.account-menu-item {
   width: 34px;
   border: 0;
   background: var(--bg-accent-light);
-  color: var(--bg-accent);
+  color: var(--text-on-accent);
   border-radius: 0 9px 9px 0;
   padding: 0;
   cursor: pointer;

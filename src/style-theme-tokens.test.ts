@@ -38,4 +38,11 @@ describe('theme tokens', () => {
   it('gives the dialog element a themed text colour', () => {
     expect(css.match(/\ndialog \{([^}]*)\}/)?.[1] || '').toMatch(/color:\s*var\(--text-primary\)/);
   });
+
+  // A `--bg-*` token used as text colour carries an unstated pairing: it reads only because some other
+  // token happens to sit behind it. The dark theme repaints both sides independently, which left `.primary`
+  // dark green on mid green at 1.6:1. Text belongs to the `--text-*` vocabulary.
+  it('never paints text with a background token', () => {
+    expect(css.match(/(^|[;\s])color:\s*var\(--bg-[\w-]+\)/)).toBeNull();
+  });
 });
