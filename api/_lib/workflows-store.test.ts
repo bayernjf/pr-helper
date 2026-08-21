@@ -5,7 +5,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, deploymentRowChanged, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, deploymentRowChanged, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -2075,5 +2075,55 @@ describe('an automation action whose workflow was archived', () => {
     // nothing: no second query, and no per-action lookup inside the loop.
     expect(drain).toMatch(/archived[\s\S]*?LEFT JOIN pr_helper_workflows/);
     expect(drain).toContain('archived: row.archived');
+  });
+});
+
+// 62 stages across 35 workflows, and 53 of them were terminal with zero new commits, yet every sweep
+// still spent about five GitHub calls on each one: pullForStage asks for `state=all`, so a merged or
+// closed PR keeps coming back and keeps dragging the five-call check fan-out behind it. The rotation
+// period grows linearly with the number of stages for work that cannot have changed.
+describe('a terminal stage with no new commits stops paying for GitHub reads', () => {
+  const terminal = { pull_state: 'merged', checks_state: 'success' };
+
+  it('skips a merged stage that the target has already absorbed', () => {
+    expect(stageReconciliationIsSettled({ aheadBy: 0, previous: terminal, deploymentConfigured: false, deploymentStates: [] })).toBe(true);
+  });
+
+  it('skips a closed stage the same way', () => {
+    expect(stageReconciliationIsSettled({ aheadBy: 0, previous: { pull_state: 'closed', checks_state: 'failure' }, deploymentConfigured: false, deploymentStates: [] })).toBe(true);
+  });
+
+  // 新提交是唯一能让已终结阶段重新变得有意义的输入：下一段 PR 要从这里创建。
+  it('never skips once the source moved ahead again', () => {
+    expect(stageReconciliationIsSettled({ aheadBy: 1, previous: terminal, deploymentConfigured: false, deploymentStates: [] })).toBe(false);
+  });
+
+  it('never skips an open stage, or one it has never seen', () => {
+    expect(stageReconciliationIsSettled({ aheadBy: 0, previous: { pull_state: 'open', checks_state: 'success' }, deploymentConfigured: false, deploymentStates: [] })).toBe(false);
+    expect(stageReconciliationIsSettled({ aheadBy: 0, previous: { pull_state: 'none', checks_state: 'unknown' }, deploymentConfigured: false, deploymentStates: [] })).toBe(false);
+    expect(stageReconciliationIsSettled({ aheadBy: 0, previous: undefined, deploymentConfigured: false, deploymentStates: [] })).toBe(false);
+  });
+
+  // 门禁还在跑的时候跳过，等于让 checks_state 永久停在 pending，下一段会被锁死。
+  it('never skips while the gate has not landed', () => {
+    expect(stageReconciliationIsSettled({ aheadBy: 0, previous: { pull_state: 'merged', checks_state: 'pending' }, deploymentConfigured: false, deploymentStates: [] })).toBe(false);
+    expect(stageReconciliationIsSettled({ aheadBy: 0, previous: { pull_state: 'merged', checks_state: 'unknown' }, deploymentConfigured: false, deploymentStates: [] })).toBe(false);
+  });
+
+  // 已终结阶段不得跳过未完成的部署跟踪：合并后的部署是异步的，跳过就再也不会有人去问 run 的结果。
+  it('已终结阶段不得跳过未完成的部署跟踪', () => {
+    expect(stageReconciliationIsSettled({ aheadBy: 0, previous: terminal, deploymentConfigured: true, deploymentStates: ['pending'] })).toBe(false);
+    expect(stageReconciliationIsSettled({ aheadBy: 0, previous: terminal, deploymentConfigured: true, deploymentStates: [] })).toBe(false);
+    expect(stageReconciliationIsSettled({ aheadBy: 0, previous: terminal, deploymentConfigured: true, deploymentStates: ['success', 'pending'] })).toBe(false);
+    expect(stageReconciliationIsSettled({ aheadBy: 0, previous: terminal, deploymentConfigured: true, deploymentStates: ['success'] })).toBe(true);
+    expect(stageReconciliationIsSettled({ aheadBy: 0, previous: terminal, deploymentConfigured: true, deploymentStates: ['success', 'failure'] })).toBe(true);
+  });
+
+  // compare 是唯一能判断「有没有新提交」的调用，所以它必须先于 pullForStage，否则短路无从谈起。
+  it('asks the comparison before it asks for the pull request', () => {
+    const source = readFileSync(STORE_SOURCE, 'utf8');
+    const work = source.slice(source.indexOf('async function reconcileStageWork'), source.indexOf('async function reconcileWorkflowScope'));
+    expect(work.indexOf("phase('compare'")).toBeLessThan(work.indexOf("phase('pull'"));
+    expect(work).toContain('stageReconciliationIsSettled');
   });
 });
