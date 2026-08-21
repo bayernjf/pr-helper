@@ -2127,3 +2127,21 @@ describe('a terminal stage with no new commits stops paying for GitHub reads', (
     expect(work).toContain('stageReconciliationIsSettled');
   });
 });
+
+// readConvergenceHealth 用 `min(updated_at)` over workflow_stage_states 判断收敛，/api/cron/health 超阈值就 503。
+// 短路省掉的是 GitHub 调用，不能连「这一行刚被核对过」也一起省掉，否则终结阶段的 updated_at 永久冻结，健康检查恒 503。
+// 这与 A1 改 cron 时钟踩到的是同一类回归。
+describe('a skipped terminal stage still records that it was verified', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const work = source.slice(source.indexOf('async function reconcileStageWork'), source.indexOf('async function reconcileWorkflowScope'));
+  const settled = work.slice(0, work.indexOf('return { reconciled: false, phases };'));
+
+  it('touches updated_at before it returns early', () => {
+    expect(settled).toMatch(/UPDATE workflow_stage_states SET updated_at = now\(\)/);
+  });
+
+  it('writes nothing else on that path, so the skip stays a skip', () => {
+    expect(settled).not.toMatch(/INSERT INTO workflow_stage_states/);
+    expect(settled).not.toMatch(/recordWorkflowStageEvent/);
+  });
+});
