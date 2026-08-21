@@ -150,6 +150,19 @@ export function stageGenerationRule(stored: { name: string; content?: string; co
   return content?.trim() ? { name: stored.name, content } : undefined;
 }
 
+export type StageGenerationRuleUpdate = { kind: 'content' | 'rule'; name: string; content: string };
+
+// 自动化没有规则选择入口，生效的永远是默认规则，而 stage 钉住的是配置那一刻的副本。
+// 所以要拿默认规则比，而不是同名规则：换一条默认规则也是变化，同名比会漏掉。
+export function stageGenerationRuleUpdate(stored: { name: string; content?: string; contentHash?: string } | undefined, rules: readonly GenerationRule[]): StageGenerationRuleUpdate | undefined {
+  const current = defaultGenerationRule(rules);
+  if (!stored || !current) return undefined;
+  if (stored.name !== current.name) return { kind: 'rule', name: current.name, content: current.content };
+  // 水合失败时 stage 手上没有内容，无从判断正文是否变了，不报比误报好。
+  if (!stored.content?.trim() || stored.content === current.content) return undefined;
+  return { kind: 'content', name: current.name, content: current.content };
+}
+
 export function markdownRuleName(fileName: string): string {
   if (!/\.md$/i.test(fileName)) {
     throw new Error('只能导入 Markdown (.md) 文件');
