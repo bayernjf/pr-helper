@@ -2223,6 +2223,22 @@ describe('a generation rule is stored once and referenced by hash', () => {
   });
 
   // payload 里不再写 content，所以保存路径必须先把内容落到自己的表里，否则下一次入队就查不到。
+  // 新 payload 里 automation.generationRule.content 是 undefined，直接 .content.trim() 会抛 TypeError，
+  // 所以两条入队路径都必须先按 hash 把内容查回来，再放进动作的 payload——drain 侧因此不用改。
+  it('resolves the content by hash on the sweep enqueue path', () => {
+    const schedule = source.slice(source.indexOf('async function scheduleServerAutoCreate'), source.indexOf('async function enqueueServerAutoMerge'));
+    expect(schedule).toContain('resolveGenerationRuleContent');
+    expect(schedule).not.toMatch(/automation\.generationRule\.content\.trim\(\)/);
+  });
+
+  // 客户端送来的提示词只是它本地 localStorage 的副本；服务端有权威副本，就该用自己的，
+  // 顺带把「客户端可以塞任意 prompt」这条也堵掉。
+  it('resolves the content from the stage rather than trusting the request body', () => {
+    const enqueue = source.slice(source.indexOf('export async function enqueueWorkflowAutomationAction'), source.indexOf('type AutomationActionRow'));
+    expect(enqueue).toContain('resolveGenerationRuleContent');
+    expect(enqueue).not.toContain('input.generationRule');
+  });
+
   it('writes the rule rows in the same transaction that writes the payload', () => {
     const upsert = source.slice(source.indexOf('export async function upsertWorkflow'), source.indexOf('export async function archiveWorkflow'));
     expect(upsert).toContain('dehydrateGenerationRules');
