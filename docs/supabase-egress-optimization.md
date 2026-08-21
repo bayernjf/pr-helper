@@ -783,9 +783,19 @@ workflow_deployments (user_id, workflow_id, target, provider, environment, ...)
 
 第六轮 ③（终结阶段短路）的验收标准：
 
-- `workflow_automation_actions` / `reconciliation_runs` 的 GitHub 调用数：单圈 cron 的调用数从约 7.8 次/阶段降到约 1 次/阶段（已终结且 `ahead_by = 0` 的阶段只保留 `compare`）。
+**部署前基线（2026-08-21 实测，`reconciliation_runs` 近 24 小时，`state <> 'skipped'`）：**
+
+| trigger | runs | stages | github_calls | 次/阶段 | 平均耗时 |
+| --- | --- | --- | --- | --- | --- |
+| cron | 222 | 3094 | 19 993 | **6.46** | 14 818 ms |
+| webhook | 222 | 306 | 2 891 | 9.45 | 9 445 ms |
+| inbox_refresh | 1 | 2 | 20 | 10.00 | 6 613 ms |
+
+- **主指标**：cron 的 `github_calls / stages_total` 从 **6.46** 降到约 **1.8**（85% 的阶段只剩 `compare` 一次调用，15% 仍走完整 6.46）。webhook 路径不受影响甚至更好——它扫的都是刚动过的分支，本来就不该被短路。
 - 轮转周期缩短：一圈扫完 35 个流程的时间从约 75 分钟降到能在一次 cron 预算内完成大部分批次；`/api/cron/health` 不再因阈值而报 503。
-- **安全边界不破**：已合并阶段若仍有未终结的部署（`deployment` 配置存在且部署行非终态），必须继续跟踪，不得被短路跳过。这条由单元测试守住。
+- **安全边界不破**：已合并阶段若仍有未终结的部署（`deployment` 配置存在且部署行非终态），必须继续跟踪，不得被短路跳过。这条由单元测试 `已终结阶段不得跳过未完成的部署跟踪` 守住。
+- **收敛时间戳不冻结**：`readConvergenceHealth` 读的是 `min(updated_at) FROM workflow_stage_states`，所以短路路径必须仍然 `UPDATE ... SET updated_at = now()`，否则健康检查恒 503。这是 A1 那类回归，已由单元测试守住。
+- **计数报实话**：短路的阶段计入 `stages_reconciled`（它确实被核对过），否则 `deferredRunState` 会把整批终结阶段的扫掠误判成 `degraded`。
 - 沙箱端到端：达到阈值的 commit 仍在秒级自动创建 PR，CI 转绿后仍自动合并。
 
 第四轮（提示词去重）的验收标准：
