@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-- 当前分支：`feature/20260722`，与 `origin/feature/20260722` 完全一致，且没有任何提交未进入 `origin/main`；`origin/main` 头为 `d1fd0bd9`（PR #288，2026-08-19 13:12 UTC），本批深色主题与自动化修复的 6 个提交经 PR #285–#288 全部合并。
+- 当前分支：`feature/20260722`。`origin/main` 头为 `613fd350`（PR #306，2026-08-21 07:12:05 UTC），出站量优化的第二、三轮已全部合入。核对分支同步状态请直接跑 `git log --oneline origin/main..HEAD`，不要引用本文档里的快照。
 - 用户已确认本批代码已上线 Production。
 - 2026-08-19 生产核对（当日第二次，合并 PR #288 之后）：最近 6 小时 cron 80 success / 1 degraded / 1 skipped、webhook 53 success / 4 degraded / 252 skipped、inbox_refresh 2 success，无 failure；55 行 stage 投影最老 1187 秒、平均 609 秒，距 `/api/cron/health` 的 2700 秒阈值余量充足；`workflow_automation_actions` 只有 263 succeeded / 35 cancelled，没有 `paused` / `queued` / `running` / `failed` 行。当日较早一次核对为 cron 78 success / 1 degraded / 2 skipped、投影最老 1370 秒、246 succeeded / 31 cancelled。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
@@ -21,7 +21,10 @@
 - **2026-08-21 已实测出站字节，权重与原判断不同**（明细见方案文档《实测：一次 `/api/inbox` 的出站字节》）：一次 `/api/inbox` 约 **588 kB**，其中 `pr_helper_workflows.payload`（35 行、70.8 kB）在**同一次请求内被 5 个 list 函数各取一遍**，占 354 kB；重复的那 4 遍即 283 kB，占整次请求 48%。历史数据（events / timeline / runs / deployment_runs）合计只有 143 kB / 24%。按 30 秒轮询折算约 **70 MB/小时**，5 GB ≈ 71 小时页面打开时间——每天前台用 4 小时，一个月即到量，6.28 GB 无需多用户即可解释。另查：`pg_stat_statements` 已装但 `prh_readonly` 读不到（schema `extensions` 权限拒绝），故用字节 × 频率推算。
 - **只有详情页的轮询不停**：首页 `refreshOverviewSnapshot`（[`src/main.ts:400`](src/main.ts)）开头本来就有 `document.visibilityState !== 'visible'` 即返回，挂后台是 0 请求；详情页 [`src/main.ts:2140`](src/main.ts) 的 `pollTimer` 没有这道判断，挂后台每 30 秒既直连 GitHub 又拉一次 588 kB。**此前本文档写成「首页也不停、挂机一晚 847 MB」是错的，已按源码更正。**
 - **修正后的顺序（原「先拆 `/api/board`」已作废）**：三刀均已落地——**B 详情页轮询隐藏即停 + 间隔 60 秒**（`1e5c6758`，两屏共用 `POLL_INTERVAL_MS = 60_000`）；**A 请求内去重**（`2b81be2c`，handler 传一个按请求的 `VisibleWorkflowReads` memo 进 list 函数，payload 与 stage_states 各只读一次）；**去掉无人读取的 `stage_snapshot`**（`98b5d245`，`INSERT` 保留，列和历史数据仍在）。同一份生产数据实测：单次 **594.3 → 274.0 kB（−53.9%）**，前台 **71.3 → 16.4 MB/小时（原来的 23%）**，详情页挂后台归零，5 GB 可支撑的前台时长从约 70 小时升到约 312 小时。逐项对比见方案文档《实测：三刀落地后的对比》。`/api/board` 拆分与按需加载降为第 4 步，等观察一周后再决定是否需要。
-- 已新增方案文档 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)，并更新 [`docs/current-state.md`](docs/current-state.md)。**代码尚未开工**；宽限期到 2026-09-20，上线前的保底手段是临时开 Supabase 按量付费或升一档（保险，非替代）。
+- 已新增方案文档 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)，并更新 [`docs/current-state.md`](docs/current-state.md)。宽限期到 2026-09-20，保底手段是临时开 Supabase 按量付费或升一档（保险，非替代）；按 1.71 GB/月的投影应该用不上。
+- **2026-08-21 第二、三轮已落地并部署生产**（`origin/main` 头 `613fd350`，07:12:05 UTC，经 PR #305 / #306）。第二轮 A1 / A2 / A3 见方案文档；第三轮把 `archived` / `repository` / `installationId` 过滤和 cron 批次下推进 SQL，新增迁移 `034`（`(payload->>'repository')` 表达式索引，用户已执行）。部署后实测：`pr_helper_workflows_repository_idx` 12 次扫描共读 28 行，**单次 webhook 投影读 35 → 约 2.3 行（−93%）**；webhook 5 次 success、11 次 skipped、`stages_failed` 全 0、最慢 9 秒，无回归。索引命中用 `pg_stat_user_indexes` 验证而非 `EXPLAIN`——只读通道拒绝 `EXPLAIN`，且 35 行下 Seq Scan 本就是正确计划。
+- **A1 引发过一次收敛阈值回归，已处置。** 033 把 pg_cron reconcile 从 `*/5` 改成 `*/30`（实测断点 05:20:03 UTC，cron 日频次 ~336 → ~84），但没有同时校准依赖时钟的告警阈值：35 个活跃流程 ÷ 每次 8 个 ÷ 3.5 次/小时 = **一圈约 75 分钟**，而 `STAGE_UNCONVERGED_THRESHOLD_SECONDS` 默认 2700（45 分钟）是按 `*/5`（一圈 22 分钟）校准的，于是 `/api/cron/health` 恒 503、`reconcile-pr-helper.yml` 每次报红，最老投影年龄涨到 6459 秒、61 个阶段中 40 个超阈值（`stages_failed` 全程为 0，不是收敛故障）。**调大批次是错的修法**：真正的卡点是 40 秒预算（`CRON_RECONCILE_BUDGET_MS = 60_000 - 20_000`），`06:43` 那次已用 44.9 秒撞线并记下「校准未在预算内完成，已让给下一次触发」，8 个流程就已装不下一次预算。实际处置是 Vercel Production 加 `STAGE_UNCONVERGED_THRESHOLD_SECONDS=9000`；处置后最老投影 3913 秒、超阈值 0 个、工作流转 success。**注意生效方式**：面板 Redeploy 会被拒（`Prebuilt deployments cannot be redeployed...`），因为生产部署是 Actions 上传的 prebuilt 产物；正确路径是 `gh workflow run deploy-vercel.yml --ref main`，该工作流第一步 `vercel pull` 会拉最新环境变量。
+- 遗留未处理：一圈的长度由 GitHub 往返决定（每阶段约 7.8 次调用，218 ÷ 28；`github_ms` 52.9 秒 > 墙钟 24.6 秒说明已并行），降这个数才能真正缩短轮转，属代码工作、未立项。另有小浪费：撞预算的 sweep 似乎没推进那批流程的 `last_reconcile_attempt_at`，`06:43 → 07:00` 领取了完全相同的 8 个流程。Actions 的 `*/10` 兜底不需要再放宽——`gh run list` 显示 GitHub 对 schedule 事件限流，实际间隔已是 30–60 分钟。
 
 ## 2026-08-14 实时校准修复（已部署生产）
 
@@ -245,7 +248,7 @@ AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 P
 
 在上述生产验收通过后，建议顺序为：
 
-1. Supabase Egress 与多用户读取扩展（当前第一优先级）：三刀已落地（`1e5c6758` / `2b81be2c` / `98b5d245`），单次 `/api/inbox` 实测 594.3 → 274.0 kB、前台 71.3 → 16.4 MB/小时。**待办只剩部署后核对**：DevTools 量一次响应体与 60 秒间隔、确认详情页切后台不再发请求，再看一周 Supabase Usage 日增量。`/api/board` 拆分与历史数据按需加载为可选第 4 步，届时再决定。理由与实测字节见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)。
+1. Supabase Egress 与多用户读取扩展（当前第一优先级）：三刀 + 第二轮 + 第三轮均已落地并部署生产。三刀单次 `/api/inbox` 实测 594.3 → 274.0 kB、前台 71.3 → 16.4 MB/小时；第三轮单次 webhook 投影读 35 → 约 2.3 行（索引命中已实测）；A1 的收敛阈值回归已处置。**待办只剩两件**：（a）DevTools 量一次响应体与 60 秒间隔、确认详情页切后台不再发请求；（b）连续看一周 Supabase Usage 日增量，目标折算约 1.7 GB/月。第四轮（提示词去重，71 kB → 28 kB）与第五轮（拆关系表）方案已写全、未开始，单用户规模下不紧急。`/api/board` 拆分与历史数据按需加载为可选第 4 步。全部理由与实测见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)。
 2. 瞬时失败的重排路径已实现，等一次真实的瞬时故障做生产验证。reconciliation 的调用预算按小时复核后只占基线的 18%–34%，已改为阈值观察。
 3. 后台自动创建 PR 与自动合并：生产已跑通；门禁为红与幂等命中两项均已在沙箱验完（前者顺带修掉 ruleset 审批不可见），自动化验收清单无未验项。
 4. 浏览器 E2E：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影已有真实 delivery 证据。
