@@ -316,13 +316,16 @@ describe('workflow configuration', () => {
     expect(sortWorkflowsForView([first, second], 'custom', 'desc').map(workflow => workflow.id)).toEqual(['second', 'first']);
   });
 
-  it('keeps default public deployments for legacy workflows and allows each project to replace them', () => {
+  // The defaults describe pr-helper's own Actions workflows. Read back as a fallback they were applied to
+  // every repository that had configured nothing, which wrote run-less gates for workflows those
+  // repositories do not contain, and a gate with no run holds checks_state at pending and locks the next
+  // stage. `createWorkflow` still prefills them, so declining the gates has to stay expressible.
+  it('gives a workflow that stores no deployments no gates at all', () => {
     const legacy = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'feature/login', target: 'dev' }] };
-    expect(deploymentConfigsForTarget(legacy, 'dev')).toEqual([
-      { target: 'dev', provider: 'vercel', workflowName: 'Deploy frontend to Vercel', environment: 'preview', githubEnvironment: 'preview-vercel' },
-      { target: 'dev', provider: 'cloudflare', workflowName: 'Deploy frontend to Cloudflare Pages', environment: 'preview', githubEnvironment: 'preview-cloudflare-pages' },
-    ]);
-    const customized = addDeployment({ ...legacy, deployments: [] }, { target: 'staging', provider: 'vercel', workflowName: 'Deploy staging', environment: 'preview', githubEnvironment: 'staging-vercel' });
+    expect(deploymentConfigsForTarget(legacy, 'dev')).toEqual([]);
+    const emptied = { ...legacy, deployments: [] };
+    expect(deploymentConfigsForTarget(emptied, 'dev')).toEqual([]);
+    const customized = addDeployment(emptied, { target: 'staging', provider: 'vercel', workflowName: 'Deploy staging', environment: 'preview', githubEnvironment: 'staging-vercel' });
     expect(deploymentConfigsForTarget(customized, 'staging')).toEqual([{ target: 'staging', provider: 'vercel', workflowName: 'Deploy staging', environment: 'preview', githubEnvironment: 'staging-vercel' }]);
     expect(removeDeployment(customized, 0).deployments).toEqual([]);
   });
@@ -335,13 +338,6 @@ describe('workflow configuration', () => {
     const corrected: DeploymentConfig = { target: 'dev', provider: 'vercel', workflowName: 'Deploy Web', environment: 'preview', githubEnvironment: 'Preview' };
     const next = replaceDeployment(workflow, 0, corrected);
     expect(next.deployments).toEqual([corrected, ...defaultDeployments.slice(1)]);
-  });
-
-  it('materializes the defaults when a gate is edited on a workflow that never stored any', () => {
-    const legacy = { id: 'flow-1', name: 'Release', repository: 'octo/app', stages: [{ source: 'dev', target: 'main', stageId: 'stage-1' }] } as unknown as Workflow;
-    const edited = replaceDeployment(legacy, 1, { ...defaultDeployments[1], githubEnvironment: 'Preview' });
-    expect(edited.deployments).toHaveLength(defaultDeployments.length);
-    expect(edited.deployments![1].githubEnvironment).toBe('Preview');
   });
 
   it('preserves an explicitly configured rollback workflow on a deployment gate', () => {
