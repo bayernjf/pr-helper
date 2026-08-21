@@ -24,8 +24,23 @@ describe('background refresh', () => {
   // showing whatever it had when the user last looked at it.
   it('refreshes each screen when the tab becomes visible again', () => {
     expect(source).toContain("window.addEventListener('focus', () => { if (screen === 'overview') void refreshOverviewSnapshot(); })");
-    expect(source).toContain("window.addEventListener('focus', () => { if (screen === 'detail') void refreshStatuses(); })");
+    expect(source).toContain("if (screen === 'detail' && !detailStatusRefreshing) void refreshStatuses();");
     expect(source.match(/document\.addEventListener\('visibilitychange'/g) || []).toHaveLength(2);
+  });
+
+  // Switching tabs fires visibilitychange and focus, and both listeners are needed: one covers a tab
+  // switch, the other a window switch. Measured in production 2026-08-22, returning to the tab issued
+  // two identical `/api/inbox` reads in the same second. The flag lives in refreshStatuses rather than
+  // in the listeners so a refresh the user asked for is never the one that gets dropped.
+  it('drops a return-to-tab refresh that duplicates one already in flight', () => {
+    const poll = body('refreshStatuses');
+    expect(poll).toContain('detailStatusRefreshing = true;');
+    expect(poll).toMatch(/finally \{ detailStatusRefreshing = false;/);
+    // Only the two return-to-tab listeners are guarded. A repository sync also refreshes the detail
+    // screen, and that one the user asked for.
+    const listeners = source.match(/(?:window|document)\.addEventListener\('(?:focus|visibilitychange)'[^\n]*refreshStatuses[^\n]*/g) || [];
+    expect(listeners).toHaveLength(2);
+    expect(listeners.filter(listener => !listener.includes('!detailStatusRefreshing'))).toEqual([]);
   });
 
   // Entering the overview must still load once, but `overview()` runs on every render, so the guard is
@@ -50,7 +65,7 @@ describe('refreshDetailStatuses', () => {
   // automation blocks read, but must stay a plain read. `/api/inbox` only calls GitHub when `refresh=1`
   // is set, which `loadActionQueue(false)` does not send, so the tick costs one database read.
   it('refreshes the projection on every tick without asking the server to reconcile', () => {
-    const poll = body('refreshStatuses');
+    const poll = body('loadDetailStatuses');
     expect(poll).toContain('loadActionQueue(false)');
     expect(poll).not.toContain('loadActionQueue(true');
   });
