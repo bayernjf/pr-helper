@@ -18,7 +18,7 @@ PR Helper 是 GitHub-first 的 PR / Release Control Tower。用户以项目 Lane
 
 ## 当前整体评估
 
-- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（639 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
+- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（651 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
 - **功能质量：8.5/10**。流程 CRUD、Lane 看板、动态来源、多路径汇聚、PR 创建/合并、五类门禁、合并后 Actions/部署状态、失败恢复和审计均已具备；后台自动创建 PR 和逐步骤自动合并已有生产成功记录。
 - **产品完善度：7.5/10**。个人使用和小团队发布控制塔已可用；多账号权限、private/organization 边界、Web Push 关闭页面投递和部署回滚仍需外部条件验收。
 - **生产准备度：7/10**。主链路和两级自动化都已有真实 Production 证据；健康检查/失败部署投影、确认式回滚和部分协作能力不能仅凭本地测试视为通过。Supabase Free Plan 在上个账单周期出现 Egress 超额（`pr-helper` 6.28GB / 5GB），当前高频 `/api/inbox` 把看板状态与历史数据绑在一起，不适合直接承载多用户轮询。
@@ -150,12 +150,26 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 **2026-08-22 沙箱端到端验收通过**：两条上游（`feature/test` PR #25 22:42:05 合并、`fix/test` PR #17 22:46:07 合并）在 stage 0 存有 5 行废弃路线（`feature/probe-timing` ×3、`feature/webhook-live-e2e` ×2）的情况下，汇聚步骤解锁、自动建出 `dev→main` PR #26 并自动合并到 `main`（23:08:05）。
 
-同一次验收暴露两个**尚未修**的时序缺陷：
+同一次验收暴露两个时序缺陷，一个已修、一个经查不存在：
 
-- **门禁转绿的那一刻不会重新评估下游**。stage 2 在 22:46:28 被评估，而 stage 1 的 `fix/test` 行到 22:46:30 才写成 `merged`——晚 2 秒。此后没有新事件，汇聚步骤就一直停着，直到 22:55 手动重跑一次 `dev` 上的 workflow 才推进。上游最后一条路合并完成时，下游必须等一个**无关**事件才会动。
-- **合并门禁用的是 PR 创建瞬间的 `mergeable` 快照**。PR #26 建出时 GitHub 还没算完可合并性，动作被记成「分支落后于目标分支」，而 GitHub 实况是 `CLEAN`；这个 reason 又会让排空进入退避，同样要等下一次事件把它清掉才合并。
+- **门禁转绿的那一刻不会重新评估下游**（已修，`6d8eee84`）。stage 2 在 22:46:28 被评估，而 stage 1 的 `fix/test` 行到 22:46:30 才写成 `merged`——晚 2 秒。根因是一次 sweep 的所有步骤跑在同一个 `Promise.allSettled` 里，汇聚步骤读依赖时兄弟步骤还没写完自己的合并，之后没有任何机制再看一眼。修法是让 sweep 记下**本批内**刚满足门禁（`merged` + `checks_state='success'`，且之前不满足）的路线，再把在等它们的下游步骤重跑一次；范围限定在本批已解析的路线，不额外付路由查询，也不计入 `stages_reconciled`，并受剩余 deadline 约束。11 条单测固定两个纯函数的语义，另加一条静态守卫——重跑逻辑长在 sweep 的 `allSettled` 内部、没有可单测的接缝，没有守卫的话重构把它删掉全部测试仍会通过。
+- **~~合并门禁用的是 PR 创建瞬间的 `mergeable` 快照~~——查证后不成立，无需修改**。（1）执行器 `runAutomationMergeAction` 现拉 `/pulls/{n}`，`mergeable` / `mergeable_state` 都取自这次响应，存量行只提供 `checks_state`（因为它折叠了 deployment 结果）；用存量快照的只有 `scheduleServerAutoMerge`，而它对 paused 只写 `failure_reason`、不改 state，最多影响退避窗口。（2）全部 467 条 action 的 `failure_reason` 分布里从未出现过「分支落后于目标分支」。（3）`behind` 也不是异步中间态：`mergeable_state='behind'` 的 5 行**全部** `mergeable=true`，真正的未算完表现为 `mergeable=null / 'unknown'`（44 行），而门禁顺序是 `mergeable !== true` 先判、再判 `behind`，走到那行时 GitHub 必然已算完。这 5 行从未触发是因为它们 `approvals=0 / required=1`，卡在前面那条可重试的 Approval 门禁上。残留的理论洞：若某路线真在 Approval 齐全时判到 `behind`，reason 不带 retryable → 落 `paused` → `automationAttemptWasReached` 判为已有裁决 → drain 永久 `skip`，且 idempotency key 带 head sha、同 sha 无法重新入队；但 `behind` 只能靠更新 source 分支解除，更新即产生新 sha 与新动作，所以实际自愈，这也正是该分支注释写明的设计意图。
 
 附注：沙箱 `dev` 要求 1 个 Approval，而自动化建出的 PR 作者是 App bot，所以人工 approve 是合法且必要的一步；这也是 #10 / #11 当初卡住的真实原因。验收期间触发对账用的是重跑 `dev` 上已有的 workflow run，未直推受保护分支。
+
+### 2026-08-22 对账时钟实测：`*/30` 是设计行为，不是故障
+
+记这一段是为了避免下次再把 migration 033 的效果当成 cron 抖动来查（本轮就查错过一次）。
+
+只读测量：`reconciliation_runs` 里 `trigger='cron'` 的相邻间隔，**断崖精确落在 2026-08-21 05:00Z**。08-20 全天到 08-21 04 点，每小时 13–14 次、最差间隔 300–302 秒、零漏；05 点起变成每小时 3–5 次、最差反复出现 1800/1799/1803 秒。消失的正好是 `:05/:15/…` 那一半：断崖前 `minute % 10 = 0` 有 179 次、`= 5` 有 177 次（标准 `*/5`），断崖后 `= 0` 还有 42 次、`= 5` 只剩 5 次。
+
+原因是 [033_relax_reconciliation_clock.sql](../db/migrations/033_relax_reconciliation_clock.sql) 把 reconcile 从 `*/5` 改成 `*/30`，为的是省掉每月约 618 MB 出站量，代价是恢复保证的最坏情况从 5 分钟放宽到 30 分钟——这只在 GitHub 整条投递丢掉时才有影响。断崖时刻即该迁移的生效时刻。
+
+其余每小时 3–5 次里，`*/30` 贡献 2 次，剩下是 `.github/workflows/reconcile-pr-helper.yml` 那条 `*/10` 兜底；它实测只跑出 3–5 次/小时而不是 6 次，是 GitHub 自己跳 tick 的已知行为，它本来就只是 secondary。
+
+`*/2` 的 drain 未受影响且健康：08-21 05:00Z 之后 `workflow_automation_actions.updated_at` 的分钟分布压倒性落在偶数分（2/4/6/8/12/16/18/22/24/26/30/32/34/38/40/42/44/46/48/52/54/58），奇数分那几个是 webhook 驱动的。033 也明确保留了 drain 的 `*/2`。
+
+一个后果：既然兜底最坏是 30 分钟而非 5 分钟，上面 `6d8eee84`（汇聚步骤在同批内重新求值）消掉的等待是 30 分钟量级，不是 5 分钟量级。
 
 ### 2026-08-19 深色主题失配与自动化僵尸行修复
 

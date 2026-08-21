@@ -276,10 +276,12 @@ AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 P
 
 **沙箱端到端验收通过**：stage 0 存有 5 行废弃路线（`feature/probe-timing` ×3、`feature/webhook-live-e2e` ×2）的前提下，两条活跃上游合并后汇聚步骤解锁，自动建出 `dev→main` PR #26 并自动合并到 `main`（23:08:05）。
 
-**同一次验收发现两个尚未修的时序缺陷**：
+**同一次验收发现两个时序缺陷，一个已修、一个经查不成立**：
 
-1. **门禁转绿的那一刻不会重新评估下游**：stage 2 于 22:46:28 被评估，stage 1 的 `fix/test` 到 22:46:30 才写成 `merged`，之后无事件，汇聚步骤一直停着，直到 22:55 手动重跑一次 `dev` 上的 workflow 才推进。上游最后一条路合并完成时，下游要等一个无关事件才动。
-2. **合并门禁用创建瞬间的 `mergeable` 快照**：PR #26 建出时 GitHub 尚未算完，动作记成「分支落后于目标分支」而实况是 `CLEAN`，该 reason 又让排空进入退避，需下一次事件清除后才合并。
+1. **门禁转绿的那一刻不会重新评估下游**（已修，`6d8eee84`）：stage 2 于 22:46:28 被评估，stage 1 的 `fix/test` 到 22:46:30 才写成 `merged`。根因是一次 sweep 的所有步骤跑在同一个 `Promise.allSettled` 里，之后没有机制再看一眼。sweep 现在记下本批内刚满足门禁的路线，把在等它们的下游步骤重跑一次；范围限定在本批已解析的路线，不计入 `stages_reconciled`，受剩余 deadline 约束。
+2. **~~合并门禁用创建瞬间的 `mergeable` 快照~~——不成立，无需修改**：执行器现拉 `/pulls/{n}`，`mergeable` / `mergeable_state` 都取实时值；全部 467 条 action 的 `failure_reason` 里从未出现过「分支落后于目标分支」；`mergeable_state='behind'` 的 5 行全部 `mergeable=true`（未算完表现为 `mergeable=null / 'unknown'`），且门禁先判 `mergeable !== true` 再判 `behind`，它们实际卡在前面那条可重试的 Approval 门禁上。详见 [`docs/current-state.md`](docs/current-state.md) 同日小节。
+
+**对账时钟的 `*/30` 是设计行为**：实测断崖落在 2026-08-21 05:00Z，即 migration 033 的生效时刻，不是 cron 抖动；本轮曾按故障查错一次。测量细节见 [`docs/current-state.md`](docs/current-state.md)「2026-08-22 对账时钟实测」。
 
 附注：沙箱 `dev` 要求 1 个 Approval，自动化建出的 PR 作者是 App bot，人工 approve 是必要一步——这也是 #10 / #11 当初卡住的真实原因。触发对账用重跑 `dev` 上已有 workflow run，未直推受保护分支。
 
