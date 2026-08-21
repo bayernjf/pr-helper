@@ -9,6 +9,7 @@ import {
   markdownRuleName,
   parseGenerationRules,
   setDefaultGenerationRule,
+  stageGenerationRule,
   updateGenerationRule,
 } from './generation-rules';
 
@@ -155,5 +156,25 @@ describe('generation rules', () => {
     );
 
     expect(parseGenerationRules(JSON.stringify(rules))).toEqual(rules);
+  });
+});
+
+// payload 里不再存提示词内容（只有 hash），所以详情页在重新保存 automation 时手上没有内容可送。
+// 本地按同名规则找回来；找不到就当作没有规则，让调用方走原有的「缺少前置条件」分支，而不是存一条空提示词。
+describe('a stage rule whose content lives on the server', () => {
+  const rules = parseGenerationRules(JSON.stringify([{ id: 'r1', name: '默认规则', content: '按仓库约定写', isDefault: true, createdAt: '2026-08-21T00:00:00.000Z', updatedAt: '2026-08-21T00:00:00.000Z' }]));
+
+  it('keeps the inline content when the payload still carries it', () => {
+    expect(stageGenerationRule({ name: '别的名字', content: '内联内容' }, rules)).toEqual({ name: '别的名字', content: '内联内容' });
+  });
+
+  it('recovers the content from the local rule of the same name', () => {
+    expect(stageGenerationRule({ name: '默认规则', contentHash: 'abc' }, rules)).toEqual({ name: '默认规则', content: '按仓库约定写' });
+  });
+
+  it('reports no rule when neither the payload nor the local list has the content', () => {
+    expect(stageGenerationRule({ name: '已删除的规则', contentHash: 'abc' }, rules)).toBeUndefined();
+    expect(stageGenerationRule({ name: '默认规则', content: '   ' }, [])).toBeUndefined();
+    expect(stageGenerationRule(undefined, rules)).toBeUndefined();
   });
 });
