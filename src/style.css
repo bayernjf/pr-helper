@@ -2557,7 +2557,7 @@ a.account-menu-item {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 8px 12px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--border-default);
   background: white;
 }
@@ -2594,13 +2594,22 @@ a.account-menu-item {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Rows that carry a reason line read the reason first, so the name steps back to a label.
+   Rows without one (deployment failures) keep the name as the primary text. */
+.failure-center li > div:has(p) b {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--text-secondary);
+}
 .failure-center li > div small {
   font-size: 0.7rem;
   color: var(--text-muted);
 }
 .failure-center li > div p {
-  margin: 2px 0 0;
-  font-size: 0.72rem;
+  margin: 4px 0 0;
+  font-size: 0.78rem;
+  font-weight: 600;
   color: var(--text-primary);
 }
 .failure-center a,
