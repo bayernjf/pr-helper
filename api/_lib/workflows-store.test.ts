@@ -625,15 +625,12 @@ describe('the sweep payload read', () => {
   // The read carried no WHERE and no LIMIT, so a delivery for one repository paid for every user's every
   // payload — 71 kB at 35 workflows, with both the sweep count and the bytes per sweep growing with the
   // user count. The trigger already knows the repository and the installation before the read happens.
+  // Migration 038 moved both tests onto NOT NULL columns, so a restore that removes the key rather than
+  // writing false is no longer representable and the filter needs no coalesce.
   it('applies the trigger scope in SQL rather than after the read', () => {
-    expect(sweep).toContain("WHERE (workflows.payload->>'archived') IS DISTINCT FROM 'true'");
-    expect(sweep).toContain("AND (workflows.payload->>'repository') = ${filter.repository}");
+    expect(sweep).toContain('WHERE workflows.archived = false');
+    expect(sweep).toContain('AND workflows.repository = ${filter.repository}');
     expect(sweep).toContain('AND users.github_installation_id = ${filter.installationId}');
-  });
-
-  // A restore removes the key rather than writing false, so an absent key has to count as not archived.
-  it('treats a missing archived key as not archived', () => {
-    expect(sweep).not.toMatch(/payload->>'archived'\) = 'false'/);
   });
 
   // Only the scheduled sweep can bound the read: it reconciles the stalest few and rotates through the
@@ -662,7 +659,7 @@ describe('the pull request projection read', () => {
   // JavaScript. It runs on every pull_request delivery, which is the event class that fires most often
   // during a review, so it paid a full table read to write at most a handful of stage state rows.
   it('applies the pull request scope in SQL rather than after the read', () => {
-    expect(projection).toContain("WHERE (workflows.payload->>'archived') IS DISTINCT FROM 'true' AND (workflows.payload->>'repository') = ${pull.repository}");
+    expect(projection).toContain('WHERE workflows.archived = false AND workflows.repository = ${pull.repository}');
   });
 
   // matchingWorkflowStages still tests the repository per stage, because it is what pairs a stage with a
@@ -1562,7 +1559,7 @@ describe('the drain reads the cooldown the workflow configured', () => {
   const drain = source.slice(source.indexOf('export async function drainWorkflowAutomationActions'), source.indexOf('export function automationRetryIsExhausted'));
 
   it('selects the recovery cooldown alongside the action and hands it to the decision', () => {
-    expect(drain).toContain("recoveryPolicy");
+    expect(drain).toContain('recovery_cooldown_seconds');
     expect(drain).toMatch(/automationDrainDecision\([^;]*cooldownSeconds/s);
   });
 
@@ -2002,7 +1999,7 @@ describe('an archived workflow', () => {
   });
 
   it('leaves the reconciliation candidate set, which is the only reason archiving saves a call', () => {
-    const tracked = source.slice(source.indexOf('const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, workflows.last_reconcile_attempt_at'));
+    const tracked = source.slice(source.indexOf('const rows = await sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)}, users.github_installation_id, workflows.last_reconcile_attempt_at'));
     expect(tracked.slice(0, tracked.indexOf('const candidates'))).toContain('archived');
   });
 
