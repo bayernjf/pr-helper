@@ -1,7 +1,7 @@
 import { type ApiRequest, type ApiResponse } from '../_lib/http.js';
 import { verifyGithubWebhookSignature } from '../_lib/github-webhook.js';
 import { recordWebhookDelivery } from '../_lib/workflows-store.js';
-import { projectPullRequestWebhook, reconcileRealtime, webhookBranchesForEvent } from '../_lib/workflows-store.js';
+import { projectPullRequestWebhook, reconcileRealtime, webhookBranchesForEvent, webhookCanChangeStageState } from '../_lib/workflows-store.js';
 
 export const config = { api: { bodyParser: false } };
 
@@ -31,7 +31,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     const projectedStages = accepted && eventName === 'pull_request' && pull && payload.repository?.full_name
       ? await projectPullRequestWebhook(process.env, { repository: payload.repository.full_name, source: pull.head.ref, target: pull.base.ref, number: pull.number, state: pull.state, mergedAt: pull.merged_at })
       : 0;
-    const shouldReconcile = accepted && Boolean(payload.repository?.full_name && payload.installation?.id);
+    const shouldReconcile = accepted && Boolean(payload.repository?.full_name && payload.installation?.id) && webhookCanChangeStageState(eventName, payload.action);
     // Narrowing the sweep to the branches this delivery touched makes it small enough to run inline,
     // so the effect is visible immediately instead of waiting for the next scheduled sweep. The wait
     // is capped because GitHub records a failed delivery if the request is killed mid-flight.

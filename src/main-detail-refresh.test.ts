@@ -8,23 +8,31 @@ function body(name: string) {
   return source.slice(start, source.indexOf('\n}', start));
 }
 
-function detailTick() {
-  const tick = source.slice(source.indexOf('if (!pollTimer)'));
-  return tick.slice(0, tick.indexOf('\n'));
-}
-
-describe('background polling', () => {
-  // The overview tick has always returned early on a hidden page, but the detail tick did not, so a
-  // detail tab left open in the background kept spending one `/api/inbox` read plus the direct GitHub
-  // reads every interval. Egress, not correctness, is what makes that unacceptable.
-  it('skips the detail tick while the page is hidden', () => {
-    expect(detailTick()).toContain("document.visibilityState === 'visible'");
+describe('background refresh', () => {
+  // Both screens used to refresh on a 60-second clock, which spent one `/api/inbox` read per interval
+  // whether or not anything had moved. Webhooks already advance stages server-side within seconds, so
+  // the clock bought the browser nothing but egress. The remaining `setInterval` watches for a popup to
+  // close and issues no request per tick.
+  it('drives neither screen from a clock', () => {
+    expect(source).not.toContain('POLL_INTERVAL_MS');
+    expect(source).not.toContain('pollTimer');
+    const ticks = source.match(/setInterval\([\s\S]{0,160}/g) || [];
+    expect(ticks.filter(tick => /refreshOverviewSnapshot|refreshStatuses/.test(tick))).toEqual([]);
   });
 
-  it('polls both screens on the same interval instead of hardcoding one per call site', () => {
-    expect(source).toContain('const POLL_INTERVAL_MS = 60_000;');
-    expect(source).toContain('void refreshOverviewSnapshot(); }, POLL_INTERVAL_MS)');
-    expect(detailTick()).toContain('POLL_INTERVAL_MS');
+  // Returning to the tab is what replaces the clock, so losing either listener would leave the board
+  // showing whatever it had when the user last looked at it.
+  it('refreshes each screen when the tab becomes visible again', () => {
+    expect(source).toContain("window.addEventListener('focus', () => { if (screen === 'overview') void refreshOverviewSnapshot(); })");
+    expect(source).toContain("window.addEventListener('focus', () => { if (screen === 'detail') void refreshStatuses(); })");
+    expect(source.match(/document\.addEventListener\('visibilitychange'/g) || []).toHaveLength(2);
+  });
+
+  // Entering the overview must still load once, but `overview()` runs on every render, so the guard is
+  // what keeps a re-render from issuing a second read.
+  it('loads the overview once per visit rather than once per render', () => {
+    expect(source).toContain('if (!overviewSnapshotRefreshed) {');
+    expect(source).toContain('overviewSnapshotRefreshed = false;');
   });
 });
 
