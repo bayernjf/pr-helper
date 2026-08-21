@@ -1,9 +1,9 @@
 # Supabase Egress 与多用户扩展方案
 
 > 创建日期：2026-08-21
-> 最后更新：2026-08-21（新增《实测：扫掠频率与 webhook 事件分布》《需求澄清：事件驱动，不是无人值守》《第二轮：按真实需求降配（A1 / A2 / A3）》《第三轮：把过滤与批次下推到 SQL》）
+> 最后更新：2026-08-21（新增《实测：扫掠频率与 webhook 事件分布》《需求澄清：事件驱动，不是无人值守》《第二轮：按真实需求降配（A1 / A2 / A3）》《第三轮：把过滤与批次下推到 SQL》《数据建模债》《化债方案》）
 > 适用范围：PR Helper 的 Supabase 出站流量、看板轮询、状态投影、历史数据读取和多用户扩展。
-> 当前状态：三刀已落地（`1e5c6758` / `2b81be2c` / `98b5d245`）；第二轮 A1 / A2 / A3 已落地（`e65daa6c` / `b51bcaed` / `538a33eb`），投影约 1.71 GB/月，待部署后核对；第三轮（SQL 下推）已落地（`7b3a7e03` / `a1054240` / `dfc9491c`），迁移 034 待应用。
+> 当前状态：三刀已落地（`1e5c6758` / `2b81be2c` / `98b5d245`）；第二轮 A1 / A2 / A3 已落地（`e65daa6c` / `b51bcaed` / `538a33eb`），投影约 1.71 GB/月，待部署后核对；第三轮（SQL 下推）已落地（`7b3a7e03` / `a1054240` / `dfc9491c`），迁移 034 已应用；第四、五轮（数据建模化债）已记录方案、未开始。
 
 ## 背景
 
@@ -483,6 +483,108 @@ cron 路径同理：`ORDER BY ... LIMIT 8` 下推后全局每月约 23 MB，可�
 
 **收 97%，放掉最难的那 3%。**
 
+## 数据建模债：`payload` 是前端对象的整体序列化
+
+> 2026-08-21 记录。前三轮砍频率、第三轮砍范围，都没有触及这一层；它是「当时正确、规模变了才成为债」的典型，不是失误。
+
+### 现状
+
+```sql
+CREATE TABLE pr_helper_workflows (
+  id text NOT NULL,
+  user_id uuid NOT NULL REFERENCES pr_helper_users(id),
+  payload jsonb NOT NULL,        -- 全部业务数据都在这一列
+  created_at timestamptz, updated_at timestamptz,
+  PRIMARY KEY (user_id, id)
+);
+```
+
+见 [`db/migrations/001_users_and_workflows.sql:10`](../db/migrations/001_users_and_workflows.sql)。整张表只有 `user_id` 与 `id` 是真正的列；流程名、仓库、每个 stage 的源/目标分支、自动化开关、AI 提示词、部署配置、重试策略全部在 `payload` 里。而 `payload` 装的不是为数据库设计的结构，是前端 `Workflow` 对象（[`src/lib/workflow.ts:26`](../src/lib/workflow.ts)）的整体序列化。
+
+### 三个后果
+
+**一、数据库查不了。** 「哪些流程涉及分支 X」这个问题埋在 `payload->'stages'` 数组里，而且 `source` 可以是 `feature/*` 通配规则。第三轮只能给 `repository` 加表达式索引，因为它恰好在顶层且是等值比较；分支条件被明确放弃下推，根因就在这里。
+
+**二、改一个字段要重写整行。** 改一个自动化开关也要读出整条 payload、改完整条写回。实测某条 payload 的 `version` 已是 86，即被整体重写过 86 次。
+
+**三、同一份数据存了很多遍。** 实测：
+
+| 指标 | 值 |
+| --- | --- |
+| 全表 payload | 71 kB / 35 行 |
+| `generationRule.content` 副本数 | 44 |
+| 其中不同内容的份数 | **1** |
+| 副本合计字节 | 43 kB |
+| 占全表 payload | **61%** |
+
+61% 是保守下限——JSON 里 `\n` 转义成两个字符，线上实际字节更多。一份 3 stage 的真实 payload 把同一段提示词一字不差地存了三遍。
+
+### 化债的工作量基准（实测）
+
+- 10 处 `SELECT` 读 `payload`，9 处 `INSERT` / `UPDATE` 写 `payload`。
+- `storedWorkflowFromPayload` 只在 `api/_lib/workflows-store.ts` 与 `api/_lib/preflight.ts` 被调用，解析入口是收敛的。
+- `workflowSaveConflicts`（[`api/_lib/workflows-store.ts:1395`](../api/_lib/workflows-store.ts)）的乐观锁依赖 `payload` 内的 `version`，拆表时它必须先提成列。
+- AGENTS.md 规则 1 规定 `src/lib/workflow.ts` 是真相来源，任何拆表都不能让服务端出现第二套互相漂移的定义。
+
+## 化债方案
+
+分两轮，**第四轮可以单独做，不依赖第五轮**。
+
+### 第四轮：提示词去重（局部改动，收益 61%）
+
+新增一张小表，把重复的内容存一次：
+
+```sql
+CREATE TABLE pr_helper_generation_rules (
+  user_id uuid NOT NULL REFERENCES pr_helper_users(id) ON DELETE CASCADE,
+  content_hash text NOT NULL,          -- sha256(content)，天然幂等
+  name text NOT NULL,
+  content text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, content_hash)
+);
+```
+
+stage 里的 `automation.generationRule` 从 `{ name, content, capturedAt }` 改为 `{ name, contentHash, capturedAt }`。
+
+**关键约束（实测得出）**：44 个 stage 的 `capturedAt` 有 44 个不同值——它是每个 stage 独立的快照时间，**必须留在 stage 上**，只有 `content` 能去重。整体替换 `generationRule` 会丢掉这个信息。
+
+- **收益**：单次全表读 71 kB → 约 28 kB（−61%）。第三轮之后 webhook 路径已只读 1~3 行，所以这一轮在单用户下主要作用于 cron 那 48 次/天，绝对值约 100 MB/月；多用户下它与用户数成正比。
+- **过渡期兼容**：读路径先取 `contentHash`，取不到时回退读内嵌 `content`；写路径只写 `contentHash`。回填完成后再删除回退分支。
+- **风险**：入队时要把内容取出来交给 AI（[`api/_lib/workflows-store.ts:102`](../api/_lib/workflows-store.ts) 与 `:156` 的 `generationRule: input.generationRule` / `automation.generationRule.content`），取不到内容会让自动创建 PR 静默失败。按 AGENTS.md 规则 2，先写「内容缺失时入队必须报错而不是写空规则」的失败测试。
+- **不受影响**：自动化 drain 读的是 `payload->'recoveryPolicy'->>'cooldownSeconds'`，与提示词无关。
+- **验收**：单次全表 payload 字节降到约 28 kB；沙箱仓库端到端仍能生成带正确标题与描述的 PR；`pr_helper_generation_rules` 行数远小于 stage 数。
+
+### 第五轮：拆成关系表（终局，对外开放前）
+
+目标结构：
+
+```sql
+workflows        (user_id, id, name, repository, archived, version, position, ...)
+workflow_stages  (user_id, workflow_id, stage_id, stage_index, source_rule, target,
+                  auto_create, auto_merge, trigger_min_commits, rule_content_hash, ...)
+workflow_deployments (user_id, workflow_id, target, provider, environment, ...)
+```
+
+按 **expand → migrate → contract** 四步走，每步都可独立部署、独立回滚：
+
+1. **加表并双写。** 新表与 `payload` 同时写，`payload` 仍是唯一真相；读路径完全不变。此步不改任何行为，只增加写入量。
+2. **回填历史。** 一次性迁移把现有 payload 展开进新表，并加一个一致性校验查询（新表还原出的对象与 payload 逐字段相等）。
+3. **读切换。** 扫掠与投影改读列而不读 `payload`；`version` 提成列，`workflowSaveConflicts` 改读列。此步之后分支条件才能真正下推：`WHERE stages.source_rule = ANY(...)` 可走普通索引，第三轮里被放弃的那一半随之成立。
+4. **收缩。** 服务端不再解析 `payload`，只保留浏览器同步所需的最小载体（或彻底移除）。
+
+- **收益**：单次扫掠字节**不再随流程总数增长**，分支条件可索引，改一个开关是一行 `UPDATE` 而非整行重写。这是把 O(U) 进一步压到「与数据量无关」的唯一途径。
+- **主要风险**：`src/lib/workflow.ts` 是前后端共享的真相定义，拆表意味着服务端要有一层行↔对象映射，两边可能漂移。缓解手段是一个往返恒等测试（对象 → 行 → 对象 必须逐字段相等），并在第 2 步的校验查询里对全量数据跑一遍。
+- **次要风险**：`stage_index` 与 `stageId` 的双重身份已经由迁移 018 / 019 处理过，拆表要沿用既有的稳定身份规则，不能再引入第三套。
+- **工作量**：数周级，不是两天级。10 处读、9 处写全部涉及。
+- **验收**：`EXPLAIN` 显示分支条件走索引；把流程数翻倍后单次扫掠字节基本持平；所有既有单测与 E2E 不变通过。
+
+### 明确不做
+
+- **不做一次性大爆炸迁移。** 第五轮必须按四步走；跳过双写阶段意味着一旦读切换出错就没有回退路径。
+- **不做长期双真相。** 双写只是过渡态，第 4 步必须真正收缩，否则等于永久维护两套结构，比现在更差。
+- **不为省 61% 而提前拆表。** 第四轮用一张小表就能拿到那 61%，与第五轮解耦；把两件事捆在一起会让一个数周级重构挡住一个数天级收益。
+
 ## 推荐实施顺序
 
 > 2026-08-21 按实测字节数重排。原顺序（`/api/board` 优先）已作废，理由见《实测：一次 `/api/inbox` 的出站字节》。
@@ -500,6 +602,10 @@ cron 路径同理：`ORDER BY ... LIMIT 8` 下推后全局每月约 23 MB，可�
 **第二轮 A1 / A2 / A3（已完成，提交 `e65daa6c` / `9e11bce8` + `b51bcaed` / `208d5c5f` + `538a33eb`）**：见《第二轮：按真实需求降配》。按 A1 → A2 → A3 拆成三个独立提交；A1 的迁移由使用者自己应用。三项合计把 3.60 GB/月 压到约 1.71 GB/月。A2 零功能损失，A3 需要先确认「看板不自动刷新」可接受，否则退化为把 `POLL_INTERVAL_MS` 改成 120 秒。
 
 **第三轮（对外开放前的硬前置，已完成，提交 `7b3a7e03` / `a1054240` / `dfc9491c`）**：把 `:2121` 与 `:1507` 的全表读改成 SQL 侧过滤 + 批量，范围、成本模型与风险见《第三轮：把过滤与批次下推到 SQL》。与前两轮独立，不降低频率而是修正读取模式；多用户下这是平方级增长的来源。单用户下收益有限，因此不必赶在宽限期之前做。
+
+**第四轮（提示词去重，未开始）**：见《化债方案 · 第四轮》。局部改动，拿掉全表 payload 的 61%，与第五轮解耦。单用户下绝对值约 100 MB/月，不紧急。
+
+**第五轮（拆成关系表，对外开放前）**：见《化债方案 · 第五轮》。数周级，按 expand → migrate → contract 四步走。第三轮放弃的分支条件下推要等它落地才成立。
 
 3. 首页自动化动作改为摘要，不读取历史（当前 `unfinishedOnly` 已经在做，`AUTOMATION_ACTION_VIEW_LIMIT` 值得复核）。
 4. 把历史数据从轮询里摘出去（events / timeline / runs / deployment_runs 共 143 kB，24%）——即原方案的 `/api/board` 与按需加载。**收益最小、改动最大**；A3 落地后浏览器侧只剩约 247 MB/月，此步优先级进一步下降，除非要面向多用户开放。
