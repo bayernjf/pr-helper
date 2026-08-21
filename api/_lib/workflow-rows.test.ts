@@ -82,6 +82,14 @@ describe('a workflow survives the trip through relational rows', () => {
     expect(JSON.stringify(workflowToRows('u-1', RICH))).not.toContain('content"');
     expect(Object.keys(workflowToRows('u-1', RICH).stages[0])).not.toContain('rule_content');
   });
+
+  // The one place the round trip is deliberately not the identity. Zero rows cannot mean both "no key"
+  // and "empty array", and every reader treats the two the same, so the mapping collapses them. 27 of
+  // the 35 live workflows carry `deployments: []`, so this is the common case, not an edge one — the
+  // backfill's consistency check has to normalize the payload side the same way.
+  it('collapses an empty deployment list to an absent key', () => {
+    expect(workflowFromRows(workflowToRows('u-1', { ...MINIMAL, deployments: [] }))).toStrictEqual(MINIMAL);
+  });
 });
 
 describe('the relational tables the mapping writes into', () => {
@@ -115,5 +123,49 @@ describe('the relational tables the mapping writes into', () => {
   it('replaces the stage and deployment rows on every save so a removed stage cannot linger', () => {
     expect(source).toMatch(/DELETE FROM workflow_stages WHERE user_id = /);
     expect(source).toMatch(/DELETE FROM workflow_deployment_configs WHERE user_id = /);
+  });
+});
+
+// The backfill cannot run in a unit test, so its safety properties are asserted against its text. Each
+// one below is a mistake the first draft actually made.
+describe('the backfill migration', () => {
+  const backfill = readFileSync(new URL('037_workflow_relational_backfill.sql', MIGRATIONS_DIR), 'utf8');
+
+  // A check that only counts rows gets read past. Rolling back is what makes it a gate.
+  it('raises and rolls back instead of reporting a mismatch it cannot enforce', () => {
+    expect(backfill).toMatch(/^BEGIN;/m);
+    expect(backfill).toMatch(/RAISE EXCEPTION/);
+    expect(backfill).toMatch(/^COMMIT;/m);
+    expect(backfill.indexOf('RAISE EXCEPTION')).toBeLessThan(backfill.indexOf('COMMIT;'));
+  });
+
+  // `archived` is NOT NULL and no live payload carries the key, so the bare comparison yields NULL
+  // rather than false and the UPDATE fails outright.
+  it('coalesces every boolean it reads out of the payload', () => {
+    expect(backfill).toMatch(/archived = COALESCE\(\(payload->>'archived'\) = 'true', false\)/);
+    for (const flag of ['autoCreatePullRequest', 'autoMergePullRequest']) {
+      expect(backfill).toMatch(new RegExp(`COALESCE\\(\\(stage\\.value->'automation'->>'${flag}'\\) = 'true', false\\)`));
+    }
+  });
+
+  // `WITH ORDINALITY AS stage` names a whole row, not the element: the array position has to come from
+  // an explicitly named column or the migration does not even parse.
+  it('names both columns of every ordinality alias', () => {
+    for (const alias of ['stage', 'deployment']) {
+      expect(backfill).toMatch(new RegExp(`WITH ORDINALITY AS ${alias}\\(value, ordinality\\)`));
+    }
+    expect(backfill).not.toMatch(/WITH ORDINALITY AS [a-z_]+[;\s)]/);
+  });
+
+  it('can be run twice, because a partly applied backfill is the state nobody can reason about', () => {
+    for (const table of ['workflow_stages', 'workflow_deployment_configs']) {
+      expect(backfill.indexOf(`DELETE FROM ${table};`)).toBeLessThan(backfill.indexOf(`INSERT INTO ${table}`));
+    }
+  });
+
+  it('drops the checking functions rather than leaving them behind as live schema', () => {
+    for (const fn of ['pr_helper_rebuild_workflow', 'pr_helper_normalize_payload']) {
+      expect(backfill).toMatch(new RegExp(`DROP FUNCTION ${fn}`));
+    }
   });
 });
