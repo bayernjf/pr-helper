@@ -2144,4 +2144,11 @@ describe('a skipped terminal stage still records that it was verified', () => {
     expect(settled).not.toMatch(/INSERT INTO workflow_stage_states/);
     expect(settled).not.toMatch(/recordWorkflowStageEvent/);
   });
+
+  // deferredRunState 把 reconciled + failed < total 判成 degraded，stages_reconciled 也会报 0——
+  // 一批全是终结阶段的扫掠会看起来像什么都没做。它们其实被核对过：compare 跑了，收敛被确认了。
+  // ③ 的验收看 reconciliation_runs.github_calls，不看这个计数，所以这里报实话就行。
+  it('reports the stage as reconciled, so a deferred sweep is not misfiled as degraded', () => {
+    expect(settled).toContain('return { reconciled: true, phases }');
+  });
 });
