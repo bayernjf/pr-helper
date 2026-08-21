@@ -780,7 +780,7 @@ workflow_deployments (user_id, workflow_id, target, provider, environment, ...)
 
 > 2026-08-21 按实测字节数重排。原顺序（`/api/board` 优先）已作废，理由见《实测：一次 `/api/inbox` 的出站字节》。
 
-**第一刀 B（已完成，提交 `1e5c6758`）：详情页轮询隐藏即停 + 间隔改 60 秒。** 首页 `refreshOverviewSnapshot` 早已自带可见性判断，无需改动；缺的是详情页 [`src/main.ts:2140`](../src/main.ts) 的 `pollTimer`，现在 tick 前先判断 `document.visibilityState === 'visible'`。两屏共用常量 `POLL_INTERVAL_MS = 60_000`。收益：详情页挂后台归零，前台从 70 MB/小时 降到约 **35 MB/小时**。原有的 `visibilitychange` / `focus` 监听保留为「回到前台立刷一次」，定时器本身不停，因此不存在回到前台后不再轮询的问题。
+**第一刀 B（已完成，提交 `1e5c6758`；间隔部分已被 `538a33eb` 取代）：详情页轮询隐藏即停 + 间隔改 60 秒。** 首页 `refreshOverviewSnapshot` 早已自带可见性判断，无需改动；缺的是详情页 [`src/main.ts:2140`](../src/main.ts) 的 `pollTimer`，现在 tick 前先判断 `document.visibilityState === 'visible'`。两屏共用常量 `POLL_INTERVAL_MS = 60_000`。收益：详情页挂后台归零，前台从 70 MB/小时 降到约 **35 MB/小时**。原有的 `visibilitychange` / `focus` 监听保留为「回到前台立刷一次」，定时器本身不停，因此不存在回到前台后不再轮询的问题。**后续变化**：第二轮 A3（`538a33eb`）把时钟整个删掉了，`POLL_INTERVAL_MS` 与 `pollTimer` 都已不存在（由 [`src/main-detail-refresh.test.ts`](../src/main-detail-refresh.test.ts) 断言守住），刷新只由回到前台和用户动作触发，所以本节的「60 秒」只反映当时的中间状态。
 
 **第二刀 A（已完成，提交 `2b81be2c`）：请求内去重。** [`api/[action].ts`](../api/[action].ts) 建一个按请求的 memo（`VisibleWorkflowReads`）传进那 5 个 / 2 个 list 函数，`pr_helper_workflows.payload` 与 `workflow_stage_states` 各只读一次。**省 283 + 32 kB / 次**，接口形状、UI 和轮询语义全不变。这些 list 函数的可选参数不传时保持原行为，其他调用方（详情页、抽屉）不受影响。
 
@@ -814,7 +814,8 @@ workflow_deployments (user_id, workflow_id, target, provider, environment, ...)
 三刀完成后（可直接量化，不需要等账单周期）：
 
 - 详情页隐藏时不产生任何 `/api/inbox` 请求（DevTools Network 观察，或看 Vercel 函数调用数）；首页隐藏时本来就没有。
-- 前台轮询间隔为 60 秒，回到前台立即刷新一次。
+- ~~前台轮询间隔为 60 秒，回到前台立即刷新一次。~~ **已被第二轮 A3（`538a33eb`）取代**：时钟整个拿掉了，两屏都只在回到前台时刷新一次，不存在间隔。验收改为下一条。
+- **2026-08-22 生产实测（DevTools PerformanceObserver，详情页）**：9 分钟内 4 次 `/api/inbox`，全部 `hidden=false`，隐藏期零请求；间隔 308 s / 192 s，即每次都对应一次「切回浏览器」，证实已无时钟。单次响应体 **301.6 kB 原始 / 24.3 kB gzip**（这是服务端到浏览器的响应体，与本文其他地方的 594.3 → 274.0 kB 不是同一口径，后者是数据库到服务端）。同时暴露一个重复读：切回标签页会同时触发 `focus` 与 `visibilitychange`，两次一模一样的请求落在同一秒（`#1`/`#2` 字节完全相同），已在 `refreshStatuses` 加 in-flight 守卫修掉，用户主动触发的刷新不受影响。
 - 单次 `/api/inbox` 的数据库出站字节约降一半（实测 594.3 → 274.0 kB）；`pr_helper_workflows` 在一次请求内只被查一次。
 - 首页看板、失败中心、时间线、抽屉的显示内容与改前完全一致（去掉的只有重复传输、请求次数和无人读取的 `stage_snapshot`）。
 - Supabase Usage 的 Egress 日增量明显下降；连续观察一周后再判断是否需要第 4 步。
