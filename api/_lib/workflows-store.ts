@@ -1504,12 +1504,13 @@ export async function recordWebhookDelivery(environment: Record<string, string |
 
 export async function projectPullRequestWebhook(environment: Record<string, string | undefined>, pull: PullRequestWebhook) {
   const sql = query(environment);
-  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
+  // An archived workflow is out of every sweep, so a state written here would never be refreshed again:
+  // it would sit on the archived view as a fact from an afternoon that has since moved on. Both tests
+  // belong in SQL because only rows for this repository can ever match a branch pair from this delivery.
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id WHERE (workflows.payload->>'archived') IS DISTINCT FROM 'true' AND (workflows.payload->>'repository') = ${pull.repository}`;
   const tracked = rows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
-    // An archived workflow is out of every sweep, so a state written here would never be refreshed
-    // again: it would sit on the archived view as a fact from an afternoon that has since moved on.
-    return workflow && !workflow.archived ? [{ userId: row.user_id, workflowId: row.id, workflow: ensureStageIds(workflow) }] : [];
+    return workflow ? [{ userId: row.user_id, workflowId: row.id, workflow: ensureStageIds(workflow) }] : [];
   });
   const matches = tracked.flatMap(item => matchingWorkflowStages([item.workflow], pull).map(match => ({ ...item, stageIndex: match.stageIndex, stageId: stageIdentity(item.workflow, match.stageIndex) })));
   const checksState = initialWebhookChecksState(pull.mergedAt);
@@ -2128,10 +2129,17 @@ export async function reconcileWorkflowStages(environment: Record<string, string
     UPDATE pr_helper_workflows workflows SET reconcile_pending_since = coalesce(workflows.reconcile_pending_since, now())
     FROM reaped WHERE workflows.user_id = reaped.user_id AND workflows.id = ANY(reaped.claimed_workflow_ids)`.catch(() => undefined);
   }
-  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, workflows.last_reconcile_attempt_at, workflows.reconcile_pending_since FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
+  // The trigger knows its repository and installation before the read, so testing them in SQL is what
+  // keeps one delivery from paying for every other user's payloads. A restore removes the archived key
+  // rather than writing false, so an absent key counts as not archived.
+  // Only an unnarrowed scheduled sweep can carry the batch bound: it reconciles the stalest few and
+  // rotates through the rest, while a realtime sweep also picks up whatever an earlier sweep left
+  // pending, and a branch-narrowed sweep would spend the limit on rows the branch filter then discards.
+  const boundedInSql = trigger === 'cron' && !filter.branches;
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, workflows.last_reconcile_attempt_at, workflows.reconcile_pending_since FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id WHERE (workflows.payload->>'archived') IS DISTINCT FROM 'true' ${filter.repository ? sql`AND (workflows.payload->>'repository') = ${filter.repository}` : sql``} ${filter.installationId ? sql`AND users.github_installation_id = ${filter.installationId}` : sql``} ${boundedInSql ? sql`ORDER BY (workflows.reconcile_pending_since IS NULL), workflows.reconcile_pending_since, workflows.last_reconcile_attempt_at NULLS FIRST, workflows.user_id, workflows.id LIMIT ${reconciliationBatchSize(environment)}` : sql``}`;
   const tracked = rows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
-    if (!workflow || workflow.archived || (filter.repository && workflow.repository !== filter.repository) || (filter.installationId && row.github_installation_id !== filter.installationId)) return [];
+    if (!workflow) return [];
     return [{ row, workflow: ensureStageIds(workflow), lastAttemptAt: row.last_reconcile_attempt_at ?? null, pendingSince: row.reconcile_pending_since ?? null, key: `${row.user_id}:${row.id}`, branchScoped: Boolean(filter.branches) }];
   });
   const candidates = tracked.filter(item => !filter.branches || item.workflow.stages.some(stage => reconciliationBranchScope(stage, filter.branches!) !== 'none'));
