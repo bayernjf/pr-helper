@@ -55,7 +55,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
       }
       if (request.method === 'POST') {
         const payload = body(request) as Record<string, unknown>;
-        const result = await enqueueWorkflowAutomationAction(process.env, identity, { workflowId: typeof payload.workflowId === 'string' ? payload.workflowId : '', stageIndex: typeof payload.stageIndex === 'number' ? payload.stageIndex : -1, source: typeof payload.source === 'string' ? payload.source : '', kind: payload.kind === 'merge-pr' || payload.kind === 'advance-stage' ? payload.kind : 'create-pr', idempotencyKey: typeof payload.idempotencyKey === 'string' ? payload.idempotencyKey : '', generationRule: typeof payload.generationRule === 'string' ? payload.generationRule : '' });
+        const result = await enqueueWorkflowAutomationAction(process.env, identity, { workflowId: typeof payload.workflowId === 'string' ? payload.workflowId : '', stageIndex: typeof payload.stageIndex === 'number' ? payload.stageIndex : -1, source: typeof payload.source === 'string' ? payload.source : '', kind: payload.kind === 'merge-pr' || payload.kind === 'advance-stage' ? payload.kind : 'create-pr', idempotencyKey: typeof payload.idempotencyKey === 'string' ? payload.idempotencyKey : '' });
         response.status(200).json({ action: result }); return;
       }
       response.status(405).json({ message: 'Method not allowed' }); return;

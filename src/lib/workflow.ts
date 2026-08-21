@@ -3,7 +3,8 @@ export type WorkflowStageAutomation = {
   autoMergePullRequest?: true;
   executionMode: 'server';
   triggerMinCommits?: number;
-  generationRule: { name: string; content: string; capturedAt: string };
+  // 内容存在 pr_helper_generation_rules，payload 只留 hash。035 之前保存的仍然带 content，两种都要读。
+  generationRule: { name: string; capturedAt: string; content?: string; contentHash?: string };
 } | {
   // Legacy browser-only policies are intentionally not promoted automatically.
   autoCreatePullRequest: true;
