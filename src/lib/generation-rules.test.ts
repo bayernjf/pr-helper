@@ -10,6 +10,7 @@ import {
   parseGenerationRules,
   setDefaultGenerationRule,
   stageGenerationRule,
+  stageGenerationRuleUpdate,
   updateGenerationRule,
 } from './generation-rules';
 
@@ -176,5 +177,41 @@ describe('a stage rule whose content lives on the server', () => {
     expect(stageGenerationRule({ name: '已删除的规则', contentHash: 'abc' }, rules)).toBeUndefined();
     expect(stageGenerationRule({ name: '默认规则', content: '   ' }, [])).toBeUndefined();
     expect(stageGenerationRule(undefined, rules)).toBeUndefined();
+  });
+});
+
+// 服务端只认 stage 上钉住的那一版提示词，而自动化没有规则选择入口，实际生效的只有默认规则。
+// 编辑默认规则或换一条默认规则之后，已配置的 stage 仍按旧版生成，界面上看不出来，所以要能判定过期。
+describe('a stage rule that has fallen behind the default rule', () => {
+  const rulesJson = (...entries: { id: string; name: string; content: string; isDefault: boolean }[]) =>
+    parseGenerationRules(JSON.stringify(entries.map(entry => ({ ...entry, createdAt: now, updatedAt: now }))));
+  const rules = rulesJson({ id: 'r1', name: '默认规则', content: '按仓库约定写', isDefault: true });
+
+  it('reports nothing when the stage already carries the default content', () => {
+    expect(stageGenerationRuleUpdate({ name: '默认规则', content: '按仓库约定写' }, rules)).toBeUndefined();
+  });
+
+  it('reports a content change when the default rule of the same name was edited', () => {
+    expect(stageGenerationRuleUpdate({ name: '默认规则', content: '旧版正文' }, rules)).toEqual({ kind: 'content', name: '默认规则', content: '按仓库约定写' });
+  });
+
+  it('reports a rule change when another rule became the default', () => {
+    const switched = rulesJson(
+      { id: 'r1', name: '默认规则', content: '按仓库约定写', isDefault: false },
+      { id: 'r2', name: '新默认规则', content: '新的正文', isDefault: true },
+    );
+
+    expect(stageGenerationRuleUpdate({ name: '默认规则', content: '按仓库约定写' }, switched)).toEqual({ kind: 'rule', name: '新默认规则', content: '新的正文' });
+  });
+
+  // 水合失败时 stage 手上没有内容，无法判断正文是否变了；名字对不上仍然是可判定的。
+  it('reports a rule change but no content change when the stage content is missing', () => {
+    expect(stageGenerationRuleUpdate({ name: '默认规则', contentHash: 'abc' }, rules)).toBeUndefined();
+    expect(stageGenerationRuleUpdate({ name: '旧规则', contentHash: 'abc' }, rules)).toEqual({ kind: 'rule', name: '默认规则', content: '按仓库约定写' });
+  });
+
+  it('reports nothing when there is no stage rule or no default rule', () => {
+    expect(stageGenerationRuleUpdate(undefined, rules)).toBeUndefined();
+    expect(stageGenerationRuleUpdate({ name: '默认规则', content: '旧版正文' }, [])).toBeUndefined();
   });
 });
