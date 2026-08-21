@@ -2559,7 +2559,7 @@ a.account-menu-item {
   gap: 10px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--border-default);
-  background: white;
+  background: var(--bg-card);
 }
 .failure-center li:last-child {
   border-bottom: none;
