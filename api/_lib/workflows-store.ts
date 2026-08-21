@@ -1593,6 +1593,24 @@ export function staleDeploymentProviders(stored: { provider: DeploymentProvider 
   return stored.map(row => row.provider).filter(provider => !configured.includes(provider));
 }
 
+// 62 stages across 35 workflows, 53 of them merged or closed with nothing new on the source, and every
+// sweep still spent about five GitHub calls on each: `pullForStage` asks for `state=all`, so a finished
+// PR keeps coming back and keeps dragging the check fan-out behind it. Nothing but a new commit can make
+// such a stage interesting again, and `compare` alone answers that — for one call instead of five.
+const TERMINAL_PULL_STATES = ['merged', 'closed'];
+const TERMINAL_CHECKS_STATES = ['success', 'failure'];
+
+export function stageReconciliationIsSettled(input: { aheadBy: number; storedAheadBy?: number; previous?: { pull_state: string; checks_state: string }; deploymentConfigured: boolean; deploymentStates: DeploymentState[] }) {
+  if (input.aheadBy !== 0 || Number(input.storedAheadBy ?? 0) !== 0) return false;
+  if (!input.previous) return false;
+  if (!TERMINAL_PULL_STATES.includes(input.previous.pull_state)) return false;
+  if (!TERMINAL_CHECKS_STATES.includes(input.previous.checks_state)) return false;
+  // A merged stage's deployment is asynchronous: skipping before its run lands means nobody ever asks
+  // for the result again, and checks_state stays pending, which locks the next stage.
+  if (!input.deploymentConfigured) return true;
+  return input.deploymentStates.length > 0 && input.deploymentStates.every(state => TERMINAL_CHECKS_STATES.includes(state));
+}
+
 export function deploymentParentState(workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string) {
   const stage = workflow.stages[stageIndex];
   if (!stage) throw new Error('未找到部署所属的流程步骤');
@@ -1754,15 +1772,22 @@ async function reconcileStageWork(environment: Record<string, string | undefined
   const installationId = row.github_installation_id;
   const stage = { ...stageForIndex(workflow, stageIndex), source };
   const stageId = stage.stageId!;
-  const pull = await phase('pull', () => pullForStage(environment, installationId, workflow, stage));
   const sql = query(environment);
-  const previous = await phase('dbRead', () => sql<{ pull_number: number | null; pull_state: string; checks_state: string; approvals: number; required_approvals: number; ahead_by: number }[]>`SELECT pull_number, pull_state, checks_state, approvals, required_approvals, ahead_by FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
-  const preceding = stageIndex
-    ? await phase('dbRead', () => sql<{ stage_index: number; stage_id: string; pull_state: string; checks_state: string }[]>`SELECT stage_index, stage_id, pull_state, checks_state FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`)
-    : [];
   const { owner, name } = ownerAndName(workflow.repository);
   const config = parseGithubAppConfig(environment);
   const comparison = await phase('compare', () => installationRequest<{ ahead_by: number; head_commit?: { id?: string }; commits?: { sha?: string }[] }>(config, installationId, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(stage.source)}`).catch(() => ({ ahead_by: 0, head_commit: undefined, commits: undefined })));
+  const previous = await phase('dbRead', () => sql<{ pull_number: number | null; pull_state: string; checks_state: string; approvals: number; required_approvals: number; ahead_by: number }[]>`SELECT pull_number, pull_state, checks_state, approvals, required_approvals, ahead_by FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
+  const deploymentConfigured = deploymentConfigsForTarget(workflow, stage.target).length > 0;
+  const settledDeployments = comparison.ahead_by === 0 && deploymentConfigured
+    ? await phase('dbRead', () => sql<{ state: DeploymentState }[]>`SELECT state FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`)
+    : [];
+  if (stageReconciliationIsSettled({ aheadBy: comparison.ahead_by, storedAheadBy: previous[0]?.ahead_by, previous: previous[0], deploymentConfigured, deploymentStates: settledDeployments.map(deployment => deployment.state) })) {
+    return { reconciled: false, phases };
+  }
+  const pull = await phase('pull', () => pullForStage(environment, installationId, workflow, stage));
+  const preceding = stageIndex
+    ? await phase('dbRead', () => sql<{ stage_index: number; stage_id: string; pull_state: string; checks_state: string }[]>`SELECT stage_index, stage_id, pull_state, checks_state FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`)
+    : [];
   const comparisonHeadSha = comparison.head_commit?.id || comparison.commits?.at(-1)?.sha;
   if (!pull) {
     await phase('write', () => sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
