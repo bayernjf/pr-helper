@@ -1144,6 +1144,16 @@ type WebhookEventPayload = {
 // Narrowing a delivery to the branches it touched is what keeps a webhook sweep small enough to
 // finish inside one request. `null` means the event carries no branch at all, so the caller must
 // fall back to the full sweep instead of silently dropping the update.
+// A delivery that announces work starting cannot turn a gate green, and every sweep reads the whole
+// workflow payload set, so reconciling on it pays a full read to reach the state the previous sweep
+// already recorded. `workflow_run.requested` stays because it is the first moment a deployment run row
+// can exist, and deploymentRunState reports every non-completed status as 'pending' either way.
+export function webhookCanChangeStageState(eventName: string, action: string | undefined) {
+  if (eventName === 'check_run') return action !== 'created';
+  if (eventName === 'workflow_run') return action !== 'in_progress';
+  return true;
+}
+
 export function webhookBranchesForEvent(eventName: string, payload: WebhookEventPayload): string[] | null {
   const candidates = ((): unknown[] | null => {
     switch (eventName) {
