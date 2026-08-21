@@ -7,6 +7,7 @@ import { assertTeamOperation, type TeamOperation } from '../../src/lib/team-perm
 import { summarizeGitHubChecks } from '../../src/lib/domain.js';
 import { credentialKeyHint, decryptAiApiKey, encryptAiApiKey, maskAiApiKey } from './ai-credentials.js';
 import { buildPrPrompt, aiChatCompletionsUrl, testAiConnection } from '../../src/lib/ai.js';
+import { workflowToRows } from './workflow-rows.js';
 
 // Mirrors `WorkflowStageAutomation` in src/lib/workflow.ts. Auto-merge stands alone because merging
 // calls no model, so a stage may automate it without automating creation.
@@ -1324,6 +1325,21 @@ export function workflowStageStateMatchesDefinition(workflow: StoredWorkflow, st
   return Boolean(stage && stage.target === state.target && branchRuleMatches(stage.source, state.source));
 }
 
+// Mirror of the payload into the relational columns and tables added by migration 036. Nothing reads
+// them yet: this is the expand step, and the mirror has to be observed filling correctly under real
+// traffic before the read path can be switched onto it.
+async function writeWorkflowRows(sql: any, userId: string, workflow: StoredWorkflow) {
+  const rows = workflowToRows(userId, workflow);
+  const { user_id, id, ...columns } = rows.workflow;
+  await sql`UPDATE pr_helper_workflows SET ${sql(columns)} WHERE user_id = ${userId} AND id = ${id}`;
+  // Replace rather than upsert: a stage or deployment removed from the payload has to disappear here
+  // too, and a diff would be a second place for the two representations to drift apart.
+  await sql`DELETE FROM workflow_stages WHERE user_id = ${userId} AND workflow_id = ${id}`;
+  if (rows.stages.length) await sql`INSERT INTO workflow_stages ${sql(rows.stages)}`;
+  await sql`DELETE FROM workflow_deployment_configs WHERE user_id = ${userId} AND workflow_id = ${id}`;
+  if (rows.deployments.length) await sql`INSERT INTO workflow_deployment_configs ${sql(rows.deployments)}`;
+}
+
 async function pruneStaleWorkflowStageData(sql: any, userId: string, workflow: StoredWorkflow) {
   const states = await sql<{ stage_index: number; stage_id: string; source: string; target: string }[]>`SELECT stage_index, stage_id, source, target FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
   for (const state of states) {
@@ -1475,6 +1491,7 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
     // reaches the hash before the content exists has nothing to resolve.
     for (const rule of dehydrated.rules) await transaction`INSERT INTO pr_helper_generation_rules (user_id, content_hash, content) VALUES (${ownerUserId}, ${rule.contentHash}, ${rule.content}) ON CONFLICT (user_id, content_hash) DO NOTHING`;
     await transaction`INSERT INTO pr_helper_workflows (id, user_id, payload) VALUES (${savedWorkflow.id}, ${ownerUserId}, ${transaction.json(savedWorkflow)}) ON CONFLICT (user_id, id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`;
+    await writeWorkflowRows(transaction, ownerUserId, savedWorkflow);
     if (previous) {
       const changedStageIds = previous.stages.flatMap((stage, index) => {
         const next = withIds.stages[index];
@@ -1528,6 +1545,7 @@ export async function removeWorkflowStage(environment: Record<string, string | u
     const latestRows = await transaction<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId}`;
     savedWorkflow = { ...ensureStageIds({ ...previous, stages }), version: (latestRows[0]?.version || 0) + 1 };
     await transaction`UPDATE pr_helper_workflows SET payload = ${transaction.json(savedWorkflow)}, updated_at = now() WHERE user_id = ${access.ownerUserId} AND id = ${workflowId}`;
+    await writeWorkflowRows(transaction, access.ownerUserId, savedWorkflow);
     await transaction`DELETE FROM workflow_stage_events WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId} AND stage_id = ${stageId}`;
     await pruneStaleWorkflowStageData(transaction, access.ownerUserId, savedWorkflow);
     await saveWorkflowVersion(transaction, access.ownerUserId, savedWorkflow);
