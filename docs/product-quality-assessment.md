@@ -148,11 +148,11 @@ PR Helper 已经超过纯浏览器 Mock 或 MVP 阶段，核心的 GitHub PR 发
 
 2026-08-21 生产 Supabase 已出现 Free Plan Egress 超额：`pr-helper` 项目占 6.28GB / 5GB。当前首页 `/api/inbox` 高频轮询同时返回看板状态、events、timeline、workflow runs、deployment runs、audit logs 和 automation history，不适合多用户长期打开页面。
 
-同日的实测把权重定死了：一次 `/api/inbox` 约 588 kB，其中 `pr_helper_workflows.payload` 在同一次请求内被 5 个 list 函数各取一遍（354 kB，重复的 4 遍占整次请求 48%），历史数据只占 143 kB / 24%；且浏览器轮询在页面隐藏时不会停，一个后台标签页挂 12 小时约 847 MB。因此实施顺序为：
+同日的实测把权重定死了：一次 `/api/inbox` 约 588 kB，其中 `pr_helper_workflows.payload` 在同一次请求内被 5 个 list 函数各取一遍（354 kB，重复的 4 遍占整次请求 48%），历史数据只占 143 kB / 24%；按 30 秒轮询折算约 70 MB/小时，5 GB ≈ 71 小时页面打开时间。可见性方面只有详情页有问题：首页 `refreshOverviewSnapshot` 本来就在页面隐藏时直接返回（本节首版写成「轮询在页面隐藏时不会停、挂机 12 小时约 847 MB」是错的，已按源码更正）。因此实施顺序为：
 
-- 先做轮询隐藏即停、间隔 60 秒、回到前台重启定时器并立刷一次。
+- 已完成（`1e5c6758`）：详情页轮询在页面隐藏时跳过，两屏共用 60 秒间隔，前台 70 → 35 MB/小时。
 - 再做请求内去重：handler 预取 payload 与 stage_states 传进各 list 函数，单次减半且行为零变化。
-- 以上两项合计约 70 → 9 MB/小时，观察一周后再决定是否需要下列改动。
+- 以上两项合计约 70 → 18 MB/小时（当前的 1/4），观察一周后再决定是否需要下列改动。
 - （可选）新增轻量 `/api/board`，首页只读取 Lane 渲染所需的当前状态、门禁摘要、待办数量、未完成自动化摘要和同步时间。
 - （可选）timeline、events、deployment runs、workflow runs、audit logs 改为详情页、抽屉或历史 Tab 按需加载。
 - （可选）增加 board version / ETag，无变化时返回空响应或 304；后续维护服务端看板投影表，把高频读和历史审计表拆开。
