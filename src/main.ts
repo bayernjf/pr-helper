@@ -75,9 +75,7 @@ let repositoryActionsLoaded = false;
 let repositoryEnvironmentsLoaded = false;
 let statuses: StepStatus[] | null = null;
 let refreshOnNextDetail = false;
-let pollTimer: number | undefined;
-const POLL_INTERVAL_MS = 60_000;
-let overviewPollTimer: number | undefined;
+let overviewSnapshotRefreshed = false;
 let overviewSnapshotRefreshing = false;
 let overviewRefreshOnFocusBound = false;
 let overviewScrollControlsBound = false;
@@ -404,12 +402,6 @@ async function refreshOverviewSnapshot() {
   overviewSnapshotRefreshing = false;
   if (loaded && screen === 'overview') render();
 }
-function stopOverviewSnapshotPolling() {
-  if (overviewPollTimer === undefined) return;
-  window.clearInterval(overviewPollTimer);
-  overviewPollTimer = undefined;
-}
-
 function updateOverviewScrollControls() {
   const controls = document.querySelector<HTMLElement>('.board-scroll-controls');
   if (!controls) return;
@@ -427,9 +419,12 @@ function bindOverviewScrollControls() {
   }
   updateOverviewScrollControls();
 }
-function startOverviewSnapshotPolling() {
-  if (overviewPollTimer === undefined) {
-    overviewPollTimer = window.setInterval(() => { void refreshOverviewSnapshot(); }, POLL_INTERVAL_MS);
+// Returning to the tab is the trigger worth reacting to: a clock spent one `/api/inbox` read plus the
+// direct GitHub reads per interval whether or not anything had moved. `overviewSnapshotRefreshed` keeps
+// the entry refresh to once per visit to the screen rather than once per render.
+function bindOverviewSnapshotRefresh() {
+  if (!overviewSnapshotRefreshed) {
+    overviewSnapshotRefreshed = true;
     void refreshOverviewSnapshot();
   }
   if (overviewRefreshOnFocusBound) return;
@@ -1011,13 +1006,11 @@ function goTo(target: Screen | 'back') {
   const previous = screen;
   screen = navigationTarget(screen, target, Boolean(active));
   if (shouldRefreshWorkflowDetail(previous, screen)) { statuses = null; refreshOnNextDetail = true; }
-  if (screen !== 'detail' && pollTimer) { window.clearInterval(pollTimer); pollTimer = undefined; }
   render();
 }
 
 function returnToSourceLane(workflowId: string) {
   screen = 'overview';
-  if (pollTimer) { window.clearInterval(pollTimer); pollTimer = undefined; }
   render();
   window.requestAnimationFrame(() => {
     const findLane = () => [...document.querySelectorAll<HTMLElement>('[data-project-lane]')]
@@ -1079,7 +1072,7 @@ function returnToSourceLane(workflowId: string) {
 
 function renderContent() {
   if (screen === 'overview') { overview(); return; }
-  stopOverviewSnapshotPolling();
+  overviewSnapshotRefreshed = false;
   if (screen === 'editor') editor(); else detail();
 }
 
@@ -1465,7 +1458,7 @@ function overview() {
   bindFlowCards();
   bindFailureCenter();
   bindOverviewScrollControls();
-  startOverviewSnapshotPolling();
+  bindOverviewSnapshotRefresh();
 }
 function bindFailureCenter() {
   document.querySelectorAll<HTMLButtonElement>('.fc-open').forEach(button => button.addEventListener('click', () => {
@@ -2138,7 +2131,6 @@ function detail() {
     const index = Number(button.dataset.codexRepair);
     void showCodexRepairDialog(index, undefined, statuses?.[index]?.pr?.number);
   }));
-  if (!pollTimer) pollTimer = window.setInterval(() => { if (document.visibilityState === 'visible') void refreshStatuses(); }, POLL_INTERVAL_MS);
   if (!refreshOnFocusBound) {
     refreshOnFocusBound = true;
     window.addEventListener('focus', () => { if (screen === 'detail') void refreshStatuses(); });
