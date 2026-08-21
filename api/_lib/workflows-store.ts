@@ -1504,12 +1504,13 @@ export async function recordWebhookDelivery(environment: Record<string, string |
 
 export async function projectPullRequestWebhook(environment: Record<string, string | undefined>, pull: PullRequestWebhook) {
   const sql = query(environment);
-  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id`;
+  // An archived workflow is out of every sweep, so a state written here would never be refreshed again:
+  // it would sit on the archived view as a fact from an afternoon that has since moved on. Both tests
+  // belong in SQL because only rows for this repository can ever match a branch pair from this delivery.
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id WHERE (workflows.payload->>'archived') IS DISTINCT FROM 'true' AND (workflows.payload->>'repository') = ${pull.repository}`;
   const tracked = rows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
-    // An archived workflow is out of every sweep, so a state written here would never be refreshed
-    // again: it would sit on the archived view as a fact from an afternoon that has since moved on.
-    return workflow && !workflow.archived ? [{ userId: row.user_id, workflowId: row.id, workflow: ensureStageIds(workflow) }] : [];
+    return workflow ? [{ userId: row.user_id, workflowId: row.id, workflow: ensureStageIds(workflow) }] : [];
   });
   const matches = tracked.flatMap(item => matchingWorkflowStages([item.workflow], pull).map(match => ({ ...item, stageIndex: match.stageIndex, stageId: stageIdentity(item.workflow, match.stageIndex) })));
   const checksState = initialWebhookChecksState(pull.mergedAt);
