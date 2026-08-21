@@ -2296,4 +2296,43 @@ describe('a generation rule is stored once and referenced by hash', () => {
     const list = functionSource(source, 'listWorkflows');
     expect(list).toContain('hydrateGenerationRules');
   });
+
+  // 040 是 035 的收缩步：把 payload 里的 content 换成 hash。它只有在内容确实已经存进
+  // pr_helper_generation_rules 之后才安全，而反向 UPDATE 能把内容写回去，这两条是敢做的全部依据。
+  describe('the contract migration', () => {
+    const contract = readFileSync(new URL('040_generation_rule_contract.sql', MIGRATIONS_DIR), 'utf8');
+
+    it('writes the rules table before it rewrites any payload', () => {
+      expect(contract.indexOf('INSERT INTO pr_helper_generation_rules')).toBeGreaterThan(-1);
+      expect(contract.indexOf('INSERT INTO pr_helper_generation_rules')).toBeLessThan(contract.indexOf('UPDATE pr_helper_workflows'));
+    });
+
+    // 内容表里没有的内容一旦被删掉就再也找不回来，所以每个 stage 的改写都要自己带守卫,
+    // 不能只依赖前面那条 INSERT 成功。
+    it('rewrites only the stages whose content the rules table already holds', () => {
+      expect(contract).toMatch(/EXISTS\s*\(\s*SELECT 1 FROM pr_helper_generation_rules/);
+    });
+
+    // stage 的顺序就是流程的顺序：jsonb_agg 不带 ORDER BY 会按任意顺序重组数组，
+    // 把「dev → main」排到「feature → dev」前面，比不迁移糟得多。
+    it('keeps the stage order it rebuilds the array from', () => {
+      expect(contract).toMatch(/jsonb_agg\([\s\S]*?ORDER BY (?:element\.)?ordinality/);
+    });
+
+    it('hashes the content exactly the way 035 did', () => {
+      expect(contract).toContain("encode(extensions.digest(");
+      expect(contract).toContain("'sha256'");
+    });
+
+    // 已入队动作自己的提示词副本是 drain 要用的，改它会打断在途动作;
+    // workflow_versions.snapshot 没有任何读者，删它省不到出站量。
+    it('touches neither the queued action snapshots nor the version snapshots', () => {
+      expect(contract).not.toContain('UPDATE workflow_automation_runs');
+      expect(contract).not.toContain('UPDATE workflow_versions');
+    });
+
+    it('leaves the payload column in place', () => {
+      expect(contract).not.toMatch(/DROP COLUMN\s+payload/i);
+    });
+  });
 });
