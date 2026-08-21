@@ -803,14 +803,16 @@ workflow_deployments (user_id, workflow_id, target, provider, environment, ...)
 - `pr_helper_generation_rules` 回填后，`content` 的去重率与实测一致（44 份引用 → 1 条内容）。
 - payload 中不再出现 `generationRule.content`，只留 `contentHash`；单次全表读字节从 70 837 B 降到约 26 kB。
 - 入队自动化时若 hash 查不到内容，必须**报错而非静默降级**——由失败测试守住。
-- 收缩迁移（036）只在读路径完全切换并观察一周后才应用。
+- 收缩迁移只在读路径完全切换并观察一周后才应用。**编号已改**：第五轮先落地，占用了 036，所以第四轮的收缩迁移取当时的下一个空号，不预留空洞（仓库里没有迁移 runner，编号空洞只会让人对「是否漏执行」产生怀疑）。
 
 第五轮（拆关系表）的验收标准：
 
-- expand → backfill → 读切换 → contract 四步各自独立可回滚；任何一步单独部署后系统行为不变。
-- 回填后有一致性检查：关系表重组出的对象与原 payload **逐字段相等**（round-trip identity 测试）。
+- expand → backfill → 读切换 → contract 四步各自独立可回滚；任何一步单独部署后系统行为不变。迁移编号：**036 expand（已落地）**、037 回填与一致性校验、038 读切换与索引、039 contract。
+- 回填后有一致性检查：关系表重组出的对象与原 payload **逐字段相等**（round-trip identity 测试）。已由 [`api/_lib/workflow-rows.test.ts`](../api/_lib/workflow-rows.test.ts) 用 `toStrictEqual` 守住——它把 `{position: undefined}` 与 `{}` 判为不等，能抓住漏键，`toEqual` 不能。
 - `version` 提升为独立列后，`workflowSaveConflicts` 的冲突检测行为与改前一致。
 - 读切换后单次读取字节随「实际需要的字段」变化，而不再随 payload 总大小变化。
+- **expand 步的两条约束**（036 已满足）：promoted 列全部可空（含类型上必填的 `name` / `repository`，因为历史行没有值可填，NOT NULL 默认值等于编造数据，要等回填后才收紧）；`declared_created_at` 与 `rule_captured_at` 存 text 而非 timestamptz，否则往返会被 Postgres 重排格式，恒等测试立刻失败。
+- **镜像不漏写点**：payload 有两处写点（`upsertWorkflow` 的 INSERT 与删步骤路径的 UPDATE），两处都必须在**同一事务内**镜像，否则崩溃后两份表示不一致，正是回填校验会读成「数据损坏」的状态。由单元测试守住。
 
 第六轮 ④（兜底只扫有活的）的验收标准：
 
