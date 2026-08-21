@@ -207,4 +207,10 @@ describe('the sweep reads the relational rows instead of the payload', () => {
     expect(schema).toMatch(/ALTER TABLE pr_helper_workflows[\s\S]*?ALTER COLUMN name SET NOT NULL/);
     expect(schema).toMatch(/ALTER TABLE pr_helper_workflows[\s\S]*?ALTER COLUMN repository SET NOT NULL/);
   });
+
+  // 034's index sits on `(payload->>'repository')`, an expression no remaining query mentions, so the
+  // planner can never choose it again. An index nothing reads still pays on every insert and update.
+  it('drops the jsonb index the read switch made unreachable', () => {
+    expect(schema).toMatch(/DROP INDEX IF EXISTS pr_helper_workflows_repository_idx/);
+  });
 });

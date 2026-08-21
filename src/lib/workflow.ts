@@ -115,8 +115,12 @@ function withBundledRollback(workflow: object, configurations: readonly Deployme
     : configuration);
 }
 
+// The defaults are a creation-time prefill, not a fallback: `createWorkflow` writes them, and a workflow
+// that stores none has declined the gates. Resolving them here instead applied pr-helper's own Actions
+// workflow names to every repository that had configured nothing, and a gate whose workflow does not exist
+// never produces a run, which holds the stage at pending and locks the next one.
 export function deploymentConfigs(workflow: object): DeploymentConfig[] {
-  return withBundledRollback(workflow, (workflow as { deployments?: DeploymentConfig[] }).deployments || defaultDeployments);
+  return withBundledRollback(workflow, (workflow as { deployments?: DeploymentConfig[] }).deployments || []);
 }
 
 export function deploymentConfigsForTarget(workflow: object, target: string) {
