@@ -58,6 +58,20 @@ describe('workflow configuration', () => {
     expect(setStageAutoCreate(enabled, 1, false).stages[1].automation).toBeUndefined();
   });
 
+  // 详情页的「同步默认规则」用的就是这条路：重新以当前默认规则启用一次，其余策略字段不能因此丢掉。
+  it('re-captures the generation rule while keeping the rest of the policy', () => {
+    const workflow = addStage(createWorkflow('octo/app', 'feature/a', 'dev'), 'dev', 'main');
+    const both = setStageAutoMerge(setStageAutoCreate(workflow, 1, true, { name: 'Default', content: '# Rule' }, 3), 1, true);
+    const synced = setStageAutoCreate(both, 1, true, { name: 'Renamed', content: '# Rewritten' }, 3);
+    expect(synced.stages[1].automation).toMatchObject({
+      autoCreatePullRequest: true,
+      autoMergePullRequest: true,
+      executionMode: 'server',
+      triggerMinCommits: 3,
+      generationRule: { name: 'Renamed', content: '# Rewritten' },
+    });
+  });
+
   it('sets and removes a per-stage auto-merge policy without a generation rule', () => {
     const workflow = addStage(createWorkflow('octo/app', 'feature/a', 'dev'), 'dev', 'main');
     const enabled = setStageAutoMerge(workflow, 1, true);
