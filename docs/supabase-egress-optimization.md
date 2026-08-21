@@ -1,9 +1,9 @@
 # Supabase Egress 与多用户扩展方案
 
 > 创建日期：2026-08-21
-> 最后更新：2026-08-21（新增《实测：扫掠频率与 webhook 事件分布》《需求澄清：事件驱动，不是无人值守》《第二轮：按真实需求降配（A1 / A2 / A3）》《第三轮：把过滤与批次下推到 SQL》《数据建模债》《化债方案》）
+> 最后更新：2026-08-21（新增《实测：扫掠频率与 webhook 事件分布》《需求澄清：事件驱动，不是无人值守》《第二轮：按真实需求降配（A1 / A2 / A3）》《第三轮：把过滤与批次下推到 SQL》《数据建模债》《化债方案》；补记 A1 的生产实测、它引发的收敛阈值回归与处置，以及第三轮的索引命中实测）
 > 适用范围：PR Helper 的 Supabase 出站流量、看板轮询、状态投影、历史数据读取和多用户扩展。
-> 当前状态：三刀已落地（`1e5c6758` / `2b81be2c` / `98b5d245`）；第二轮 A1 / A2 / A3 已落地（`e65daa6c` / `b51bcaed` / `538a33eb`），投影约 1.71 GB/月，待部署后核对；第三轮（SQL 下推）已落地（`7b3a7e03` / `a1054240` / `dfc9491c`），迁移 034 已应用；第四、五轮（数据建模化债）已记录方案、未开始。
+> 当前状态：三刀已落地（`1e5c6758` / `2b81be2c` / `98b5d245`）；第二轮 A1 / A2 / A3 已落地（`e65daa6c` / `b51bcaed` / `538a33eb`），投影约 1.71 GB/月；第三轮（SQL 下推）已落地并**已部署生产**（`613fd350`），迁移 034 已应用，索引命中已实测；A1 的收敛阈值回归已处置（`STAGE_UNCONVERGED_THRESHOLD_SECONDS=9000`）；第四、五轮（数据建模化债）已记录方案、未开始。
 
 ## 背景
 
@@ -368,6 +368,48 @@ GET /api/board?workflowId=<id>
 - **附带检查**：`.github/workflows/reconcile-pr-helper.yml` 的 `*/10` 兜底也在调 `/api/cron/reconcile`，pg_cron 拉长后它的相对占比会变大，需要一并决定是否放宽。
 - **执行方**：迁移由使用者自己应用，不由本流程代跑。
 
+#### 生产实测：生效时刻与真实收益（2026-08-21）
+
+`reconciliation_runs` 按小时聚合给出精确断点：最后一次 `*/5` 落在 **05:20:03 UTC**，此后只剩 `:00` / `:30` 两拍。cron 触发从稳定的 **13–14 次/小时降到约 3.5 次/小时**，日频次 **约 336 → 约 84**。
+
+比预测的 48 次/天高，因为 `.github/workflows/reconcile-pr-helper.yml` 的兜底仍在跑。它声明 `*/10`，但 `gh run list` 显示 GitHub 对 schedule 事件限流，**实际间隔 30–60 分钟**、约 1.5 次/小时。所以 84 ≈ pg_cron 48 + Actions 36。上面《附带检查》里那条「是否放宽 Actions 的 `*/10`」因此没有实际意义：它已经被 GitHub 自己限流到比 `*/30` 还慢。
+
+#### 部署后发现的回归：45 分钟收敛阈值变成结构上不可达
+
+A1 只改了时钟，没有改依赖时钟的告警阈值，结果 `/api/cron/health` 开始持续返回 503，`reconcile-pr-helper.yml` 每次报红（`06:42:55` 那次的错误是 `/api/cron/health returned 503`）。
+
+**根因是轮转算术，不是收敛故障**（`stages_failed` 全程为 0）：
+
+| 量 | 值 | 来源 |
+| --- | --- | --- |
+| 活跃流程 | 35 | `pr_helper_workflows` |
+| 每次 cron 领取 | 8 | `claimed_workflow_ids` 长度恒为 8 |
+| 轮完一圈需要 | 4.4 次 sweep | 35 ÷ 8 |
+| cron 频次 | 3.5 次/小时 | 上一节实测 |
+| **一圈周期** | **约 75 分钟** | 4.4 ÷ 3.5 |
+| 旧阈值 | 45 分钟 | `STAGE_UNCONVERGED_THRESHOLD_SECONDS` 默认 2700 |
+
+033 之前 `*/5` 是 12 次/小时，一圈 22 分钟，45 分钟阈值有两倍余量——阈值正是按那个时钟校准的。改成 `*/30` 后一圈必然 > 45 分钟，实测最老投影年龄一路涨到 **6459 秒（108 分）、61 个阶段里 40 个超阈值**（108 = 75 + 一次撞预算的重复领取）。
+
+**曾经想错的修法：把批次从 8 调大。** 数据否掉了它——真正的卡点是 40 秒预算（`CRON_RECONCILE_BUDGET_MS = AUTOMATION_FUNCTION_CEILING_MS - 20_000`，而 `vercel.json` 的 `maxDuration` 是 60）。`06:43` 那次已经用 44.9 秒撞线，`error_message` 为「校准未在预算内完成，已让给下一次触发」。**8 个流程就已经装不下一次预算**（可展开成 28 个阶段、218 次 GitHub 调用），调大批次只会更早撞线、丢掉更多已完成的工作。
+
+**实际处置：重新校准阈值，不动时钟也不动批次。** Vercel Production 加环境变量 `STAGE_UNCONVERGED_THRESHOLD_SECONDS=9000`（150 分钟 = 一圈 75 分钟 + 一次浪费的槽位 + 40% 余量）。
+
+这不是挪球门柱，依据是《需求澄清：事件驱动，不是无人值守》那一节：真实工作走 webhook 路径（当天实测 5 次全部 ≤9 秒完成），cron 扫掠只是兜底，它的一圈周期本就该是分钟到小时级。阈值应该量「兜底轮转有没有停」，而不是「有没有比 45 分钟快」。
+
+生效方式值得记一笔：面板 Redeploy 会被拒绝（`Prebuilt deployments cannot be redeployed because they will not use the latest environment variables`），因为生产部署是 Actions 构建产物后上传的 prebuilt。正确路径是 `gh workflow run deploy-vercel.yml --ref main`——该工作流第一步就是 `vercel pull` 拉最新环境变量，再 `vercel build --prod`。
+
+处置后实测：
+
+| 指标 | 处置前 07:17 | 处置后 07:35 |
+| --- | --- | --- |
+| 最老投影 | 6459s（108 分） | 3913s（65 分） |
+| 平均 | 2663s（44 分） | 1021s（17 分） |
+| 超阈值阶段 | 40 / 61 | 0 / 61 |
+| `reconcile-pr-helper.yml` | failure | success |
+
+**遗留的真正瓶颈（未处理）**：每个阶段约 7.8 次 GitHub 调用（218 ÷ 28），`github_ms` 52.9 秒 > 墙钟 24.6 秒说明已经并行，所以一圈的长度由 GitHub 往返决定。降这个数才能真正缩短轮转，属代码工作，未立项。另有一处小浪费：撞预算的 sweep 似乎没有推进那批流程的 `last_reconcile_attempt_at`，导致 `06:43 → 07:00` 领取了完全相同的 8 个流程，白烧一个槽位。
+
 ### A2：跳过不可能改变合并判定的 CI 事件（已完成，提交 `9e11bce8` + `b51bcaed`）
 
 - **改哪里**：新增 `webhookCanChangeStageState(eventName, action)`，在 [`api/github/webhook.ts`](../api/github/webhook.ts) 里并进 `shouldReconcile`。跳过 `check_run.created` 与 `workflow_run.in_progress` 的扫掠，**仍然记录 delivery**，只是不触发 `reconcileRealtime`。注意不能用 `webhookBranchesForEvent` 返回空数组来实现——空数组在 JS 里是真值，会照样进 `reconcileRealtime` 并付掉那次全表读。
@@ -482,6 +524,22 @@ cron 路径同理：`ORDER BY ... LIMIT 8` 下推后全局每月约 23 MB，可�
 - 代价却是要在 SQL 里重写一遍 `branchRuleMatches`（`:1131`）的通配语义（`foo*` 前缀匹配），两份实现必然漂移。
 
 **收 97%，放掉最难的那 3%。**
+
+### 部署后实测：索引在生产被命中（2026-08-21）
+
+代码经 PR #305 / #306 进入 `main`（`613fd350`，07:12:05 UTC）并部署。`pg_stat_user_indexes` 给出比 `EXPLAIN` 更直接的证据——它统计的是真实流量，不是一次假设查询：
+
+| 索引 | `idx_scan` | `idx_tup_read` | 折算 |
+| --- | --- | --- | --- |
+| `pr_helper_workflows_repository_idx` | 12 | 28 | **2.3 行/次**（旧读法 35 行） |
+| `pr_helper_workflows_reconcile_pending_idx` | 4 | 75 | `ORDER BY` 下推生效 |
+| `pr_helper_workflows_reconcile_attempt_idx` | 6 | 275 | 同上 |
+
+单次 webhook 投影读 **35 → 约 2.3 行，减少 93%**，与「1.06 流程/仓库」的选择性预测一致。原验收标准要求跑 `EXPLAIN (ANALYZE)`，但只读通道拒绝 `EXPLAIN`（`read-only runner: only SELECT allowed`），且 35 行规模下 Seq Scan 本来就是正确计划；索引统计绕过了这两个问题。
+
+无回归：部署后 webhook 5 次 success（各重算 1 个阶段）、11 次 skipped、`stages_failed` 全 0、最慢 9 秒。
+
+**归属更正**：cron 日频次 `~336 → ~84` 是 **A1（033 的时钟）** 的收益，不是第三轮的。第三轮只降单次读取的字节，不改任何触发频率。原《验收标准》把 cron 频次列在第三轮名下，属误记。
 
 ## 数据建模债：`payload` 是前端对象的整体序列化
 
@@ -626,7 +684,7 @@ workflow_deployments (user_id, workflow_id, target, provider, environment, ...)
 
 第二轮 A1 / A2 / A3 的验收标准：
 
-- **A1**：`SELECT schedule FROM cron.job WHERE jobname = 'pr-helper-reconcile'` 返回 `*/30 * * * *`；`reconciliation_runs` 中 `trigger = 'cron'` 的日频次从约 289 降到约 48。
+- **A1**：`SELECT schedule FROM cron.job WHERE jobname = 'pr-helper-reconcile'` 返回 `*/30 * * * *`；`reconciliation_runs` 中 `trigger = 'cron'` 的日频次从约 289 降到约 48。✅ 已验（2026-08-21 05:20:03 UTC 断点，日频次 ~336 → ~84，差额来自 Actions 兜底）。**追加一条**：改时钟必须同时校准 `STAGE_UNCONVERGED_THRESHOLD_SECONDS`——阈值应 ≥ 一圈周期（`活跃流程数 ÷ 批次 ÷ cron 频次`）加一次撞预算的余量，否则 `/api/cron/health` 恒 503。当前值 9000。
 - **A2**：`github_webhook_deliveries` 仍然记录 `check_run.created` 与 `workflow_run.in_progress`（投递不丢），但 `reconciliation_runs` 中 `trigger = 'webhook'` 的日频次从约 916 降到约 618。部署卡片仍能在 run 开始时显示 pending 与链接（由 `workflow_run.requested` 提供）。
 - **A3**：详情页与首页在前台停留时不再产生周期性 `/api/inbox` 请求；切走再切回时恰好产生一次；手动刷新仍然工作。
 - **端到端**：在沙箱仓库（`bayernjf/pr-helper-e2e-sandbox` 或其 private 版本）推一次达到阈值的 commit，确认 PR 仍在秒级自动创建；CI 转绿后确认仍自动合并，且不需要页面处于前台。
@@ -646,8 +704,8 @@ workflow_deployments (user_id, workflow_id, target, provider, environment, ...)
 
 第三轮（SQL 下推）的验收标准（迁移 034 应用后核对）：
 
-- 一次 webhook 触发的校准只读取该仓库相关的 workflow 行，而非全表：`EXPLAIN (ANALYZE)` 显示走 `(payload->>'repository')` 索引，`rows` 在个位数。
-- cron 扫掠单次读取行数等于 `RECONCILE_WORKFLOW_BATCH_SIZE`（当前 8），不再是全表行数。
+- 一次 webhook 触发的校准只读取该仓库相关的 workflow 行，而非全表。✅ 已验，但改用 `pg_stat_user_indexes` 而非 `EXPLAIN (ANALYZE)`：只读通道拒绝 `EXPLAIN`，且 35 行下 Seq Scan 本就是正确计划。实测 `pr_helper_workflows_repository_idx` 12 次扫描共读 28 行 = 2.3 行/次。
+- cron 扫掠单次读取行数等于 `RECONCILE_WORKFLOW_BATCH_SIZE`（当前 8），不再是全表行数。✅ 已验，`claimed_workflow_ids` 长度恒为 8。
 - 批次轮转仍然公平：`reconcile_pending_since` 非空的流程优先，其次按 `last_reconcile_attempt_at` 由旧到新，从未校准过的排最前。
 - archived 流程仍然完全不参与任何扫掠。
 - 沙箱端到端：达到阈值的 commit 仍在秒级自动创建 PR，CI 转绿后仍自动合并。
