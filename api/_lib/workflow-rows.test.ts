@@ -120,6 +120,20 @@ describe('the relational tables the mapping writes into', () => {
     expect(transaction).toMatch(/writeWorkflowRows\(transaction,/);
   });
 
+  // Postgres checks NOT NULL on the proposed tuple before it resolves ON CONFLICT, so a column promoted
+  // to NOT NULL has to appear in the insert even though the row always exists by then and only the
+  // DO UPDATE branch ever runs. Migration 038 promoted name and repository and every save started
+  // failing with a not-null violation until they were listed here.
+  it('supplies every column the migrations require on the payload insert', () => {
+    const upsert = source.slice(source.indexOf('export async function upsertWorkflow'), source.indexOf('export async function deleteWorkflow'));
+    const insert = /INSERT INTO pr_helper_workflows \(([a-z_, ]+)\)/.exec(upsert);
+    const supplied = new Set(insert?.[1].split(',').map(column => column.trim()));
+    const required = [...schema.matchAll(/ALTER TABLE pr_helper_workflows\b([\s\S]*?);/gi)]
+      .flatMap(statement => [...statement[1].matchAll(/ALTER COLUMN ([a-z_][a-z0-9_]*) SET NOT NULL/gi)].map(match => match[1]));
+    expect(required.length).toBeGreaterThan(0);
+    expect(required.filter(column => !supplied.has(column))).toEqual([]);
+  });
+
   it('replaces the stage and deployment rows on every save so a removed stage cannot linger', () => {
     expect(source).toMatch(/DELETE FROM workflow_stages WHERE user_id = /);
     expect(source).toMatch(/DELETE FROM workflow_deployment_configs WHERE user_id = /);
