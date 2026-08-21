@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-19（服务端自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 是唯一执行入口；流程详情页的只读进度条已上线；深色主题的三类失配已修并加了静态守卫；调用预算经复核后已从第一优先级降级，见《2026-08-15 调用预算复核与 drain 实测》）
+> 最后更新：2026-08-21（服务端自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 是唯一执行入口；流程详情页的只读进度条已上线；Supabase Free Plan 出现 Egress 超额，已实测定位到「详情页轮询隐藏不停」与「同一请求内重复读 payload」两项，前者已修，见《Supabase Egress 与多用户扩展方案》）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -21,8 +21,8 @@ PR Helper 是 GitHub-first 的 PR / Release Control Tower。用户以项目 Lane
 - **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（553 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
 - **功能质量：8.5/10**。流程 CRUD、Lane 看板、动态来源、多路径汇聚、PR 创建/合并、五类门禁、合并后 Actions/部署状态、失败恢复和审计均已具备；后台自动创建 PR 和逐步骤自动合并已有生产成功记录。
 - **产品完善度：7.5/10**。个人使用和小团队发布控制塔已可用；多账号权限、private/organization 边界、Web Push 关闭页面投递和部署回滚仍需外部条件验收。
-- **生产准备度：7.5/10**。主链路和两级自动化都已有真实 Production 证据；健康检查/失败部署投影、确认式回滚和部分协作能力不能仅凭本地测试视为通过。校准让出（`degraded`）的成因已由分段耗时遥测定位到数据库写入与内联自动化执行，而非 GitHub 调用量，第一刀（跳过内容未变的部署行写入）已上线并实测有效。
-- **结论：综合 8/10**。产品已超过 MVP，可继续作为受控生产工具使用；下一步优先收敛 reconciliation 的数据库写入与内联执行开销，再完成剩余外部条件验收，不建议立即投入画布或模板市场。
+- **生产准备度：7/10**。主链路和两级自动化都已有真实 Production 证据；健康检查/失败部署投影、确认式回滚和部分协作能力不能仅凭本地测试视为通过。Supabase Free Plan 在上个账单周期出现 Egress 超额（`pr-helper` 6.28GB / 5GB），当前高频 `/api/inbox` 把看板状态与历史数据绑在一起，不适合直接承载多用户轮询。
+- **结论：综合 7.5/10**。产品已超过 MVP，可继续作为受控生产工具使用；下一步优先降低 Supabase Egress（详情页轮询隐藏即停 + 60 秒已完成，接下来做请求内去重），再继续收敛 reconciliation 写入和完成外部条件验收，不建议立即投入画布或模板市场。
 
 ## 当前架构
 
@@ -203,6 +203,27 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 本轮发现的连续编辑版本 `409` 已通过 Production 连续新增/删除和整页刷新复验。动态来源规则（如 `fix/*`）已在 Production 通过服务端投影逐条展示实际分支，PR #4 在失败中心、Lane 和抽屉均显示失败；产品内 Actions 重跑、冷却和 Codex 修复包边界也已通过。并发待办刷新导致抽屉短暂读取空快照的问题，已在请求串行修复上线后通过 Production 复验。Webhook 自动投影已在生产完成真实验收。
 
 操作审计的 Production 首次验收曾因动态路由参数冲突而误显示为空；现有 `inbox` 函数已改用不冲突的 `resource=operation-audit` 分流。修复部署后，账户菜单已显示真实的流程更新、创建 PR 和合并 PR 记录，CSV 导出按钮也已启用，验收通过。
+
+## 当前最高优先级：Supabase Egress 与多用户读取扩展
+
+2026-08-21 的 Supabase Usage 显示 Free Plan Egress 为 6.309GB / 5GB（126%），其中 `pr-helper` 项目占 6.28GB，宽限期到 2026-09-20；若仍超额，Supabase 请求可能返回 402。
+
+当前根因判断是高频 `/api/inbox` 同时返回看板当前状态与历史详情数据。浏览器轮询和页面长时间打开会重复拉取 events、timeline、workflow runs、deployment runs、audit logs 和 automation history。用户数增加时，Supabase Egress 会随在线用户近似线性增长。
+
+2026-08-21 已按各查询的实际列和 LIMIT 在生产库上量过字节，权重与上述判断不同：一次 `/api/inbox` 约 588 kB，其中 `pr_helper_workflows.payload`（35 行、70.8 kB）在**同一次请求内被 5 个 list 函数各取一遍**，占 354 kB，重复的 4 遍即 283 kB / 48%；历史数据合计只有 143 kB / 24%。按 30 秒轮询折算约 70 MB/小时，5 GB 约等于 71 小时页面打开时间——每天前台使用 4 小时、一个月即到量，现有超额无需多用户即可解释。可见性方面只有详情页有问题：首页 `refreshOverviewSnapshot` 开头本来就有 `document.visibilityState !== 'visible'` 即返回，详情页的 `pollTimer` 没有（本文档首版写成「首页轮询也不停、挂机一晚约 847 MB」是错的，已按源码更正）。
+
+因此第一阶段的落地顺序已修正为先做前两项，`/api/board` 拆分降为可选：
+
+- **详情页轮询隐藏即停、两屏间隔改 60 秒**：已完成（`1e5c6758`）。
+- **请求内去重**：已完成（`2b81be2c`），handler 传一个按请求的 memo 进各 list 函数，payload 与 stage_states 各只读一次。
+- **去掉无人读取的 `stage_snapshot`**：已完成（`98b5d245`），`INSERT` 保留，列和历史数据仍在。
+- 三刀实测合计：单次 594.3 → 274.0 kB（−53.9%），前台 71.3 → 16.4 MB/小时，详情页挂后台归零，5 GB 可支撑前台时长从约 70 小时升到约 312 小时。之后观察一周，再决定是否需要下列改动。
+- （可选）新增轻量 `/api/board`，首页只读取 Lane 渲染所需的当前状态、门禁摘要、待办数量、未完成自动化摘要和同步时间。
+- （可选）timeline、events、deployment runs、workflow runs、audit logs 改为进入流程详情、步骤抽屉或历史 Tab 时按需加载。
+- 首页自动化动作只返回未完成摘要，不读取 200 条历史动作。
+- 手动“刷新 GitHub 状态”仍触发校准；Webhook、cron 和自动化队列负责后台推进。
+
+后续阶段包括 board version / ETag 增量响应、服务端看板投影表、历史数据分页和保留策略、多用户下的 reconciliation lock、限流和 GitHub API 预算。完整方案见 [Supabase Egress 与多用户扩展方案](supabase-egress-optimization.md)。
 
 ## 依赖外部条件的待办
 

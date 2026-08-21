@@ -610,6 +610,36 @@ describe('listWorkflowAutomationActions', () => {
   });
 });
 
+describe('shared reads within one inbox request', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const handler = readFileSync(new URL('../[action].ts', import.meta.url), 'utf8');
+
+  // `/api/inbox` fans out to eleven list functions, five of which each pulled every visible
+  // workflow payload and two of which each pulled every stage state row. Measured on production
+  // that made the redundant payload copies 48% of the whole response's database egress.
+  it('reads each visible workflow payload and stage state set from one query', () => {
+    expect(source.match(/FROM pr_helper_workflows workflows WHERE \$\{visibleWorkflowPredicate/g) || []).toHaveLength(1);
+    expect(source.match(/FROM workflow_stage_states states WHERE \$\{visibleWorkflowPredicate\(sql, userId, /g) || []).toHaveLength(1);
+  });
+
+  it('hands the inbox handler one cache that every list call shares', () => {
+    expect(handler).toContain('const reads: VisibleWorkflowReads = {}');
+    expect(handler.match(/, reads\)/g) || []).toHaveLength(5);
+  });
+});
+
+describe('listWorkflowRuns', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+
+  // The column is still written on every run start, so the history stays queryable — but nothing
+  // reads it back, and `/api/inbox` was shipping 50 copies of the jsonb to the browser each poll.
+  it('does not ship the stage snapshot nobody reads', () => {
+    expect(source).toContain('INSERT INTO workflow_runs (user_id, workflow_id, version, stage_index, stage_id, source, target, stage_snapshot, pull_number)');
+    expect(source).not.toContain('runs.stage_snapshot');
+    expect(readFileSync(new URL('../../src/main.ts', import.meta.url), 'utf8')).not.toContain('stageSnapshot');
+  });
+});
+
 describe('server bundle boundaries', () => {
   for (const entry of importedSourcePaths(new URL('../', import.meta.url), '.ts')) {
     it(`keeps browser-only modules out of ${entry.pathname.replace(/^.*\/api\//, 'api/')}`, () => {

@@ -38,7 +38,7 @@ type WorkflowConfigurationWarning = { workflowId: string; code: 'no-deployments'
 type ReconciliationRun = { id: number; trigger: string; state: 'running' | 'success' | 'degraded' | 'failure' | 'skipped'; stagesTotal: number; stagesReconciled: number; stagesFailed: number; durationMs: number | null; errorMessage: string | null; repository: string | null; startedAt: string; finishedAt: string | null; interrupted: boolean };
 type StageSyncHealth = { workflowId: string; stageIndex: number; stageId: string | null; source: string; target: string; updatedAt: string; ageSeconds: number; stale: boolean };
 type SyncHealth = { lastReconciliation: ReconciliationRun | null; triggerHealth: ReconciliationRun[]; stages: StageSyncHealth[]; webhookDeliveriesLast24h: number };
-type WorkflowRun = { id: number; workflowId: string; version: number; stageIndex: number; stageId: string | null; source: string; target: string; stageSnapshot: { source: string; target: string; stageId?: string }; pullNumber: number | null; state: 'active' | 'completed' | 'failed'; startedAt: string; completedAt: string | null };
+type WorkflowRun = { id: number; workflowId: string; version: number; stageIndex: number; stageId: string | null; source: string; target: string; pullNumber: number | null; state: 'active' | 'completed' | 'failed'; startedAt: string; completedAt: string | null };
 type TimelineEntry = { workflowId: string; stageIndex: number; stageId: string | null; source: string; target: string; kind: string; message: string; occurredAt: string; pullNumber: number | null; runId: number | null };
 type OperationAuditEntry = { id: number; action: string; outcome: 'success' | 'failure'; repository: string | null; workflowId: string | null; stageId: string | null; source: string | null; target: string | null; pullNumber: number | null; runId: number | null; metadata: Record<string, unknown>; failureReason: string | null; occurredAt: string };
 type Team = { id: string; name: string; role: 'owner' | 'editor' | 'operator' | 'viewer'; createdAt: string };
@@ -76,6 +76,7 @@ let repositoryEnvironmentsLoaded = false;
 let statuses: StepStatus[] | null = null;
 let refreshOnNextDetail = false;
 let pollTimer: number | undefined;
+const POLL_INTERVAL_MS = 60_000;
 let overviewPollTimer: number | undefined;
 let overviewSnapshotRefreshing = false;
 let overviewRefreshOnFocusBound = false;
@@ -428,7 +429,7 @@ function bindOverviewScrollControls() {
 }
 function startOverviewSnapshotPolling() {
   if (overviewPollTimer === undefined) {
-    overviewPollTimer = window.setInterval(() => { void refreshOverviewSnapshot(); }, 30_000);
+    overviewPollTimer = window.setInterval(() => { void refreshOverviewSnapshot(); }, POLL_INTERVAL_MS);
     void refreshOverviewSnapshot();
   }
   if (overviewRefreshOnFocusBound) return;
@@ -2137,7 +2138,7 @@ function detail() {
     const index = Number(button.dataset.codexRepair);
     void showCodexRepairDialog(index, undefined, statuses?.[index]?.pr?.number);
   }));
-  if (!pollTimer) pollTimer = window.setInterval(() => refreshStatuses(), 30000);
+  if (!pollTimer) pollTimer = window.setInterval(() => { if (document.visibilityState === 'visible') void refreshStatuses(); }, POLL_INTERVAL_MS);
   if (!refreshOnFocusBound) {
     refreshOnFocusBound = true;
     window.addEventListener('focus', () => { if (screen === 'detail') void refreshStatuses(); });

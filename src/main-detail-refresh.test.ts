@@ -8,6 +8,26 @@ function body(name: string) {
   return source.slice(start, source.indexOf('\n}', start));
 }
 
+function detailTick() {
+  const tick = source.slice(source.indexOf('if (!pollTimer)'));
+  return tick.slice(0, tick.indexOf('\n'));
+}
+
+describe('background polling', () => {
+  // The overview tick has always returned early on a hidden page, but the detail tick did not, so a
+  // detail tab left open in the background kept spending one `/api/inbox` read plus the direct GitHub
+  // reads every interval. Egress, not correctness, is what makes that unacceptable.
+  it('skips the detail tick while the page is hidden', () => {
+    expect(detailTick()).toContain("document.visibilityState === 'visible'");
+  });
+
+  it('polls both screens on the same interval instead of hardcoding one per call site', () => {
+    expect(source).toContain('const POLL_INTERVAL_MS = 60_000;');
+    expect(source).toContain('void refreshOverviewSnapshot(); }, POLL_INTERVAL_MS)');
+    expect(detailTick()).toContain('POLL_INTERVAL_MS');
+  });
+});
+
 describe('refreshDetailStatuses', () => {
   // Browser-side status reads only update what is rendered; the persisted projection and the server
   // automation that reads it move only when the queue is refreshed. Gating that on a wildcard source
