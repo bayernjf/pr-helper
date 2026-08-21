@@ -610,6 +610,67 @@ describe('listWorkflowAutomationActions', () => {
   });
 });
 
+// Both payload reads live in one file, so a whole-file scan cannot tell which of them a WHERE belongs to.
+function functionSource(source: string, name: string) {
+  const start = source.indexOf(`export async function ${name}(`);
+  expect(start).toBeGreaterThan(-1);
+  const next = source.indexOf('\nexport ', start + 1);
+  return source.slice(start, next === -1 ? undefined : next);
+}
+
+describe('the sweep payload read', () => {
+  const sweep = functionSource(readFileSync(STORE_SOURCE, 'utf8'), 'reconcileWorkflowStages');
+
+  // The read carried no WHERE and no LIMIT, so a delivery for one repository paid for every user's every
+  // payload — 71 kB at 35 workflows, with both the sweep count and the bytes per sweep growing with the
+  // user count. The trigger already knows the repository and the installation before the read happens.
+  it('applies the trigger scope in SQL rather than after the read', () => {
+    expect(sweep).toContain("WHERE (workflows.payload->>'archived') IS DISTINCT FROM 'true'");
+    expect(sweep).toContain("AND (workflows.payload->>'repository') = ${filter.repository}");
+    expect(sweep).toContain('AND users.github_installation_id = ${filter.installationId}');
+  });
+
+  // A restore removes the key rather than writing false, so an absent key has to count as not archived.
+  it('treats a missing archived key as not archived', () => {
+    expect(sweep).not.toMatch(/payload->>'archived'\) = 'false'/);
+  });
+
+  // Only the scheduled sweep can bound the read: it reconciles the stalest few and rotates through the
+  // rest, while a realtime sweep also carries whatever an earlier sweep left pending. A branch-narrowed
+  // sweep must not be bounded either, or the limit is spent on rows the branch filter then discards.
+  // The order mirrors selectReconciliationBatch: a workflow an unfinished sweep left behind goes first,
+  // then the one waiting longest, then the one attempted least recently — and a never-attempted workflow
+  // sorts ahead of every attempted one, because reconciliationStaleness reads null as 0.
+  it('bounds the scheduled sweep to its batch size in SQL', () => {
+    expect(sweep).toContain("const boundedInSql = trigger === 'cron' && !filter.branches;");
+    expect(sweep).toContain('ORDER BY (workflows.reconcile_pending_since IS NULL), workflows.reconcile_pending_since, workflows.last_reconcile_attempt_at NULLS FIRST, workflows.user_id, workflows.id LIMIT ${reconciliationBatchSize(environment)}');
+  });
+
+  // Leaving the JavaScript copy in place would not cost egress, but it would leave two tests of the same
+  // thing to drift apart, and the SQL one is the only one that can still be trusted.
+  it('no longer repeats the scope test in JavaScript', () => {
+    expect(sweep).not.toContain('filter.repository && workflow.repository !== filter.repository');
+    expect(sweep).not.toContain('filter.installationId && row.github_installation_id !== filter.installationId');
+  });
+});
+
+describe('the pull request projection read', () => {
+  const projection = functionSource(readFileSync(STORE_SOURCE, 'utf8'), 'projectPullRequestWebhook');
+
+  // This read had the same shape as the sweep's: every payload for every user, then a repository test in
+  // JavaScript. It runs on every pull_request delivery, which is the event class that fires most often
+  // during a review, so it paid a full table read to write at most a handful of stage state rows.
+  it('applies the pull request scope in SQL rather than after the read', () => {
+    expect(projection).toContain("WHERE (workflows.payload->>'archived') IS DISTINCT FROM 'true' AND (workflows.payload->>'repository') = ${pull.repository}");
+  });
+
+  // matchingWorkflowStages still tests the repository per stage, because it is what pairs a stage with a
+  // branch pair; the SQL test only decides which rows have to be read at all.
+  it('keeps the per-stage match that pairs a stage with the branches', () => {
+    expect(projection).toContain('matchingWorkflowStages(');
+  });
+});
+
 describe('shared reads within one inbox request', () => {
   const source = readFileSync(STORE_SOURCE, 'utf8');
   const handler = readFileSync(new URL('../[action].ts', import.meta.url), 'utf8');

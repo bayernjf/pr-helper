@@ -1,9 +1,9 @@
 # Supabase Egress 与多用户扩展方案
 
 > 创建日期：2026-08-21
-> 最后更新：2026-08-21（新增《实测：扫掠频率与 webhook 事件分布》《需求澄清：事件驱动，不是无人值守》《第二轮：按真实需求降配（A1 / A2 / A3）》）
+> 最后更新：2026-08-21（新增《实测：扫掠频率与 webhook 事件分布》《需求澄清：事件驱动，不是无人值守》《第二轮：按真实需求降配（A1 / A2 / A3）》《第三轮：把过滤与批次下推到 SQL》《数据建模债》《化债方案》）
 > 适用范围：PR Helper 的 Supabase 出站流量、看板轮询、状态投影、历史数据读取和多用户扩展。
-> 当前状态：三刀已落地（`1e5c6758` / `2b81be2c` / `98b5d245`）；第二轮 A1 / A2 / A3 已落地（`e65daa6c` / `b51bcaed` / `538a33eb`），投影约 1.71 GB/月，待部署后核对。
+> 当前状态：三刀已落地（`1e5c6758` / `2b81be2c` / `98b5d245`）；第二轮 A1 / A2 / A3 已落地（`e65daa6c` / `b51bcaed` / `538a33eb`），投影约 1.71 GB/月，待部署后核对；第三轮（SQL 下推）已落地（`7b3a7e03` / `a1054240` / `dfc9491c`），迁移 034 已应用；第四、五轮（数据建模化债）已记录方案、未开始。
 
 ## 背景
 
@@ -95,7 +95,7 @@
 
 前面三刀只动了浏览器发起的读取。2026-08-21 进一步查了服务端常驻负载，发现它的量级和浏览器同级甚至更大。
 
-`reconcileWorkflowStages` 每次都在 [`api/_lib/workflows-store.ts:2121`](../api/_lib/workflows-store.ts) 无条件读整张 `pr_helper_workflows`（无 `WHERE`、无 `LIMIT`），过滤全在 JS 里做，最后只取 `RECONCILE_WORKFLOW_BATCH_SIZE = 8` 条。[`projectPullRequestWebhook`](../api/_lib/workflows-store.ts) 在 `:1497` 同样。所以**每一次扫掠都要付一份全表 payload 的出站量**，当前 35 个流程 = 71.3 kB。
+`reconcileWorkflowStages` 每次都在 [`api/_lib/workflows-store.ts:2121`](../api/_lib/workflows-store.ts) 无条件读整张 `pr_helper_workflows`（无 `WHERE`、无 `LIMIT`），过滤全在 JS 里做，最后只取 `RECONCILE_WORKFLOW_BATCH_SIZE = 8` 条。[`projectPullRequestWebhook`](../api/_lib/workflows-store.ts) 在 `:1507` 同样。所以**每一次扫掠都要付一份全表 payload 的出站量**，当前 35 个流程 = 71.3 kB。
 
 近 7 天 `reconciliation_runs` 的扫掠频率：
 
@@ -401,6 +401,190 @@ A3 落地后，浏览器侧月出站降到约 247 MB，第四步（把 143 kB �
 
 需要记录在案：`:2121` 的全表读在多用户下是**平方级**的——扫掠次数随流程总数增长（webhook 主导），每次读取量也随流程总数增长。10 万日活 × 20 流程 = 200 万行时单次扫掠约 4 GB，函数会先超时，出站量根本轮不到成为第一个坏掉的东西。A1 / A2 只降低频率，**没有修正这个读取模式**。把过滤和批量下推到 SQL 是对外开放前的硬前置，与本轮三项独立。
 
+## 第三轮：把过滤与批次下推到 SQL（O(U²W) → O(U)）
+
+> 2026-08-21 评估并落地。这一轮与 A1 / A2 / A3 的性质不同：前两轮降的是**频率**，这一轮改的是**读取模式**。它是对外开放前的硬前置，单用户下收益有限。
+
+### 实测：payload 规模与过滤选择性
+
+| 指标 | 值 |
+| --- | --- |
+| workflow 行数 | 35（1 个用户） |
+| payload 平均 JSON 字节 | 2014 B（最大 5043 B） |
+| 全表读一次 | 约 71 kB |
+| 不同仓库数 | 33 |
+| 每仓库平均 workflow 数 | **1.06（最大 3）** |
+| archived 占比 | 0 |
+| 有 stage 以 `main` 为 target | **32 / 35** |
+
+最后两行决定了这一轮该做哪一半、不该做哪一半。
+
+### 成本模型
+
+两个读点都是全表：`reconcileWorkflowStages`（[`api/_lib/workflows-store.ts:2121`](../api/_lib/workflows-store.ts)）与 `projectPullRequestWebhook`（[`api/_lib/workflows-store.ts:1507`](../api/_lib/workflows-store.ts)），都先 `SELECT ... payload ... JOIN pr_helper_users` 不带 WHERE、不带 LIMIT，再在 JS 里过滤。
+
+设用户数 `U`、人均流程 `W`、单 payload `p ≈ 2 kB`：
+
+- **单次全表读 = U × W × p**，与「是谁触发的」无关——任何人的一次 push 都要读所有人的所有 payload。
+- **每天扫掠次数 ≈ 618 × U + 48**，webhook 部分随用户线性增长（618 为 A 轮后的单用户预估），cron 那 48 次是全局的。
+
+两者相乘即 **O(U² × W)**。
+
+| 规模 | 单次读 | 每天扫掠 | 月出站量 |
+| --- | --- | --- | --- |
+| 1 用户 / 20 流程 | 40 kB | 666 | 0.8 GB |
+| 100 用户 / 20 流程 | 4 MB | 61,848 | 7.4 TB |
+| 1,000 用户 / 20 流程 | 40 MB | 618,048 | 742 TB |
+
+1,000 用户时是每秒 7 次、每次读 40 MB：函数会先超时、连接池（`max: 4`）会先耗尽，**账单不是第一个坏掉的东西**。这与《多用户场景下真正的阻塞》一节的结论一致。
+
+### 修正后的成本
+
+webhook 每次都携带 `repository` 与 `installationId`（[`api/github/webhook.ts:40`](../api/github/webhook.ts)），两者当前都在 JS 里判：`installationId` 本来就是列（`users.github_installation_id`），`repository` 是 `payload->>'repository'`。由于**每仓库只有 1.06 个 workflow**，把这两个条件下推后单次读从 35 行降到约 1 行，**且不再随 U 或 W 增长**。
+
+| 规模 | 月出站量（修后） | Supabase 成本 |
+| --- | --- | --- |
+| 100 用户 | 7.4 GB | Pro $25（含 250 GB） |
+| 1,000 用户 | 74 GB | Pro $25 |
+| 10,000 用户 | 740 GB | $25 + 490 GB × $0.09 ≈ $69 |
+| 100,000 用户 | 7.4 TB | 约 $670 |
+
+cron 路径同理：`ORDER BY ... LIMIT 8` 下推后全局每月约 23 MB，可忽略。
+
+**真正买到的是复杂度从 O(U²W) 降成 O(U)，不是省下几个 GB。**
+
+### 改动范围（已完成）
+
+1. `reconcileWorkflowStages`（`:2121`）：加 `WHERE payload->>'archived' IS DISTINCT FROM 'true'` 及 repository / installation 条件；cron 路径加 `ORDER BY (reconcile_pending_since IS NULL), reconcile_pending_since, last_reconcile_attempt_at NULLS FIRST LIMIT 8`；realtime 路径的 pending 补扫拆成第二条窄查询。
+2. `projectPullRequestWebhook`（`:1507`）：加 repository 与 archived 条件。
+3. 新迁移（034）：`(payload->>'repository')` 表达式索引。
+
+按 AGENTS.md 规则 2，两处读点各自先写失败测试再实现：迁移 `7b3a7e03`，扫掠 `de880223` + `a1054240`，PR 投影 `1a88e082` + `dfc9491c`。
+
+### 实施中的两个发现
+
+**批次下推不能施加于分支收窄的扫掠。** 最初的设计只按 `trigger === 'cron'` 决定是否带 `LIMIT`，但 SQL 的 LIMIT 在分支过滤**之前**生效——若某次 cron 调用带了 `branches`，这 8 个名额会被随后被分支条件丢掉的行占满，导致本该校准的流程一轮都轮不到。实现改成 `const boundedInSql = trigger === 'cron' && !filter.branches`。当前唯一的 cron 调用方 [`api/cron/reconcile.ts:14`](../api/cron/reconcile.ts) 传的是 `{}`，所以这是防御性的，但 `trigger` 的默认值就是 `'cron'`，条件必须写明。
+
+**`selectReconciliationBatch` 保留调用。** SQL 已经限到 8 条，该函数因此退化为按原序透传。删掉它会连带失去它的单测（即《风险》里那条「可测性下降」真正会发生的地方），保留调用则让排序语义仍有纯函数测试守着，而 SQL 的 `ORDER BY` 由源码形状测试守着，两层都在。
+
+### 风险
+
+- **批次排序的 tiebreak 会变。** `selectReconciliationBatch`（`:2076`）当前用原数组下标兜底，SQL 需换成显式 `user_id, id`。行为差异很小但真实存在。
+- **可测性下降。** `selectReconciliationBatch` / `mergeCatchUpCandidates` 现在是纯函数且有单测覆盖，逻辑搬进 SQL 后出了单测射程，需要改用集成或源码形状测试。这是真实代价。
+- **payload 结构校验留在 JS。** SQL 判不了 `isStoredWorkflow`，畸形行会被选中后再在 JS 丢掉，可能白占一个 LIMIT 名额。影响可忽略。
+
+### 不做：把分支条件下推到 SQL
+
+`filter.branches` 不下推，理由是实测数据而非工程偏好：
+
+- **32 / 35 个 workflow 有 stage 以 `main` 为 target**，而 `reconciliationBranchScope`（`:1177`）遇到 target 命中即返回 `'all'`。因此一个碰到 `main` 的投递选择性约 91%，等于没筛。
+- repository 条件已把结果压到约 1 行，再窄没有空间。
+- 代价却是要在 SQL 里重写一遍 `branchRuleMatches`（`:1131`）的通配语义（`foo*` 前缀匹配），两份实现必然漂移。
+
+**收 97%，放掉最难的那 3%。**
+
+## 数据建模债：`payload` 是前端对象的整体序列化
+
+> 2026-08-21 记录。前三轮砍频率、第三轮砍范围，都没有触及这一层；它是「当时正确、规模变了才成为债」的典型，不是失误。
+
+### 现状
+
+```sql
+CREATE TABLE pr_helper_workflows (
+  id text NOT NULL,
+  user_id uuid NOT NULL REFERENCES pr_helper_users(id),
+  payload jsonb NOT NULL,        -- 全部业务数据都在这一列
+  created_at timestamptz, updated_at timestamptz,
+  PRIMARY KEY (user_id, id)
+);
+```
+
+见 [`db/migrations/001_users_and_workflows.sql:10`](../db/migrations/001_users_and_workflows.sql)。整张表只有 `user_id` 与 `id` 是真正的列；流程名、仓库、每个 stage 的源/目标分支、自动化开关、AI 提示词、部署配置、重试策略全部在 `payload` 里。而 `payload` 装的不是为数据库设计的结构，是前端 `Workflow` 对象（[`src/lib/workflow.ts:26`](../src/lib/workflow.ts)）的整体序列化。
+
+### 三个后果
+
+**一、数据库查不了。** 「哪些流程涉及分支 X」这个问题埋在 `payload->'stages'` 数组里，而且 `source` 可以是 `feature/*` 通配规则。第三轮只能给 `repository` 加表达式索引，因为它恰好在顶层且是等值比较；分支条件被明确放弃下推，根因就在这里。
+
+**二、改一个字段要重写整行。** 改一个自动化开关也要读出整条 payload、改完整条写回。实测某条 payload 的 `version` 已是 86，即被整体重写过 86 次。
+
+**三、同一份数据存了很多遍。** 实测：
+
+| 指标 | 值 |
+| --- | --- |
+| 全表 payload | 71 kB / 35 行 |
+| `generationRule.content` 副本数 | 44 |
+| 其中不同内容的份数 | **1** |
+| 副本合计字节 | 43 kB |
+| 占全表 payload | **61%** |
+
+61% 是保守下限——JSON 里 `\n` 转义成两个字符，线上实际字节更多。一份 3 stage 的真实 payload 把同一段提示词一字不差地存了三遍。
+
+### 化债的工作量基准（实测）
+
+- 10 处 `SELECT` 读 `payload`，9 处 `INSERT` / `UPDATE` 写 `payload`。
+- `storedWorkflowFromPayload` 只在 `api/_lib/workflows-store.ts` 与 `api/_lib/preflight.ts` 被调用，解析入口是收敛的。
+- `workflowSaveConflicts`（[`api/_lib/workflows-store.ts:1395`](../api/_lib/workflows-store.ts)）的乐观锁依赖 `payload` 内的 `version`，拆表时它必须先提成列。
+- AGENTS.md 规则 1 规定 `src/lib/workflow.ts` 是真相来源，任何拆表都不能让服务端出现第二套互相漂移的定义。
+
+## 化债方案
+
+分两轮，**第四轮可以单独做，不依赖第五轮**。
+
+### 第四轮：提示词去重（局部改动，收益 61%）
+
+新增一张小表，把重复的内容存一次：
+
+```sql
+CREATE TABLE pr_helper_generation_rules (
+  user_id uuid NOT NULL REFERENCES pr_helper_users(id) ON DELETE CASCADE,
+  content_hash text NOT NULL,          -- sha256(content)，天然幂等
+  name text NOT NULL,
+  content text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, content_hash)
+);
+```
+
+stage 里的 `automation.generationRule` 从 `{ name, content, capturedAt }` 改为 `{ name, contentHash, capturedAt }`。
+
+**关键约束（实测得出）**：44 个 stage 的 `capturedAt` 有 44 个不同值——它是每个 stage 独立的快照时间，**必须留在 stage 上**，只有 `content` 能去重。整体替换 `generationRule` 会丢掉这个信息。
+
+- **收益**：单次全表读 71 kB → 约 28 kB（−61%）。第三轮之后 webhook 路径已只读 1~3 行，所以这一轮在单用户下主要作用于 cron 那 48 次/天，绝对值约 100 MB/月；多用户下它与用户数成正比。
+- **过渡期兼容**：读路径先取 `contentHash`，取不到时回退读内嵌 `content`；写路径只写 `contentHash`。回填完成后再删除回退分支。
+- **风险**：入队时要把内容取出来交给 AI（[`api/_lib/workflows-store.ts:102`](../api/_lib/workflows-store.ts) 与 `:156` 的 `generationRule: input.generationRule` / `automation.generationRule.content`），取不到内容会让自动创建 PR 静默失败。按 AGENTS.md 规则 2，先写「内容缺失时入队必须报错而不是写空规则」的失败测试。
+- **不受影响**：自动化 drain 读的是 `payload->'recoveryPolicy'->>'cooldownSeconds'`，与提示词无关。
+- **验收**：单次全表 payload 字节降到约 28 kB；沙箱仓库端到端仍能生成带正确标题与描述的 PR；`pr_helper_generation_rules` 行数远小于 stage 数。
+
+### 第五轮：拆成关系表（终局，对外开放前）
+
+目标结构：
+
+```sql
+workflows        (user_id, id, name, repository, archived, version, position, ...)
+workflow_stages  (user_id, workflow_id, stage_id, stage_index, source_rule, target,
+                  auto_create, auto_merge, trigger_min_commits, rule_content_hash, ...)
+workflow_deployments (user_id, workflow_id, target, provider, environment, ...)
+```
+
+按 **expand → migrate → contract** 四步走，每步都可独立部署、独立回滚：
+
+1. **加表并双写。** 新表与 `payload` 同时写，`payload` 仍是唯一真相；读路径完全不变。此步不改任何行为，只增加写入量。
+2. **回填历史。** 一次性迁移把现有 payload 展开进新表，并加一个一致性校验查询（新表还原出的对象与 payload 逐字段相等）。
+3. **读切换。** 扫掠与投影改读列而不读 `payload`；`version` 提成列，`workflowSaveConflicts` 改读列。此步之后分支条件才能真正下推：`WHERE stages.source_rule = ANY(...)` 可走普通索引，第三轮里被放弃的那一半随之成立。
+4. **收缩。** 服务端不再解析 `payload`，只保留浏览器同步所需的最小载体（或彻底移除）。
+
+- **收益**：单次扫掠字节**不再随流程总数增长**，分支条件可索引，改一个开关是一行 `UPDATE` 而非整行重写。这是把 O(U) 进一步压到「与数据量无关」的唯一途径。
+- **主要风险**：`src/lib/workflow.ts` 是前后端共享的真相定义，拆表意味着服务端要有一层行↔对象映射，两边可能漂移。缓解手段是一个往返恒等测试（对象 → 行 → 对象 必须逐字段相等），并在第 2 步的校验查询里对全量数据跑一遍。
+- **次要风险**：`stage_index` 与 `stageId` 的双重身份已经由迁移 018 / 019 处理过，拆表要沿用既有的稳定身份规则，不能再引入第三套。
+- **工作量**：数周级，不是两天级。10 处读、9 处写全部涉及。
+- **验收**：`EXPLAIN` 显示分支条件走索引；把流程数翻倍后单次扫掠字节基本持平；所有既有单测与 E2E 不变通过。
+
+### 明确不做
+
+- **不做一次性大爆炸迁移。** 第五轮必须按四步走；跳过双写阶段意味着一旦读切换出错就没有回退路径。
+- **不做长期双真相。** 双写只是过渡态，第 4 步必须真正收缩，否则等于永久维护两套结构，比现在更差。
+- **不为省 61% 而提前拆表。** 第四轮用一张小表就能拿到那 61%，与第五轮解耦；把两件事捆在一起会让一个数周级重构挡住一个数天级收益。
+
 ## 推荐实施顺序
 
 > 2026-08-21 按实测字节数重排。原顺序（`/api/board` 优先）已作废，理由见《实测：一次 `/api/inbox` 的出站字节》。
@@ -417,7 +601,11 @@ A3 落地后，浏览器侧月出站降到约 247 MB，第四步（把 143 kB �
 
 **第二轮 A1 / A2 / A3（已完成，提交 `e65daa6c` / `9e11bce8` + `b51bcaed` / `208d5c5f` + `538a33eb`）**：见《第二轮：按真实需求降配》。按 A1 → A2 → A3 拆成三个独立提交；A1 的迁移由使用者自己应用。三项合计把 3.60 GB/月 压到约 1.71 GB/月。A2 零功能损失，A3 需要先确认「看板不自动刷新」可接受，否则退化为把 `POLL_INTERVAL_MS` 改成 120 秒。
 
-**对外开放前的硬前置**：把 `:2121` 与 `:1497` 的全表读改成 SQL 侧过滤 + 批量。与本轮三项独立，不降低频率而是修正读取模式；多用户下这是平方级增长的来源。
+**第三轮（对外开放前的硬前置，已完成，提交 `7b3a7e03` / `a1054240` / `dfc9491c`）**：把 `:2121` 与 `:1507` 的全表读改成 SQL 侧过滤 + 批量，范围、成本模型与风险见《第三轮：把过滤与批次下推到 SQL》。与前两轮独立，不降低频率而是修正读取模式；多用户下这是平方级增长的来源。单用户下收益有限，因此不必赶在宽限期之前做。
+
+**第四轮（提示词去重，未开始）**：见《化债方案 · 第四轮》。局部改动，拿掉全表 payload 的 61%，与第五轮解耦。单用户下绝对值约 100 MB/月，不紧急。
+
+**第五轮（拆成关系表，对外开放前）**：见《化债方案 · 第五轮》。数周级，按 expand → migrate → contract 四步走。第三轮放弃的分支条件下推要等它落地才成立。
 
 3. 首页自动化动作改为摘要，不读取历史（当前 `unfinishedOnly` 已经在做，`AUTOMATION_ACTION_VIEW_LIMIT` 值得复核）。
 4. 把历史数据从轮询里摘出去（events / timeline / runs / deployment_runs 共 143 kB，24%）——即原方案的 `/api/board` 与按需加载。**收益最小、改动最大**；A3 落地后浏览器侧只剩约 247 MB/月，此步优先级进一步下降，除非要面向多用户开放。
@@ -455,6 +643,15 @@ A3 落地后，浏览器侧月出站降到约 247 MB，第四步（把 143 kB �
 - 无状态变化时，轮询响应接近空 body 或 304。
 - 多个打开的标签页不会产生重复校准。
 - Supabase Egress 在连续运行一周后明显下降。
+
+第三轮（SQL 下推）的验收标准（迁移 034 应用后核对）：
+
+- 一次 webhook 触发的校准只读取该仓库相关的 workflow 行，而非全表：`EXPLAIN (ANALYZE)` 显示走 `(payload->>'repository')` 索引，`rows` 在个位数。
+- cron 扫掠单次读取行数等于 `RECONCILE_WORKFLOW_BATCH_SIZE`（当前 8），不再是全表行数。
+- 批次轮转仍然公平：`reconcile_pending_since` 非空的流程优先，其次按 `last_reconcile_attempt_at` 由旧到新，从未校准过的排最前。
+- archived 流程仍然完全不参与任何扫掠。
+- 沙箱端到端：达到阈值的 commit 仍在秒级自动创建 PR，CI 转绿后仍自动合并。
+- 单次全表读的 71 kB 不再随流程总数增长——增加流程数后重测单次读取字节应基本持平。
 
 ## 临时运营建议
 
