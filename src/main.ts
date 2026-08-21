@@ -77,6 +77,7 @@ let statuses: StepStatus[] | null = null;
 let refreshOnNextDetail = false;
 let overviewSnapshotRefreshed = false;
 let overviewSnapshotRefreshing = false;
+let detailStatusRefreshing = false;
 let overviewRefreshOnFocusBound = false;
 let overviewScrollControlsBound = false;
 let refreshOnFocusBound = false;
@@ -2133,8 +2134,8 @@ function detail() {
   }));
   if (!refreshOnFocusBound) {
     refreshOnFocusBound = true;
-    window.addEventListener('focus', () => { if (screen === 'detail') void refreshStatuses(); });
-    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && screen === 'detail') void refreshStatuses(); });
+    window.addEventListener('focus', () => { if (screen === 'detail' && !detailStatusRefreshing) void refreshStatuses(); });
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && screen === 'detail' && !detailStatusRefreshing) void refreshStatuses(); });
   }
   document.querySelectorAll<HTMLButtonElement>('[data-create-pr]').forEach(button => button.addEventListener('click', () => showCreateDialog(Number(button.dataset.createPr))));
   document.querySelectorAll<HTMLInputElement>('[data-detail-auto-create-stage]').forEach(input => input.addEventListener('change', () => {
@@ -2579,7 +2580,16 @@ async function resolveDetailSource(owner: string, name: string, sourceRule: stri
   }));
   return openPulls.find(candidate => candidate.pull)?.source || matches[0];
 }
+// A tab switch fires both return-to-tab listeners, and both are needed: one covers a tab switch, the
+// other a window switch. Measured in production 2026-08-22, coming back issued two identical reads in
+// the same second. The flag is set here rather than in the listeners so that a refresh the user pressed
+// is never the one dropped — only an automatic one that duplicates a read already running.
 async function refreshStatuses(renderDetail = true, refreshProjectedStates = true) {
+  detailStatusRefreshing = true;
+  try { await loadDetailStatuses(renderDetail, refreshProjectedStates); }
+  finally { detailStatusRefreshing = false; }
+}
+async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = true) {
   if (!active) return;
   const button = document.querySelector<HTMLButtonElement>('#refresh-status');
   if (button) { button.disabled = true; button.textContent = t('detail.refresh.loading'); }
