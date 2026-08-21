@@ -1270,6 +1270,16 @@ a.account-menu-item {
   font: 500 .72rem Manrope;
 }
 
+.timeline-rule-outdated {
+  display: flex;
+  flex-basis: 100%;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--text-warning);
+  font: 600 .72rem Manrope;
+}
+
 .auto-create-threshold {
   width: 42px !important;
   height: 30px !important;
