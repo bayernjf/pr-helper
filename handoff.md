@@ -1,6 +1,6 @@
 # PR Helper Handoff
 
-> 最后更新：2026-08-21（Supabase Free Plan 出现 Egress 超额，`pr-helper` 项目占 6.28GB / 5GB；已按实测字节数定位到两个来源并重排优先级——**第一刀「详情页轮询隐藏即停 + 60 秒」已完成（`1e5c6758`）**，第二刀「请求内去重」待做，`/api/board` 拆分降为可选。完整方案见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
+> 最后更新：2026-08-21（Supabase Free Plan 出现 Egress 超额，`pr-helper` 项目占 6.28GB / 5GB；已按实测字节数定位并落地三刀——轮询（`1e5c6758`）、请求内去重（`2b81be2c`）、去掉无人读取的 `stage_snapshot`（`98b5d245`），单次 `/api/inbox` 实测 594.3 → 274.0 kB、前台 71.3 → 16.4 MB/小时，`/api/board` 拆分降为可选。完整方案见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 > 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
 
@@ -20,7 +20,7 @@
 - 当前根因判断：高频 `/api/inbox` 同时返回看板状态、recent events、timeline、workflow runs、deployment runs、audit 和 automation history；浏览器 30 秒轮询及长时间打开页面会重复拉取低频历史数据，多用户下不可扩展。
 - **2026-08-21 已实测出站字节，权重与原判断不同**（明细见方案文档《实测：一次 `/api/inbox` 的出站字节》）：一次 `/api/inbox` 约 **588 kB**，其中 `pr_helper_workflows.payload`（35 行、70.8 kB）在**同一次请求内被 5 个 list 函数各取一遍**，占 354 kB；重复的那 4 遍即 283 kB，占整次请求 48%。历史数据（events / timeline / runs / deployment_runs）合计只有 143 kB / 24%。按 30 秒轮询折算约 **70 MB/小时**，5 GB ≈ 71 小时页面打开时间——每天前台用 4 小时，一个月即到量，6.28 GB 无需多用户即可解释。另查：`pg_stat_statements` 已装但 `prh_readonly` 读不到（schema `extensions` 权限拒绝），故用字节 × 频率推算。
 - **只有详情页的轮询不停**：首页 `refreshOverviewSnapshot`（[`src/main.ts:400`](src/main.ts)）开头本来就有 `document.visibilityState !== 'visible'` 即返回，挂后台是 0 请求；详情页 [`src/main.ts:2140`](src/main.ts) 的 `pollTimer` 没有这道判断，挂后台每 30 秒既直连 GitHub 又拉一次 588 kB。**此前本文档写成「首页也不停、挂机一晚 847 MB」是错的，已按源码更正。**
-- **修正后的顺序（原「先拆 `/api/board`」已作废）**：**B 详情页轮询隐藏即停 + 间隔 60 秒 —— 已完成（`1e5c6758`）**，前台 70 → 35 MB/小时，详情页挂后台归零，两屏共用 `POLL_INTERVAL_MS = 60_000`；**A 请求内去重（待做）**，handler 里先取一次 payload 与 stage_states 传进 list 函数，单次 -48%，接口与 UI 行为零变化。B + A 合计约 70 → **18 MB/小时（当前的 1/4）**。`/api/board` 拆分与按需加载降为第 4 步，等 B + A 观察一周后再决定是否需要。
+- **修正后的顺序（原「先拆 `/api/board`」已作废）**：三刀均已落地——**B 详情页轮询隐藏即停 + 间隔 60 秒**（`1e5c6758`，两屏共用 `POLL_INTERVAL_MS = 60_000`）；**A 请求内去重**（`2b81be2c`，handler 传一个按请求的 `VisibleWorkflowReads` memo 进 list 函数，payload 与 stage_states 各只读一次）；**去掉无人读取的 `stage_snapshot`**（`98b5d245`，`INSERT` 保留，列和历史数据仍在）。同一份生产数据实测：单次 **594.3 → 274.0 kB（−53.9%）**，前台 **71.3 → 16.4 MB/小时（原来的 23%）**，详情页挂后台归零，5 GB 可支撑的前台时长从约 70 小时升到约 312 小时。逐项对比见方案文档《实测：三刀落地后的对比》。`/api/board` 拆分与按需加载降为第 4 步，等观察一周后再决定是否需要。
 - 已新增方案文档 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)，并更新 [`docs/current-state.md`](docs/current-state.md)。**代码尚未开工**；宽限期到 2026-09-20，上线前的保底手段是临时开 Supabase 按量付费或升一档（保险，非替代）。
 
 ## 2026-08-14 实时校准修复（已部署生产）
@@ -245,7 +245,7 @@ AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 P
 
 在上述生产验收通过后，建议顺序为：
 
-1. Supabase Egress 与多用户读取扩展（当前第一优先级）：「详情页轮询隐藏即停 + 间隔 60 秒」已完成（`1e5c6758`），下一步做「请求内去重」（handler 预取 payload / stage_states 传进 list 函数）。`/api/board` 拆分与历史数据按需加载降为可选第 4 步，等前两刀观察一周后再决定。理由与实测字节见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)。
+1. Supabase Egress 与多用户读取扩展（当前第一优先级）：三刀已落地（`1e5c6758` / `2b81be2c` / `98b5d245`），单次 `/api/inbox` 实测 594.3 → 274.0 kB、前台 71.3 → 16.4 MB/小时。**待办只剩部署后核对**：DevTools 量一次响应体与 60 秒间隔、确认详情页切后台不再发请求，再看一周 Supabase Usage 日增量。`/api/board` 拆分与历史数据按需加载为可选第 4 步，届时再决定。理由与实测字节见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)。
 2. 瞬时失败的重排路径已实现，等一次真实的瞬时故障做生产验证。reconciliation 的调用预算按小时复核后只占基线的 18%–34%，已改为阈值观察。
 3. 后台自动创建 PR 与自动合并：生产已跑通；门禁为红与幂等命中两项均已在沙箱验完（前者顺带修掉 ruleset 审批不可见），自动化验收清单无未验项。
 4. 浏览器 E2E：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影已有真实 delivery 证据。
