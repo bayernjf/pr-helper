@@ -6,7 +6,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, generationRuleHashes, hydrateGenerationRules, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -2260,5 +2260,40 @@ describe('a generation rule is stored once and referenced by hash', () => {
     expect(upsert).toContain('dehydrateGenerationRules');
     expect(upsert).toMatch(/INSERT INTO pr_helper_generation_rules[\s\S]{0,400}ON CONFLICT/);
     expect(upsert.indexOf('INSERT INTO pr_helper_generation_rules')).toBeLessThan(upsert.indexOf('INSERT INTO pr_helper_workflows'));
+  });
+
+  // 浏览器拿到只有 hash 的 stage 时，会按同名规则从本地列表找回内容（src/lib/generation-rules.ts）；
+  // 本地列表里没有同名规则就当作「没有规则」，再保存一次 automation 就把配置静默丢了。
+  // 服务端有权威副本，读列表时填回来即可，代价是每个请求多读该用户的规则行（当前 1 行）。
+  const hash = generationRuleContentHash(rule.content);
+  const hashedStage = { source: 'feature', target: 'dev', stageId: 's1', automation: { autoCreatePullRequest: true as const, executionMode: 'server' as const, generationRule: { name: rule.name, capturedAt: rule.capturedAt, contentHash: hash } } };
+  const hashed = { ...workflow, stages: [hashedStage] };
+
+  it('fills a hash-only rule back from the rules table', () => {
+    const hydrated = hydrateGenerationRules(hashed as never, 'user-1', new Map([[`user-1:${hash}`, rule.content]]));
+    const automation = hydrated.stages[0].automation as { generationRule: Record<string, unknown> };
+    expect(automation.generationRule).toEqual({ name: rule.name, capturedAt: rule.capturedAt, contentHash: hash, content: rule.content });
+  });
+
+  // 规则是按 (user_id, content_hash) 存的，共享流程属于它的拥有者；用读者的 id 去查会查空，
+  // 填回错误内容比不填更糟，所以键里必须带 user_id。
+  it('does not fill a rule that belongs to another user', () => {
+    const hydrated = hydrateGenerationRules(hashed as never, 'reader', new Map([[`user-1:${hash}`, rule.content]]));
+    expect((hydrated.stages[0].automation as { generationRule: { content?: string } }).generationRule.content).toBeUndefined();
+    expect(hydrated).toBe(hashed);
+  });
+
+  it('leaves a stage that already carries the content alone', () => {
+    expect(hydrateGenerationRules(workflow as never, 'user-1', new Map([[`user-1:${hash}`, '别的内容']]))).toBe(workflow);
+  });
+
+  it('asks only for the hashes the payloads actually reference', () => {
+    expect(generationRuleHashes(hashed as never)).toEqual([hash]);
+    expect(generationRuleHashes(workflow as never)).toEqual([]);
+  });
+
+  it('is applied by the browser list read', () => {
+    const list = functionSource(source, 'listWorkflows');
+    expect(list).toContain('hydrateGenerationRules');
   });
 });
