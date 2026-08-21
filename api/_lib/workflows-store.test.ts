@@ -444,6 +444,52 @@ describe('stage decision affordances', () => {
   });
 });
 
+// A dynamic source rule accumulates one state row per branch it ever matched, and nothing deletes a row
+// while it still matches the rule. Measured in the sandbox 2026-08-22: three rows left by branches that
+// were deleted after their pull requests were closed unmerged held the converging stage locked from
+// 2026-08-19 onwards, with no operation available to clear them. A closed unmerged route is an abandoned
+// route, so the gate has to skip it — but only merged routes can satisfy the gate, so a set of nothing
+// but abandoned routes stays locked.
+describe('converging gate over abandoned routes', () => {
+  const workflow = {
+    id: 'flow-1',
+    name: 'Release',
+    repository: 'octo/app',
+    stages: [
+      { source: 'feature/*', target: 'dev', stageId: 'stage-feature' },
+      { source: 'fix/test', target: 'dev', stageId: 'stage-fix' },
+      { source: 'dev', target: 'main', stageId: 'stage-dev', waitFor: [0, 1] },
+    ],
+  };
+  const converging = { stage_id: 'stage-dev', pull_state: 'none', checks_state: 'unknown', approvals: 0, required_approvals: 0, mergeable: null, mergeable_state: null, ahead_by: 3 } as Parameters<typeof deriveStageDecision>[2];
+  const merged = (stage_id: string) => ({ stage_index: 0, stage_id, pull_state: 'merged', checks_state: 'success' });
+  const abandoned = (stage_id: string) => ({ stage_index: 0, stage_id, pull_state: 'closed', checks_state: 'success' });
+
+  it('unlocks when every live upstream route merged and the rest were abandoned', () => {
+    expect(deriveStageDecision(workflow, 2, converging, [
+      merged('stage-feature'), abandoned('stage-feature'), abandoned('stage-feature'),
+      merged('stage-fix'),
+      { stage_index: 2, stage_id: 'stage-dev', pull_state: 'none', checks_state: 'unknown' },
+    ])).toMatchObject({ kind: 'ready-to-create', canCreateNext: true });
+  });
+
+  it('stays locked when a dependency has nothing but abandoned routes', () => {
+    expect(deriveStageDecision(workflow, 2, converging, [
+      abandoned('stage-feature'),
+      merged('stage-fix'),
+      { stage_index: 2, stage_id: 'stage-dev', pull_state: 'none', checks_state: 'unknown' },
+    ])).toMatchObject({ kind: 'locked', canCreateNext: false });
+  });
+
+  it('still waits on a live upstream route that has not opened a pull request yet', () => {
+    expect(deriveStageDecision(workflow, 2, converging, [
+      merged('stage-feature'), { stage_index: 0, stage_id: 'stage-feature', pull_state: 'none', checks_state: 'unknown' },
+      merged('stage-fix'),
+      { stage_index: 2, stage_id: 'stage-dev', pull_state: 'none', checks_state: 'unknown' },
+    ])).toMatchObject({ kind: 'locked', canCreateNext: false });
+  });
+});
+
 describe('actionable stage projection', () => {
   const decision = (overrides: Record<string, unknown>) => ({ kind: 'merged', actionable: false, canCreateNext: false, message: '已合并且门禁通过', ...overrides }) as Parameters<typeof actionableStageEntry>[0];
 

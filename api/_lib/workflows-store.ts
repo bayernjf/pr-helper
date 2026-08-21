@@ -1431,7 +1431,11 @@ function stageIsUnlocked(workflow: StoredWorkflow, stageIndex: number, states: {
   const waitFor = workflow.stages[stageIndex]?.waitFor;
   if (waitFor?.length) return waitFor.every(dependency => {
     const dependencyId = workflow.stages[dependency]?.stageId;
-    const dependencies = dependencyId ? states.filter(state => state.stage_id === dependencyId) : [];
+    // A dynamic source rule keeps one row per branch it ever matched and nothing deletes a row while the
+    // branch name still matches, so a route whose pull request was closed unmerged would hold this stage
+    // locked forever. Such a route is abandoned, not pending. Only a merged route can satisfy the gate,
+    // so a dependency left with nothing but abandoned routes still fails it.
+    const dependencies = dependencyId ? states.filter(state => state.stage_id === dependencyId && state.pull_state !== 'closed') : [];
     return dependencies.length > 0 && dependencies.every(state => state.pull_state === 'merged' && state.checks_state === 'success');
   });
   const previousId = workflow.stages[stageIndex - 1]?.stageId;
