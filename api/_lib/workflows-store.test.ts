@@ -2134,7 +2134,7 @@ describe('a terminal stage with no new commits stops paying for GitHub reads', (
 describe('a skipped terminal stage still records that it was verified', () => {
   const source = readFileSync(STORE_SOURCE, 'utf8');
   const work = source.slice(source.indexOf('async function reconcileStageWork'), source.indexOf('async function reconcileWorkflowScope'));
-  const settled = work.slice(0, work.indexOf('return { reconciled: false, phases };'));
+  const settled = work.slice(work.indexOf('if (stageReconciliationIsSettled('), work.indexOf('const pull = await phase('));
 
   it('touches updated_at before it returns early', () => {
     expect(settled).toMatch(/UPDATE workflow_stage_states SET updated_at = now\(\)/);
