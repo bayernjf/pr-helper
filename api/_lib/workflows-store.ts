@@ -1573,7 +1573,10 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
     // The payload no longer carries the content, so the rule rows must land first: an enqueue that
     // reaches the hash before the content exists has nothing to resolve.
     for (const rule of dehydrated.rules) await transaction`INSERT INTO pr_helper_generation_rules (user_id, content_hash, content) VALUES (${ownerUserId}, ${rule.contentHash}, ${rule.content}) ON CONFLICT (user_id, content_hash) DO NOTHING`;
-    await transaction`INSERT INTO pr_helper_workflows (id, user_id, payload) VALUES (${savedWorkflow.id}, ${ownerUserId}, ${transaction.json(savedWorkflow)}) ON CONFLICT (user_id, id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`;
+    // name and repository are supplied even though writeWorkflowRows below sets them in this same
+    // transaction: 038 promoted both to NOT NULL, and Postgres checks the proposed tuple before it
+    // resolves ON CONFLICT, so leaving them out fails every save — including one that only updates.
+    await transaction`INSERT INTO pr_helper_workflows (id, user_id, name, repository, payload) VALUES (${savedWorkflow.id}, ${ownerUserId}, ${savedWorkflow.name}, ${savedWorkflow.repository}, ${transaction.json(savedWorkflow)}) ON CONFLICT (user_id, id) DO UPDATE SET name = EXCLUDED.name, repository = EXCLUDED.repository, payload = EXCLUDED.payload, updated_at = now()`;
     await writeWorkflowRows(transaction, ownerUserId, savedWorkflow);
     if (previous) {
       const changedStageIds = previous.stages.flatMap((stage, index) => {
