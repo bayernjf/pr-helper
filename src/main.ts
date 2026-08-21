@@ -3,7 +3,7 @@ import { GitHubRequestError, githubAppApiUrl, githubFetch, mergePullRequestPaylo
 import { buildPrPrompt, shouldAutoGeneratePrMessage, testAiConnection, type AiConfig } from './lib/ai';
 import { streamPrMessage } from './lib/ai-stream';
 import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, githubCompareUrl, githubPullUrl, needsNewPullRequest, statusChanged, summarizeChecks, summarizeGitHubCheckDetails, summarizeGitHubChecks, type GitHubCheckDetail } from './lib/domain';
-import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
+import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, stageGenerationRule, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, selectWorkflowAfterCloudLoad, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
 import { activeWorkflows, archiveWorkflow, archivedWorkflows, restoreWorkflow, addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type StageRouteMode, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
@@ -2141,7 +2141,7 @@ function detail() {
     if (!active) return;
     const stageIndex = Number(input.dataset.detailAutoCreateStage);
     const stage = active.stages[stageIndex];
-    const rule = stage.automation?.generationRule ? { name: stage.automation.generationRule.name, content: stage.automation.generationRule.content } : defaultGenerationRule(generationRules);
+    const rule = stageGenerationRule(stage.automation?.generationRule, generationRules) || (stage.automation?.generationRule ? undefined : defaultGenerationRule(generationRules));
     if (input.checked && (!autoCreatePrerequisites() || !rule)) { input.checked = false; showToast(t('draft.autoCreatePrerequisites')); return; }
     const threshold = Number(document.querySelector<HTMLInputElement>(`[data-detail-auto-create-threshold="${stageIndex}"]`)?.value || active.stages[stageIndex]?.automation?.triggerMinCommits || 1);
     void (async () => {
@@ -2167,7 +2167,7 @@ function detail() {
     if (!active) return;
     const stageIndex = Number(input.dataset.detailAutoCreateThreshold);
     const stage = active.stages[stageIndex];
-    const rule = stage.automation?.generationRule ? { name: stage.automation.generationRule.name, content: stage.automation.generationRule.content } : defaultGenerationRule(generationRules);
+    const rule = stageGenerationRule(stage.automation?.generationRule, generationRules) || (stage.automation?.generationRule ? undefined : defaultGenerationRule(generationRules));
     if (!stage?.automation?.autoCreatePullRequest || !rule) return;
     const threshold = Number(input.value);
     if (!Number.isInteger(threshold) || threshold < 1) { input.value = String(stage.automation.triggerMinCommits || 1); showToast(t('draft.autoCreateThresholdInvalid')); return; }
