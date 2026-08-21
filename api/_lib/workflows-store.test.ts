@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 
 const MIGRATIONS_DIR = new URL('../../db/migrations/', import.meta.url);
@@ -5,7 +6,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, deploymentRowChanged, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -2150,5 +2151,82 @@ describe('a skipped terminal stage still records that it was verified', () => {
   // ③ 的验收看 reconciliation_runs.github_calls，不看这个计数，所以这里报实话就行。
   it('reports the stage as reconciled, so a deferred sweep is not misfiled as degraded', () => {
     expect(settled).toContain('return { reconciled: true, phases }');
+  });
+});
+
+// 44 个阶段全部带 generationRule，44 份 content 加起来 44 528 B，占单次全表读 70 837 B 的 63%——
+// 而其中只有 1 份内容是不同的。同一段提示词被抄进每个阶段的 payload，再抄进每个 workflow_versions 快照。
+// 内容按 (user_id, content_hash) 存一次，payload 里只留 hash，读的时候再查回来。
+describe('a generation rule is stored once and referenced by hash', () => {
+  const schema = migrationSql();
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const rule = { name: '默认规则', content: '按仓库约定写 PR 描述', capturedAt: '2026-08-21T00:00:00.000Z' };
+  const workflow = { id: 'w1', name: 'W', repository: 'o/r', stages: [{ source: 'feature', target: 'dev', stageId: 's1', automation: { autoCreatePullRequest: true as const, executionMode: 'server' as const, generationRule: rule } }] };
+
+  // 迁移里的回填用 encode(digest(content,'sha256'),'hex')，必须与 Node 侧算出同一个值，否则回填的行读不回来。
+  it('hashes the content the same way the migration backfill does', () => {
+    expect(generationRuleContentHash(rule.content)).toBe(createHash('sha256').update(rule.content).digest('hex'));
+    expect(generationRuleContentHash(rule.content)).toHaveLength(64);
+  });
+
+  it('lifts every distinct content out of the payload, keeping name and capturedAt inline', () => {
+    const dehydrated = dehydrateGenerationRules(workflow as never);
+    expect(dehydrated.rules).toEqual([{ contentHash: generationRuleContentHash(rule.content), content: rule.content }]);
+    const automation = dehydrated.workflow.stages[0].automation as { generationRule: Record<string, unknown> };
+    expect(automation.generationRule).toEqual({ name: rule.name, capturedAt: rule.capturedAt, contentHash: generationRuleContentHash(rule.content) });
+    expect(automation.generationRule.content).toBeUndefined();
+  });
+
+  it('collapses the same content shared by many stages into one row', () => {
+    const many = { ...workflow, stages: [0, 1, 2].map(index => ({ ...workflow.stages[0], stageId: `s${index}` })) };
+    expect(dehydrateGenerationRules(many as never).rules).toHaveLength(1);
+  });
+
+  it('leaves a payload that carries no rule content untouched', () => {
+    const bare = { ...workflow, stages: [{ source: 'feature', target: 'dev', stageId: 's1' }] };
+    const dehydrated = dehydrateGenerationRules(bare as never);
+    expect(dehydrated.rules).toEqual([]);
+    expect(dehydrated.workflow).toEqual(bare);
+  });
+
+  // 过渡期：035 之前保存的 payload 仍然带 content，读路径必须同时接受两种形状。
+  it('accepts a stored rule that carries either the content or the hash', () => {
+    expect(isStoredWorkflow(workflow)).toBe(true);
+    expect(isStoredWorkflow(dehydrateGenerationRules(workflow as never).workflow)).toBe(true);
+  });
+
+  it('rejects a stored rule that carries neither', () => {
+    const orphan = { ...workflow, stages: [{ ...workflow.stages[0], automation: { autoCreatePullRequest: true, executionMode: 'server', generationRule: { name: rule.name, capturedAt: rule.capturedAt } } }] };
+    expect(isStoredWorkflow(orphan)).toBe(false);
+  });
+
+  it('reads the inline content first, then falls back to the hash lookup', () => {
+    const hash = generationRuleContentHash(rule.content);
+    expect(generationRuleContent(rule, new Map())).toBe(rule.content);
+    expect(generationRuleContent({ name: rule.name, capturedAt: rule.capturedAt, contentHash: hash }, new Map([[hash, rule.content]]))).toBe(rule.content);
+  });
+
+  // 内容缺失时入队必须报错：一个空提示词会让模型生成无约束的 PR 描述，静默降级比失败更糟。
+  it('内容缺失时入队必须报错', () => {
+    const hash = generationRuleContentHash(rule.content);
+    expect(() => generationRuleContent({ name: rule.name, capturedAt: rule.capturedAt, contentHash: hash }, new Map())).toThrow();
+    expect(() => generationRuleContent({ name: rule.name, capturedAt: rule.capturedAt, contentHash: hash }, new Map([[hash, '   ']]))).toThrow();
+    expect(() => generationRuleContent({ name: rule.name, capturedAt: rule.capturedAt }, new Map())).toThrow();
+  });
+
+  it('only selects columns that pr_helper_generation_rules actually declares', () => {
+    const declared = declaredColumns(schema, 'pr_helper_generation_rules');
+    expect(declared).toContain('content_hash');
+    expect(declared).toContain('content');
+    expect(declared).toContain('user_id');
+    expect([...selectedColumns(source, 'pr_helper_generation_rules')].filter(column => !declared.has(column))).toEqual([]);
+  });
+
+  // payload 里不再写 content，所以保存路径必须先把内容落到自己的表里，否则下一次入队就查不到。
+  it('writes the rule rows in the same transaction that writes the payload', () => {
+    const upsert = source.slice(source.indexOf('export async function upsertWorkflow'), source.indexOf('export async function archiveWorkflow'));
+    expect(upsert).toContain('dehydrateGenerationRules');
+    expect(upsert).toMatch(/INSERT INTO pr_helper_generation_rules[\s\S]{0,400}ON CONFLICT/);
+    expect(upsert.indexOf('INSERT INTO pr_helper_generation_rules')).toBeLessThan(upsert.indexOf('INSERT INTO pr_helper_workflows'));
   });
 });
