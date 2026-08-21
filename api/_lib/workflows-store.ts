@@ -1785,7 +1785,7 @@ async function reconcileStageWork(environment: Record<string, string | undefined
     // The row was verified, not ignored: readConvergenceHealth reads min(updated_at) across every stage,
     // so freezing this timestamp would drive /api/cron/health to a permanent 503.
     await phase('write', () => sql`UPDATE workflow_stage_states SET updated_at = now() WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
-    return { reconciled: false, phases };
+    return { reconciled: true, phases };
   }
   const pull = await phase('pull', () => pullForStage(environment, installationId, workflow, stage));
   const preceding = stageIndex
