@@ -654,6 +654,23 @@ describe('the sweep payload read', () => {
   });
 });
 
+describe('the pull request projection read', () => {
+  const projection = functionSource(readFileSync(STORE_SOURCE, 'utf8'), 'projectPullRequestWebhook');
+
+  // This read had the same shape as the sweep's: every payload for every user, then a repository test in
+  // JavaScript. It runs on every pull_request delivery, which is the event class that fires most often
+  // during a review, so it paid a full table read to write at most a handful of stage state rows.
+  it('applies the pull request scope in SQL rather than after the read', () => {
+    expect(projection).toContain("WHERE (workflows.payload->>'archived') IS DISTINCT FROM 'true' AND (workflows.payload->>'repository') = ${pull.repository}");
+  });
+
+  // matchingWorkflowStages still tests the repository per stage, because it is what pairs a stage with a
+  // branch pair; the SQL test only decides which rows have to be read at all.
+  it('keeps the per-stage match that pairs a stage with the branches', () => {
+    expect(projection).toContain('matchingWorkflowStages(');
+  });
+});
+
 describe('shared reads within one inbox request', () => {
   const source = readFileSync(STORE_SOURCE, 'utf8');
   const handler = readFileSync(new URL('../[action].ts', import.meta.url), 'utf8');
