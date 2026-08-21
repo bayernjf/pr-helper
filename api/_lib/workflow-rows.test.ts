@@ -169,3 +169,42 @@ describe('the backfill migration', () => {
     }
   });
 });
+
+describe('the sweep reads the relational rows instead of the payload', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const schema = migrationSql();
+
+  // Both tracked reads used `(payload->>'archived') IS DISTINCT FROM 'true'` and `(payload->>'repository')`,
+  // neither of which any index can serve. The whole point of promoting them is that they now can be.
+  it('filters on the promoted columns rather than inside the jsonb', () => {
+    expect(source).not.toMatch(/payload->>'archived'/);
+    expect(source).not.toMatch(/payload->>'repository'/);
+    expect(source).toMatch(/workflows\.archived = false/);
+  });
+
+  it('stops transporting the payload to the sweep and the webhook projection', () => {
+    for (const match of source.matchAll(/SELECT workflows\.user_id, workflows\.id,([\s\S]*?)FROM pr_helper_workflows/g)) {
+      expect(match[1]).not.toContain('payload');
+    }
+  });
+
+  it('rebuilds the workflow through the shared mapping rather than a second parser', () => {
+    expect(source).toMatch(/workflowFromRows\(/);
+  });
+
+  // A row whose mirror is missing would rebuild into a workflow with no name and no stages, and the
+  // sweep would skip it without saying so — the failure mode that reads as success.
+  it('refuses to treat a workflow with no stage rows as an empty workflow', () => {
+    expect(source).toMatch(/trackedWorkflowFromRow/);
+    const helper = source.slice(source.indexOf('function trackedWorkflowFromRow'), source.indexOf('function trackedWorkflowFromRow') + 900);
+    expect(helper).toMatch(/console\.(error|warn)/);
+    expect(helper).toMatch(/stages\.length/);
+  });
+
+  // 036 left them nullable because historical rows had nothing to put there. 037 filled every one, so
+  // the invariant the read switch depends on can now be enforced by the database instead of by hope.
+  it('tightens the promoted columns the read switch depends on', () => {
+    expect(schema).toMatch(/ALTER TABLE pr_helper_workflows[\s\S]*?ALTER COLUMN name SET NOT NULL/);
+    expect(schema).toMatch(/ALTER TABLE pr_helper_workflows[\s\S]*?ALTER COLUMN repository SET NOT NULL/);
+  });
+});

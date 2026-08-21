@@ -7,7 +7,8 @@ import { assertTeamOperation, type TeamOperation } from '../../src/lib/team-perm
 import { summarizeGitHubChecks } from '../../src/lib/domain.js';
 import { credentialKeyHint, decryptAiApiKey, encryptAiApiKey, maskAiApiKey } from './ai-credentials.js';
 import { buildPrPrompt, aiChatCompletionsUrl, testAiConnection } from '../../src/lib/ai.js';
-import { workflowToRows } from './workflow-rows.js';
+import { workflowToRows, workflowFromRows } from './workflow-rows.js';
+import type { WorkflowColumns, WorkflowStageColumns, WorkflowDeploymentColumns } from './workflow-rows.js';
 
 // Mirrors `WorkflowStageAutomation` in src/lib/workflow.ts. Auto-merge stands alone because merging
 // calls no model, so a stage may automate it without automating creation.
@@ -397,9 +398,9 @@ export async function drainWorkflowAutomationActions(environment: Record<string,
   const rows = await sql<DrainActionRow[]>`
     SELECT actions.id, actions.user_id, actions.kind, actions.state, actions.attempts, actions.failure_reason,
            actions.created_at, actions.updated_at, actions.source, actions.target,
-           workflows.payload->>'repository' AS repository, users.github_installation_id AS installation_id,
-           (workflows.payload->>'archived') = 'true' AS archived,
-           workflows.payload->'recoveryPolicy'->>'cooldownSeconds' AS cooldown_seconds,
+           workflows.repository, users.github_installation_id AS installation_id,
+           workflows.archived,
+           workflows.recovery_cooldown_seconds AS cooldown_seconds,
            (SELECT count(*) FROM workflow_automation_actions newer
               WHERE newer.user_id = actions.user_id AND newer.workflow_id = actions.workflow_id
                 AND newer.stage_id = actions.stage_id AND newer.source = actions.source
@@ -613,7 +614,36 @@ export async function listWorkflowAutomationActions(environment: Record<string, 
 type DatabaseUser = { id: string };
 type WorkflowRow = { payload: unknown; version?: number };
 type VisibleWorkflowRow = WorkflowRow & { id: string };
-type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string; github_installation_id?: string | null; last_reconcile_attempt_at?: string | null; reconcile_pending_since?: string | null };
+// The columns the sweep and the webhook projection rebuild a workflow from, plus the two child arrays
+// carried as raw column objects. `to_jsonb(row)` is transport, not a second encoding: the shapes are
+// exactly WorkflowStageColumns and WorkflowDeploymentColumns, so workflowFromRows stays the only place
+// that knows how a row becomes a workflow. No payload: that is the point of the read switch.
+type TrackedWorkflowRow = Omit<WorkflowColumns, 'user_id' | 'id'> & {
+  user_id: string;
+  id: string;
+  stages: WorkflowStageColumns[];
+  deployments: WorkflowDeploymentColumns[];
+  github_installation_id?: string | null;
+  last_reconcile_attempt_at?: string | null;
+  reconcile_pending_since?: string | null;
+};
+
+function trackedWorkflowColumns(sql: ReturnType<typeof query>) {
+  return sql`workflows.user_id, workflows.id, workflows.name, workflows.repository, workflows.archived, workflows.version, workflows.position, workflows.declared_created_at, workflows.recovery_max_retries, workflows.recovery_cooldown_seconds,
+    (SELECT coalesce(jsonb_agg(to_jsonb(stages) ORDER BY stages.stage_index), '[]'::jsonb) FROM workflow_stages stages WHERE stages.user_id = workflows.user_id AND stages.workflow_id = workflows.id) AS stages,
+    (SELECT coalesce(jsonb_agg(to_jsonb(deployments) ORDER BY deployments.position), '[]'::jsonb) FROM workflow_deployment_configs deployments WHERE deployments.user_id = workflows.user_id AND deployments.workflow_id = workflows.id) AS deployments`;
+}
+
+function trackedWorkflowFromRow(row: TrackedWorkflowRow): StoredWorkflow | null {
+  // Migration 038 makes a missing mirror unrepresentable, so reaching this is a bug rather than an
+  // expected state. It is loud because the alternative is a workflow quietly leaving reconciliation.
+  if (!row.stages.length) {
+    console.error(`workflow ${row.user_id}/${row.id} has no stage rows; reconciliation is skipping it. Re-run db/migrations/037_workflow_relational_backfill.sql.`);
+    return null;
+  }
+  return workflowFromRows({ workflow: row, stages: row.stages, deployments: row.deployments }) as StoredWorkflow;
+}
+
 type WorkflowAccess = { ownerUserId: string; workflow: StoredWorkflow; team?: { id: string; name: string; role: TeamRole } };
 
 type WebhookDelivery = { deliveryId: string; eventName: string; action?: string; repository?: string; installationId?: string };
@@ -1585,9 +1615,9 @@ export async function projectPullRequestWebhook(environment: Record<string, stri
   // An archived workflow is out of every sweep, so a state written here would never be refreshed again:
   // it would sit on the archived view as a fact from an afternoon that has since moved on. Both tests
   // belong in SQL because only rows for this repository can ever match a branch pair from this delivery.
-  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id WHERE (workflows.payload->>'archived') IS DISTINCT FROM 'true' AND (workflows.payload->>'repository') = ${pull.repository}`;
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)}, users.github_installation_id FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id WHERE workflows.archived = false AND workflows.repository = ${pull.repository}`;
   const tracked = rows.flatMap(row => {
-    const workflow = storedWorkflowFromPayload(row.payload);
+    const workflow = trackedWorkflowFromRow(row);
     return workflow ? [{ userId: row.user_id, workflowId: row.id, workflow: ensureStageIds(workflow) }] : [];
   });
   const matches = tracked.flatMap(item => matchingWorkflowStages([item.workflow], pull).map(match => ({ ...item, stageIndex: match.stageIndex, stageId: stageIdentity(item.workflow, match.stageIndex) })));
@@ -2242,9 +2272,9 @@ export async function reconcileWorkflowStages(environment: Record<string, string
   // rotates through the rest, while a realtime sweep also picks up whatever an earlier sweep left
   // pending, and a branch-narrowed sweep would spend the limit on rows the branch filter then discards.
   const boundedInSql = trigger === 'cron' && !filter.branches;
-  const rows = await sql<TrackedWorkflowRow[]>`SELECT workflows.user_id, workflows.id, workflows.payload, users.github_installation_id, workflows.last_reconcile_attempt_at, workflows.reconcile_pending_since FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id WHERE (workflows.payload->>'archived') IS DISTINCT FROM 'true' ${filter.repository ? sql`AND (workflows.payload->>'repository') = ${filter.repository}` : sql``} ${filter.installationId ? sql`AND users.github_installation_id = ${filter.installationId}` : sql``} ${boundedInSql ? sql`ORDER BY (workflows.reconcile_pending_since IS NULL), workflows.reconcile_pending_since, workflows.last_reconcile_attempt_at NULLS FIRST, workflows.user_id, workflows.id LIMIT ${reconciliationBatchSize(environment)}` : sql``}`;
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)}, users.github_installation_id, workflows.last_reconcile_attempt_at, workflows.reconcile_pending_since FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id WHERE workflows.archived = false ${filter.repository ? sql`AND workflows.repository = ${filter.repository}` : sql``} ${filter.installationId ? sql`AND users.github_installation_id = ${filter.installationId}` : sql``} ${boundedInSql ? sql`ORDER BY (workflows.reconcile_pending_since IS NULL), workflows.reconcile_pending_since, workflows.last_reconcile_attempt_at NULLS FIRST, workflows.user_id, workflows.id LIMIT ${reconciliationBatchSize(environment)}` : sql``}`;
   const tracked = rows.flatMap(row => {
-    const workflow = storedWorkflowFromPayload(row.payload);
+    const workflow = trackedWorkflowFromRow(row);
     if (!workflow) return [];
     return [{ row, workflow: ensureStageIds(workflow), lastAttemptAt: row.last_reconcile_attempt_at ?? null, pendingSince: row.reconcile_pending_since ?? null, key: `${row.user_id}:${row.id}`, branchScoped: Boolean(filter.branches) }];
   });
