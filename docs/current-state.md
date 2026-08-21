@@ -18,7 +18,7 @@ PR Helper 是 GitHub-first 的 PR / Release Control Tower。用户以项目 Lane
 
 ## 当前整体评估
 
-- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（553 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
+- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（639 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
 - **功能质量：8.5/10**。流程 CRUD、Lane 看板、动态来源、多路径汇聚、PR 创建/合并、五类门禁、合并后 Actions/部署状态、失败恢复和审计均已具备；后台自动创建 PR 和逐步骤自动合并已有生产成功记录。
 - **产品完善度：7.5/10**。个人使用和小团队发布控制塔已可用；多账号权限、private/organization 边界、Web Push 关闭页面投递和部署回滚仍需外部条件验收。
 - **生产准备度：7/10**。主链路和两级自动化都已有真实 Production 证据；健康检查/失败部署投影、确认式回滚和部分协作能力不能仅凭本地测试视为通过。Supabase Free Plan 在上个账单周期出现 Egress 超额（`pr-helper` 6.28GB / 5GB），当前高频 `/api/inbox` 把看板状态与历史数据绑在一起，不适合直接承载多用户轮询。
@@ -141,6 +141,21 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - **自动化队列自愈**：新增计划端点在每次校准 sweep 之后 drain 卡住的动作，恢复不再依赖新的 push 事件；drain 中执行抛错的动作会被 park，避免后续 sweep 反复重试同一个。
 - **部署门禁可维护**：门禁可就地编辑而非删除重建、可从仓库实际的 Actions 工作流重新派生和同步、新建流程时按所选仓库预填候选；没有任何 Actions 工作流的仓库不再被塞入默认门禁，清空配置的步骤会退役对应数据行。
 - 其余：详情页刷新一律触发服务端校准；未设预算的 sweep 等待自身阶段结束再报完成；等待中的门禁保持 `queued` 而不是 `paused`；`duration_ms` 不再把回收前的等待计入耗时。
+
+### 2026-08-22 汇聚门禁被废弃路线永久锁死（已修，已部署并验收）
+
+提交 `ea8d01c0`（失败测试）+ `1a76a39d`（修复）。动态源规则（如 `feature/*`）会为它匹配过的每个分支各留一行 `workflow_stage_states`，而**只要分支名还匹配规则就没有任何机制删除这一行**——`pruneStaleWorkflowStageData` 的唯一 `DELETE` 只在 `workflowStageStateMatchesDefinition` 判为不匹配时触发，`branchRuleMatches('feature/*', 'feature/probe-timing')` 在分支删除后依然为真。修复前 `stageIsUnlocked` 要求依赖步骤的**每一行**都是 `merged` + `checks_state='success'`，于是一条 PR 被关闭但未合并的路线会把汇聚步骤永久锁住，**没有任何界面操作能清除它**。沙箱实测：`feature/probe-timing` 的 PR #19 于 2026-08-19 关闭未合并、分支已删（GitHub 返回 404），状态行仍在，汇聚步骤从那天起就再没解锁过。
+
+修法是把 `pull_state='closed'` 的行视为**已放弃的路线**并从门禁中排除，同时保留「依赖必须至少有一条活跃路线」的要求——否则一个只剩废弃路线的依赖会被误判为满足。三条单测固定这个语义：活跃路线全合并 + 其余已放弃 → 解锁；只剩已放弃 → 仍锁；有活跃路线尚未开 PR → 仍锁。
+
+**2026-08-22 沙箱端到端验收通过**：两条上游（`feature/test` PR #25 22:42:05 合并、`fix/test` PR #17 22:46:07 合并）在 stage 0 存有 5 行废弃路线（`feature/probe-timing` ×3、`feature/webhook-live-e2e` ×2）的情况下，汇聚步骤解锁、自动建出 `dev→main` PR #26 并自动合并到 `main`（23:08:05）。
+
+同一次验收暴露两个**尚未修**的时序缺陷：
+
+- **门禁转绿的那一刻不会重新评估下游**。stage 2 在 22:46:28 被评估，而 stage 1 的 `fix/test` 行到 22:46:30 才写成 `merged`——晚 2 秒。此后没有新事件，汇聚步骤就一直停着，直到 22:55 手动重跑一次 `dev` 上的 workflow 才推进。上游最后一条路合并完成时，下游必须等一个**无关**事件才会动。
+- **合并门禁用的是 PR 创建瞬间的 `mergeable` 快照**。PR #26 建出时 GitHub 还没算完可合并性，动作被记成「分支落后于目标分支」，而 GitHub 实况是 `CLEAN`；这个 reason 又会让排空进入退避，同样要等下一次事件把它清掉才合并。
+
+附注：沙箱 `dev` 要求 1 个 Approval，而自动化建出的 PR 作者是 App bot，所以人工 approve 是合法且必要的一步；这也是 #10 / #11 当初卡住的真实原因。验收期间触发对账用的是重跑 `dev` 上已有的 workflow run，未直推受保护分支。
 
 ### 2026-08-19 深色主题失配与自动化僵尸行修复
 
@@ -352,7 +367,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 0. **`id 84` 重排已关闭，bigint 修复已由其他动作在生产验证（本项收尾，无待办）**。2026-08-15 13:03 用户按建议把 `id 84` 重排回 `queued`，但它 `created_at` 为 01:03:20，恰在 13:03 跨过 `AUTOMATION_ACTION_STALE_MS`（12 小时），而 `automationDrainDecision` 的 stale 判定排在 execute 之前，因此它只会被下一次 sweep 标记 `cancelled / 超过自动化时限，未再尝试`，拿不到真实裁决。提出该建议时未核对动作年龄，属规划疏漏。修复本身已被真实执行验证：12:36–13:11 之间 `id 113`–`121` 共 8 条动作 `succeeded`（`attempts` 1–3，领取与重排均正常），`id 111` 被正确判为 `superseded` 而 `cancelled`——这是排空器上线以来第一次真正执行动作。
 
-1. **瞬时失败的重排路径已实现，待生产验证（当前第一优先级）**。`drainWorkflowAutomationActions` 现在也读 `paused` 行，`automationDrainDecision` 对 `paused` 只在「失败原因存在且 `automationAttemptWasReached` 判为未触达供方」时返回 `requeue`，并叠加多重界限：未被更新动作取代、仍在 12 小时 stale 窗口内、距上次更新超过 `AUTOMATION_TRANSIENT_REQUEUE_COOLDOWN_MS`（15 分钟）、`attempts` 未达 `AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS`（3）。冷却是必需的：领取前抛出的故障不计 `attempts`，仅靠次数上限无法收敛。重排写入以读到的 `state = 'paused'` 为条件，期间若有真实裁决写入则裁决胜出。批次排序改为 `ORDER BY (actions.state = 'paused'), actions.created_at`，避免最老的 `paused` 行占满 10 条批次、饿死本该执行的队列行。7 条「门禁尚未全绿」是 GitHub 已给出的裁决，仍留在 `paused` 不动。**更正**：此前记录「`automationAttemptWasReached` 的正则漏掉 `CONNECT_TIMEOUT`」是错的——`timed? ?out` 在忽略大小写下已经匹配 `TIMEOUT`，无需改正则，现由测试固定该分类。超窗的瞬时失败改判 `cancel / stale` 而不是继续 `skip`：没有别的机制会重试它，留在 `paused` 就是把一个已死的意图长期钉在失败中心里；GitHub 已给出的裁决无论多老都保持 `paused`，那是操作者唯一的记录。因此 `id 6` / `58` / `80` 会被清成 `cancelled`，不会被救回；重排路径本身的生产验证要等下一次真实的瞬时故障。`id 84` 已于 2026-08-15 13:29 按预期清成 `cancelled / 超过自动化时限，未再尝试`。
+1. **瞬时失败的重排路径已实现，2026-08-22 验收通过（本项收尾，无待办）**。`drainWorkflowAutomationActions` 现在也读 `paused` 行，`automationDrainDecision` 对 `paused` 只在「失败原因存在且 `automationAttemptWasReached` 判为未触达供方」时返回 `requeue`，并叠加多重界限：未被更新动作取代、仍在 12 小时 stale 窗口内、距上次更新超过 `AUTOMATION_TRANSIENT_REQUEUE_COOLDOWN_MS`（15 分钟）、`attempts` 未达 `AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS`（3）。冷却是必需的：领取前抛出的故障不计 `attempts`，仅靠次数上限无法收敛。重排写入以读到的 `state = 'paused'` 为条件，期间若有真实裁决写入则裁决胜出。批次排序改为 `ORDER BY (actions.state = 'paused'), actions.created_at`，避免最老的 `paused` 行占满 10 条批次、饿死本该执行的队列行。7 条「门禁尚未全绿」是 GitHub 已给出的裁决，仍留在 `paused` 不动。**更正**：此前记录「`automationAttemptWasReached` 的正则漏掉 `CONNECT_TIMEOUT`」是错的——`timed? ?out` 在忽略大小写下已经匹配 `TIMEOUT`，无需改正则，现由测试固定该分类。超窗的瞬时失败改判 `cancel / stale` 而不是继续 `skip`：没有别的机制会重试它，留在 `paused` 就是把一个已死的意图长期钉在失败中心里；GitHub 已给出的裁决无论多老都保持 `paused`，那是操作者唯一的记录。因此 `id 6` / `58` / `80` 会被清成 `cancelled`，不会被救回；重排路径本身的生产验证要等下一次真实的瞬时故障。`id 84` 已于 2026-08-15 13:29 按预期清成 `cancelled / 超过自动化时限，未再尝试`。**2026-08-22 等到真实瞬时故障并验完**：沙箱 stage 2（`dev→main`）的 `create-pr` 在 22:58:30 因 `The operation was aborted due to timeout` 落到 `paused` / `attempts=0`，PR 未创建。22:59:53 的下一次对账没有救它（`paused` 仅 83 秒，未过 120 秒 stale 阈值，符合设计），23:02 那次对账把它重排回 `queued` 并执行成功，`attempts` 变 1、建出 PR #26。同日生产仓库另有一次同措辞超时（22:30:12 的 PR #324）表现不同：动作落 `paused` 但 `payload.pullNumber=324`，**PR 实际已创建**，后续 `merge-pr` 22:32:06 正常成功——说明超时可能发生在建 PR 之后的回写阶段，`paused` 不等于未生效，排障时要先看 `payload.pullNumber` 与 GitHub 实况再判断。
 
 2. **实时校准预算已按触发方分开，生产已验证（无待办，仅留结论）**。原先一个 8 秒常数同时服务三种触发方，而它们的约束正相反：webhook 的响应体没有任何调用方读，投递本身要求把这次事件涉及的 1–2 个步骤跑完；保存与收件箱刷新背后有人在等，让出不等于丢工作（`reconcile_pending_since` 会让下一次触发接力）。因此 `webhook` 提到 `WEBHOOK_RECONCILE_BUDGET_MS = 25000`，`manual` / `inbox_refresh` 保持 8000，`REALTIME_RECONCILE_BUDGET_MS` 环境变量仍可一并覆盖。同时把外层兜底从 `budgetMs * 2` 改为 `realtimeReconcileCeilingMs(budgetMs)`（`min(budgetMs + 15s, 60s - 15s)`）：外层只是给永不落地的 I/O 兜底，不是第二份预算，16 秒时它离预算太近，会在 sweep 还活着时把它甩掉，25 秒预算再翻倍则直接越过平台上限。依据见《2026-08-15 实时校准预算的实测重定》。**2026-08-15 14:49 部署后核对**：webhook 12 次成功、让出 0、被回收 0（部署前 24 小时 292 / 149 / 60）；p50 9.0 秒、最长 17.2 秒，全部在旧的 8 秒预算之上。cron 11 次全成功，p50 14.1 秒，校准 130 个步骤。待补齐标记为 0。`manual` / `inbox_refresh` 暂无部署后样本，仍需在日常使用中观察 p90。
 

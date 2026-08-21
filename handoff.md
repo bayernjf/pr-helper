@@ -64,7 +64,7 @@
 **一、自动创建 / 自动合并稳定性（当前唯一主线）**
 
 1. **`id 84` 重排已关闭：bigint 修复已在生产被真实执行验证（无待办，仅留结论）**。`6aa011c2` 部署后，12:36–13:11 之间 `id 113`–`121` 共 8 条动作 `succeeded`（`attempts` 1–3），`id 111` 被判 `superseded` 而 `cancelled`——这是 drain 上线以来第一次真正执行动作，此前首轮 `executed: 0` 是每行都在原子领取前抛错，不是队列为空。`id 84` 本身拿不到真实裁决了：它 `created_at` 为 08-15 01:03:20，人工重排发生在 13:03:30，已过 `AUTOMATION_ACTION_STALE_MS`（12 小时）30 秒，而 `automationDrainDecision` 的 stale 判定排在 execute 之前，因此只会被下一次 sweep 标记 `cancelled / 超过自动化时限，未再尝试`。不必再干预。
-2. **瞬时失败的重排路径已实现，待生产验证（当前第一优先级）**。drain 现在也读 `paused`，`automationDrainDecision` 只在「有失败原因且 `automationAttemptWasReached` 判为未触达供方」时返回 `requeue`，并要求未被取代、仍在 12 小时窗口内、距上次更新超过 15 分钟（`AUTOMATION_TRANSIENT_REQUEUE_COOLDOWN_MS`）、`attempts < 3`（`AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS`）。冷却不可省：领取前抛出的故障不计 `attempts`。重排以读到的 `state = 'paused'` 为条件写入，真实裁决胜出。批次改按 `ORDER BY (actions.state = 'paused'), actions.created_at`，防止最老的 `paused` 行占满批次饿死队列行。7 条「门禁尚未全绿」是正确终态，不动。**更正**：此前写「正则漏掉 `CONNECT_TIMEOUT`」是错的，`timed? ?out` 忽略大小写已匹配 `TIMEOUT`。超窗的瞬时失败改判 `cancel / stale` 而不是继续 `skip`：没有别的机制会重试它，留在 `paused` 就是把一个已死的意图长期钉在失败中心里；GitHub 已给出的裁决无论多老都保持 `paused`，那是操作者唯一的记录。因此 `id 6` / `58` / `80` 会被清成 `cancelled`，不会被救回；重排路径本身的生产验证要等下一次真实的瞬时故障。`id 84` 已于 2026-08-15 13:29 按预期清成 `cancelled / 超过自动化时限，未再尝试`。
+2. **瞬时失败的重排路径已实现，2026-08-22 验收通过（本项收尾，无待办）**。drain 现在也读 `paused`，`automationDrainDecision` 只在「有失败原因且 `automationAttemptWasReached` 判为未触达供方」时返回 `requeue`，并要求未被取代、仍在 12 小时窗口内、距上次更新超过 15 分钟（`AUTOMATION_TRANSIENT_REQUEUE_COOLDOWN_MS`）、`attempts < 3`（`AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS`）。冷却不可省：领取前抛出的故障不计 `attempts`。重排以读到的 `state = 'paused'` 为条件写入，真实裁决胜出。批次改按 `ORDER BY (actions.state = 'paused'), actions.created_at`，防止最老的 `paused` 行占满批次饿死队列行。7 条「门禁尚未全绿」是正确终态，不动。**更正**：此前写「正则漏掉 `CONNECT_TIMEOUT`」是错的，`timed? ?out` 忽略大小写已匹配 `TIMEOUT`。超窗的瞬时失败改判 `cancel / stale` 而不是继续 `skip`：没有别的机制会重试它，留在 `paused` 就是把一个已死的意图长期钉在失败中心里；GitHub 已给出的裁决无论多老都保持 `paused`，那是操作者唯一的记录。因此 `id 6` / `58` / `80` 会被清成 `cancelled`，不会被救回；重排路径本身的生产验证要等下一次真实的瞬时故障。`id 84` 已于 2026-08-15 13:29 按预期清成 `cancelled / 超过自动化时限，未再尝试`。**2026-08-22 验完**：沙箱 `dev→main` 的 `create-pr` 22:58:30 因 `The operation was aborted due to timeout` 落 `paused` / `attempts=0` 且 PR 未创建；22:59:53 的对账没救它（`paused` 仅 83 秒，未过 120 秒阈值，符合设计），23:02 的对账重排成功、`attempts` 变 1、建出 PR #26。同日生产的同措辞超时（PR #324）相反：`paused` 但 `payload.pullNumber=324`，PR 已真实创建——`paused` 不等于未生效，排障先看 `payload.pullNumber` 与 GitHub 实况。
 
 3. **实时校准预算已按触发方分开，生产已验证（无待办，仅留结论）**。一个 8 秒常数同时服务三种触发方，但约束相反：webhook 的响应体无人读，要的是把这次事件的 1–2 个步骤跑完；保存与收件箱刷新有人在等，让出由 `reconcile_pending_since` 接力，不算丢工作。故 `webhook` = `WEBHOOK_RECONCILE_BUDGET_MS` 25000、`manual` / `inbox_refresh` 保持 8000，环境变量 `REALTIME_RECONCILE_BUDGET_MS` 仍可整体覆盖。外层兜底改为 `realtimeReconcileCeilingMs(budgetMs)` = `min(budgetMs + 15s, 45s)`，不再是 `budgetMs * 2`。实测依据：webhook 成功 p50 7.9 秒（单步骤的 GitHub 往返就接近整份预算），34% 投递让出、让出的 195 个步骤里 151 个白做；让出耗时最小 9.86 秒（租约与周边查询在预算之外约 1.9 秒）；最大 16.4 秒正压在旧的 16 秒外层兜底上，被甩掉的 sweep 留下 `running` 行，5 分钟宽限后记成「实例被回收」——24 小时 25 条 webhook `failure` 即此。**2026-08-15 14:49 部署后核对**：webhook 12 次成功、让出 0、被回收 0（部署前 24 小时为 292 / 149 / 60，即 29.7% 让出、12% 被回收）；webhook p50 9.0 秒、最长 17.2 秒，全部落在旧的 8 秒预算之上，说明这些在改之前都会让出。cron 11 次全成功，p50 14.1 秒，共校准 130 个步骤。`reconcile_pending_since` 待补齐为 0，无积压。`manual` / `inbox_refresh` 部署后暂无样本（需界面操作才产生），这两个按设计仍是 8 秒并靠计划清扫兜底，历史让出率偏高（54% / 60%），是否退化要在日常使用中继续看。**2026-08-15 20:45 复核（修正上一行的「被回收 0」）**：那是部署后 12 次的小样本假象。9 小时完整口径为部署前成功 78 / 让出 61 / 被回收 10，部署后 146 / 5 / 11——让出率 44% → 3% 是预算拆分的真实成效，被回收率 11% → 7% 基本没动，即这一类既没消失也没回归。成因已定位且与「实例真被回收」无关，见第 10 项。
 4. **失败中心 9 条假待办已修，生产已验证（无待办，仅留结论）**。首页「需要处理」显示十项，核对后 9 项失效：全部是被同路线更新动作取代的 `paused` 行，取代它们的那条都已 `succeeded`（ids 11/13/15/20/22/58/71/80/99）。根因是 08-15 新加的 `paused` 分支先判失败原因、GitHub 裁决直接 `skip`，永远走不到 `hasNewer`，而 `queued` / `running` 本来就有 `superseded` 出口。已把 `hasNewer` 提到该分支首位判 `cancel / superseded`。真待办只有 1 项：`E2E Failure and Dynamic Rule` 的 `fix/failure-e2e`（PR #4）Actions 失败。**2026-08-15 14:50 部署后核对**：九条在同一个 drain 批次里被清成 `cancelled / 已被后续提交的自动化动作取代`（约 0.75 秒一条），库里已无任何 `paused` 行，失败中心只剩那 1 项真待办。
@@ -249,7 +249,7 @@ AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 P
 在上述生产验收通过后，建议顺序为：
 
 1. Supabase Egress 与多用户读取扩展（当前第一优先级）：三刀 + 第二轮 + 第三轮均已落地并部署生产。三刀单次 `/api/inbox` 实测 594.3 → 274.0 kB、前台 71.3 → 16.4 MB/小时；第三轮单次 webhook 投影读 35 → 约 2.3 行（索引命中已实测）；A1 的收敛阈值回归已处置。**待办只剩一件**：连续看一周 Supabase Usage 日增量（最早 2026-08-28 出结论）。浏览器侧验收已于 **2026-08-22 完成**：详情页隐藏期零请求、已无轮询时钟（时钟由 `538a33eb` 删除，「60 秒」是过期表述）、单次响应体 301.6 kB 原始 / 24.3 kB gzip；同时发现并修掉「切回标签页触发两次相同请求」（`f40bf119`，修复后已在生产复测：启动 1 次、每次切回前台恰好 1 次、同秒成对消失）。**「回到前台的最小间隔」2026-08-22 决定不做**，等一周 Usage 出结论后再判断是否必要。第四轮（提示词去重）与第五轮（拆关系表）均已完成，`payload` 列删除与 `version` 乐观锁是剩下的两项独立步骤。`/api/board` 拆分与历史数据按需加载为可选第 4 步。全部理由与实测见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)。
-2. 瞬时失败的重排路径已实现，等一次真实的瞬时故障做生产验证。reconciliation 的调用预算按小时复核后只占基线的 18%–34%，已改为阈值观察。
+2. 瞬时失败的重排路径已实现，**2026-08-22 等到真实瞬时故障并验完，无待办**。reconciliation 的调用预算按小时复核后只占基线的 18%–34%，已改为阈值观察。
 3. 后台自动创建 PR 与自动合并：生产已跑通；门禁为红与幂等命中两项均已在沙箱验完（前者顺带修掉 ruleset 审批不可见），自动化验收清单无未验项。
 4. 浏览器 E2E：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影已有真实 delivery 证据。
 5. 操作审计：`020` 已执行；Production 已完成流程更新、创建/合并 PR 记录读取及 CSV 导出可用性验收。✅
@@ -269,6 +269,19 @@ AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 P
 - **paused 动作不再冒充步骤的最新状态（已部署，未验证）**（提交 `ecf86b41`、`96897203`）：生产上 `bayernjf/pr-helper` 第 2 步 dev→main 的 PR 已在 11:36 合并，界面却持续显示「自动创建 PR · 已暂停，需要处理」。两层成因：`latestAutomationAction` 按 `updated_at` 跨 kind 取最新，那条门禁未满足而 paused 的 create-pr 每次重试都被推新时间戳（11:50），永远比真正走完该路径的 merge-pr（11:36）更新；排空判定的取代子查询又带 `newer.kind = actions.kind`，merge-pr 取代不了 create-pr，而「门禁未满足」属已给出裁决的 verdict，过期清理也会 `skip`，该行永久留存。已新增 `hasNewerSucceeded`：同 workflow + stage + source 上存在更晚创建且已 `succeeded` 的动作（不限 kind）时 cancel 成 superseded，原有同 kind 判定与 queued / running 分支不变。**为什么算未验证**：那条具体的行（id 291）在 12:22:02 被 12:21:35 排入的新 create-pr（id 295）按**原有**同 kind 规则取代掉了，与事前预测的自愈一致；新规则至今没有独立触发的机会。下次遇到「步骤已合并却显示已暂停」时，先查该 stage 是否存在更晚的 succeeded 动作，若有而 paused 行仍在，说明新规则没生效。
 
 **仍未做的可选项**：深色主题的第三条思路——Playwright 遍历深色下所有可见按钮算对比度、低于 4.5 即失败。覆盖面比静态守卫广（能抓到弹窗里未展开的按钮），代价是需要走遍各屏的 fixture、跑得慢、设计微调容易误报。当前靠静态守卫 + 手工实测。
+
+## 2026-08-22 汇聚门禁被废弃路线永久锁死（已修，已部署并验收）
+
+提交 `ea8d01c0`（失败测试先行）+ `1a76a39d`（修复），已在生产。动态源规则会为匹配过的每个分支各留一行 `workflow_stage_states`，而只要分支名还匹配规则就没有任何机制删除它（`pruneStaleWorkflowStageData` 的唯一 `DELETE` 依赖 `workflowStageStateMatchesDefinition` 判否，而 `branchRuleMatches('feature/*', 'feature/probe-timing')` 在分支删除后仍为真）。修复前 `stageIsUnlocked` 要求依赖步骤每一行都 `merged` + `success`，因此一条「PR 关闭未合并」的路线会永久锁死汇聚步骤，且界面上没有任何操作能清除。修法：把 `pull_state='closed'` 视为已放弃路线并从门禁排除，同时保留「依赖至少要有一条活跃路线」的要求（否则只剩废弃路线会被误判为满足）。三条单测固定语义。
+
+**沙箱端到端验收通过**：stage 0 存有 5 行废弃路线（`feature/probe-timing` ×3、`feature/webhook-live-e2e` ×2）的前提下，两条活跃上游合并后汇聚步骤解锁，自动建出 `dev→main` PR #26 并自动合并到 `main`（23:08:05）。
+
+**同一次验收发现两个尚未修的时序缺陷**：
+
+1. **门禁转绿的那一刻不会重新评估下游**：stage 2 于 22:46:28 被评估，stage 1 的 `fix/test` 到 22:46:30 才写成 `merged`，之后无事件，汇聚步骤一直停着，直到 22:55 手动重跑一次 `dev` 上的 workflow 才推进。上游最后一条路合并完成时，下游要等一个无关事件才动。
+2. **合并门禁用创建瞬间的 `mergeable` 快照**：PR #26 建出时 GitHub 尚未算完，动作记成「分支落后于目标分支」而实况是 `CLEAN`，该 reason 又让排空进入退避，需下一次事件清除后才合并。
+
+附注：沙箱 `dev` 要求 1 个 Approval，自动化建出的 PR 作者是 App bot，人工 approve 是必要一步——这也是 #10 / #11 当初卡住的真实原因。触发对账用重跑 `dev` 上已有 workflow run，未直推受保护分支。
 
 ## 常用命令
 

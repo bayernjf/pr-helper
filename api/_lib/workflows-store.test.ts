@@ -6,7 +6,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, generationRuleHashes, hydrateGenerationRules, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, generationRuleHashes, hydrateGenerationRules, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, stageGateSatisfactionAdvanced, downstreamStagesToRecheck, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -487,6 +487,71 @@ describe('converging gate over abandoned routes', () => {
       merged('stage-fix'),
       { stage_index: 2, stage_id: 'stage-dev', pull_state: 'none', checks_state: 'unknown' },
     ])).toMatchObject({ kind: 'locked', canCreateNext: false });
+  });
+});
+
+// Every stage of a sweep runs inside one Promise.allSettled, so a converging stage can read its
+// dependencies before a sibling writes its own merge. Measured in the sandbox 2026-08-22: stage 2 was
+// evaluated at 22:46:28 while stage 1 stored `merged` at 22:46:30, and with no further delivery the
+// convergence waited for the scheduled sweep instead — whose real spacing that hour ranged from 2 to 28
+// minutes. The sweep therefore has to notice which routes satisfied their gate during the batch and
+// re-run the stages that were waiting on them.
+describe('gate satisfaction advanced by a reconciliation', () => {
+  it('reports a route that reached the gate during this reconciliation', () => {
+    expect(stageGateSatisfactionAdvanced({ pull_state: 'open', checks_state: 'pending' }, { pullState: 'merged', checksState: 'success' })).toBe(true);
+  });
+
+  it('reports a route whose post-merge checks turned green during this reconciliation', () => {
+    expect(stageGateSatisfactionAdvanced({ pull_state: 'merged', checks_state: 'pending' }, { pullState: 'merged', checksState: 'success' })).toBe(true);
+  });
+
+  it('stays quiet when the route already satisfied the gate before', () => {
+    expect(stageGateSatisfactionAdvanced({ pull_state: 'merged', checks_state: 'success' }, { pullState: 'merged', checksState: 'success' })).toBe(false);
+  });
+
+  it('stays quiet when the route still does not satisfy the gate', () => {
+    expect(stageGateSatisfactionAdvanced({ pull_state: 'open', checks_state: 'pending' }, { pullState: 'merged', checksState: 'pending' })).toBe(false);
+  });
+
+  // A route seen for the first time has no stored row, and a first sighting that is already merged and
+  // green is exactly the case a converging downstream stage must not miss.
+  it('reports a first sighting that already satisfies the gate', () => {
+    expect(stageGateSatisfactionAdvanced(undefined, { pullState: 'merged', checksState: 'success' })).toBe(true);
+  });
+});
+
+describe('downstream stages to recheck', () => {
+  const workflow = {
+    stages: [
+      { source: 'feature/*', target: 'dev', stageId: 'stage-feature' },
+      { source: 'fix/test', target: 'dev', stageId: 'stage-fix', independent: true },
+      { source: 'dev', target: 'main', stageId: 'stage-dev', waitFor: [0, 1] },
+      { source: 'main', target: 'release', stageId: 'stage-release' },
+    ],
+  } as Parameters<typeof downstreamStagesToRecheck>[0];
+
+  it('returns the converging stage that waits on the advanced one', () => {
+    expect(downstreamStagesToRecheck(workflow, [1])).toEqual([2]);
+  });
+
+  it('returns the immediate successor of a stage nothing explicitly waits on', () => {
+    expect(downstreamStagesToRecheck(workflow, [2])).toEqual([3]);
+  });
+
+  it('does not return an independent successor', () => {
+    expect(downstreamStagesToRecheck(workflow, [0])).toEqual([2]);
+  });
+
+  it('reports each downstream stage once when several dependencies advanced together', () => {
+    expect(downstreamStagesToRecheck(workflow, [0, 1])).toEqual([2]);
+  });
+
+  it('asks for nothing when the last stage advanced', () => {
+    expect(downstreamStagesToRecheck(workflow, [3])).toEqual([]);
+  });
+
+  it('asks for nothing when no stage advanced', () => {
+    expect(downstreamStagesToRecheck(workflow, [])).toEqual([]);
   });
 });
 
@@ -1807,6 +1872,16 @@ describe('a sweep records where its time went', () => {
     const work = source.slice(source.indexOf('async function reconcileStageWork'), source.indexOf('export function reconciliationLockKey'));
     expect(work).toContain("phase('queue', () => scheduleServerAutoCreate");
     expect(work).toContain("phase('queue', () => scheduleServerAutoMerge");
+  });
+
+  // The recheck has no unit-testable seam of its own: it lives inside the sweep's allSettled and only
+  // shows up as a second reconcileOneStage call. Without this guard a refactor could drop it and every
+  // test would still pass, while a converging stage silently went back to waiting for the next sweep.
+  it('re-runs the stages that were waiting on a route that advanced during the batch', () => {
+    const scope = source.slice(source.indexOf('async function reconcileWorkflowScope'), source.indexOf('export const RECONCILIATION_RUN_GRACE_SECONDS'));
+    expect(scope).toContain('advancedByWorkflow.set(item.workflow.id');
+    expect(scope).toContain('downstreamStagesToRecheck(item.workflow');
+    expect(scope).toContain('recheck.map(item => reconcileOneStage(');
   });
 
   it('adds the column in an ordered migration rather than at runtime', () => {
