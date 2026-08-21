@@ -821,7 +821,7 @@ export type WorkflowStageState = {
 };
 export type WorkflowStageEvent = { workflowId: string; stageIndex: number; stageId: string | null; source: string | null; target: string | null; kind: string; message: string; occurredAt: string };
 export type TimelineEntry = { workflowId: string; stageIndex: number; stageId: string | null; source: string; target: string; kind: string; message: string; occurredAt: string; pullNumber: number | null; runId: number | null };
-export type WorkflowRun = { id: number; workflowId: string; version: number; stageIndex: number; stageId: string | null; source: string; target: string; stageSnapshot: { source: string; target: string; stageId?: string }; pullNumber: number | null; state: 'active' | 'completed' | 'failed'; startedAt: string; completedAt: string | null };
+export type WorkflowRun = { id: number; workflowId: string; version: number; stageIndex: number; stageId: string | null; source: string; target: string; pullNumber: number | null; state: 'active' | 'completed' | 'failed'; startedAt: string; completedAt: string | null };
 export type WorkflowVersion = { workflowId: string; version: number; snapshot: StoredWorkflow; createdAt: string };
 export type WorkflowStageDeployment = {
   workflowId: string;
@@ -2339,12 +2339,12 @@ export async function completeWorkflowRun(environment: Record<string, string | u
   await sql`UPDATE workflow_runs SET state = ${state}, completed_at = now() WHERE user_id = ${user.id} AND workflow_id = ${workflowId} AND pull_number = ${pullNumber} AND state = 'active'`;
 }
 
-type WorkflowRunRow = { id: number; workflow_id: string; version: number; stage_index: number; stage_id: string | null; source: string; target: string; stage_snapshot: { source: string; target: string; stageId?: string }; pull_number: number | null; state: string; started_at: string; completed_at: string | null };
+type WorkflowRunRow = { id: number; workflow_id: string; version: number; stage_index: number; stage_id: string | null; source: string; target: string; pull_number: number | null; state: string; started_at: string; completed_at: string | null };
 
 export async function listWorkflowRuns(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowRun[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRunRow[]>`SELECT runs.id, runs.workflow_id, runs.version, runs.stage_index, runs.stage_id, runs.source, runs.target, runs.stage_snapshot, runs.pull_number, runs.state, runs.started_at, runs.completed_at FROM workflow_runs runs WHERE ${visibleWorkflowPredicate(sql, user.id, 'runs.user_id', 'runs.workflow_id')} ORDER BY runs.started_at DESC LIMIT 50`;
+  const rows = await sql<WorkflowRunRow[]>`SELECT runs.id, runs.workflow_id, runs.version, runs.stage_index, runs.stage_id, runs.source, runs.target, runs.pull_number, runs.state, runs.started_at, runs.completed_at FROM workflow_runs runs WHERE ${visibleWorkflowPredicate(sql, user.id, 'runs.user_id', 'runs.workflow_id')} ORDER BY runs.started_at DESC LIMIT 50`;
   return rows.map(row => ({
     id: row.id,
     workflowId: row.workflow_id,
@@ -2353,7 +2353,6 @@ export async function listWorkflowRuns(environment: Record<string, string | unde
     stageId: row.stage_id,
     source: row.source,
     target: row.target,
-    stageSnapshot: row.stage_snapshot,
     pullNumber: row.pull_number,
     state: row.state as 'active' | 'completed' | 'failed',
     startedAt: row.started_at,

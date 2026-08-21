@@ -628,6 +628,18 @@ describe('shared reads within one inbox request', () => {
   });
 });
 
+describe('listWorkflowRuns', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+
+  // The column is still written on every run start, so the history stays queryable — but nothing
+  // reads it back, and `/api/inbox` was shipping 50 copies of the jsonb to the browser each poll.
+  it('does not ship the stage snapshot nobody reads', () => {
+    expect(source).toContain('INSERT INTO workflow_runs (user_id, workflow_id, version, stage_index, stage_id, source, target, stage_snapshot, pull_number)');
+    expect(source).not.toContain('runs.stage_snapshot');
+    expect(readFileSync(new URL('../../src/main.ts', import.meta.url), 'utf8')).not.toContain('stageSnapshot');
+  });
+});
+
 describe('server bundle boundaries', () => {
   for (const entry of importedSourcePaths(new URL('../', import.meta.url), '.ts')) {
     it(`keeps browser-only modules out of ${entry.pathname.replace(/^.*\/api\//, 'api/')}`, () => {
