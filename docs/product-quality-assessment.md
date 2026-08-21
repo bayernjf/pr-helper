@@ -4,7 +4,7 @@
 > 评估分支：`feature/20260722`
 > 评估范围：代码质量、功能质量、产品完善度、生产风险和后续高价值投入
 > 本文是评估报告，不替代 [`docs/current-state.md`](./current-state.md) 的当前架构事实记录。
-> **文中数据是 2026-08-12 的时点观测，不回改。**截至 2026-08-15：`npm test` 460 项通过，迁移基线 `001`–`031`，后台自动创建 PR 与逐步骤自动合并均已部署并在生产跑通，校准时钟由 `pg_cron` 驱动（排空每 2 分钟、校准每 5 分钟）。文中所有「待部署验收」判断以此为准作废。
+> **文中数据是 2026-08-12 的时点观测，不回改。**截至 2026-08-15：`npm test` 460 项通过，迁移基线 `001`–`031`，后台自动创建 PR 与逐步骤自动合并均已部署并在生产跑通，校准时钟由 `pg_cron` 驱动（排空每 2 分钟、校准每 5 分钟）。文中所有「待部署验收」判断以此为准作废。2026-08-21 追加记录：Supabase Free Plan 出现 Egress 超额，读取路径扩展已提升为 P0，详见 [`supabase-egress-optimization.md`](./supabase-egress-optimization.md)。
 
 ## 结论摘要
 
@@ -144,6 +144,21 @@ PR Helper 已经超过纯浏览器 Mock 或 MVP 阶段，核心的 GitHub PR 发
 
 ## 四、最值得投入的新增功能
 
+### P0：Supabase Egress 与多用户读取扩展
+
+2026-08-21 生产 Supabase 已出现 Free Plan Egress 超额：`pr-helper` 项目占 6.28GB / 5GB。当前首页 `/api/inbox` 高频轮询同时返回看板状态、events、timeline、workflow runs、deployment runs、audit logs 和 automation history，不适合多用户长期打开页面。
+
+同日的实测把权重定死了：一次 `/api/inbox` 约 588 kB，其中 `pr_helper_workflows.payload` 在同一次请求内被 5 个 list 函数各取一遍（354 kB，重复的 4 遍占整次请求 48%），历史数据只占 143 kB / 24%；且浏览器轮询在页面隐藏时不会停，一个后台标签页挂 12 小时约 847 MB。因此实施顺序为：
+
+- 先做轮询隐藏即停、间隔 60 秒、回到前台重启定时器并立刷一次。
+- 再做请求内去重：handler 预取 payload 与 stage_states 传进各 list 函数，单次减半且行为零变化。
+- 以上两项合计约 70 → 9 MB/小时，观察一周后再决定是否需要下列改动。
+- （可选）新增轻量 `/api/board`，首页只读取 Lane 渲染所需的当前状态、门禁摘要、待办数量、未完成自动化摘要和同步时间。
+- （可选）timeline、events、deployment runs、workflow runs、audit logs 改为详情页、抽屉或历史 Tab 按需加载。
+- （可选）增加 board version / ETag，无变化时返回空响应或 304；后续维护服务端看板投影表，把高频读和历史审计表拆开。
+
+详细方案见 [`docs/supabase-egress-optimization.md`](supabase-egress-optimization.md)。这项工作优先级高于画布、模板市场和更多视觉优化，是多用户可用的前置条件。
+
 ### P0：可控的 PR 流程自动化
 
 用户已经明确需要在门禁通过后自动合并 PR，并在合并后的 Checks、Actions、部署和健康检查全部成功后自动推进下一步。建议先实现无画布的逐步骤自动化策略，避免引入新的流程图编辑复杂度：
@@ -162,7 +177,7 @@ PR Helper 已经超过纯浏览器 Mock 或 MVP 阶段，核心的 GitHub PR 发
 
 ### P0：统一状态模型与同步健康度
 
-这是当前最高价值投入，优先级高于模板、复杂 DAG 和更多视觉功能。
+这是与 Egress 收敛并列的基础可靠性投入，优先级高于模板、复杂 DAG 和更多视觉功能。
 
 建议实现：
 

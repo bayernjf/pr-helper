@@ -1,6 +1,6 @@
 # PR Helper Handoff
 
-> 最后更新：2026-08-19（流程详情页的只读进度条已上线生产并核对；深色主题的三类失配已修并加了静态守卫；paused 动作跨 kind 取代规则已部署但未验证；自动化队列已清空，无 `paused` / `queued` / `failed` 行；当前第一优先级见《2026-08-15 drain 首轮实测与优先级调整》第 11 项的观察窗口）
+> 最后更新：2026-08-21（Supabase Free Plan 出现 Egress 超额，`pr-helper` 项目占 6.28GB / 5GB；已按实测字节数定位到两个来源并重排优先级——**第一刀是「轮询隐藏即停 + 60 秒」，第二刀是「请求内去重」**，`/api/board` 拆分降为可选。完整方案见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 > 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
 
@@ -10,12 +10,18 @@
 - 用户已确认本批代码已上线 Production。
 - 2026-08-19 生产核对（当日第二次，合并 PR #288 之后）：最近 6 小时 cron 80 success / 1 degraded / 1 skipped、webhook 53 success / 4 degraded / 252 skipped、inbox_refresh 2 success，无 failure；55 行 stage 投影最老 1187 秒、平均 609 秒，距 `/api/cron/health` 的 2700 秒阈值余量充足；`workflow_automation_actions` 只有 263 succeeded / 35 cancelled，没有 `paused` / `queued` / `running` / `failed` 行。当日较早一次核对为 cron 78 success / 1 degraded / 2 skipped、投影最老 1370 秒、246 succeeded / 31 cancelled。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地验证已通过：`npm test`（29 个文件 / 536 项）、`npx tsc --noEmit`、`npm run build`；浏览器 E2E `npm run test:e2e` 26/26 通过（Playwright 端口为 4373，避免 `reuseExistingServer` 复用别的项目的开发服务）。
+- 当前本地验证已通过：`npm test`（29 个文件 / 553 项）、`npx tsc --noEmit`、`npm run build`；浏览器 E2E `npm run test:e2e` 27/27 通过（Playwright 端口为 4373，避免 `reuseExistingServer` 复用别的项目的开发服务）。
 - 最近本地提交 `b61e2d3e` 新增“测试已保存配置”：服务端解密保存的 AI 凭据并实际调用模型连接测试，15 秒超时，只返回成功或脱敏错误，不返回 API Key；生产端已验证连接成功（`agnes-2.0-flash`）。
 - 最近本地提交 `510a63c9` 为自动 PR 动作增加 AI 请求 20 秒超时、输出上限和过期 `running/paused` 动作回收重试，避免一次超时永久阻塞幂等动作。
 - Supabase 迁移 `001`–`031` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
 - Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`，覆盖 Production 和 Preview。
 - PR #172 的首个 Vercel Preview 失败原因为 Vercel 对 `api/` 完整 TypeScript 编译，而仓库原 `tsconfig.json` 仅包含 `src/`；随后又因 Hobby 计划 Serverless Function 数量限制在部署输出阶段失败。已将 `api/` 纳入本地检查、修复类型错误，并把自动化与 AI 凭据入口合并到 `/api/workflows` rewrite；提交 `93c00d41` 后 Vercel Preview、CI 和 Preview Comments 全部通过。
+- 2026-08-21 Supabase Usage：Organization Egress 为 6.309GB / 5GB（126%），其中 `pr-helper` 6.28GB、`feng-projects` 0.02GB；Database Size 仅 0.047GB，说明主要风险是重复出站传输而非静态存储。Supabase 宽限期到 2026-09-20，之后若仍超额可能返回 402。
+- 当前根因判断：高频 `/api/inbox` 同时返回看板状态、recent events、timeline、workflow runs、deployment runs、audit 和 automation history；浏览器 30 秒轮询及长时间打开页面会重复拉取低频历史数据，多用户下不可扩展。
+- **2026-08-21 已实测出站字节，权重与原判断不同**（明细见方案文档《实测：一次 `/api/inbox` 的出站字节》）：一次 `/api/inbox` 约 **588 kB**，其中 `pr_helper_workflows.payload`（35 行、70.8 kB）在**同一次请求内被 5 个 list 函数各取一遍**，占 354 kB；重复的那 4 遍即 283 kB，占整次请求 48%。历史数据（events / timeline / runs / deployment_runs）合计只有 143 kB / 24%。按 30 秒轮询折算约 **70 MB/小时**，5 GB ≈ 71 小时页面打开时间，一个后台标签页挂 12 小时约 **847 MB**——6.28 GB 无需多用户即可解释。另查：`pg_stat_statements` 已装但 `prh_readonly` 读不到（schema `extensions` 权限拒绝），故用字节 × 频率推算。
+- **轮询根本不会停**：[`src/main.ts:429`](src/main.ts) 的 `setInterval` 30 秒在页面隐藏时继续跑，`visibilitychange` / `focus` 只是「回到前台额外刷一次」而非重启定时器；详情页 [`src/main.ts:2140`](src/main.ts) 同样。挂机标签页因此是最大的单一来源。
+- **修正后的顺序（原「先拆 `/api/board`」已作废）**：**B 轮询隐藏即停 + 间隔 60 秒**（改动最小、真实收益最大：挂机 847 MB/晚 → 0，前台 70 → 35 MB/小时）；**A 请求内去重**（handler 里先取一次 payload 与 stage_states 传进 list 函数，单次 -48%，接口与 UI 行为零变化）。B + A 合计约 70 → 9 MB/小时。`/api/board` 拆分与按需加载降为第 4 步，等 B + A 观察一周后再决定是否需要。
+- 已新增方案文档 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)，并更新 [`docs/current-state.md`](docs/current-state.md)。**代码尚未开工**；宽限期到 2026-09-20，上线前的保底手段是临时开 Supabase 按量付费或升一档（保险，非替代）。
 
 ## 2026-08-14 实时校准修复（已部署生产）
 
@@ -239,13 +245,14 @@ AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 P
 
 在上述生产验收通过后，建议顺序为：
 
-1. 瞬时失败的重排路径已实现，等一次真实的瞬时故障做生产验证（当前第一优先级）。reconciliation 的调用预算**不在**这个位置：按小时复核后只占基线的 18%–34%，已改为阈值观察，见上方第二节。
-2. 后台自动创建 PR 与自动合并：生产已跑通；门禁为红与幂等命中两项均已在沙箱验完（前者顺带修掉 ruleset 审批不可见），自动化验收清单无未验项。
-3. 浏览器 E2E：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影已有真实 delivery 证据。
-4. 操作审计：`020` 已执行；Production 已完成流程更新、创建/合并 PR 记录读取及 CSV 导出可用性验收。✅
-5. 加密云同步加固：已部署，`021` 已执行；待验证 v1/v2 兼容、口令轮换、冲突拒绝和历史恢复。
-6. 历史数据保留与清理：已部署，`022` 已执行；待确认 Cron 产生成功运行记录并按批次清理历史数据。
-7. 团队协作闭环：已部署团队管理界面、成员角色管理、流程共享、共享状态投影和服务端操作授权；`023` 已执行。需用至少两个 GitHub 账号验收角色边界与 GitHub App 安装范围。
+1. Supabase Egress 与多用户读取扩展（当前第一优先级）：先做「轮询隐藏即停 + 间隔 60 秒」，再做「请求内去重」（handler 预取 payload / stage_states 传进 list 函数）。`/api/board` 拆分与历史数据按需加载降为可选第 4 步，等前两刀观察一周后再决定。理由与实测字节见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)。
+2. 瞬时失败的重排路径已实现，等一次真实的瞬时故障做生产验证。reconciliation 的调用预算按小时复核后只占基线的 18%–34%，已改为阈值观察。
+3. 后台自动创建 PR 与自动合并：生产已跑通；门禁为红与幂等命中两项均已在沙箱验完（前者顺带修掉 ruleset 审批不可见），自动化验收清单无未验项。
+4. 浏览器 E2E：已覆盖授权返回、新建/编辑流程、步骤排序、失败恢复、抽屉创建/合并 PR、删除流程和确认式回滚；Webhook 自动投影已有真实 delivery 证据。
+5. 操作审计：`020` 已执行；Production 已完成流程更新、创建/合并 PR 记录读取及 CSV 导出可用性验收。✅
+6. 加密云同步加固：已部署，`021` 已执行；待验证 v1/v2 兼容、口令轮换、冲突拒绝和历史恢复。
+7. 历史数据保留与清理：已部署，`022` 已执行；待确认 Cron 产生成功运行记录并按批次清理历史数据。
+8. 团队协作闭环：已部署团队管理界面、成员角色管理、流程共享、共享状态投影和服务端操作授权；`023` 已执行。需用至少两个 GitHub 账号验收角色边界与 GitHub App 安装范围。
 
 不建议第一阶段投入任意 DAG、流程模板市场、自建 CI/CD 引擎或无额外安全设计的 AI 自动修复。画布仅在条件分支、并行节点、汇聚节点和回滚路径的可视化需求明确后再投入。
 
