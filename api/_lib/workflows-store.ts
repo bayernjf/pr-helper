@@ -1150,6 +1150,50 @@ export function dehydrateGenerationRules(workflow: StoredWorkflow): { workflow: 
   return { workflow: { ...workflow, stages }, rules: [...rules].map(([contentHash, content]) => ({ contentHash, content })) };
 }
 
+// The browser resolves a hash-only rule by looking for a same-named rule in its own localStorage list,
+// and a browser whose list lacks that name reads the stage as having no rule at all — saving automation
+// again then drops the policy without saying so. The server holds the authoritative copy, so the list
+// read fills it back: one row per user instead of one inline copy per stage.
+export function generationRuleHashes(workflow: StoredWorkflow): string[] {
+  return workflow.stages.flatMap(stage => {
+    const rule = stage.automation?.generationRule as StoredGenerationRule | undefined;
+    return rule?.contentHash && !rule.content?.trim() ? [rule.contentHash] : [];
+  });
+}
+
+function generationRuleKey(userId: string, contentHash: string) {
+  return `${userId}:${contentHash}`;
+}
+
+// Keyed by owner too: a shared workflow's rules belong to whoever owns the workflow, and filling a
+// reader's same-hash content in would substitute one prompt for another.
+export function hydrateGenerationRules(workflow: StoredWorkflow, userId: string, contentByKey: Map<string, string>): StoredWorkflow {
+  let filled = false;
+  const stages = workflow.stages.map(stage => {
+    const rule = stage.automation?.generationRule as StoredGenerationRule | undefined;
+    if (!rule?.contentHash || rule.content?.trim()) return stage;
+    const content = contentByKey.get(generationRuleKey(userId, rule.contentHash));
+    if (!content) return stage;
+    filled = true;
+    return { ...stage, automation: { ...stage.automation, generationRule: { ...rule, content } } as typeof stage.automation };
+  });
+  return filled ? { ...workflow, stages } : workflow;
+}
+
+async function generationRuleContentsFor(sql: ReturnType<typeof query>, entries: { userId: string; workflow: StoredWorkflow }[]) {
+  const wanted = new Set<string>();
+  const userIds = new Set<string>();
+  const hashes = new Set<string>();
+  for (const entry of entries) for (const hash of generationRuleHashes(entry.workflow)) {
+    wanted.add(generationRuleKey(entry.userId, hash));
+    userIds.add(entry.userId);
+    hashes.add(hash);
+  }
+  if (!wanted.size) return new Map<string, string>();
+  const rows = await sql<{ user_id: string; content_hash: string; content: string }[]>`SELECT user_id, content_hash, content FROM pr_helper_generation_rules WHERE user_id = ANY(${[...userIds]}::uuid[]) AND content_hash = ANY(${[...hashes]}::text[])`;
+  return new Map(rows.map(row => [generationRuleKey(row.user_id, row.content_hash), row.content]).filter(([key]) => wanted.has(key)) as [string, string][]);
+}
+
 // The sweep and the browser both enqueue a create-pr action, and both hold only the hash once a payload
 // has been written by migration 035's code. Resolving here keeps the action payload and the drain
 // unchanged, and makes the server's own copy of the prompt authoritative.
@@ -1446,18 +1490,23 @@ export async function listWorkflows(environment: Record<string, string | undefin
     if (!workflow) return undefined;
     const normalized = ensureStageIds(workflow);
     return row.version > 0 ? { ...normalized, version: row.version } : normalized;
-  }).filter((workflow): workflow is StoredWorkflow => Boolean(workflow));
-  const sharedByWorkflow = new Map<string, StoredWorkflow>();
+  }).filter((workflow): workflow is StoredWorkflow => Boolean(workflow)).map(workflow => ({ userId: user.id, workflow }));
+  const sharedByWorkflow = new Map<string, { userId: string; workflow: StoredWorkflow }>();
   for (const row of sharedRows) {
     const workflow = storedWorkflowFromPayload(row.payload);
     if (!workflow || sharedByWorkflow.has(workflow.id)) continue;
     const normalized = ensureStageIds(workflow);
     sharedByWorkflow.set(workflow.id, {
-      ...(row.version > 0 ? { ...normalized, version: row.version } : normalized),
-      team: { id: row.team_id, name: row.team_name, role: row.role },
+      userId: row.owner_user_id,
+      workflow: {
+        ...(row.version > 0 ? { ...normalized, version: row.version } : normalized),
+        team: { id: row.team_id, name: row.team_name, role: row.role },
+      },
     });
   }
-  return sortStoredWorkflows([...owned, ...sharedByWorkflow.values()]);
+  const entries = [...owned, ...sharedByWorkflow.values()];
+  const contentByKey = await generationRuleContentsFor(sql, entries);
+  return sortStoredWorkflows(entries.map(entry => hydrateGenerationRules(entry.workflow, entry.userId, contentByKey)));
 }
 
 // Enabling a toggle is a change of intent, so the work that is already waiting should be picked up
