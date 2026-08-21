@@ -1443,6 +1443,26 @@ function stageIsUnlocked(workflow: StoredWorkflow, stageIndex: number, states: {
   return workflow.stages[stageIndex]?.independent === true || stageIndex === 0 || previous?.pull_state === 'merged' && previous.checks_state === 'success';
 }
 
+// Every stage of a sweep runs inside one Promise.allSettled, so a converging stage routinely reads its
+// dependencies before a sibling has written its own merge. Nothing re-evaluates it afterwards, so the
+// convergence waits for the next unrelated delivery or the scheduled sweep — whose real spacing was
+// measured at 2 to 28 minutes. These two functions let the sweep close that gap: the first names the
+// routes that reached the gate during the batch, the second names the stages that were waiting on them.
+export function stageGateSatisfactionAdvanced(before: { pull_state: string; checks_state: string } | undefined, after: { pullState: string; checksState: string }) {
+  const satisfied = (pullState: string, checksState: string) => pullState === 'merged' && checksState === 'success';
+  return satisfied(after.pullState, after.checksState) && !(before && satisfied(before.pull_state, before.checks_state));
+}
+
+export function downstreamStagesToRecheck(workflow: Pick<StoredWorkflow, 'stages'>, advanced: readonly number[]) {
+  if (!advanced.length) return [];
+  return workflow.stages.flatMap((stage, stageIndex) => {
+    if (advanced.includes(stageIndex) || stage.independent === true) return [];
+    const waitFor = stage.waitFor;
+    const waits = waitFor?.length ? waitFor.some(dependency => advanced.includes(dependency)) : advanced.includes(stageIndex - 1);
+    return waits ? [stageIndex] : [];
+  });
+}
+
 export function deriveStageDecision(workflow: StoredWorkflow, stageIndex: number, state: Pick<StageStateRow, 'stage_id' | 'pull_state' | 'checks_state' | 'approvals' | 'required_approvals' | 'mergeable' | 'mergeable_state' | 'ahead_by'>, allStates: readonly (Pick<StageStateRow, 'stage_index' | 'stage_id' | 'pull_state' | 'checks_state'> & { checks_total?: number })[]): StageDecision {
   const stage = workflow.stages[stageIndex];
   if (!stage || !state.stage_id || state.stage_id !== stage.stageId) return { kind: 'none', actionable: false, canCreateNext: false, message: '暂无状态' };
@@ -1931,10 +1951,10 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
     slowestMs: tracked.stats.slowest?.ms,
     total: Math.round(performance.now() - startedAt),
   }));
-  return tracked.value.reconciled;
+  return { reconciled: tracked.value.reconciled, advanced: tracked.value.advanced === true };
 }
 
-async function reconcileStageWork(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string, tracker?: StagePhaseTracker): Promise<{ reconciled: boolean; phases: Record<string, number> }> {
+async function reconcileStageWork(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string, tracker?: StagePhaseTracker): Promise<{ reconciled: boolean; phases: Record<string, number>; advanced?: boolean }> {
   const { phases, phase } = createPhaseRecorder(tracker);
   if (!row.github_installation_id) return { reconciled: false, phases };
   const installationId = row.github_installation_id;
@@ -2014,7 +2034,7 @@ async function reconcileStageWork(environment: Record<string, string | undefined
   // Only an open pull request can be merged, and the gate verdict is pinned to the head sha just stored.
   // The gate goes in already computed, so a wait that only a later event can end costs no second read.
   if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await phase('queue', () => scheduleServerAutoMerge(sql, row, workflow, stageIndex, source, pull.number, pull.head.sha, { checksState: checks.state, approvals, requiredApprovals, mergeable: pull.mergeable ?? null, mergeableState: pull.mergeable_state || '' }));
-  return { reconciled: true, phases };
+  return { reconciled: true, phases, advanced: stageGateSatisfactionAdvanced(before, { pullState: pull.merged_at ? 'merged' : pull.state, checksState: checks.state }) };
 }
 
 // One push emits several deliveries within seconds. Without exclusion each one starts its own sweep
@@ -2123,11 +2143,29 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     let firstFailure: unknown;
     // Counting as each stage settles is what lets a deferred sweep report the work it did finish; the
     // aggregate from allSettled is only available if we wait for every stage.
+    const advancedByWorkflow = new Map<string, number[]>();
     const stageWork = Promise.allSettled(flatTasks.map(item => reconcileOneStage(environment, item.row, item.workflow, item.stageIndex, item.source, filter.eventName, githubBudget).then(
-      value => { if (value) reconciled += 1; return value; },
+      value => {
+        if (value.reconciled) reconciled += 1;
+        if (value.advanced) advancedByWorkflow.set(item.workflow.id, [...(advancedByWorkflow.get(item.workflow.id) || []), item.stageIndex]);
+        return value;
+      },
       error => { failed += 1; firstFailure ||= error; throw error; },
     )));
     const raced = await withStageDeadline(stageWork, deadlineMs);
+    // A stage that read its dependencies before a sibling stored its merge decided on stale rows, and
+    // nothing else in this sweep will look again. Re-running the waiting stages is scoped to the routes
+    // this batch already resolved — a downstream route the branch filter dropped is left to the
+    // scheduled sweep rather than paid for with extra route queries here. The recheck itself does not
+    // count towards stages_reconciled: stages_total was recorded before the batch, and a count above it
+    // would read as work nobody asked for.
+    const recheck = raced.outcome === 'completed' && advancedByWorkflow.size
+      ? flatTasks.filter(item => downstreamStagesToRecheck(item.workflow, advancedByWorkflow.get(item.workflow.id) || []).includes(item.stageIndex))
+      : [];
+    if (recheck.length) {
+      const remainingMs = deadlineMs === undefined ? undefined : deadlineMs - (Date.now() - startedAt);
+      if (remainingMs === undefined || remainingMs > 0) await withStageDeadline(Promise.allSettled(recheck.map(item => reconcileOneStage(environment, item.row, item.workflow, item.stageIndex, item.source, filter.eventName, githubBudget))), remainingMs);
+    }
     const durationMs = Date.now() - startedAt;
     console.log(reconcileTimingLine({
       scope: 'sweep',
