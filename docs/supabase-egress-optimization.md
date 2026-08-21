@@ -629,8 +629,23 @@ workflow_deployments (user_id, workflow_id, target, provider, environment, ...)
 
 1. **加表并双写。** 新表与 `payload` 同时写，`payload` 仍是唯一真相；读路径完全不变。此步不改任何行为，只增加写入量。
 2. **回填历史。** 一次性迁移把现有 payload 展开进新表，并加一个一致性校验查询（新表还原出的对象与 payload 逐字段相等）。
-3. **读切换。** 扫掠与投影改读列而不读 `payload`；`version` 提成列，`workflowSaveConflicts` 改读列。此步之后分支条件才能真正下推：`WHERE stages.source_rule = ANY(...)` 可走普通索引，第三轮里被放弃的那一半随之成立。
-4. **收缩。** 服务端不再解析 `payload`，只保留浏览器同步所需的最小载体（或彻底移除）。
+3. **读切换。**（2026-08-21 已落地，迁移 038）扫掠与 webhook 投影改读列而不读 `payload`；分支条件由此才能真正下推：`WHERE stages.source_rule = ANY(...)` 可走普通索引，第三轮里被放弃的那一半随之成立。`version` 提成列但**未**接入 `workflowSaveConflicts`——错误的乐观锁意味着丢编辑，这一步单独排。
+4. **收缩。** 服务端不再解析 `payload`，只保留浏览器同步所需的最小载体（或彻底移除）。**范围已收窄，见下。**
+
+#### 读切换之后：为什么 039 的代码半不做
+
+2026-08-21 落地 038 后清点剩余 14 处 `storedWorkflowFromPayload`，结论是**代码上的 contract 基本不值得做**：
+
+- **7 处是按主键读单个流程**（`workflowAccessForUser`、`upsertWorkflow`、`removeWorkflow`、`recordWorkflowRun` 等）。每次只读 1 条 payload（约 1.5 kB），切成列读要多打两次子表索引，省下的字节可忽略。
+- **7 处是浏览器列表读**（`listWorkflows`、`listWorkflowStageStates`、`listActionableStages`、`listRecoveryStatuses`、`listWorkflowTimeline` 等）。这些是全量读，但**浏览器要的就是完整对象**——从 payload 读还是从列拼，离开 Supabase 的字节数几乎一样，`jsonb_agg` 加上每行重复的列名甚至更多。
+
+038 有收益是因为扫掠读 35 个流程只为动其中 2 个，**杠杆在「读得多、用得少」**；列表读没有这个杠杆。所以 039 只保留一件立刻能做且安全的事：删掉已死的 `pr_helper_workflows_repository_idx`（旧 jsonb 表达式索引，切换后无任何查询引用，只剩写入开销）。`payload` 列的删除并入第四轮 contract 一起做。
+
+**payload 为什么必须再等一段**——不是仪式，有可指名的残余风险：
+
+- payload 目前仍是完整真相，038 的重建若有测试没覆盖到的错，`git revert` 即可恢复，零数据操作；删掉 payload 后回滚要走备份恢复。
+- 线上 44 条 stage 行的 `execution_mode` **全是 `server`**（2026-08-21 实测）。映射层的 `browser-session` 分支与「只有 autoMerge」分支线上一条真实数据都没走过，只有单测覆盖。等的意义就是等这两个分支被真实流量走一遍。
+
 
 - **收益**：单次扫掠字节**不再随流程总数增长**，分支条件可索引，改一个开关是一行 `UPDATE` 而非整行重写。这是把 O(U) 进一步压到「与数据量无关」的唯一途径。
 - **主要风险**：`src/lib/workflow.ts` 是前后端共享的真相定义，拆表意味着服务端要有一层行↔对象映射，两边可能漂移。缓解手段是一个往返恒等测试（对象 → 行 → 对象 必须逐字段相等），并在第 2 步的校验查询里对全量数据跑一遍。
@@ -731,9 +746,9 @@ workflow_deployments (user_id, workflow_id, target, provider, environment, ...)
 
 **第四轮（提示词去重，未开始）**：见《化债方案 · 第四轮》。局部改动，拿掉全表 payload 的 63%（实测 44 528 / 70 837 B），与第五轮解耦。单用户下约 119 MB/月——**原先标注的「约 100 MB/月」是按第三轮之前的 cron 基线算的，已作废**；重算后的构成是浏览器 39 MB、webhook 45 MB、manual 21 MB、cron 14 MB。多用户下与用户数成正比。
 
-**第五轮（拆成关系表，对外开放前）**：见《化债方案 · 第五轮》。数周级，按 expand → migrate → contract 四步走。第三轮放弃的分支条件下推要等它落地才成立；第六轮 ④ 的候选集也依赖它。
+**第五轮（拆成关系表，对外开放前）**：见《化债方案 · 第五轮》。数周级，按 expand → migrate → contract 四步走。**036 / 037 / 038 已于 2026-08-21 落地**，扫掠与 webhook 投影已改读列，第三轮放弃的分支条件下推随之成立；039 contract 的范围已收窄到只删一个已死索引，`payload` 的删除并入第四轮 contract。第六轮 ④ 的候选集所依赖的列化已就绪。
 
-**第六轮 ④（兜底只扫有活的，最后做）**：见《第六轮：兜底扫掠瘦身 · ④》。约 1 周，依赖第五轮的列化。这是唯一把兜底从 O(全部流程) 变成 O(真正有活的流程) 的一步。
+**第六轮 ④（兜底只扫有活的，最后做）**：见《第六轮：兜底扫掠瘦身 · ④》。约 1 周，**前置的第五轮列化已就绪（038 已落地），可以开始**。这是唯一把兜底从 O(全部流程) 变成 O(真正有活的流程) 的一步。
 
 3. 首页自动化动作改为摘要，不读取历史（当前 `unfinishedOnly` 已经在做，`AUTOMATION_ACTION_VIEW_LIMIT` 值得复核）。
 4. 把历史数据从轮询里摘出去（events / timeline / runs / deployment_runs 共 143 kB，24%）——即原方案的 `/api/board` 与按需加载。**收益最小、改动最大**；A3 落地后浏览器侧只剩约 247 MB/月，此步优先级进一步下降，除非要面向多用户开放。
@@ -803,13 +818,15 @@ workflow_deployments (user_id, workflow_id, target, provider, environment, ...)
 - `pr_helper_generation_rules` 回填后，`content` 的去重率与实测一致（44 份引用 → 1 条内容）。
 - payload 中不再出现 `generationRule.content`，只留 `contentHash`；单次全表读字节从 70 837 B 降到约 26 kB。
 - 入队自动化时若 hash 查不到内容，必须**报错而非静默降级**——由失败测试守住。
-- 收缩迁移只在读路径完全切换并观察一周后才应用。**编号已改**：第五轮先落地，占用了 036，所以第四轮的收缩迁移取当时的下一个空号，不预留空洞（仓库里没有迁移 runner，编号空洞只会让人对「是否漏执行」产生怀疑）。
+- 收缩迁移只在读路径完全切换并观察一周后才应用。**编号已改**：第五轮先落地，占用了 036，所以第四轮的收缩迁移取当时的下一个空号，不预留空洞（仓库里没有迁移 runner，编号空洞只会让人对「是否漏执行」产生怀疑）。第五轮 `payload` 列的删除并入这一步。
+- **脱水是保存时触发的，没有批量迁移**，所以全表收益是渐进的而非上线即得：2026-08-21 实测 2 个已脱水流程共 2 508 B（均 1 254 B），另 33 个仍内联共 52 179 B（均 1 581 B），单流程约 −21%。方案里的 −63% 是按全部 44 个 stage 算的，而已脱水的两个沙箱流程各只有 1 个 stage——两个数字不矛盾，但**不要拿 63% 当上线次日的验收线**。
 
 第五轮（拆关系表）的验收标准：
 
-- expand → backfill → 读切换 → contract 四步各自独立可回滚；任何一步单独部署后系统行为不变。迁移编号：**036 expand（已落地）**、037 回填与一致性校验、038 读切换与索引、039 contract。
+- expand → backfill → 读切换 → contract 四步各自独立可回滚；任何一步单独部署后系统行为不变。迁移编号：**036 expand（已落地）**、**037 回填与一致性校验（已落地）**、**038 读切换与索引（已落地，2026-08-21）**、039 contract（范围已收窄，见《读切换之后》）。
+- 038 落地后的实测证据（读-only 通道）：`name` / `repository` / `archived` 三列均为 NOT NULL（这条 ALTER 能成功本身就证明 037 一行没漏）；新索引 `pr_helper_workflows_active_repository_idx ON (repository) WHERE archived = false` 已被使用，12 次扫描读出 27 行（均 2.25 行/次，切换前是全表 35 行）；子表走索引而非全表（`workflow_stages` idx_scan 193 / seq_scan 8）；35 个流程中 **0 个没有 stage 行**，payload 的 stage 数与行数 **0 处不一致**。
 - 回填后有一致性检查：关系表重组出的对象与原 payload **逐字段相等**（round-trip identity 测试）。已由 [`api/_lib/workflow-rows.test.ts`](../api/_lib/workflow-rows.test.ts) 用 `toStrictEqual` 守住——它把 `{position: undefined}` 与 `{}` 判为不等，能抓住漏键，`toEqual` 不能。
-- `version` 提升为独立列后，`workflowSaveConflicts` 的冲突检测行为与改前一致。
+- `version` 提升为独立列后，`workflowSaveConflicts` 的冲突检测行为与改前一致。**038 未做这一步**：列已存在并被镜像写入，但冲突检测仍读 payload。错误的乐观锁意味着丢用户编辑，故单独排一步、单独验收。
 - 读切换后单次读取字节随「实际需要的字段」变化，而不再随 payload 总大小变化。
 - **expand 步的两条约束**（036 已满足）：promoted 列全部可空（含类型上必填的 `name` / `repository`，因为历史行没有值可填，NOT NULL 默认值等于编造数据，要等回填后才收紧）；`declared_created_at` 与 `rule_captured_at` 存 text 而非 timestamptz，否则往返会被 Postgres 重排格式，恒等测试立刻失败。
 - **镜像不漏写点**：payload 有两处写点（`upsertWorkflow` 的 INSERT 与删步骤路径的 UPDATE），两处都必须在**同一事务内**镜像，否则崩溃后两份表示不一致，正是回填校验会读成「数据损坏」的状态。由单元测试守住。

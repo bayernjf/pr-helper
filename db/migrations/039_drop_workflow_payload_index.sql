@@ -1,0 +1,12 @@
+-- 039: Drop the jsonb repository index that migration 038 made unreachable.
+--
+-- 034 added `pr_helper_workflows_repository_idx ON ((payload->>'repository')) WHERE (payload->>'archived')
+-- IS DISTINCT FROM 'true'` for the sweep and the webhook projection. 038 moved both filters onto the
+-- promoted `repository` and `archived` columns, and no query in the repository mentions either jsonb
+-- expression any more, so the planner can never choose this index again. An index nothing reads is not
+-- free: it is maintained on every insert and every update of a workflow.
+--
+-- This is the whole of the contract step for now. The `payload` column itself stays: it is still the only
+-- complete truth, so a fault in the column-based rebuild is one `git revert` away from being fixed, and
+-- the mapping's `browser-session` automation branch has no live row to have proved it yet.
+DROP INDEX IF EXISTS pr_helper_workflows_repository_idx;

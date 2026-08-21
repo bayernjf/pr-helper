@@ -693,8 +693,12 @@ const defaultDeploymentConfigs: DeploymentConfig[] = [
 const bundledRollbackRepository = 'bayernjf/pr-helper';
 const bundledRollbackWorkflow = 'Rollback frontend deployment';
 
+// A workflow that stores no deployments has declined the gates. Falling back to the bundled defaults here
+// applied pr-helper's own Actions workflow names to every repository that had configured nothing, and
+// reconciliation wrote a run-less pending row per name; pending deployments become pending checks, which
+// locks the next stage. The defaults stay a creation-time prefill on the client.
 function deploymentConfigs(workflow: StoredWorkflow) {
-  const configured = workflow.deployments || defaultDeploymentConfigs;
+  const configured = workflow.deployments || [];
   if (workflow.repository !== bundledRollbackRepository) return configured;
   return configured.map(deployment => deployment.environment === 'production' && deployment.workflowName === (deployment.provider === 'vercel' ? 'Deploy frontend to Vercel' : 'Deploy frontend to Cloudflare Pages') && !deployment.rollbackWorkflowName
     ? { ...deployment, rollbackWorkflowName: bundledRollbackWorkflow }

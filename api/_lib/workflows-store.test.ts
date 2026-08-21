@@ -186,7 +186,10 @@ describe('stored workflow validation', () => {
   });
 
   it('expects the bundled rollback workflow only for PR Helper production deployments', () => {
-    const workflow = { id: 'flow-1', name: 'Release', repository: 'bayernjf/pr-helper', stages: [{ source: 'dev', target: 'main' }] };
+    const workflow = { id: 'flow-1', name: 'Release', repository: 'bayernjf/pr-helper', stages: [{ source: 'dev', target: 'main' }], deployments: [
+      { target: 'main', provider: 'vercel' as const, workflowName: 'Deploy frontend to Vercel', environment: 'production' as const, githubEnvironment: 'production-vercel' },
+      { target: 'main', provider: 'cloudflare' as const, workflowName: 'Deploy frontend to Cloudflare Pages', environment: 'production' as const, githubEnvironment: 'production-cloudflare-pages' },
+    ] };
     const warnings = workflowConfigurationWarnings(workflow, {
       actionsAvailable: true,
       workflows: [
@@ -1302,6 +1305,22 @@ describe('reaped run rows', () => {
   // path entirely; a duration nobody measured is better left unset.
   it('never reports the delay before reaping as the duration of the sweep', () => {
     expect(reaper).not.toContain('extract(epoch from now() - started_at)');
+  });
+});
+
+// The client and the server keep separate copies of this resolution, and reconciliation is the copy that
+// writes rows, so the client-side test in src/lib/workflow.test.ts does not cover it. A workflow with no
+// gates was resolved to pr-helper's own four, and `reconcileStageDeployments` then wrote run-less pending
+// rows for Actions workflows the repository does not have. `mergeChecksWithDeployments` turns a pending
+// deployment into pending checks, and `stageIsUnlocked` requires the previous stage's checks to be
+// success, so a repository that had simply configured nothing lost its next stage for good.
+describe('a workflow with no deployment gates', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const start = source.indexOf('function deploymentConfigs(workflow: StoredWorkflow)');
+  const resolver = source.slice(start, source.indexOf('\n}', start));
+
+  it('resolves to no gates rather than to the bundled defaults', () => {
+    expect(resolver).not.toContain('defaultDeploymentConfigs');
   });
 });
 
