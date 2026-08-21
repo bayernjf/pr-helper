@@ -142,6 +142,14 @@ export function generationRuleButtonLabel(rule?: GenerationRule): string {
   return rule ? `生成规则 · ${rule.name}` : '生成规则';
 }
 
+// 提示词内容存在服务端的 pr_helper_generation_rules，payload 只留 hash，所以详情页重新保存 automation 时
+// 手上可能没有内容。按同名规则从本地列表找回来；找不到就当作没有规则，让调用方走原有的缺前置条件分支。
+export function stageGenerationRule(stored: { name: string; content?: string; contentHash?: string } | undefined, rules: readonly GenerationRule[]): { name: string; content: string } | undefined {
+  if (!stored) return undefined;
+  const content = stored.content?.trim() ? stored.content : rules.find(rule => rule.name === stored.name)?.content;
+  return content?.trim() ? { name: stored.name, content } : undefined;
+}
+
 export function markdownRuleName(fileName: string): string {
   if (!/\.md$/i.test(fileName)) {
     throw new Error('只能导入 Markdown (.md) 文件');
