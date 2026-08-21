@@ -76,6 +76,7 @@ let repositoryEnvironmentsLoaded = false;
 let statuses: StepStatus[] | null = null;
 let refreshOnNextDetail = false;
 let pollTimer: number | undefined;
+const POLL_INTERVAL_MS = 60_000;
 let overviewPollTimer: number | undefined;
 let overviewSnapshotRefreshing = false;
 let overviewRefreshOnFocusBound = false;
@@ -428,7 +429,7 @@ function bindOverviewScrollControls() {
 }
 function startOverviewSnapshotPolling() {
   if (overviewPollTimer === undefined) {
-    overviewPollTimer = window.setInterval(() => { void refreshOverviewSnapshot(); }, 30_000);
+    overviewPollTimer = window.setInterval(() => { void refreshOverviewSnapshot(); }, POLL_INTERVAL_MS);
     void refreshOverviewSnapshot();
   }
   if (overviewRefreshOnFocusBound) return;
@@ -2137,7 +2138,7 @@ function detail() {
     const index = Number(button.dataset.codexRepair);
     void showCodexRepairDialog(index, undefined, statuses?.[index]?.pr?.number);
   }));
-  if (!pollTimer) pollTimer = window.setInterval(() => refreshStatuses(), 30000);
+  if (!pollTimer) pollTimer = window.setInterval(() => { if (document.visibilityState === 'visible') void refreshStatuses(); }, POLL_INTERVAL_MS);
   if (!refreshOnFocusBound) {
     refreshOnFocusBound = true;
     window.addEventListener('focus', () => { if (screen === 'detail') void refreshStatuses(); });
