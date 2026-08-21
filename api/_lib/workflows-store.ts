@@ -601,6 +601,7 @@ export async function listWorkflowAutomationActions(environment: Record<string, 
 
 type DatabaseUser = { id: string };
 type WorkflowRow = { payload: unknown; version?: number };
+type VisibleWorkflowRow = WorkflowRow & { id: string };
 type TrackedWorkflowRow = WorkflowRow & { user_id: string; id: string; github_installation_id?: string | null; last_reconcile_attempt_at?: string | null; reconcile_pending_since?: string | null };
 type WorkflowAccess = { ownerUserId: string; workflow: StoredWorkflow; team?: { id: string; name: string; role: TeamRole } };
 
@@ -820,7 +821,7 @@ export type WorkflowStageState = {
 };
 export type WorkflowStageEvent = { workflowId: string; stageIndex: number; stageId: string | null; source: string | null; target: string | null; kind: string; message: string; occurredAt: string };
 export type TimelineEntry = { workflowId: string; stageIndex: number; stageId: string | null; source: string; target: string; kind: string; message: string; occurredAt: string; pullNumber: number | null; runId: number | null };
-export type WorkflowRun = { id: number; workflowId: string; version: number; stageIndex: number; stageId: string | null; source: string; target: string; stageSnapshot: { source: string; target: string; stageId?: string }; pullNumber: number | null; state: 'active' | 'completed' | 'failed'; startedAt: string; completedAt: string | null };
+export type WorkflowRun = { id: number; workflowId: string; version: number; stageIndex: number; stageId: string | null; source: string; target: string; pullNumber: number | null; state: 'active' | 'completed' | 'failed'; startedAt: string; completedAt: string | null };
 export type WorkflowVersion = { workflowId: string; version: number; snapshot: StoredWorkflow; createdAt: string };
 export type WorkflowStageDeployment = {
   workflowId: string;
@@ -1224,6 +1225,24 @@ function visibleWorkflowPredicate(sql: ReturnType<typeof query>, userId: string,
     JOIN pr_helper_team_members members ON members.team_id = shared.team_id
     WHERE shared.owner_user_id = ${owner} AND shared.workflow_id = ${workflow} AND members.user_id = ${userId}
   )`;
+}
+
+/** Per-request memo so one `/api/inbox` reads each visible workflow payload and stage state set once. */
+export type VisibleWorkflowReads = {
+  workflows?: Promise<VisibleWorkflowRow[]>;
+  stageStates?: Promise<StageStateRow[]>;
+};
+
+function visibleWorkflowRows(sql: ReturnType<typeof query>, userId: string, reads?: VisibleWorkflowReads) {
+  const read = () => sql<VisibleWorkflowRow[]>`SELECT workflows.id, workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, userId, 'workflows.user_id', 'workflows.id')}`;
+  if (!reads) return read();
+  return reads.workflows ??= read();
+}
+
+function visibleStageStateRows(sql: ReturnType<typeof query>, userId: string, reads?: VisibleWorkflowReads) {
+  const read = () => sql<StageStateRow[]>`SELECT states.workflow_id, states.stage_index, states.stage_id, states.repository, states.source, states.target, states.pull_number, states.pull_state, states.merged_at, states.head_sha, states.checks_state, states.checks_passed, states.checks_total, states.approvals, states.required_approvals, states.mergeable, states.mergeable_state, states.ahead_by, states.last_event, states.updated_at FROM workflow_stage_states states WHERE ${visibleWorkflowPredicate(sql, userId, 'states.user_id', 'states.workflow_id')} ORDER BY states.workflow_id, states.stage_index`;
+  if (!reads) return read();
+  return reads.stageStates ??= read();
 }
 
 export async function authorizeWorkflowOperation(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, input: { workflowId: string; repository: string; operation: TeamOperation; source?: string; target?: string; environment?: 'preview' | 'production' }) {
@@ -2156,12 +2175,12 @@ type StageStateRow = { workflow_id: string; stage_index: number; stage_id: strin
 type StageDeploymentRow = { workflow_id: string; stage_index: number; stage_id: string | null; source: string; provider: DeploymentProvider; environment: 'preview' | 'production'; run_id: number | null; run_name: string; run_url: string | null; deployment_url: string | null; state: DeploymentState; conclusion: string | null; failure_summary: string | null; failure_job_url: string | null; health_state: DeploymentState | null; health_url: string | null; health_detail: string | null; updated_at: string };
 type StageDeploymentRunRow = StageDeploymentRow & { first_seen_at: string };
 
-export async function listWorkflowStageStates(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageState[]> {
+export async function listWorkflowStageStates(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, reads?: VisibleWorkflowReads): Promise<WorkflowStageState[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
   const [rows, workflowRows] = await Promise.all([
-    sql<StageStateRow[]>`SELECT states.workflow_id, states.stage_index, states.stage_id, states.repository, states.source, states.target, states.pull_number, states.pull_state, states.merged_at, states.head_sha, states.checks_state, states.checks_passed, states.checks_total, states.approvals, states.required_approvals, states.mergeable, states.mergeable_state, states.ahead_by, states.last_event, states.updated_at FROM workflow_stage_states states WHERE ${visibleWorkflowPredicate(sql, user.id, 'states.user_id', 'states.workflow_id')} ORDER BY states.workflow_id, states.stage_index`,
-    sql<WorkflowRow[]>`SELECT workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, user.id, 'workflows.user_id', 'workflows.id')}`,
+    visibleStageStateRows(sql, user.id, reads),
+    visibleWorkflowRows(sql, user.id, reads),
   ]);
   const workflowById = new Map(workflowRows.flatMap(row => {
     const workflow = storedWorkflowFromPayload(row.payload);
@@ -2208,10 +2227,10 @@ export async function listWorkflowStageDeploymentRuns(environment: Record<string
   return rows.map(row => ({ workflowId: row.workflow_id, stageIndex: row.stage_index, stageId: row.stage_id, source: row.source, provider: row.provider, environment: row.environment, runId: row.run_id, runName: row.run_name, runUrl: row.run_url, deploymentUrl: row.deployment_url, state: row.state, conclusion: row.conclusion, failureSummary: null, failureJobUrl: null, healthState: row.health_state, healthUrl: row.health_url, healthDetail: row.health_detail, firstSeenAt: row.first_seen_at, updatedAt: row.updated_at }));
 }
 
-export async function listWorkflowConfigurationWarnings(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowConfigurationWarning[]> {
+export async function listWorkflowConfigurationWarnings(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, reads?: VisibleWorkflowReads): Promise<WorkflowConfigurationWarning[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRow[]>`SELECT workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, user.id, 'workflows.user_id', 'workflows.id')}`;
+  const rows = await visibleWorkflowRows(sql, user.id, reads);
   // An archived workflow is not being shipped, so a gate it never reaches is not a warning worth
   // showing — and checking it would spend two GitHub calls per workflow to say so.
   const stored = rows.map(row => storedWorkflowFromPayload(row.payload)).filter((workflow): workflow is StoredWorkflow => Boolean(workflow) && !workflow!.archived);
@@ -2236,11 +2255,11 @@ export async function listRecentWorkflowStageEvents(environment: Record<string, 
   return rows.map(row => ({ workflowId: row.workflow_id, stageIndex: row.stage_index, stageId: row.stage_id, source: row.source, target: row.target, kind: row.kind, message: row.message, occurredAt: row.occurred_at }));
 }
 
-export async function listActionableStages(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<ActionableStage[]> {
+export async function listActionableStages(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, reads?: VisibleWorkflowReads): Promise<ActionableStage[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const workflows = await sql<WorkflowRow[]>`SELECT workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, user.id, 'workflows.user_id', 'workflows.id')}`;
-  const states = await sql<StageStateRow[]>`SELECT states.workflow_id, states.stage_index, states.stage_id, states.repository, states.source, states.target, states.pull_number, states.pull_state, states.merged_at, states.head_sha, states.checks_state, states.checks_passed, states.checks_total, states.approvals, states.required_approvals, states.mergeable, states.mergeable_state, states.ahead_by, states.last_event, states.updated_at FROM workflow_stage_states states WHERE ${visibleWorkflowPredicate(sql, user.id, 'states.user_id', 'states.workflow_id')}`;
+  const workflows = await visibleWorkflowRows(sql, user.id, reads);
+  const states = await visibleStageStateRows(sql, user.id, reads);
   return workflows.flatMap(row => {
     const stored = storedWorkflowFromPayload(row.payload);
     const workflow = stored && !stored.archived ? ensureStageIds(stored) : undefined;
@@ -2258,10 +2277,10 @@ export async function listActionableStages(environment: Record<string, string | 
   });
 }
 
-export async function listRecoveryStatuses(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<RecoveryStatus[]> {
+export async function listRecoveryStatuses(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, reads?: VisibleWorkflowReads): Promise<RecoveryStatus[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const workflowRows = await sql<WorkflowRow[]>`SELECT workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, user.id, 'workflows.user_id', 'workflows.id')}`;
+  const workflowRows = await visibleWorkflowRows(sql, user.id, reads);
   const policyByWorkflow = new Map<string, RecoveryPolicy>();
   const stageIndexByIdentity = new Map<string, number>();
   for (const row of workflowRows) {
@@ -2320,12 +2339,12 @@ export async function completeWorkflowRun(environment: Record<string, string | u
   await sql`UPDATE workflow_runs SET state = ${state}, completed_at = now() WHERE user_id = ${user.id} AND workflow_id = ${workflowId} AND pull_number = ${pullNumber} AND state = 'active'`;
 }
 
-type WorkflowRunRow = { id: number; workflow_id: string; version: number; stage_index: number; stage_id: string | null; source: string; target: string; stage_snapshot: { source: string; target: string; stageId?: string }; pull_number: number | null; state: string; started_at: string; completed_at: string | null };
+type WorkflowRunRow = { id: number; workflow_id: string; version: number; stage_index: number; stage_id: string | null; source: string; target: string; pull_number: number | null; state: string; started_at: string; completed_at: string | null };
 
 export async function listWorkflowRuns(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowRun[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRunRow[]>`SELECT runs.id, runs.workflow_id, runs.version, runs.stage_index, runs.stage_id, runs.source, runs.target, runs.stage_snapshot, runs.pull_number, runs.state, runs.started_at, runs.completed_at FROM workflow_runs runs WHERE ${visibleWorkflowPredicate(sql, user.id, 'runs.user_id', 'runs.workflow_id')} ORDER BY runs.started_at DESC LIMIT 50`;
+  const rows = await sql<WorkflowRunRow[]>`SELECT runs.id, runs.workflow_id, runs.version, runs.stage_index, runs.stage_id, runs.source, runs.target, runs.pull_number, runs.state, runs.started_at, runs.completed_at FROM workflow_runs runs WHERE ${visibleWorkflowPredicate(sql, user.id, 'runs.user_id', 'runs.workflow_id')} ORDER BY runs.started_at DESC LIMIT 50`;
   return rows.map(row => ({
     id: row.id,
     workflowId: row.workflow_id,
@@ -2334,7 +2353,6 @@ export async function listWorkflowRuns(environment: Record<string, string | unde
     stageId: row.stage_id,
     source: row.source,
     target: row.target,
-    stageSnapshot: row.stage_snapshot,
     pullNumber: row.pull_number,
     state: row.state as 'active' | 'completed' | 'failed',
     startedAt: row.started_at,
@@ -2400,14 +2418,14 @@ export async function readConvergenceHealth(environment: Record<string, string |
   };
 }
 
-export async function listWorkflowTimeline(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<TimelineEntry[]> {
+export async function listWorkflowTimeline(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, reads?: VisibleWorkflowReads): Promise<TimelineEntry[]> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
   const [events, runs] = await Promise.all([
     sql<{ workflow_id: string; stage_index: number; stage_id: string | null; source: string | null; target: string | null; kind: string; message: string; occurred_at: string }[]>`SELECT events.workflow_id, events.stage_index, events.stage_id, events.source, events.target, events.kind, events.message, events.occurred_at FROM workflow_stage_events events WHERE ${visibleWorkflowPredicate(sql, user.id, 'events.user_id', 'events.workflow_id')} ORDER BY events.occurred_at DESC LIMIT 200`,
     sql<{ workflow_id: string; stage_index: number; stage_id: string | null; source: string; target: string; pull_number: number | null; id: number; state: string; started_at: string; completed_at: string | null }[]>`SELECT runs.workflow_id, runs.stage_index, runs.stage_id, runs.source, runs.target, runs.pull_number, runs.id, runs.state, runs.started_at, runs.completed_at FROM workflow_runs runs WHERE ${visibleWorkflowPredicate(sql, user.id, 'runs.user_id', 'runs.workflow_id')} ORDER BY runs.started_at DESC LIMIT 100`,
   ]);
-  const workflows = await sql<(WorkflowRow & { id: string })[]>`SELECT workflows.id, workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, user.id, 'workflows.user_id', 'workflows.id')}`;
+  const workflows = await visibleWorkflowRows(sql, user.id, reads);
   const workflowMap = new Map(workflows.map(row => {
     const wf = storedWorkflowFromPayload(row.payload);
     return [row.id, wf] as const;
