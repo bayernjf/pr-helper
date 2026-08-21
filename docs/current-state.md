@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-21（服务端自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 是唯一执行入口；流程详情页的只读进度条已上线；Supabase Free Plan 出现 Egress 超额，已实测定位到「详情页轮询隐藏不停」与「同一请求内重复读 payload」两项，前者已修，见《Supabase Egress 与多用户扩展方案》）
+> 最后更新：2026-08-21（服务端自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 是唯一执行入口；流程详情页的只读进度条已上线；Supabase Free Plan 出现 Egress 超额，已实测定位到「详情页轮询隐藏不停」与「同一请求内重复读 payload」两项，均已修，见《Supabase Egress 与多用户扩展方案》）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -22,7 +22,7 @@ PR Helper 是 GitHub-first 的 PR / Release Control Tower。用户以项目 Lane
 - **功能质量：8.5/10**。流程 CRUD、Lane 看板、动态来源、多路径汇聚、PR 创建/合并、五类门禁、合并后 Actions/部署状态、失败恢复和审计均已具备；后台自动创建 PR 和逐步骤自动合并已有生产成功记录。
 - **产品完善度：7.5/10**。个人使用和小团队发布控制塔已可用；多账号权限、private/organization 边界、Web Push 关闭页面投递和部署回滚仍需外部条件验收。
 - **生产准备度：7/10**。主链路和两级自动化都已有真实 Production 证据；健康检查/失败部署投影、确认式回滚和部分协作能力不能仅凭本地测试视为通过。Supabase Free Plan 在上个账单周期出现 Egress 超额（`pr-helper` 6.28GB / 5GB），当前高频 `/api/inbox` 把看板状态与历史数据绑在一起，不适合直接承载多用户轮询。
-- **结论：综合 7.5/10**。产品已超过 MVP，可继续作为受控生产工具使用；下一步优先降低 Supabase Egress（详情页轮询隐藏即停 + 60 秒已完成，接下来做请求内去重），再继续收敛 reconciliation 写入和完成外部条件验收，不建议立即投入画布或模板市场。
+- **结论：综合 7.5/10**。产品已超过 MVP，可继续作为受控生产工具使用；下一步优先降低 Supabase Egress（轮询时钟已整个删掉、请求内去重与 payload 内容哈希化均已完成，最终判定要等一周 Supabase Usage，最早 2026-08-28），再继续收敛 reconciliation 写入和完成外部条件验收，不建议立即投入画布或模板市场。
 
 ## 当前架构
 
