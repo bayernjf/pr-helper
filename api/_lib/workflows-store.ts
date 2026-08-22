@@ -131,6 +131,19 @@ export function automationSkipLine(fields: { kind: WorkflowAutomationAction['kin
   return `[automation-skip] ${logFields(fields)}`;
 }
 
+// The editor offers 1–20, so anything outside that range reached the payload by hand and cannot be
+// trusted. Both the reconcile enqueue and the manual trigger read the threshold through here: two
+// inline copies of the clamp could drift, and production has only ever stored 1, so a divergence
+// would go unnoticed exactly like the health probe did.
+export function autoCreateCommitThreshold(automation: { triggerMinCommits?: number } | undefined) {
+  const value = automation?.triggerMinCommits;
+  return typeof value === 'number' && Number.isInteger(value) ? Math.min(20, Math.max(1, value)) : 1;
+}
+
+export function autoCreateReachedThreshold(automation: { triggerMinCommits?: number } | undefined, aheadBy: number) {
+  return aheadBy > 0 && aheadBy >= autoCreateCommitThreshold(automation);
+}
+
 async function enqueueServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string, aheadBy: number): Promise<number | null> {
   const stage = stageForIndex(workflow, stageIndex);
   const automation = stage?.automation;
@@ -150,8 +163,8 @@ async function enqueueServerAutoCreate(environment: Record<string, string | unde
   }
   const credentialRows = await sql<{ id: string }[]>`SELECT user_id AS id FROM pr_helper_ai_automation_credentials WHERE user_id = ${row.user_id} AND auto_generate_pr_message = true AND auto_confirm_pr_creation = true LIMIT 1`;
   if (!credentialRows[0]) return skip('no-automation-credential');
-  const triggerMinCommits = typeof automation.triggerMinCommits === 'number' && Number.isInteger(automation.triggerMinCommits) ? Math.min(20, Math.max(1, automation.triggerMinCommits)) : 1;
-  if (aheadBy < triggerMinCommits) return skip('below-threshold', { aheadBy, threshold: triggerMinCommits });
+  const triggerMinCommits = autoCreateCommitThreshold(automation);
+  if (!autoCreateReachedThreshold(automation, aheadBy)) return skip('below-threshold', { aheadBy, threshold: triggerMinCommits });
   const idempotencyKey = automationIdempotencyKey({ workflowId: workflow.id, stageId: stage.stageId, source, target: stage.target, headSha, kind: 'create-pr' });
   const existing = await sql<{ id: number; state: WorkflowAutomationAction['state']; updated_at: string }[]>`SELECT id, state, updated_at FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
   if (existing[0]) {
@@ -552,8 +565,7 @@ async function executeWorkflowAutomationActionForUser(environment: Record<string
     const currentStates = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
     const current = currentStates.find(state => state.stage_id === action.stage_id && state.source === action.source);
     if (!current || !deriveStageDecision(workflow, action.stage_index, current, currentStates).canCreateNext) throw new Error('当前步骤尚未满足自动创建 PR 的门禁');
-    const triggerMinCommits = typeof stage.automation.triggerMinCommits === 'number' && Number.isInteger(stage.automation.triggerMinCommits) ? Math.min(20, Math.max(1, stage.automation.triggerMinCommits)) : 1;
-    if (current.ahead_by < triggerMinCommits) throw new Error(`新提交数未达到自动创建阈值（需要 ${triggerMinCommits} 个）`);
+    if (!autoCreateReachedThreshold(stage.automation, current.ahead_by)) throw new Error(`新提交数未达到自动创建阈值（需要 ${autoCreateCommitThreshold(stage.automation)} 个）`);
     const credential = await readAiAutomationCredentialForUser(environment, userId);
     if (!credential || !credential.autoGeneratePrMessage || !credential.autoConfirmPrCreation) throw new Error('服务端 AI 自动生成或自动确认设置未开启');
     const { owner, name } = ownerAndName(workflow.repository);
@@ -1506,9 +1518,9 @@ export async function listWorkflows(environment: Record<string, string | undefin
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
   const [ownedRows, sharedRows] = await Promise.all([
-    sql<(WorkflowRow & { version: number })[]>`SELECT workflows.payload, COALESCE((SELECT MAX(version) FROM workflow_versions versions WHERE versions.user_id = workflows.user_id AND versions.workflow_id = workflows.id), 0)::int AS version FROM pr_helper_workflows workflows WHERE workflows.user_id = ${user.id} ORDER BY workflows.updated_at DESC`,
+    sql<(WorkflowRow & { version: number })[]>`SELECT workflows.payload, COALESCE(workflows.version, 0)::int AS version FROM pr_helper_workflows workflows WHERE workflows.user_id = ${user.id} ORDER BY workflows.updated_at DESC`,
     sql<(WorkflowRow & { owner_user_id: string; version: number; team_id: string; team_name: string; role: TeamRole })[]>`
-      SELECT workflows.payload, shared.owner_user_id, COALESCE((SELECT MAX(version) FROM workflow_versions versions WHERE versions.user_id = workflows.user_id AND versions.workflow_id = workflows.id), 0)::int AS version, teams.id AS team_id, teams.name AS team_name, members.role
+      SELECT workflows.payload, shared.owner_user_id, COALESCE(workflows.version, 0)::int AS version, teams.id AS team_id, teams.name AS team_name, members.role
       FROM pr_helper_team_workflows shared
       JOIN pr_helper_team_members members ON members.team_id = shared.team_id
       JOIN pr_helper_teams teams ON teams.id = shared.team_id
@@ -1577,9 +1589,11 @@ export function stageGateChanged(previous: StoredWorkflow | null, next: StoredWo
 
 // A row written before versioning has no version history, so an incoming save has nothing to
 // conflict with. Requiring the client to echo a version it was never given left those rows
-// permanently unsaveable, which failed every reorder — a reorder saves every workflow.
-export function workflowSaveConflicts(hasPrevious: boolean, latestVersion: number, version: unknown) {
-  if (!hasPrevious || latestVersion === 0) return false;
+// permanently unsaveable, which failed every reorder — a reorder saves every workflow. The stored
+// version now comes from the promoted column, which 036 had to leave nullable, so an absent value
+// means the same thing as zero rather than a mismatch.
+export function workflowSaveConflicts(hasPrevious: boolean, latestVersion: unknown, version: unknown) {
+  if (!hasPrevious || latestVersion === null || latestVersion === undefined || latestVersion === 0) return false;
   return typeof version !== 'number' || version !== latestVersion;
 }
 
@@ -1597,10 +1611,14 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
   let savedWorkflow = dehydrated.workflow;
   await sql.begin(async transaction => {
     await transaction`SELECT pg_advisory_xact_lock(hashtext(${`${ownerUserId}:${withIds.id}`}))`;
-    const latestRows = await transaction<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${ownerUserId} AND workflow_id = ${withIds.id}`;
-    const latestVersion = latestRows[0]?.version || 0;
-    if (workflowSaveConflicts(Boolean(previous), latestVersion, workflow.version)) throw new Error('流程已被其他窗口更新，请刷新后再保存。');
-    savedWorkflow = { ...dehydrated.workflow, version: latestVersion + 1 };
+    // Read under the advisory lock, and from the promoted column rather than `MAX(workflow_versions.version)`:
+    // the lock's authority is now the same row the save is about to update, so it cannot be weakened by
+    // anything that prunes version history. `hasPrevious` follows the row's existence instead of whether its
+    // payload still parses — once the payload column goes, a parse-based check would silently pass everything.
+    const latestRows = await transaction<{ version: number | null }[]>`SELECT version FROM pr_helper_workflows WHERE user_id = ${ownerUserId} AND id = ${withIds.id}`;
+    const latestVersion = latestRows[0]?.version ?? null;
+    if (workflowSaveConflicts(latestRows.length > 0, latestVersion, workflow.version)) throw new Error('流程已被其他窗口更新，请刷新后再保存。');
+    savedWorkflow = { ...dehydrated.workflow, version: (latestVersion || 0) + 1 };
     // The payload no longer carries the content, so the rule rows must land first: an enqueue that
     // reaches the hash before the content exists has nothing to resolve.
     for (const rule of dehydrated.rules) await transaction`INSERT INTO pr_helper_generation_rules (user_id, content_hash, content) VALUES (${ownerUserId}, ${rule.contentHash}, ${rule.content}) ON CONFLICT (user_id, content_hash) DO NOTHING`;
@@ -1650,7 +1668,7 @@ export async function removeWorkflowStage(environment: Record<string, string | u
   let savedWorkflow: StoredWorkflow | null = null;
   await sql.begin(async transaction => {
     await transaction`SELECT pg_advisory_xact_lock(hashtext(${`${access.ownerUserId}:${workflowId}`}))`;
-    const rows = await transaction<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${access.ownerUserId} AND id = ${workflowId} FOR UPDATE`;
+    const rows = await transaction<(WorkflowRow & { version: number | null })[]>`SELECT payload, version FROM pr_helper_workflows WHERE user_id = ${access.ownerUserId} AND id = ${workflowId} FOR UPDATE`;
     const previous = storedWorkflowFromPayload(rows[0]?.payload);
     if (!previous) throw new Error('未找到对应流程');
     const removalIndex = findWorkflowStageIndexForRemoval(previous, stageId, stageIndex, source, target);
@@ -1659,8 +1677,7 @@ export async function removeWorkflowStage(environment: Record<string, string | u
     const stages = previous.stages
       .filter((stage, index) => index !== removalIndex && stage.stageId !== stageId)
       .map(stage => !stage.waitFor ? stage : { ...stage, waitFor: stage.waitFor.filter(dependency => dependency !== removalIndex).map(dependency => dependency > removalIndex ? dependency - 1 : dependency) });
-    const latestRows = await transaction<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId}`;
-    savedWorkflow = { ...ensureStageIds({ ...previous, stages }), version: (latestRows[0]?.version || 0) + 1 };
+    savedWorkflow = { ...ensureStageIds({ ...previous, stages }), version: (rows[0]?.version || 0) + 1 };
     await transaction`UPDATE pr_helper_workflows SET payload = ${transaction.json(savedWorkflow)}, updated_at = now() WHERE user_id = ${access.ownerUserId} AND id = ${workflowId}`;
     await writeWorkflowRows(transaction, access.ownerUserId, savedWorkflow);
     await transaction`DELETE FROM workflow_stage_events WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId} AND stage_id = ${stageId}`;
@@ -2571,10 +2588,12 @@ export async function listRecoveryStatuses(environment: Record<string, string | 
   });
 }
 
+// The version was already decided under the advisory lock by the caller, from the row's own column.
+// Deriving it a second time from `MAX(workflow_versions.version)` would be a second authority that can
+// disagree with the one the optimistic lock reads, and history that numbers a save differently from the
+// row it snapshots is worse than no history.
 async function saveWorkflowVersion(sql: any, userId: string, workflow: StoredWorkflow) {
-  const latest = await sql<{ version: number }[]>`SELECT version FROM workflow_versions WHERE user_id = ${userId} AND workflow_id = ${workflow.id} ORDER BY version DESC LIMIT 1`;
-  const nextVersion = (latest[0]?.version || 0) + 1;
-  await sql`INSERT INTO workflow_versions (user_id, workflow_id, version, snapshot) VALUES (${userId}, ${workflow.id}, ${nextVersion}, ${sql.json(workflow)})`;
+  await sql`INSERT INTO workflow_versions (user_id, workflow_id, version, snapshot) VALUES (${userId}, ${workflow.id}, ${workflow.version}, ${sql.json(workflow)})`;
 }
 
 export async function recordWorkflowRun(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string, stageIndex: number, source: string, pullNumber: number) {

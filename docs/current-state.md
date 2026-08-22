@@ -18,7 +18,7 @@ PR Helper 是 GitHub-first 的 PR / Release Control Tower。用户以项目 Lane
 
 ## 当前整体评估
 
-- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（651 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
+- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（658 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
 - **功能质量：8.5/10**。流程 CRUD、Lane 看板、动态来源、多路径汇聚、PR 创建/合并、五类门禁、合并后 Actions/部署状态、失败恢复和审计均已具备；后台自动创建 PR 和逐步骤自动合并已有生产成功记录。
 - **产品完善度：7.5/10**。个人使用和小团队发布控制塔已可用；多账号权限、private/organization 边界、Web Push 关闭页面投递和部署回滚仍需外部条件验收。
 - **生产准备度：7/10**。主链路和两级自动化都已有真实 Production 证据；健康检查已于 2026-08-22 在沙箱 Preview 实测成功与失败两条路径，并借此发现它一直只落库不参与门禁（`f1bbb9df` 已修，修复上线后门禁效果亦已实测确认，见下文）；失败部署投影、确认式回滚和部分协作能力仍不能仅凭本地测试视为通过。Supabase Free Plan 在上个账单周期出现 Egress 超额（`pr-helper` 6.28GB / 5GB），当前高频 `/api/inbox` 把看板状态与历史数据绑在一起，不适合直接承载多用户轮询。
@@ -216,6 +216,23 @@ stage 0 状态:  pull_state=merged  checks_state=failure  ahead_by=1
 
 **改动部署健康逻辑时的回归约定**：不靠线上探针，靠手动跑一遍红绿两路——在 `bayjf` 的 `feature/20260719 → dev` 步骤的 cloudflare/preview 配置上先填必然 404 的路径、推一个提交，确认 `checks_state=failure` 且下游不入队；再清空或改回 `/`，确认下一轮对账转绿并自动放行。本节上文两次实测就是这个流程的样板。
 
+### 2026-08-22 自动创建 PR 的提交数阈值首次实测（此前生产从未启用）
+
+`triggerMinCommits` 与健康检查是同一类历史遗留：实现完整、UI 能配、**生产从未启用过**——全部 44 个步骤的 `trigger_min_commits` 都是 1，`aheadBy < threshold` 这个分支一次都没执行过。而 `skip('below-threshold')` 只写日志、`workflow_automation_runs` 没有原因列，所以即使跑过也留不下痕迹。
+
+测试覆盖同样只在边缘：`automationSkipLine` 测了日志格式化字符串，前端 `immediateAutomationEffect` 测了「开关时提示什么」，但**对账时到底放不放行的判定没有任何单测**，且夹取逻辑在对账入队与手动触发两处各有一份重复的 `Math.min(20, Math.max(1, n))`。已由 `53a650f7`（失败测试先行）抽成 `autoCreateCommitThreshold` / `autoCreateReachedThreshold` 两个纯函数，两处共用，四条单测锁住语义：默认 1、超范围夹到 1/20、非整数回落 1、未达阈值不入队。行为逐字节相同（`aheadBy=0` 在旧代码里也因阈值下限 1 而被拒）。
+
+**沙箱实测**：把 `pr-helper-e2e-sandbox` 流程 `69q14` 步骤 0（`feature/*` → `dev`）的阈值设为 2，向 `feature/approval-e2e` 连推两个空提交——
+
+```
+ahead_by=1  阈值 2  → 02:53:10 写入状态，队列无任何新动作（最新仍是 01:10 的 481）
+ahead_by=2  阈值 2  → 02:57:05 create-pr 动作 508 入队，attempts=1 成功建出 PR
+```
+
+选 `feature/approval-e2e` 而非 `feature/test`，是因为后者同时被 `d4h70` 步骤 0 的字面规则匹配，一次推送会触发两个流程争抢同一条 `feature/test → dev` 路由；前者只被 `69q14` 的 `feature/*` 匹配，且已有状态行，不会给动态源规则新增一行永久残留。
+
+**这次实测能区分「阈值挡住」与「别的门禁挡住」**：第一步时 `canCreateNext` 为真——步骤 0 天然解锁、`checks_state=success`、`pull_state=merged`、`ahead_by>0`——所以唯一挡住入队的只能是阈值。后续 `merge-pr` 动作 509 停在 `queued` / 「PR 还需要 1 个 Approval」，那是沙箱 `dev` 的分支保护要求，与阈值无关。
+
 ### 2026-08-22 对账时钟实测：`*/30` 是设计行为，不是故障
 
 记这一段是为了避免下次再把 migration 033 的效果当成 cron 抖动来查（本轮就查错过一次）。
@@ -336,7 +353,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 ## 测试覆盖
 
-- 本地单元/服务端测试：`npm test` 运行 29 个文件 / 536 个测试；`npx tsc --noEmit` 和 `npm run build` 同时通过。
+- 本地单元/服务端测试：`npm test` 运行 30 个文件 / 658 个测试；`npx tsc --noEmit` 和 `npm run build` 同时通过。
 - 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 26 个用例，包括 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉、创建/合并 PR、删除流程、确认式部署回滚、操作审计查询、编辑既有流程时步骤表单折叠、换仓库确认，以及流程详情进度条的步骤状态、前缀计数、同步时间标注与全部完成后不再高亮当前步。它验证真实 DOM、二次确认和浏览器请求负载，不替代真实 GitHub 写入、门禁和部署验收。
 - 已新增流程保存队列回归：连续编辑会串行使用服务端返回的新版本，且不会由旧响应覆盖最新编辑；真实跨窗口乐观锁冲突仍会明确报错。
 - Production E2E 通过项目与尚未通过的集成项目均以 [验证报告](verification-report.md) 为准。

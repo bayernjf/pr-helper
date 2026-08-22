@@ -6,7 +6,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, generationRuleHashes, hydrateGenerationRules, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, stageGateSatisfactionAdvanced, downstreamStagesToRecheck, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, deploymentRunState, deploymentStateWithHealth, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, generationRuleHashes, hydrateGenerationRules, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, stageGateSatisfactionAdvanced, downstreamStagesToRecheck, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, autoCreateCommitThreshold, autoCreateReachedThreshold, deploymentRunState, deploymentStateWithHealth, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -1065,6 +1065,21 @@ describe('workflowSaveConflicts', () => {
   it('never conflicts when the workflow is genuinely new', () => {
     expect(workflowSaveConflicts(false, 0, undefined)).toBe(false);
   });
+
+  // The stored version now comes from the promoted column, which 036 had to leave nullable — historical
+  // rows had no value to fill. A null read as a mismatch would reject every save on such a row, which is
+  // the same lost-edit failure the version-less payload caused before.
+  it('treats an absent stored version the same as no version history', () => {
+    expect(workflowSaveConflicts(true, null, 5)).toBe(false);
+    expect(workflowSaveConflicts(true, null, undefined)).toBe(false);
+    expect(workflowSaveConflicts(true, undefined, 5)).toBe(false);
+  });
+
+  // The row exists, so the client had a version to echo; a stored version present but unreadable must
+  // not silently disable the lock.
+  it('rejects a save when the stored version is not a usable number', () => {
+    expect(workflowSaveConflicts(true, '46' as unknown as number, 46)).toBe(true);
+  });
 });
 
 describe('stored automation policies', () => {
@@ -1974,6 +1989,36 @@ describe('automationSkipLine', () => {
 
   it('keeps the line single so log truncation cannot split a reason', () => {
     expect(automationSkipLine({ kind: 'create-pr', repository: 'a/b', route: 'dev → main', reason: 'duplicate', state: 'failed' }).includes('\n')).toBe(false);
+  });
+});
+
+// The threshold clamp lived inline in two places — the reconcile enqueue and the manual trigger — and
+// production has never set a value other than 1, so neither copy had ever run its declining branch.
+describe('autoCreateCommitThreshold', () => {
+  it('defaults to one so an unset threshold never withholds a single-commit route', () => {
+    expect(autoCreateCommitThreshold(undefined)).toBe(1);
+    expect(autoCreateCommitThreshold({})).toBe(1);
+  });
+
+  it('clamps to the range the editor offers instead of trusting a hand-edited payload', () => {
+    expect(autoCreateCommitThreshold({ triggerMinCommits: 0 })).toBe(1);
+    expect(autoCreateCommitThreshold({ triggerMinCommits: -3 })).toBe(1);
+    expect(autoCreateCommitThreshold({ triggerMinCommits: 21 })).toBe(20);
+    expect(autoCreateCommitThreshold({ triggerMinCommits: 7 })).toBe(7);
+  });
+
+  it('falls back to one for a value that is not a whole number', () => {
+    expect(autoCreateCommitThreshold({ triggerMinCommits: 2.5 })).toBe(1);
+    expect(autoCreateCommitThreshold({ triggerMinCommits: Number.NaN })).toBe(1);
+    expect(autoCreateCommitThreshold({ triggerMinCommits: '3' as unknown as number })).toBe(1);
+  });
+
+  it('withholds the enqueue until the commit count reaches the threshold', () => {
+    expect(autoCreateReachedThreshold({ triggerMinCommits: 3 }, 2)).toBe(false);
+    expect(autoCreateReachedThreshold({ triggerMinCommits: 3 }, 3)).toBe(true);
+    expect(autoCreateReachedThreshold({ triggerMinCommits: 3 }, 9)).toBe(true);
+    // A route with no new commits is never eligible, whatever the threshold says.
+    expect(autoCreateReachedThreshold({ triggerMinCommits: 1 }, 0)).toBe(false);
   });
 });
 
