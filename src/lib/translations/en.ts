@@ -330,7 +330,7 @@ const en: TranslationDict = {
   'editor.deployments.workflowRequired': 'Enter the GitHub Actions workflow name.',
   'editor.deployments.duplicate': 'Only one deployment platform may be configured for a target branch.',
   'editor.deployments.healthPath': 'Health check path (optional)',
-  'editor.deployments.healthPathHint': 'Runs only against the public URL returned by this deployment, for example /health.',
+  'editor.deployments.healthPathHint': 'Runs once against the public URL returned by this deployment, for example /health. A failed probe blocks the next stage and is not retried automatically — a new commit is needed to re-evaluate it.',
   'editor.deployments.healthPathInvalid': 'The health check path must start with /.',
   'editor.deployments.rollbackWorkflow': 'Rollback Actions workflow (optional)',
   'editor.deployments.rollbackWorkflowHint': 'Shown only when configured. Its workflow_dispatch must accept target_run_id, deployment_url, environment, and provider.',
