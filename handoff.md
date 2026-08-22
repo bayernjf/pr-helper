@@ -302,6 +302,16 @@ AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 P
 - `stageIsUnlocked` 的**顺序回退分支**仍用 `states.find(...)` 取任意一行（`f41cb370`，失败测试先行）。上文 `1a76a39d` 只修了 `waitFor` 分支。现网 38 个步骤全用固定分支源、每步只有一行，因此行为逐字节相同、零线上影响；只有动态源产生多行时才分叉——正是那个潜在 bug。修法：抽出 `dependencyStageSatisfied`，两个分支共用同一套「排除已放弃路线 + 至少一条活跃路线 + 全部 merged/success」判定。
 - 部署门禁行的**「编辑」按钮被「移除」盖住 7 天**（`a720726c`）。`648f8127`（2026-08-15）加了编辑按钮，但没动 `24e30dd0` 留下的布局规则——那条规则把行内每个 `button` 都钉在 `grid-column:2; grid-row:1`，两个按钮占同一格，后画的「移除」完全盖住「编辑」，标签宽度和内边距还一样，界面上看不出任何痕迹。修法：行改三列，用 `[data-edit-deployment]` / `[data-remove-deployment]` 属性选择器各给一列（特异度 (0,2,1) 压过 `>*{grid-column:1}` 的 (0,1,0)），并在 `src/style-theme-tokens.test.ts` 加了一条守卫断言两者列号不同。**未做视觉确认**：本机连不到线上应用，只验证了级联推理并用测试锁死。
 
+## 2026-08-22 自动创建 PR 的提交数阈值首次实测（此前生产从未启用）
+
+提交 `53a650f7`（失败测试先行）。`triggerMinCommits` 与健康检查同类：实现完整、UI 能配、生产从未启用——44 个步骤的 `trigger_min_commits` 全是 1，`aheadBy < threshold` 分支一次都没跑过；`skip('below-threshold')` 只写日志，`workflow_automation_runs` 无原因列，跑过也留不下痕迹。测试也只覆盖边缘（日志格式化、前端开关提示），对账时的放行判定无单测，且夹取逻辑在对账入队与手动触发两处各有一份重复。已抽成 `autoCreateCommitThreshold` / `autoCreateReachedThreshold` 两个纯函数供两处共用，四条单测锁住默认 1、夹到 1/20、非整数回落 1、未达阈值不入队；行为逐字节相同。
+
+**沙箱实测**（`pr-helper-e2e-sandbox` 流程 `69q14` 步骤 0，`feature/*` → `dev`，阈值设 2，向 `feature/approval-e2e` 连推两个空提交）：`ahead_by=1` 时 02:53:10 写入状态、队列零新动作；`ahead_by=2` 时 02:57:05 `create-pr` 动作 508 入队并成功建出 PR。第一步的 `canCreateNext` 为真（步骤 0 天然解锁、`checks_state=success`、`pull_state=merged`、`ahead_by>0`），所以挡住入队的只能是阈值——这次实测能区分「阈值挡住」与「别的门禁挡住」。后续 `merge-pr` 509 停在 `queued` / 「PR 还需要 1 个 Approval」，是沙箱分支保护要求，与阈值无关。
+
+**选靶注意**：用 `feature/approval-e2e` 而非 `feature/test`——后者同时被 `d4h70` 步骤 0 的字面规则匹配，一次推送会让两个流程争抢同一条 `feature/test → dev` 路由；前者只被 `69q14` 的 `feature/*` 匹配且已有状态行，不给动态源规则新增永久残留。
+
+**遗留**：用户当时把六个沙箱步骤（`69q14` ×3、`5xdwc` ×1、`d4h70` ×1、`pvmxx` ×1）的阈值都设成了 2。留着会让以后所有沙箱测试都要推两个提交才动，排障前先查 `trigger_min_commits`。
+
 ## 常用命令
 
 ```bash

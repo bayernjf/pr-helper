@@ -216,6 +216,23 @@ stage 0 状态:  pull_state=merged  checks_state=failure  ahead_by=1
 
 **改动部署健康逻辑时的回归约定**：不靠线上探针，靠手动跑一遍红绿两路——在 `bayjf` 的 `feature/20260719 → dev` 步骤的 cloudflare/preview 配置上先填必然 404 的路径、推一个提交，确认 `checks_state=failure` 且下游不入队；再清空或改回 `/`，确认下一轮对账转绿并自动放行。本节上文两次实测就是这个流程的样板。
 
+### 2026-08-22 自动创建 PR 的提交数阈值首次实测（此前生产从未启用）
+
+`triggerMinCommits` 与健康检查是同一类历史遗留：实现完整、UI 能配、**生产从未启用过**——全部 44 个步骤的 `trigger_min_commits` 都是 1，`aheadBy < threshold` 这个分支一次都没执行过。而 `skip('below-threshold')` 只写日志、`workflow_automation_runs` 没有原因列，所以即使跑过也留不下痕迹。
+
+测试覆盖同样只在边缘：`automationSkipLine` 测了日志格式化字符串，前端 `immediateAutomationEffect` 测了「开关时提示什么」，但**对账时到底放不放行的判定没有任何单测**，且夹取逻辑在对账入队与手动触发两处各有一份重复的 `Math.min(20, Math.max(1, n))`。已由 `53a650f7`（失败测试先行）抽成 `autoCreateCommitThreshold` / `autoCreateReachedThreshold` 两个纯函数，两处共用，四条单测锁住语义：默认 1、超范围夹到 1/20、非整数回落 1、未达阈值不入队。行为逐字节相同（`aheadBy=0` 在旧代码里也因阈值下限 1 而被拒）。
+
+**沙箱实测**：把 `pr-helper-e2e-sandbox` 流程 `69q14` 步骤 0（`feature/*` → `dev`）的阈值设为 2，向 `feature/approval-e2e` 连推两个空提交——
+
+```
+ahead_by=1  阈值 2  → 02:53:10 写入状态，队列无任何新动作（最新仍是 01:10 的 481）
+ahead_by=2  阈值 2  → 02:57:05 create-pr 动作 508 入队，attempts=1 成功建出 PR
+```
+
+选 `feature/approval-e2e` 而非 `feature/test`，是因为后者同时被 `d4h70` 步骤 0 的字面规则匹配，一次推送会触发两个流程争抢同一条 `feature/test → dev` 路由；前者只被 `69q14` 的 `feature/*` 匹配，且已有状态行，不会给动态源规则新增一行永久残留。
+
+**这次实测能区分「阈值挡住」与「别的门禁挡住」**：第一步时 `canCreateNext` 为真——步骤 0 天然解锁、`checks_state=success`、`pull_state=merged`、`ahead_by>0`——所以唯一挡住入队的只能是阈值。后续 `merge-pr` 动作 509 停在 `queued` / 「PR 还需要 1 个 Approval」，那是沙箱 `dev` 的分支保护要求，与阈值无关。
+
 ### 2026-08-22 对账时钟实测：`*/30` 是设计行为，不是故障
 
 记这一段是为了避免下次再把 migration 033 的效果当成 cron 抖动来查（本轮就查错过一次）。
