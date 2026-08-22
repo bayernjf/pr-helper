@@ -481,6 +481,25 @@ describe('converging gate over abandoned routes', () => {
     ])).toMatchObject({ kind: 'locked', canCreateNext: false });
   });
 
+  it('applies the same reading to a sequential stage that names no waitFor', () => {
+    const sequential = {
+      id: 'flow-2',
+      name: 'Release',
+      repository: 'octo/app',
+      stages: [
+        { source: 'feature/*', target: 'dev', stageId: 'stage-feature' },
+        { source: 'dev', target: 'main', stageId: 'stage-dev' },
+      ],
+    };
+    const target = { stage_id: 'stage-dev', pull_state: 'none', checks_state: 'unknown', approvals: 0, required_approvals: 0, mergeable: null, mergeable_state: null, ahead_by: 3 } as Parameters<typeof deriveStageDecision>[2];
+    const own = { stage_index: 1, stage_id: 'stage-dev', pull_state: 'none', checks_state: 'unknown' };
+    const open = { stage_index: 0, stage_id: 'stage-feature', pull_state: 'open', checks_state: 'pending' };
+    expect(deriveStageDecision(sequential, 1, target, [merged('stage-feature'), open, own])).toMatchObject({ kind: 'locked', canCreateNext: false });
+    expect(deriveStageDecision(sequential, 1, target, [open, merged('stage-feature'), own])).toMatchObject({ kind: 'locked', canCreateNext: false });
+    expect(deriveStageDecision(sequential, 1, target, [abandoned('stage-feature'), merged('stage-feature'), own])).toMatchObject({ kind: 'ready-to-create', canCreateNext: true });
+    expect(deriveStageDecision(sequential, 1, target, [abandoned('stage-feature'), own])).toMatchObject({ kind: 'locked', canCreateNext: false });
+  });
+
   it('still waits on a live upstream route that has not opened a pull request yet', () => {
     expect(deriveStageDecision(workflow, 2, converging, [
       merged('stage-feature'), { stage_index: 0, stage_id: 'stage-feature', pull_state: 'none', checks_state: 'unknown' },
