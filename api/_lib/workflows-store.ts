@@ -1427,20 +1427,20 @@ async function pruneStaleWorkflowStageData(sql: any, userId: string, workflow: S
   }
 }
 
+// A dynamic source rule keeps one row per branch it ever matched and nothing deletes a row while the
+// branch name still matches, so a route whose pull request was closed unmerged would hold a dependent
+// stage locked forever. Such a route is abandoned, not pending. Only a merged route can satisfy the gate,
+// so a dependency left with nothing but abandoned routes still fails it.
+function dependencyStageSatisfied(dependencyId: string | undefined, states: { stage_id: string; pull_state: string; checks_state: string }[]) {
+  const routes = dependencyId ? states.filter(state => state.stage_id === dependencyId && state.pull_state !== 'closed') : [];
+  return routes.length > 0 && routes.every(state => state.pull_state === 'merged' && state.checks_state === 'success');
+}
+
 function stageIsUnlocked(workflow: StoredWorkflow, stageIndex: number, states: { stage_index: number; stage_id: string; pull_state: string; checks_state: string }[]) {
   const waitFor = workflow.stages[stageIndex]?.waitFor;
-  if (waitFor?.length) return waitFor.every(dependency => {
-    const dependencyId = workflow.stages[dependency]?.stageId;
-    // A dynamic source rule keeps one row per branch it ever matched and nothing deletes a row while the
-    // branch name still matches, so a route whose pull request was closed unmerged would hold this stage
-    // locked forever. Such a route is abandoned, not pending. Only a merged route can satisfy the gate,
-    // so a dependency left with nothing but abandoned routes still fails it.
-    const dependencies = dependencyId ? states.filter(state => state.stage_id === dependencyId && state.pull_state !== 'closed') : [];
-    return dependencies.length > 0 && dependencies.every(state => state.pull_state === 'merged' && state.checks_state === 'success');
-  });
-  const previousId = workflow.stages[stageIndex - 1]?.stageId;
-  const previous = previousId ? states.find(state => state.stage_id === previousId) : undefined;
-  return workflow.stages[stageIndex]?.independent === true || stageIndex === 0 || previous?.pull_state === 'merged' && previous.checks_state === 'success';
+  if (waitFor?.length) return waitFor.every(dependency => dependencyStageSatisfied(workflow.stages[dependency]?.stageId, states));
+  if (workflow.stages[stageIndex]?.independent === true || stageIndex === 0) return true;
+  return dependencyStageSatisfied(workflow.stages[stageIndex - 1]?.stageId, states);
 }
 
 // Every stage of a sweep runs inside one Promise.allSettled, so a converging stage routinely reads its
