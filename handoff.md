@@ -1,6 +1,6 @@
 # PR Helper Handoff
 
-> 最后更新：2026-08-21（Supabase Free Plan 出现 Egress 超额，`pr-helper` 项目占 6.28GB / 5GB；已按实测字节数定位并落地三刀——轮询（`1e5c6758`）、请求内去重（`2b81be2c`）、去掉无人读取的 `stage_snapshot`（`98b5d245`），单次 `/api/inbox` 实测 594.3 → 274.0 kB、前台 71.3 → 16.4 MB/小时，`/api/board` 拆分降为可选。完整方案见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
+> 最后更新：2026-08-22（部署健康检查经查一直只落库、不参与门禁，`f1bbb9df` 已修并双向验收；同期修掉 `stageIsUnlocked` 顺序回退分支取任意路由和部署门禁行「编辑」按钮被「移除」盖住 7 天两个 bug。Supabase Egress 超额的三轮优化已全部落地，最终判定等 2026-08-28 的 Usage 日增量，完整方案见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 > 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
 
@@ -10,7 +10,7 @@
 - 用户已确认本批代码已上线 Production。
 - 2026-08-19 生产核对（当日第二次，合并 PR #288 之后）：最近 6 小时 cron 80 success / 1 degraded / 1 skipped、webhook 53 success / 4 degraded / 252 skipped、inbox_refresh 2 success，无 failure；55 行 stage 投影最老 1187 秒、平均 609 秒，距 `/api/cron/health` 的 2700 秒阈值余量充足；`workflow_automation_actions` 只有 263 succeeded / 35 cancelled，没有 `paused` / `queued` / `running` / `failed` 行。当日较早一次核对为 cron 78 success / 1 degraded / 2 skipped、投影最老 1370 秒、246 succeeded / 31 cancelled。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
-- 当前本地验证已通过：`npm test`（29 个文件 / 553 项）、`npx tsc --noEmit`、`npm run build`；浏览器 E2E `npm run test:e2e` 27/27 通过（Playwright 端口为 4373，避免 `reuseExistingServer` 复用别的项目的开发服务）。
+- 当前本地验证已通过：`npm test`（30 个文件 / 654 项）、`npx tsc --noEmit`、`npm run build`；浏览器 E2E `npm run test:e2e` 27/27 通过（Playwright 端口为 4373，避免 `reuseExistingServer` 复用别的项目的开发服务）。
 - 最近本地提交 `b61e2d3e` 新增“测试已保存配置”：服务端解密保存的 AI 凭据并实际调用模型连接测试，15 秒超时，只返回成功或脱敏错误，不返回 API Key；生产端已验证连接成功（`agnes-2.0-flash`）。
 - 最近本地提交 `510a63c9` 为自动 PR 动作增加 AI 请求 20 秒超时、输出上限和过期 `running/paused` 动作回收重试，避免一次超时永久阻塞幂等动作。
 - Supabase 迁移 `001`–`031` 已执行；`021`–`023` 对应代码已部署 Production，待加密同步线上回归、Cron 清理观察和团队多账号验收。操作审计读取已改为现有 `inbox` 函数的 `resource=operation-audit` 分流，未增加 Serverless Function 数量；Production 已显示流程更新、创建/合并 PR 记录，CSV 导出按钮可用。`019` 已将 `stage_id` 设为阶段持久化数据的正式主键/外键身份。
@@ -207,7 +207,7 @@ Production 已验证行为：
 | 待办 | 你需要准备 | Codex 负责 | 验收结论 |
 | --- | --- | --- | --- |
 | Required approval | 第二个可审批 GitHub 账号；E2E 目标分支要求 1 个审批 | 创建测试 PR，验证并记录状态迁移 | `needs-approval` → `ready-to-merge` |
-| Vercel / Cloudflare 部署与回滚 | 低风险仓库、真实工作流/Environment/密钥、健康检查地址、单独回滚窗口 | 触发、跟踪并记录双平台部署、失败和确认式回滚 | 双平台门禁、健康检查和确认式 Production 回滚可追溯 |
+| Vercel / Cloudflare 部署与回滚 | 低风险仓库、真实工作流/Environment/密钥、健康检查地址、单独回滚窗口 | 触发、跟踪并记录双平台部署、失败和确认式回滚 | 双平台门禁与确认式 Production 回滚可追溯（健康检查已于 2026-08-22 验完，见下文同日小节） |
 | GitHub Webhook 自动投影 | 保持 Production 页面打开并准备可触发事件 | 触发事件，核查 delivery、投影和无刷新 UI 更新 | 无手动刷新时自动更新看板和时间线 |
 | private / organization 安装边界 | 已授权 private 仓库和 organization 仓库，配置 GitHub App 仓库选择范围 | 验证授权内读写和授权外拒绝 | 授权范围正确生效，范围外访问被拒绝 |
 
@@ -284,6 +284,23 @@ AI 失败节点的交互已明确：进度条位于每个步骤“自动创建 P
 **对账时钟的 `*/30` 是设计行为**：实测断崖落在 2026-08-21 05:00Z，即 migration 033 的生效时刻，不是 cron 抖动；本轮曾按故障查错一次。测量细节见 [`docs/current-state.md`](docs/current-state.md)「2026-08-22 对账时钟实测」。
 
 附注：沙箱 `dev` 要求 1 个 Approval，自动化建出的 PR 作者是 App bot，人工 approve 是必要一步——这也是 #10 / #11 当初卡住的真实原因。触发对账用重跑 `dev` 上已有 workflow run，未直推受保护分支。
+
+## 2026-08-22 部署健康检查一直只是徽标，不是门禁（已修，已部署并双向验收）
+
+提交 `f1bbb9df`（失败测试先行）。`healthCheckPath` 的实现看着完整——探测、落库、`success + health failure → failure` 的折叠都有——但**从未被任何流程配置过**（27 条部署配置的 `health_check_path` 全为 NULL，32 条 `workflow_stage_deployments.health_state` 全为 NULL）。第一次真实配置就暴露链路是断的：`reconcileStageDeployments` 写进数据库的 `state` 折进了健康检查，而**返回给调用方的那份用 `deploymentRunState(run)` 重算**，只看 Actions 的 `status`/`conclusion`。于是 `mergeChecksWithDeployments` 永远收到 `success`，探测既不阻止下一步解锁也不阻止自动合并。修法：折叠逻辑抽成纯函数 `deploymentStateWithHealth`，数据库行与返回值都走它，结构上不再可能分叉。
+
+**双向验收（沙箱 `bayjf` 的 `feature/20260719 → dev` 步骤，cloudflare/preview 配置）**：填必然 404 的路径起一轮——部署行 `state=failure` / `HTTP 404`，修复前 stage 0 写出 `checks-success` 且下游 `create-pr` 于 01:31:37 入队；修复上线后同样数据写出 `checks-failure`、`checks_state=failure`，`ahead_by=1` 却不开 PR（`deriveStageDecision` 的 `canCreateNext` 要求 `checks_state !== 'failure'`，该条件此前永远不会被触发）。再清空路径——stage 0 于 02:34:25 转绿，四秒后 `create-pr` 动作 497 自动发出，**无需新推提交**，因为 `ahead_by=1` 时步骤未结算、`stageReconciliationIsSettled` 不短路。
+
+**三个必须记住的边界**（完整论证见 [`docs/current-state.md`](docs/current-state.md) 同日小节）：
+
+1. **部署门禁是合并后的门禁**，不是缺陷：PR 开着时部署行每轮对账都被删掉，只有合并后才跟踪目标分支上那次部署，所以红部署管的是下一个步骤能否解锁，物理上无法阻止触发它的那次合并。
+2. **能自动变红，不能自动变绿**：步骤一旦结算（已合并 + 门禁终态 + `ahead_by=0`），`stageReconciliationIsSettled` 会短路掉部署对账，改配置或站点恢复都不会重探，必须有新提交起一轮——一次偶发 502 会卡到下次推送。这是「部署冒烟测试」定位下的有意取舍，`editor.deployments.healthPathHint` 已补明这个边界（`28fe8d75`）。
+3. **探测的意义有上限，故当前不长期挂载**：它只补「部署命令退出码 0 ≠ 站点能服务」这一个缺口，价值取决于端点断言了什么。填 `/` 拿 200 排除不了空白页，作为健康信号近乎无用；且四个 `pr-helper-e2e-sandbox*` 流程的 `deployment_url` 全为 NULL（Actions 只模拟部署、不发布 environment URL），探测无 URL 直接跳过，**沙箱物理上挂不了**。全库仅 `bayjf` 与 `pr-helper` 自身带 URL，都是真实项目，误判会挡住真实开发。因此改动部署健康逻辑时不靠线上探针，按 `docs/current-state.md` 里写死的「手动跑红绿两路」约定回归。
+
+**同期另两个已修 bug**：
+
+- `stageIsUnlocked` 的**顺序回退分支**仍用 `states.find(...)` 取任意一行（`f41cb370`，失败测试先行）。上文 `1a76a39d` 只修了 `waitFor` 分支。现网 38 个步骤全用固定分支源、每步只有一行，因此行为逐字节相同、零线上影响；只有动态源产生多行时才分叉——正是那个潜在 bug。修法：抽出 `dependencyStageSatisfied`，两个分支共用同一套「排除已放弃路线 + 至少一条活跃路线 + 全部 merged/success」判定。
+- 部署门禁行的**「编辑」按钮被「移除」盖住 7 天**（`a720726c`）。`648f8127`（2026-08-15）加了编辑按钮，但没动 `24e30dd0` 留下的布局规则——那条规则把行内每个 `button` 都钉在 `grid-column:2; grid-row:1`，两个按钮占同一格，后画的「移除」完全盖住「编辑」，标签宽度和内边距还一样，界面上看不出任何痕迹。修法：行改三列，用 `[data-edit-deployment]` / `[data-remove-deployment]` 属性选择器各给一列（特异度 (0,2,1) 压过 `>*{grid-column:1}` 的 (0,1,0)），并在 `src/style-theme-tokens.test.ts` 加了一条守卫断言两者列号不同。**未做视觉确认**：本机连不到线上应用，只验证了级联推理并用测试锁死。
 
 ## 常用命令
 
