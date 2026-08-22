@@ -2119,8 +2119,11 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
   const runId = runRow[0].id;
   onRunStarted?.(runId);
   // The turn is given up before the work runs, so a workflow that fails or resolves to no route still
-  // rotates to the back of the queue instead of being picked again in every sweep.
-  await sql`UPDATE pr_helper_workflows SET last_reconcile_attempt_at = now() WHERE user_id = ${userId} AND id IN ${sql(workflowsToReconcile.map(item => item.row.id))}`.catch(() => undefined);
+  // rotates to the back of the queue instead of being picked again in every sweep. A branch-narrowed
+  // sweep keeps its turn: it only looked at the routes the pushed branches reach, and renewing the
+  // stamp would let a busy repository starve the routes the filter dropped out of the scheduled queue.
+  const rotatingIds = workflowsToReconcile.filter(item => !(filter.branches && item.branchScoped)).map(item => item.row.id);
+  if (rotatingIds.length) await sql`UPDATE pr_helper_workflows SET last_reconcile_attempt_at = now() WHERE user_id = ${userId} AND id IN ${sql(rotatingIds)}`.catch(() => undefined);
   const workflowIds = workflowsToReconcile.map(item => item.row.id);
   // Marking is per sweep, not per stage: the marker only answers "does this workflow still owe work",
   // which is what the next trigger needs to know to pick it up without waiting for the schedule.

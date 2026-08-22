@@ -709,6 +709,16 @@ describe('store queries against the migration schema', () => {
     expect(source).toMatch(/await markPending\(failed > 0\);/);
   });
 
+  // The stamp was unconditional, but a branch-narrowed sweep only looks at the routes the pushed
+  // branches can reach. A repository with frequent deliveries therefore renewed its turn every few
+  // minutes without ever reconciling the dropped routes, so it never came back to the front of the
+  // scheduled queue and those projections aged past the /api/cron/health threshold for good.
+  it('only gives up the scheduled turn for a workflow the sweep reconciled unnarrowed', () => {
+    expect(source).toMatch(/const rotatingIds = workflowsToReconcile\.filter\(item => !\(filter\.branches && item\.branchScoped\)\)/);
+    expect(source).toMatch(/SET last_reconcile_attempt_at = now\(\) WHERE user_id = \$\{userId\} AND id IN \$\{sql\(rotatingIds\)\}/);
+    expect(source).not.toMatch(/SET last_reconcile_attempt_at = now\(\) WHERE user_id = \$\{userId\} AND id IN \$\{sql\(workflowsToReconcile/);
+  });
+
   for (const table of ['workflow_automation_actions', 'workflow_automation_runs', 'workflow_stage_states'] as const) {
     it(`only selects columns that ${table} actually declares`, () => {
       const declared = declaredColumns(schema, table);
