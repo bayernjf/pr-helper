@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-21（服务端自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 是唯一执行入口；流程详情页的只读进度条已上线；Supabase Free Plan 出现 Egress 超额，已实测定位到「详情页轮询隐藏不停」与「同一请求内重复读 payload」两项，均已修，见《Supabase Egress 与多用户扩展方案》）
+> 最后更新：2026-08-22（出站量优化五轮全部落地并部署，迁移 001–040 已全部执行，`version` 已接入乐观锁；仅剩 `payload` 列删除一项，方案已写好未实施，最终判定等 2026-08-28 的一周 Usage 结论。服务端自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 是唯一执行入口；流程详情页的只读进度条已上线；Supabase Free Plan 出现 Egress 超额，已实测定位到「详情页轮询隐藏不停」与「同一请求内重复读 payload」两项，均已修，见《Supabase Egress 与多用户扩展方案》）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -18,7 +18,7 @@ PR Helper 是 GitHub-first 的 PR / Release Control Tower。用户以项目 Lane
 
 ## 当前整体评估
 
-- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（658 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
+- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（660 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
 - **功能质量：8.5/10**。流程 CRUD、Lane 看板、动态来源、多路径汇聚、PR 创建/合并、五类门禁、合并后 Actions/部署状态、失败恢复和审计均已具备；后台自动创建 PR 和逐步骤自动合并已有生产成功记录。
 - **产品完善度：7.5/10**。个人使用和小团队发布控制塔已可用；多账号权限、private/organization 边界、Web Push 关闭页面投递和部署回滚仍需外部条件验收。
 - **生产准备度：7/10**。主链路和两级自动化都已有真实 Production 证据；健康检查已于 2026-08-22 在沙箱 Preview 实测成功与失败两条路径，并借此发现它一直只落库不参与门禁（`f1bbb9df` 已修，修复上线后门禁效果亦已实测确认，见下文）；失败部署投影、确认式回滚和部分协作能力仍不能仅凭本地测试视为通过。Supabase Free Plan 在上个账单周期出现 Egress 超额（`pr-helper` 6.28GB / 5GB），当前高频 `/api/inbox` 把看板状态与历史数据绑在一起，不适合直接承载多用户轮询。
@@ -330,6 +330,14 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 后续阶段包括 board version / ETag 增量响应、服务端看板投影表、历史数据分页和保留策略、多用户下的 reconciliation lock、限流和 GitHub API 预算。完整方案见 [Supabase Egress 与多用户扩展方案](supabase-egress-optimization.md)。
 
+三刀之后又落了三轮，均已部署生产（迁移 `033`–`040` 已全部执行）：
+
+- **第二、三轮**（2026-08-21，PR #305 / #306）：请求内去重与轮询时钟删除之外，把 `archived` / `repository` / `installationId` 过滤和 cron 批次下推进 SQL。单次 webhook 投影读 35 → 约 2.3 行（−93%，索引命中用 `pg_stat_user_indexes` 实测）。
+- **第四轮 提示词去重**（`035` / `040`）：payload 里不再存内联提示词，只留 `contentHash`，内容集中在 `pr_helper_generation_rules`。2026-08-22 只读核对：45 个步骤零处残留内联内容。
+- **第五轮 拆关系表**（`036` expand → `037` 回填与一致性校验 → `038` 读切换 → `039` 删死索引）：流程定义提升为独立列加 `workflow_stages` / `workflow_deployment_configs`，映射集中在 `api/_lib/workflow-rows.ts` 并由往返恒等测试守住。
+- **`version` 接入乐观锁**（2026-08-22 已落地、部署、验收）：乐观锁不再读 `MAX(workflow_versions.version)`，改读同一行的 `version` 列；同时修掉「`hasPrevious` 依赖 payload 能否解析」——payload 删列后那会让锁静默放过所有保存。
+- **仍待决定**：`pr_helper_workflows.payload` 列的删除。方案已写好但**尚未实施**，见 [删除 payload 列方案](superpowers/plans/2026-08-22-drop-workflow-payload-column.md)；其收益是收口双表示而非省出站量，是否落地与一周 Usage 结论一并在 2026-08-28 决定。
+
 ## 依赖外部条件的待办
 
 以下项目均已实现对应产品能力，但仍缺少可控的真实外部条件或完整的可追溯证据，不能以本地或手动刷新替代验收。
@@ -353,7 +361,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 ## 测试覆盖
 
-- 本地单元/服务端测试：`npm test` 运行 30 个文件 / 658 个测试；`npx tsc --noEmit` 和 `npm run build` 同时通过。
+- 本地单元/服务端测试：`npm test` 运行 30 个文件 / 660 个测试；`npx tsc --noEmit` 和 `npm run build` 同时通过。
 - 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 26 个用例，包括 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉、创建/合并 PR、删除流程、确认式部署回滚、操作审计查询、编辑既有流程时步骤表单折叠、换仓库确认，以及流程详情进度条的步骤状态、前缀计数、同步时间标注与全部完成后不再高亮当前步。它验证真实 DOM、二次确认和浏览器请求负载，不替代真实 GitHub 写入、门禁和部署验收。
 - 已新增流程保存队列回归：连续编辑会串行使用服务端返回的新版本，且不会由旧响应覆盖最新编辑；真实跨窗口乐观锁冲突仍会明确报错。
 - Production E2E 通过项目与尚未通过的集成项目均以 [验证报告](verification-report.md) 为准。
