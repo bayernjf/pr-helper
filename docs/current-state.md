@@ -21,7 +21,7 @@ PR Helper 是 GitHub-first 的 PR / Release Control Tower。用户以项目 Lane
 - **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（651 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
 - **功能质量：8.5/10**。流程 CRUD、Lane 看板、动态来源、多路径汇聚、PR 创建/合并、五类门禁、合并后 Actions/部署状态、失败恢复和审计均已具备；后台自动创建 PR 和逐步骤自动合并已有生产成功记录。
 - **产品完善度：7.5/10**。个人使用和小团队发布控制塔已可用；多账号权限、private/organization 边界、Web Push 关闭页面投递和部署回滚仍需外部条件验收。
-- **生产准备度：7/10**。主链路和两级自动化都已有真实 Production 证据；健康检查已于 2026-08-22 在沙箱 Preview 首次跑通成功路径（见下文），失败路径、失败部署投影、确认式回滚和部分协作能力仍不能仅凭本地测试视为通过。Supabase Free Plan 在上个账单周期出现 Egress 超额（`pr-helper` 6.28GB / 5GB），当前高频 `/api/inbox` 把看板状态与历史数据绑在一起，不适合直接承载多用户轮询。
+- **生产准备度：7/10**。主链路和两级自动化都已有真实 Production 证据；健康检查已于 2026-08-22 在沙箱 Preview 首次实测成功与失败两条路径，并借此发现它一直只落库不参与门禁（`f1bbb9df` 已修，修复后的门禁效果待部署上线后复测，见下文）；失败部署投影、确认式回滚和部分协作能力仍不能仅凭本地测试视为通过。Supabase Free Plan 在上个账单周期出现 Egress 超额（`pr-helper` 6.28GB / 5GB），当前高频 `/api/inbox` 把看板状态与历史数据绑在一起，不适合直接承载多用户轮询。
 - **结论：综合 7.5/10**。产品已超过 MVP，可继续作为受控生产工具使用；下一步优先降低 Supabase Egress（轮询时钟已整个删掉、请求内去重与 payload 内容哈希化均已完成，最终判定要等一周 Supabase Usage，最早 2026-08-28），再继续收敛 reconciliation 写入和完成外部条件验收，不建议立即投入画布或模板市场。
 
 ## 当前架构
@@ -167,23 +167,37 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 **已知残留（决定不修）**：[api/workflows.ts:82](../api/workflows.ts) 用 `payload.workflow.version === undefined` 判定审计 action，而 version 被回滚成 undefined 正好落进 `workflow-created`，所以那 132 条「创建流程失败」全是更新。只影响失败行——成功路径在 `upsertWorkflow` 里用 `previous ? 'workflow-updated' : 'workflow-created'`，是对的。产生它的 bug 已修、8 天零新增，改法（把 action 判定挪进 `upsertWorkflow` 抛错前）要动错误传递路径，不值得。历史数据也不订正：改审计日志本身不合规。
 
-### 2026-08-22 部署健康检查首次配置并跑通
+### 2026-08-22 部署健康检查：首次配置后发现它一直只是徽标，不是门禁（已修）
 
-此前 `healthCheckPath` 的实现是完整的（UI 输入、`workflow_deployment_configs.health_check_path` 存储、[workflows-store.ts:1854](../api/_lib/workflows-store.ts) 用 `new URL(path, environment_url)` 拼地址后带 10 秒超时 `fetch`、结果写回 `health_state/health_url/health_detail`，并在 `success && health==='failure'` 时把部署整体判为 `failure`），但**从未被任何流程配置过**：全部 27 条部署配置的 `health_check_path` 都是 NULL，全部 32 条 `workflow_stage_deployments.health_state` 也都是 NULL，所以这条链路一行代码都没在真实数据上跑过。
+`healthCheckPath` 的实现看起来是完整的（UI 输入、`workflow_deployment_configs.health_check_path` 存储、[workflows-store.ts](../api/_lib/workflows-store.ts) 用 `new URL(path, environment_url)` 拼地址后带 10 秒超时 `fetch`、结果写回 `health_state/health_url/health_detail`，并把 `success` 的部署在探测失败时判为 `failure`），但**从未被任何流程配置过**：全部 27 条部署配置的 `health_check_path` 都是 NULL，全部 32 条 `workflow_stage_deployments.health_state` 也都是 NULL。第一次真实配置它，就暴露出这条链路是断的。
 
-在 `bayernjf/bayjf` 的 `feature/20260719 → dev` 步骤上给 cloudflare/preview 那条配置填了 `/`（该站没有专用健康端点，根路径返回 200；填 `/` 只能证明站点起来了，证明不了后端健康），实测结果：
+**成功路径**：在 `bayernjf/bayjf` 的 `feature/20260719 → dev` 步骤上给 cloudflare/preview 那条配置填 `/`（该站没有专用健康端点，根路径返回 200；填 `/` 只能证明站点起来了，证明不了后端健康）——
 
 ```
-stage 0 / cloudflare: state=success  health_state=success
-  health_url=https://37829b80.bayjf.pages.dev/  health_detail=HTTP 200
+stage 0 / cloudflare: state=success  health_state=success  health_detail=HTTP 200
+  health_url=https://37829b80.bayjf.pages.dev/
 ```
 
-`health_url` 确为 `deployment_url` 拼上配置路径，`state` 保持 `success`，健康探测没有把绿的部署判红。同一步骤的 vercel 行与 stage 1 的两行 `health_state` 仍是 NULL，因为它们各自的配置没填路径——即「未配置」与「探测失败」在数据上是可区分的。
+`health_url` 确为 `deployment_url` 拼上配置路径。同一步骤的 vercel 行与 stage 1 的两行 `health_state` 仍是 NULL，因为它们各自的配置没填路径——「未配置」与「探测失败」在数据上可区分。
 
-两点值得记下：
+**失败路径暴露了缺陷**。把路径改成必然 404 的 `/deployment-health-path` 后重新起一轮，实测时序：
 
-- 配置与步骤的匹配靠 `target` 而非 `position`（[workflows-store.ts:1814](../api/_lib/workflows-store.ts) `deploymentConfigsForTarget(workflow, target)`），`position` 只决定数组顺序，所以填在哪一行不影响生效。
-- 不需要新推提交来触发：对账重新读到步骤 0 那次已有的 Actions run 就直接探测了，`deployment_url` 仍是原来那个。填错路径的代价因此是即时的——先前误填成输入框的 DOM id `/deployment-health-path`（实测 404），若保留会让绿部署变红、汇进 `checks_state` 后挡住该步骤的自动合并。
+```
+01:26:59  create-pr 成功        → PR #63 开
+01:30:05  merge-pr 成功        → PR #63 被 App 合掉
+01:30:58  部署行 state=failure / health_state=failure / HTTP 404
+          health_url=https://3b3ebcee.bayjf.pages.dev/deployment-health-path
+01:32:56  stage 0 写入 checks_state=success   ← 应为 failure
+```
+
+部署行确实被探测判红了（`conclusion=success` 而 `state=failure`），但 `checks_state` 没跟着红，PR #63 照常合并，下游 stage 1 的 `create-pr` 在 01:31:37 正常入队。根因：`reconcileStageDeployments` 写进数据库的 `state` 折进了健康检查，而**返回给调用方的那份是用 `deploymentRunState(run)` 重算的**，只看 Actions 的 `status`/`conclusion`，完全不看探测。于是 `mergeChecksWithDeployments(observedChecks, ['success'])` 原样返回。
+
+结论：健康检查从实现出来就**只落库、只在界面显示，从不参与任何门禁**——既不阻止下一步解锁，也不阻止自动合并，尽管 UI 文案与本文档此前都把它描述成门禁。已由 `f1bbb9df` 修复：折叠逻辑抽成纯函数 `deploymentStateWithHealth`，数据库行与返回值都走它，结构上不再可能分叉。
+
+其余两点值得记下：
+
+- 配置与步骤的匹配靠 `target` 而非 `position`（`deploymentConfigsForTarget(workflow, target)`），`position` 只决定数组顺序，所以填在哪一行不影响生效。填错值的表现是 404 而非「不生效」——先前误填成输入框的 DOM id `/deployment-health-path` 就是这么来的。
+- 部署门禁是**合并后**的门禁：PR 开着时部署行每轮对账都被删掉，只有合并后才跟踪目标分支上那次部署。所以红部署管的是**下一个步骤能否解锁**，不是当前 PR 能否合并。另外步骤一旦结算（已合并 + 门禁终态 + `ahead_by=0`），`stageReconciliationIsSettled` 会短路掉部署对账，改配置后不会自动重探，必须有新提交起一轮。
 
 ### 2026-08-22 对账时钟实测：`*/30` 是设计行为，不是故障
 
@@ -289,7 +303,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 | 项目 | 当前状态 | 剩余验收 |
 | --- | --- | --- |
 | Required approval | PR #5 已在第二账号审批后完成应用内合并 | 补齐审批前 `needs-approval` 与审批后 `ready-to-merge` 的完整证据即可关闭 |
-| Vercel / Cloudflare 部署 | PR #7 Preview、PR #8 Production 双平台跟踪已通过；2026-08-22 健康检查成功路径已在沙箱 Preview 跑通 | 健康检查失败路径、失败投影与确认式 Production 回滚 |
+| Vercel / Cloudflare 部署 | PR #7 Preview、PR #8 Production 双平台跟踪已通过；2026-08-22 健康检查探测与落库已在沙箱 Preview 实测成功与失败两条路径 | 健康检查门禁效果（`f1bbb9df` 修复后待复测）、失败投影与确认式 Production 回滚 |
 | GitHub Webhook 自动投影 | 沙箱 PR #11 重开事件返回 `202`，且生产详情页无需手动刷新自动显示动态来源 | 通过 |
 | private / organization 安装边界 | 未验收 | 需要对应仓库、安装范围和授权内外读写测试 |
 
@@ -422,7 +436,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 6. **reconciliation 调用预算改为阈值观察（已从第一优先级降级）**。等峰值小时越过约 2,500 次再设计预算模型，依据见《2026-08-15 调用预算复核与 drain 实测》。**2026-08-18 复核**：常态 876–1,182 次/小时，历史峰值 1,702 次（08-17 23:00），占 5,000 次/小时基线的 18%–34%（08-15 记的 1,204 次已被此峰值取代）。同时更正方向：`degraded` 的约束是**时延不是调用数**——249 次让出里有只花 10–11 次调用就超时的样本（08-18 12:01 webhook、12:13 inbox_refresh），按调用数设上限治不到它；先做 ETag / `If-None-Match`（304 不计配额、往返也短），再按剩余时间预算切分单轮工作量。
 
 7. private / organization 安装边界、Web Push、团队多账号协作、加密同步线上回归与数据保留 Cron：详见上方「依赖外部条件的待办」。
-8. 完整发布回归：已通过 `feature → dev → main`、PR Actions、应用内合并与双平台 Preview/Production 部署跟踪；健康检查成功路径已于 2026-08-22 在沙箱 Preview 跑通（`health_state=success` / `HTTP 200`），其失败路径、失败部署投影和 Production 回滚仍待实测。 ⏳ 部分完成
+8. 完整发布回归：已通过 `feature → dev → main`、PR Actions、应用内合并与双平台 Preview/Production 部署跟踪；健康检查的探测与落库已于 2026-08-22 在沙箱 Preview 实测两条路径（`HTTP 200 → health_state=success`、`HTTP 404 → health_state=failure`），并暴露出探测结果从未汇入 `checks_state`（`f1bbb9df` 已修，门禁效果待上线复测）；失败部署投影和 Production 回滚仍待实测。 ⏳ 部分完成
 9. 对 public、private、organization 仓库执行一轮 GitHub App 权限回归。 🟡 public 通过 / ⏳ private、organization 待验证
 10. 失败恢复已由服务端校验重试次数、冷却时间、当前提交和失败 Actions；仍不自动修改代码或合并生产。
 11. 加密云同步已接通密文上传/下载原型，仍需补齐密钥轮换、冲突处理和线上回归后再扩大使用范围。 🟡 待加固
