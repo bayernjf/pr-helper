@@ -45,4 +45,14 @@ describe('theme tokens', () => {
   it('never paints text with a background token', () => {
     expect(css.match(/(^|[;\s])color:\s*var\(--bg-[\w-]+\)/)).toBeNull();
   });
+
+  // Two sibling buttons pinned to the same grid cell overlap, and the later one paints over the earlier.
+  // The deployment gate row carried one button when its layout rule was written, so the edit button added
+  // later shipped hidden underneath remove — same label width, same padding, no visible trace.
+  it('gives each deployment row button its own grid column', () => {
+    const columnFor = (kind: string) => css.match(new RegExp(`\\[data-${kind}-deployment\\]\\{[^}]*grid-column:\\s*(\\d+)`))?.[1];
+    expect(columnFor('edit')).toBeDefined();
+    expect(columnFor('remove')).toBeDefined();
+    expect(columnFor('remove')).not.toBe(columnFor('edit'));
+  });
 });
