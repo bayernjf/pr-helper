@@ -157,6 +157,16 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 
 附注：沙箱 `dev` 要求 1 个 Approval，而自动化建出的 PR 作者是 App bot，所以人工 approve 是合法且必要的一步；这也是 #10 / #11 当初卡住的真实原因。验收期间触发对账用的是重跑 `dev` 上已有的 workflow run，未直推受保护分支。
 
+### 2026-08-22 审计日志里 132 条「创建流程失败」其实都是更新（产生它的 bug 已修，标签错分未修）
+
+记这一段是为了避免下次又从这 173 条失败重新查一遍。
+
+`workflow_operation_audit_logs` 里 `failure_reason = '流程已被其他窗口更新，请刷新后再保存。'` 共 173 条（`workflow-created` 132 + `workflow-updated` 41），全部落在 2026-08-06 至 08-14，之后至今零新增，且只涉及 4 个 `workflow_id`、每个约 35 次。
+
+根因是**看板拖拽排序**，与并发编辑无关：`persistWorkflowOrder` 当时用拖拽前的快照整体替换 `workflows`，把 `version` 一起回滚，并且用 `Promise.all` 同时发全部 lane 的保存，一个响应会落在下一个请求已经读走它要替换的 version 之后。`d2726c72`（08-15）两处都修了——新增 `applyWorkflowOrder` 只把顺序搬到当前持有的记录上、不动 version，保存改成串行。数据完全对上：最后一次冲突 08-14T22:28，那 3 个流程在 08-15T21:09 成功保存；集中在 4 个 id 上也对，排序会保存每一条 lane 而看板正好 4 条。
+
+**已知残留（决定不修）**：[api/workflows.ts:82](../api/workflows.ts) 用 `payload.workflow.version === undefined` 判定审计 action，而 version 被回滚成 undefined 正好落进 `workflow-created`，所以那 132 条「创建流程失败」全是更新。只影响失败行——成功路径在 `upsertWorkflow` 里用 `previous ? 'workflow-updated' : 'workflow-created'`，是对的。产生它的 bug 已修、8 天零新增，改法（把 action 判定挪进 `upsertWorkflow` 抛错前）要动错误传递路径，不值得。历史数据也不订正：改审计日志本身不合规。
+
 ### 2026-08-22 对账时钟实测：`*/30` 是设计行为，不是故障
 
 记这一段是为了避免下次再把 migration 033 的效果当成 cron 抖动来查（本轮就查错过一次）。
