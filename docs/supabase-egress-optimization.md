@@ -3,7 +3,7 @@
 > 创建日期：2026-08-21
 > 最后更新：2026-08-22（第四轮收缩迁移 040 已应用并实测；第六轮 ④ 放弃并新增《兜底周期的规模化》占位；浏览器侧重复读已修并复测，回到前台的最小间隔决定暂不做）
 > 适用范围：PR Helper 的 Supabase 出站流量、看板轮询、状态投影、历史数据读取和多用户扩展。
-> 当前状态：三刀已落地（`1e5c6758` / `2b81be2c` / `98b5d245`）；第二轮 A1 / A2 / A3 已落地（`e65daa6c` / `b51bcaed` / `538a33eb`）；第三轮（SQL 下推）已落地并**已部署生产**（`613fd350`），迁移 034 已应用，索引命中已实测；A1 的收敛阈值回归已处置（`STAGE_UNCONVERGED_THRESHOLD_SECONDS=9000`）。第三轮之后投影约 **0.38 GB/月**（1.71 GB 是第二轮的数字，见《第三轮之后的投影重算》）。执行顺序为 **6③ → 4 → 5 → 6④**：6③ 已落地并部署；第四轮已完成——服务端水合先行落地，收缩迁移 **040 已于 2026-08-21 应用**，内联提示词 42 → 0，全表 payload 读 70 837 → 28 421 B（**−59.9%**）；第五轮 036–039 已落地（`payload` 列的删除仍挂着，是独立一步）；**6④ 已放弃**（2026-08-22，理由见该节开头），轮转周期问题另立《兜底周期的规模化》占位。**至此出站量化债收口，剩余待办只有 `payload` 列删除与 `version` 乐观锁两项独立步骤。**
+> 当前状态：三刀已落地（`1e5c6758` / `2b81be2c` / `98b5d245`）；第二轮 A1 / A2 / A3 已落地（`e65daa6c` / `b51bcaed` / `538a33eb`）；第三轮（SQL 下推）已落地并**已部署生产**（`613fd350`），迁移 034 已应用，索引命中已实测；A1 的收敛阈值回归已处置（`STAGE_UNCONVERGED_THRESHOLD_SECONDS=9000`）。第三轮之后投影约 **0.38 GB/月**（1.71 GB 是第二轮的数字，见《第三轮之后的投影重算》）。执行顺序为 **6③ → 4 → 5 → 6④**：6③ 已落地并部署；第四轮已完成——服务端水合先行落地，收缩迁移 **040 已于 2026-08-21 应用**，内联提示词 42 → 0，全表 payload 读 70 837 → 28 421 B（**−59.9%**）；第五轮 036–039 已落地（`payload` 列的删除仍挂着，是独立一步）；**`version` 接入乐观锁已于 2026-08-22 落地、待部署**（见《`version` 接入乐观锁》）；**6④ 已放弃**（2026-08-22，理由见该节开头），轮转周期问题另立《兜底周期的规模化》占位。**至此出站量化债收口，剩余待办只有 `payload` 列删除一项独立步骤。**
 
 ## 背景
 
@@ -645,7 +645,7 @@ workflow_deployments (user_id, workflow_id, target, provider, environment, ...)
 
 1. **加表并双写。** 新表与 `payload` 同时写，`payload` 仍是唯一真相；读路径完全不变。此步不改任何行为，只增加写入量。
 2. **回填历史。** 一次性迁移把现有 payload 展开进新表，并加一个一致性校验查询（新表还原出的对象与 payload 逐字段相等）。
-3. **读切换。**（2026-08-21 已落地，迁移 038）扫掠与 webhook 投影改读列而不读 `payload`；分支条件由此才能真正下推：`WHERE stages.source_rule = ANY(...)` 可走普通索引，第三轮里被放弃的那一半随之成立。`version` 提成列但**未**接入 `workflowSaveConflicts`——错误的乐观锁意味着丢编辑，这一步单独排。
+3. **读切换。**（2026-08-21 已落地，迁移 038）扫掠与 webhook 投影改读列而不读 `payload`；分支条件由此才能真正下推：`WHERE stages.source_rule = ANY(...)` 可走普通索引，第三轮里被放弃的那一半随之成立。`version` 提成列但**未**接入 `workflowSaveConflicts`——错误的乐观锁意味着丢编辑，这一步单独排（**2026-08-22 已单独完成**，见《`version` 接入乐观锁》）。
 4. **收缩。** 服务端不再解析 `payload`，只保留浏览器同步所需的最小载体（或彻底移除）。**范围已收窄，见下。**
 
 #### 读切换之后：为什么 039 的代码半不做
@@ -881,7 +881,7 @@ workflow_deployments (user_id, workflow_id, target, provider, environment, ...)
 - expand → backfill → 读切换 → contract 四步各自独立可回滚；任何一步单独部署后系统行为不变。迁移编号：**036 expand（已落地）**、**037 回填与一致性校验（已落地）**、**038 读切换与索引（已落地，2026-08-21）**、039 contract（范围已收窄，见《读切换之后》）。
 - 038 落地后的实测证据（读-only 通道）：`name` / `repository` / `archived` 三列均为 NOT NULL（这条 ALTER 能成功本身就证明 037 一行没漏）；新索引 `pr_helper_workflows_active_repository_idx ON (repository) WHERE archived = false` 已被使用，12 次扫描读出 27 行（均 2.25 行/次，切换前是全表 35 行）；子表走索引而非全表（`workflow_stages` idx_scan 193 / seq_scan 8）；35 个流程中 **0 个没有 stage 行**，payload 的 stage 数与行数 **0 处不一致**。
 - 回填后有一致性检查：关系表重组出的对象与原 payload **逐字段相等**（round-trip identity 测试）。已由 [`api/_lib/workflow-rows.test.ts`](../api/_lib/workflow-rows.test.ts) 用 `toStrictEqual` 守住——它把 `{position: undefined}` 与 `{}` 判为不等，能抓住漏键，`toEqual` 不能。
-- `version` 提升为独立列后，`workflowSaveConflicts` 的冲突检测行为与改前一致。**038 未做这一步**：列已存在并被镜像写入，但冲突检测仍读 payload。错误的乐观锁意味着丢用户编辑，故单独排一步、单独验收。
+- `version` 提升为独立列后，`workflowSaveConflicts` 的冲突检测行为与改前一致。**038 未做这一步，2026-08-22 已单独完成**：见下方《`version` 接入乐观锁》。
 - 读切换后单次读取字节随「实际需要的字段」变化，而不再随 payload 总大小变化。
 - **expand 步的两条约束**（036 已满足）：promoted 列全部可空（含类型上必填的 `name` / `repository`，因为历史行没有值可填，NOT NULL 默认值等于编造数据，要等回填后才收紧）；`declared_created_at` 与 `rule_captured_at` 存 text 而非 timestamptz，否则往返会被 Postgres 重排格式，恒等测试立刻失败。
 - **镜像不漏写点**：payload 有两处写点（`upsertWorkflow` 的 INSERT 与删步骤路径的 UPDATE），两处都必须在**同一事务内**镜像，否则崩溃后两份表示不一致，正是回填校验会读成「数据损坏」的状态。由单元测试守住。
@@ -891,6 +891,25 @@ workflow_deployments (user_id, workflow_id, target, provider, environment, ...)
 - `workflow_repository_branch_tips` 存在且被 webhook 更新；cron 的第一层只按仓库做 tip 发现，第二层只对 tip 变化或有未终结活的流程取详情。
 - 无任何变化时，一圈 cron 的 GitHub 调用数接近仓库数（而非阶段数）。
 - 丢投递恢复能力不退化：人为跳过一次 webhook 投递后，下一圈 cron 仍能发现并补齐该仓库的变化。
+
+## `version` 接入乐观锁（2026-08-22 已落地，未部署）
+
+036 把 `version` 提成列并在写路径镜像，但乐观锁一直没接：`workflowSaveConflicts` 的两个入参各自来自别处——`latestVersion` 读 `MAX(workflow_versions.version)`，`hasPrevious` 取 `Boolean(storedWorkflowFromPayload(payload))`。后者才是真正的 payload 依赖，也是删列时最危险的一处：**payload 一旦没了，`previous` 恒为 null，`hasPrevious` 恒为 false，锁会静默放过所有保存**——不报错、不留痕，表现就是并发编辑互相覆盖。
+
+改法（`53a650f7` 之后的提交，先写失败测试）：
+
+- `latestVersion` 改读 `pr_helper_workflows.version`，仍在 `pg_advisory_xact_lock` 之后读，权威变成「即将被更新的那一行自己」，不再依赖一张没有保留策略、只增不减的历史表。
+- `hasPrevious` 改为「行是否存在」（`latestRows.length > 0`），不再看 payload 能否解析。
+- 列按 036 的约束是可空的，所以 `workflowSaveConflicts` 必须把 `null` / `undefined` 与 `0` 同义处理（都是「无版本历史，无从冲突」）。**这条是新增的失败测试抓到的**：改前签名是 `latestVersion: number`，列读出的 `null` 会走到 `version !== null` 判为冲突，于是这类行的每次保存都被拒——正是当年 payload 缺 version 造成的同一种丢编辑。
+- `listWorkflows` 的两条查询同步改读该列。客户端回显的 version 与门禁比较的 version 必须同源，否则两者一旦分叉就是误报冲突。顺带去掉了每行一个相关子查询（35 行 = 35 次 `MAX` 聚合）。
+- `saveWorkflowVersion` 不再自己算 `MAX+1`，直接写调用方已在锁内定好的 `workflow.version`。两个权威各算一次就是允许它们分叉。
+- `removeWorkflowStage` 的下一版本号改自它本来就 `FOR UPDATE` 读的那一行，少一次查询。
+
+**切换前的硬证据**（只读通道）：35 行 `version` 列全部非空，与 `workflow_versions` 的 `MAX(version)` **零处不一致**。所以这次切换是等值替换，不是行为变更。
+
+**已知残余风险（明确不写防御代码）**：`version` 列在 schema 上仍可空（036 的 expand 约束要求，037 已回填）。假如出现一行「列为 NULL 但历史里已有版本」，新代码会把下一版本记成 1 并撞上 `workflow_versions` 的主键——**在事务里报错回滚，用户看到保存失败，不会静默丢数据**。这个状态目前不可达（0 个 NULL，且列与历史自 036 起同事务写入），所以不加运行时兜底；要彻底消灭这一类，正解是新增一支迁移把该列收紧为 `NOT NULL`，那是独立一步。
+
+**部署后要验的**：换两个浏览器窗口打开同一个流程，A 保存成功后 B 再保存，必须仍然收到「流程已被其他窗口更新，请刷新后再保存。」；同时确认连续编辑（排序、增删步骤）不再出现误报冲突。这两条本机验不了——本机连不到线上应用。
 
 ## 临时运营建议
 
