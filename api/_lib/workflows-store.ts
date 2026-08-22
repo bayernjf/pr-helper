@@ -730,6 +730,13 @@ export function deploymentRunState(run: Pick<GitHubWorkflowRun, 'status' | 'conc
   return run.conclusion === 'success' ? 'success' : 'failure';
 }
 
+// The health probe is a gate, not a badge, so the reading it produces has to be the one both the deployment
+// row and the caller see. Recomputing the caller's copy from the Actions run alone kept checks_state green
+// under a failing probe, which let the next stage unlock and auto-merge proceed.
+export function deploymentStateWithHealth(actionState: DeploymentState, healthState: string | null): DeploymentState {
+  return actionState === 'success' && healthState === 'failure' ? 'failure' : actionState;
+}
+
 export function deploymentFailureSummary(jobs: readonly GitHubWorkflowJob[]) {
   const job = jobs.find(candidate => ['failure', 'cancelled', 'timed_out', 'action_required'].includes(candidate.conclusion || ''));
   if (!job) return { summary: 'GitHub Actions 部署失败，请打开日志查看详情。', jobUrl: null };
@@ -1838,6 +1845,7 @@ async function reconcileStageDeployments(environment: Record<string, string | un
     .filter((item): item is { run: GitHubWorkflowRun; provider: DeploymentProvider } => Boolean(item.provider))
     .sort((left, right) => (right.run.created_at || '').localeCompare(left.run.created_at || ''));
   const latestByProvider = new Map<DeploymentProvider, GitHubWorkflowRun>();
+  const stateByProvider = new Map<DeploymentProvider, DeploymentState>();
   deployments.forEach(({ run, provider }) => { if (!latestByProvider.has(provider)) latestByProvider.set(provider, run); });
   await Promise.all([...latestByProvider].map(async ([provider, run]) => {
     const configuration = configurations.find(item => item.provider === provider)!;
@@ -1855,7 +1863,8 @@ async function reconcileStageDeployments(environment: Record<string, string | un
     const health = healthUrl && canCheckDeploymentUrl(healthUrl)
       ? await phase('deployHealth', () => fetch(healthUrl, { signal: AbortSignal.timeout(10_000), redirect: 'follow' }).then(response => ({ state: response.ok ? 'success' : 'failure', detail: `HTTP ${response.status}` })).catch(error => ({ state: 'failure', detail: error instanceof Error ? error.message.slice(0, 240) : '请求失败' })))
       : { state: null, detail: null };
-    const state: DeploymentState = actionState === 'success' && health.state === 'failure' ? 'failure' : actionState;
+    const state: DeploymentState = deploymentStateWithHealth(actionState, health.state);
+    stateByProvider.set(provider, state);
     const snapshot: StageDeploymentSnapshot = { stage_index: stageIndex, environment: configuration.environment, run_id: run.id, run_name: run.name, run_url: run.html_url || null, deployment_url: latestStatus?.environment_url || null, state, conclusion: run.conclusion, failure_summary: failure.summary, failure_job_url: failure.jobUrl, health_state: health.state, health_url: healthUrl, health_detail: health.detail };
     if (deploymentRowChanged(previousByProvider.get(provider), snapshot)) await phase('deployWrite', () => sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, stage_id, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${source}, ${provider}, ${configuration.environment}, ${run.id}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${state}, ${run.conclusion}, ${failure.summary}, ${failure.jobUrl}, ${health.state}, ${healthUrl}, ${health.detail}) ON CONFLICT (user_id, workflow_id, stage_id, source, provider) DO UPDATE SET stage_index = EXCLUDED.stage_index, environment = EXCLUDED.environment, run_id = EXCLUDED.run_id, run_name = EXCLUDED.run_name, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, failure_summary = EXCLUDED.failure_summary, failure_job_url = EXCLUDED.failure_job_url, health_state = EXCLUDED.health_state, health_url = EXCLUDED.health_url, health_detail = EXCLUDED.health_detail, updated_at = now()`);
     await phase('deployWrite', () => sql`INSERT INTO workflow_stage_deployment_runs (user_id, workflow_id, stage_index, stage_id, source, provider, run_id, environment, run_name, run_url, deployment_url, state, conclusion, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${source}, ${provider}, ${run.id}, ${configuration.environment}, ${run.name}, ${run.html_url || null}, ${latestStatus?.environment_url || null}, ${state}, ${run.conclusion}, ${health.state}, ${healthUrl}, ${health.detail}) ON CONFLICT (user_id, workflow_id, stage_id, source, provider, run_id) DO UPDATE SET stage_index = EXCLUDED.stage_index, run_url = EXCLUDED.run_url, deployment_url = EXCLUDED.deployment_url, state = EXCLUDED.state, conclusion = EXCLUDED.conclusion, health_state = EXCLUDED.health_state, health_url = EXCLUDED.health_url, health_detail = EXCLUDED.health_detail, updated_at = now()`);
@@ -1871,10 +1880,7 @@ async function reconcileStageDeployments(environment: Record<string, string | un
     .filter(configuration => deploymentRowChanged(previousByProvider.get(configuration.provider), { stage_index: stageIndex, environment: configuration.environment, run_id: null, run_name: configuration.workflowName, run_url: null, deployment_url: null, state: 'pending', conclusion: null, failure_summary: missingDeploymentSummary(configuration.workflowName), failure_job_url: null, health_state: null, health_url: null, health_detail: null }));
   if (placeholders.length) await phase('deployWrite', () => Promise.all(placeholders
     .map(configuration => sql`INSERT INTO workflow_stage_deployments (user_id, workflow_id, stage_index, stage_id, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, failure_summary, failure_job_url, health_state, health_url, health_detail) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${source}, ${configuration.provider}, ${configuration.environment}, ${null}, ${configuration.workflowName}, ${null}, ${null}, 'pending', ${null}, ${missingDeploymentSummary(configuration.workflowName)}, ${null}, ${null}, ${null}, ${null}) ON CONFLICT (user_id, workflow_id, stage_id, source, provider) DO UPDATE SET stage_index = EXCLUDED.stage_index, environment = EXCLUDED.environment, run_id = NULL, run_name = EXCLUDED.run_name, run_url = NULL, deployment_url = NULL, state = EXCLUDED.state, conclusion = NULL, failure_summary = EXCLUDED.failure_summary, failure_job_url = NULL, health_state = NULL, health_url = NULL, health_detail = NULL, updated_at = now()`)));
-  return configurations.map(configuration => {
-    const run = latestByProvider.get(configuration.provider);
-    return run ? deploymentRunState(run) : 'pending';
-  });
+  return configurations.map(configuration => stateByProvider.get(configuration.provider) ?? 'pending');
 }
 
 // One greppable line per stage and per sweep: Vercel keeps stdout, and a single line survives log
