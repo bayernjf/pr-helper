@@ -1065,6 +1065,21 @@ describe('workflowSaveConflicts', () => {
   it('never conflicts when the workflow is genuinely new', () => {
     expect(workflowSaveConflicts(false, 0, undefined)).toBe(false);
   });
+
+  // The stored version now comes from the promoted column, which 036 had to leave nullable — historical
+  // rows had no value to fill. A null read as a mismatch would reject every save on such a row, which is
+  // the same lost-edit failure the version-less payload caused before.
+  it('treats an absent stored version the same as no version history', () => {
+    expect(workflowSaveConflicts(true, null, 5)).toBe(false);
+    expect(workflowSaveConflicts(true, null, undefined)).toBe(false);
+    expect(workflowSaveConflicts(true, undefined, 5)).toBe(false);
+  });
+
+  // The row exists, so the client had a version to echo; a stored version present but unreadable must
+  // not silently disable the lock.
+  it('rejects a save when the stored version is not a usable number', () => {
+    expect(workflowSaveConflicts(true, '46' as unknown as number, 46)).toBe(true);
+  });
 });
 
 describe('stored automation policies', () => {
