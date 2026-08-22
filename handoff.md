@@ -45,8 +45,8 @@
 
 | 事项 | 一句话 | 去处 |
 | --- | --- | --- |
-| 删 `pr_helper_workflows.payload` 列 | 14 处读点、5 步、最后一步是单向门；收益是收口双表示而非省流量。是否落地等 8/28 一并决定。 | [`docs/superpowers/plans/2026-08-22-drop-workflow-payload-column.md`](docs/superpowers/plans/2026-08-22-drop-workflow-payload-column.md) |
-| `pr_helper_workflows.version` 收紧为 `NOT NULL` | `036` 只能留成 nullable，实测 35 行 0 个 NULL。乐观锁已把 NULL 当「无历史」处理，所以这条只是消灭一个不可达分支，**可以不做**。你还没定。 | 《`version` 接入乐观锁》 |
+| 删 `pr_helper_workflows.payload` 列 | 14 处读点、5 步、最后一步是单向门；收益是收口双表示而非省流量。是否落地等 8/28 一并决定。**`version` 收紧为 `NOT NULL` 已于 2026-08-22 定为并入该方案的 D 步，不再单列**——实测 0 个 NULL 且今天不可达，即便出现也是主键冲突后事务回滚（响亮报错，非静默丢编辑），只有 D 步手写列清单时才第一次有防御价值。 | [`docs/superpowers/plans/2026-08-22-drop-workflow-payload-column.md`](docs/superpowers/plans/2026-08-22-drop-workflow-payload-column.md) |
+| `pr_helper_workflows.version` 收紧为 `NOT NULL` | ~~未定~~ **2026-08-22 已定：并入 payload 删列方案的 D 步，不单独做。** | 同上 |
 | AI 生成失败 → 接管弹窗的验收 | 你此前定为「单独排期」，未开始。 | 《后续高价值投入》 |
 
 ### 已知但未立项（不影响当前功能）

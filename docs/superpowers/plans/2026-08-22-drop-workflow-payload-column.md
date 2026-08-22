@@ -72,6 +72,8 @@
 1. **`payload` 是 `NOT NULL` 且无默认值。** 所以「代码停止写 payload」不能先于一次 `ALTER COLUMN payload DROP NOT NULL`，否则每次新建流程的 `INSERT` 当场失败。
 2. **`writeWorkflowRows` 只做 `UPDATE`，不做 `INSERT`。** 建行完全依赖 1628 行那条 `INSERT`。所以停写 payload 的同一步，必须把 `workflowToRows` 产出的全部列搬进这条 `INSERT`（今天它只带 `name` / `repository`，其余列靠随后的 `UPDATE` 补齐），否则新建的流程会缺 `archived` / `version` / `position` 等列。这是本方案里唯一一处**不是**机械改动的地方。
 
+3. **`version` 收紧为 `NOT NULL` 并进 D 步（2026-08-22 已定）。** 该列在 `036` 里只能留成 nullable（历史行无值可填），至今没收紧；实测 35 行 0 个 NULL，且 NULL 今天不可达——唯一的建行语句在同一事务里由 `writeWorkflowRows` 填入 `(latestVersion || 0) + 1`。即便出现 NULL，乐观锁放过之后紧接着的 `INSERT INTO workflow_versions` 会撞 `PRIMARY KEY (user_id, workflow_id, version)`（全代码库无 `DELETE FROM workflow_versions`，保留策略不含该表），事务回滚、保存报错，**不是静默丢编辑**。所以它单独做没有可达收益；价值恰好落在 D 步——那是历史上第一次有人手写这份列清单，也是最可能漏掉 `version` 的时刻。`workflowToRows` 写的是 `version: workflow.version ?? null`，漏掉时今天会静静写下 NULL，有了 `NOT NULL` 则当场被数据库拒绝。
+
 ## 四、分步与顺序
 
 严格 expand → contract，每一步单独部署、单独验收，任意一步都可以只回滚代码。
@@ -81,7 +83,7 @@
 | A | 切第一批 7 处主键单行读 | 纯代码，`git revert` 即回滚 | 可在 8/28 前做（若批准） |
 | B | 切第二批 7 处列表读 | 纯代码 | A 稳定后 |
 | C | 迁移：`ALTER TABLE pr_helper_workflows ALTER COLUMN payload DROP NOT NULL` | 无损，可再 `SET NOT NULL` | B 稳定后 |
-| D | 代码停止写 payload（含第三节第 2 点的 `INSERT` 补列） | 纯代码 | C 之后 |
+| D | 代码停止写 payload（含第三节第 2 点的 `INSERT` 补列）+ 迁移：`ALTER COLUMN version SET NOT NULL` | 纯代码；迁移可 `DROP NOT NULL` 回滚 | C 之后 |
 | E | 迁移：`ALTER TABLE pr_helper_workflows DROP COLUMN payload` | **单向门** | D 观察满一周后 |
 
 **E 是本方案唯一不可逆的一步。** 列一删，任何仍读 payload 的旧 Vercel 部署都不能再回滚上线——`handoff.md` 已有「不要为了验收立即触发 Production 回滚」的约束，这里再加一条：E 之前要确认没有需要保留的回滚目标。若不确定，E 可以无限期推迟，A–D 的收益（少写一份 JSON、读路径单一真相）已经全部到手，**E 只是省 70.8 kB 存储**。
