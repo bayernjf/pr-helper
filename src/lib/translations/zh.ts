@@ -330,7 +330,7 @@ const zh: TranslationDict = {
   'editor.deployments.workflowRequired': '请填写 GitHub Actions 工作流名称。',
   'editor.deployments.duplicate': '同一目标分支不能重复配置同一部署平台。',
   'editor.deployments.healthPath': '健康检查路径（可选）',
-  'editor.deployments.healthPathHint': '仅对本次部署返回的公网地址执行，例如 /health。',
+  'editor.deployments.healthPathHint': '仅对本次部署返回的公网地址执行一次，例如 /health。探测失败会挡住下一步，且不会自动重试——需要新提交才会重新评估。',
   'editor.deployments.healthPathInvalid': '健康检查路径必须以 / 开头。',
   'editor.deployments.rollbackWorkflow': '回滚 Actions 工作流（可选）',
   'editor.deployments.rollbackWorkflowHint': '仅配置后显示回滚入口；该 workflow_dispatch 需接收 target_run_id、deployment_url、environment、provider。',
