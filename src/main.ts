@@ -1417,8 +1417,7 @@ function overview() {
   content.classList.toggle('lane-sort-not-custom', laneSortMode !== 'custom');
   const sortControls = content.querySelector<HTMLElement>('.lane-sort-controls');
   const boardSummary = content.querySelector<HTMLElement>('.board-summary');
-  const firstFilterButton = content.querySelector<HTMLElement>('[data-board-filter]');
-  if (sortControls && boardSummary && firstFilterButton) boardSummary.insertBefore(sortControls, firstFilterButton);
+  if (sortControls && boardSummary) boardSummary.appendChild(sortControls);
   const searchCount = content.querySelector<HTMLElement>('.lane-search-count');
   const searchControl = content.querySelector<HTMLElement>('.lane-search');
   if (searchCount && boardSummary && sortControls) boardSummary.insertBefore(searchCount, sortControls);
