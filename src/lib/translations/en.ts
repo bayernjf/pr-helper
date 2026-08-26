@@ -141,6 +141,7 @@ const en: TranslationDict = {
   'overview.board.searchEmpty': 'No matching workflows',
   'overview.board.searchClear': 'Clear search',
   'overview.board.attention': 'Needs attention',
+  'overview.board.running': 'Running',
   'overview.board.active': 'All projects',
   'overview.board.failed': 'Failed',
   'automation.state.queued': 'Queued, waiting to run',
