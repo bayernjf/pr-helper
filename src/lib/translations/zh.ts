@@ -190,7 +190,7 @@ const zh: TranslationDict = {
   'overview.run.checks-failed': 'Actions 失败',
   'overview.run.merged-pending': '已合并，等待合并后检查',
   'overview.run.prStatus': 'PR #{number} · {status}',
-  'overview.run.current': '当前：第 {step} 步 · {status}',
+  'overview.run.current': '当前：第 {step}/{total} 步 · {status}',
   'overview.run.updated': '同步于 {time}',
   'overview.run.checkCount': '门禁：{passed}/{total} 已通过',
   'overview.run.history': '最近动态',

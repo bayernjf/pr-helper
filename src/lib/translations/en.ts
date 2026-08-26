@@ -190,7 +190,7 @@ const en: TranslationDict = {
   'overview.run.checks-failed': 'Actions failed',
   'overview.run.merged-pending': 'Merged · waiting for post-merge checks',
   'overview.run.prStatus': 'PR #{number} · {status}',
-  'overview.run.current': 'Current: step {step} · {status}',
+  'overview.run.current': 'Current: step {step}/{total} · {status}',
   'overview.run.updated': 'Synced {time}',
   'overview.run.checkCount': 'Checks: {passed}/{total} passed',
   'overview.run.history': 'Recent activity',
