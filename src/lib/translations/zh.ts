@@ -141,6 +141,7 @@ const zh: TranslationDict = {
   'overview.board.searchEmpty': '没有匹配的流程',
   'overview.board.searchClear': '清除搜索',
   'overview.board.attention': '需要处理',
+  'overview.board.running': '正在运行',
   'overview.board.active': '全部流程',
   'overview.board.failed': '失败',
   'automation.state.queued': '已排队，等待执行',
