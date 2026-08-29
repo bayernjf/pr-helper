@@ -1790,15 +1790,17 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   dialog.querySelector<HTMLButtonElement>('.drawer-create-pr')?.addEventListener('click', () => {
     active = flow;
     dialog.close();
-    showCreateDialog(stageIndex, () => { void loadActionQueue(true, flow.repository).finally(render); }, routeSource);
+    showCreateDialog(stageIndex, () => render(), routeSource);
   });
   dialog.querySelector<HTMLButtonElement>('.drawer-merge-pr')?.addEventListener('click', () => {
     if (!mergeStatus) return;
     active = flow;
     dialog.close();
     showMergeDialog(stageIndex, mergeStatus, () => {
-      void loadActionQueue(true, flow.repository).finally(render);
-    });
+      // The step is already resolved locally, so show that at once. Reconciliation is slow and
+      // asynchronous; blocking the board on it would make a finished action look like it failed.
+      render();
+    }, routeSource);
   });
   dialog.querySelector<HTMLButtonElement>('.drawer-sync')?.addEventListener('click', async event => {
     const button = event.currentTarget as HTMLButtonElement;
@@ -2594,10 +2596,13 @@ function mergeErrorMessage(error: unknown) {
     ? t('merge.error.permission')
     : message;
 }
-function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: () => void) {
+function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: () => void, sourceOverride?: string) {
   const status = statusOverride || statuses?.[index];
   if (!active || !status?.pr || !canMergePull(status) || !canOperateWorkflow(active, 'pull-merge')) return;
   const pull = status.pr;
+  // The head ref is the branch the automation row is keyed by. A stage source may be a wildcard rule,
+  // which never matches a persisted row, so prefer the concrete branch whenever GitHub reports one.
+  const source = sourceOverride || pull.head.ref || active.stages[index]?.source || '';
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
   dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('merge.eyebrow')}</p><h2>${t('merge.dialog.title', { number: pull.number })}</h2><p class="meta">${t('merge.dialog.desc')}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('merge.dialog.cancel')}</button><button id="confirm-merge" class="primary">${t('merge.dialog.confirm')}</button></div></form>`;
@@ -2616,6 +2621,7 @@ function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: 
       statuses = statuses?.map((item, statusIndex) => statusIndex === index ? { ...item, kind: 'merged', pr: { ...pull, state: 'closed', merged_at: new Date().toISOString(), merge_commit_sha: result.sha }, checks: pendingChecks } : item) || null;
       recentlyMergedPullNumbers.set(index, pull.number);
       mergingStages.delete(index);
+      if (source) markAutomationResolved(active!, index, source);
       dialog.close();
       if (onMerged) {
         onMerged();
@@ -3086,6 +3092,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
       // Do not let that stale record expose a merge action for the new PR before GitHub reports its checks.
       workflowStageStates = workflowStageStates.filter(state => state.workflowId !== active!.id || state.stageIndex !== index || state.source !== source);
       actionQueue = actionQueue.filter(item => item.workflowId !== active!.id || item.stageIndex !== index || item.source !== source);
+      markAutomationResolved(active!, index, source);
       dialog.close();
       if (onCreated) {
         onCreated();
