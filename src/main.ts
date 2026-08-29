@@ -1559,7 +1559,8 @@ function bindFailureCenter() {
       const payload = await response.json().catch(() => ({})) as { count?: number; message?: string };
       if (!response.ok) throw new Error(payload.message || t('recovery.retryFailed'));
       showToast(t('recovery.retryStarted', { count: payload.count || 0 }));
-      void loadActionQueue(true, flow.repository).finally(render);
+      markAutomationResolved(flow, stageIndex, source);
+      render();
     } catch (error) {
       showToast(error instanceof Error ? error.message : t('recovery.retryFailed'));
       button.disabled = false;
@@ -2533,8 +2534,10 @@ async function retryFailedActions(flow: Workflow, state: WorkflowStageState, but
     const payload = await response.json().catch(() => ({})) as { count?: number; message?: string };
     if (!response.ok) throw new Error(payload.message || t('recovery.retryFailed'));
     showToast(t('recovery.retryStarted', { count: payload.count || 0 }));
-    void loadActionQueue(true, flow.repository).finally(render);
-    window.setTimeout(() => void loadActionQueue(true, flow.repository).finally(render), 1_500);
+    // A rerun resolves the failure from the person's point of view; the projection is allowed to
+    // catch up in the background rather than holding the board on a slow reconciliation.
+    markAutomationResolved(flow, state.stageIndex, state.source);
+    render();
   } catch (error) {
     showToast(error instanceof Error ? error.message : t('recovery.retryFailed'));
   } finally {
