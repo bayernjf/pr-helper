@@ -117,6 +117,15 @@ let repositoryManagementTimer: number | undefined;
 const mergingStages = new Set<number>();
 const recentlyCreatedPullNumbers = new Map<number, number>();
 const recentlyMergedPullNumbers = new Map<number, number>();
+// GitHub accepts a person's create/merge/retry immediately, but the server projection only catches up
+// when reconciliation next runs. These notes record what a person just handled so the board can drop
+// the row at once and let the server catch up in the background, instead of putting work that is
+// already done back in front of them. Each note also remembers the row it dismissed, so a genuinely
+// new automation event is never hidden behind an old one.
+const RESOLVED_AUTOMATION_TTL_MS = 15 * 60_000;
+const AUTOMATION_RECONCILE_DELAYS_MS = [1_500, 4_000, 9_000];
+type ResolvedAutomationRecord = { resolvedAt: number; source: string; actionId: number | null; updatedAt: string };
+const resolvedAutomation = new Map<string, ResolvedAutomationRecord>();
 let aiConfig: AiConfig | null = loadAiConfig();
 let automationCredentialConfigured = false;
 let generationRules = loadGenerationRules(() => localStorage.getItem(GENERATION_RULES_KEY));
@@ -1325,8 +1334,65 @@ function flowProgressBar(flow: Workflow): string {
   const nodes = progress.nodes.map((status, index) => `<button type="button" class="fp-node is-${status} ${progress.currentIndex !== null && index === progress.currentIndex && synced ? 'is-current' : ''}" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(statesForStage(flow, index)[0]?.source || flow.stages[index]!.source)}" title="${escape(stageProgressTooltip(flow, index))}" aria-label="${escape(`${t('detail.progress.step', { step: index + 1 })} · ${t(`detail.progress.node.${status}`)}`)}"><span class="fp-node-index">${index + 1}</span><span class="fp-node-status">${t(`detail.progress.node.${status}`)}</span></button>`).join('');
   return `<div class="flow-progress"><p class="eyebrow">${t('detail.progress.eyebrow')}</p><p class="flow-progress-headline">${escape(headline)}</p><div class="flow-progress-nodes">${nodes}</div>${syncedNote}</div>`;
 }
+function automationStepKey(workflowId: string, stageIndex: number, source: string) {
+  return `${workflowId}|${stageIndex}|${source}`;
+}
+function currentAutomationAction(workflowId: string, stageIndex: number, source: string) {
+  return automationActions.find(action => action.workflowId === workflowId && action.stageIndex === stageIndex && action.source === source);
+}
+// A wildcard rule stands for every concrete route beneath it, so it covers the whole stage; an exact
+// branch only covers the route a person actually touched.
+function resolvedSourceMatches(resolved: string, candidate: string) {
+  return resolved === candidate || resolved.includes('*') && sourceRuleMatches(candidate, resolved);
+}
+function isAutomationResolved(workflowId: string, stageIndex: number, source: string) {
+  const prefix = `${workflowId}|${stageIndex}|`;
+  for (const [key, record] of resolvedAutomation) {
+    if (!key.startsWith(prefix) || !resolvedSourceMatches(record.source, source)) continue;
+    if (Date.now() - record.resolvedAt > RESOLVED_AUTOMATION_TTL_MS) { resolvedAutomation.delete(key); continue; }
+    // A different or newer row is a fresh event rather than the one just handled, so it must surface.
+    const current = currentAutomationAction(workflowId, stageIndex, source);
+    if (current && (current.id !== record.actionId || current.updatedAt > record.updatedAt)) { resolvedAutomation.delete(key); continue; }
+    return true;
+  }
+  return false;
+}
+/**
+ * Records that a person just moved this step by hand, which drops it from the board at once.
+ * Reconciliation runs asynchronously, so reloading immediately would read the stale row back and put
+ * work the user already did in front of them again; the projection catches up quietly instead.
+ *
+ * The automation projection itself is left intact — only the board's view of it is filtered — so every
+ * other reader (the drawer's automation block, the progress bar) keeps seeing the server's real state.
+ * The attention queue is different: it exists purely to say "a person needs to do this", so once they
+ * have, dropping the entry is the honest thing to do rather than something to re-derive later.
+ */
+function markAutomationResolved(flow: Workflow, stageIndex: number, source: string) {
+  const key = automationStepKey(flow.id, stageIndex, source);
+  const current = currentAutomationAction(flow.id, stageIndex, source);
+  resolvedAutomation.set(key, { resolvedAt: Date.now(), source, actionId: current?.id ?? null, updatedAt: current?.updatedAt ?? '' });
+  actionQueue = actionQueue.filter(item => !(item.workflowId === flow.id && item.stageIndex === stageIndex && resolvedSourceMatches(source, item.source)));
+  void reconcileAutomationInBackground(flow, stageIndex, source);
+}
+async function reconcileAutomationInBackground(flow: Workflow, stageIndex: number, source: string) {
+  const key = automationStepKey(flow.id, stageIndex, source);
+  for (const delay of AUTOMATION_RECONCILE_DELAYS_MS) {
+    await new Promise(resolve => window.setTimeout(resolve, delay));
+    if (!resolvedAutomation.has(key)) return;
+    await loadActionQueue(true, flow.repository).catch(() => undefined);
+    // Once the server projection agrees the step is no longer blocked it becomes the source of truth
+    // again, and the local note has served its purpose.
+    const stillBlocked = automationActions.some(action => action.workflowId === flow.id && action.stageIndex === stageIndex && resolvedSourceMatches(source, action.source) && automationActionPresentation(action).blocked);
+    if (!stillBlocked) {
+      resolvedAutomation.delete(key);
+      if (screen === 'overview') render();
+      return;
+    }
+    if (screen === 'overview') render();
+  }
+}
 function blockedAutomationActions(): AutomationAction[] {
-  return automationActions.filter(action => automationActionPresentation(action).blocked);
+  return automationActions.filter(action => automationActionPresentation(action).blocked && !isAutomationResolved(action.workflowId, action.stageIndex, action.source));
 }
 function failureCenterPanel(): string {
   const failures = actionQueue.filter(item => item.kind === 'checks-failed' || item.kind === 'needs-approval');
@@ -1493,7 +1559,8 @@ function bindFailureCenter() {
       const payload = await response.json().catch(() => ({})) as { count?: number; message?: string };
       if (!response.ok) throw new Error(payload.message || t('recovery.retryFailed'));
       showToast(t('recovery.retryStarted', { count: payload.count || 0 }));
-      void loadActionQueue(true, flow.repository).finally(render);
+      markAutomationResolved(flow, stageIndex, source);
+      render();
     } catch (error) {
       showToast(error instanceof Error ? error.message : t('recovery.retryFailed'));
       button.disabled = false;
@@ -1724,15 +1791,17 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   dialog.querySelector<HTMLButtonElement>('.drawer-create-pr')?.addEventListener('click', () => {
     active = flow;
     dialog.close();
-    showCreateDialog(stageIndex, () => { void loadActionQueue(true, flow.repository).finally(render); }, routeSource);
+    showCreateDialog(stageIndex, () => render(), routeSource);
   });
   dialog.querySelector<HTMLButtonElement>('.drawer-merge-pr')?.addEventListener('click', () => {
     if (!mergeStatus) return;
     active = flow;
     dialog.close();
     showMergeDialog(stageIndex, mergeStatus, () => {
-      void loadActionQueue(true, flow.repository).finally(render);
-    });
+      // The step is already resolved locally, so show that at once. Reconciliation is slow and
+      // asynchronous; blocking the board on it would make a finished action look like it failed.
+      render();
+    }, routeSource);
   });
   dialog.querySelector<HTMLButtonElement>('.drawer-sync')?.addEventListener('click', async event => {
     const button = event.currentTarget as HTMLButtonElement;
@@ -2465,8 +2534,10 @@ async function retryFailedActions(flow: Workflow, state: WorkflowStageState, but
     const payload = await response.json().catch(() => ({})) as { count?: number; message?: string };
     if (!response.ok) throw new Error(payload.message || t('recovery.retryFailed'));
     showToast(t('recovery.retryStarted', { count: payload.count || 0 }));
-    void loadActionQueue(true, flow.repository).finally(render);
-    window.setTimeout(() => void loadActionQueue(true, flow.repository).finally(render), 1_500);
+    // A rerun resolves the failure from the person's point of view; the projection is allowed to
+    // catch up in the background rather than holding the board on a slow reconciliation.
+    markAutomationResolved(flow, state.stageIndex, state.source);
+    render();
   } catch (error) {
     showToast(error instanceof Error ? error.message : t('recovery.retryFailed'));
   } finally {
@@ -2528,10 +2599,13 @@ function mergeErrorMessage(error: unknown) {
     ? t('merge.error.permission')
     : message;
 }
-function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: () => void) {
+function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: () => void, sourceOverride?: string) {
   const status = statusOverride || statuses?.[index];
   if (!active || !status?.pr || !canMergePull(status) || !canOperateWorkflow(active, 'pull-merge')) return;
   const pull = status.pr;
+  // The head ref is the branch the automation row is keyed by. A stage source may be a wildcard rule,
+  // which never matches a persisted row, so prefer the concrete branch whenever GitHub reports one.
+  const source = sourceOverride || pull.head.ref || active.stages[index]?.source || '';
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
   dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('merge.eyebrow')}</p><h2>${t('merge.dialog.title', { number: pull.number })}</h2><p class="meta">${t('merge.dialog.desc')}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('merge.dialog.cancel')}</button><button id="confirm-merge" class="primary">${t('merge.dialog.confirm')}</button></div></form>`;
@@ -2550,6 +2624,7 @@ function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: 
       statuses = statuses?.map((item, statusIndex) => statusIndex === index ? { ...item, kind: 'merged', pr: { ...pull, state: 'closed', merged_at: new Date().toISOString(), merge_commit_sha: result.sha }, checks: pendingChecks } : item) || null;
       recentlyMergedPullNumbers.set(index, pull.number);
       mergingStages.delete(index);
+      if (source) markAutomationResolved(active!, index, source);
       dialog.close();
       if (onMerged) {
         onMerged();
@@ -3020,6 +3095,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
       // Do not let that stale record expose a merge action for the new PR before GitHub reports its checks.
       workflowStageStates = workflowStageStates.filter(state => state.workflowId !== active!.id || state.stageIndex !== index || state.source !== source);
       actionQueue = actionQueue.filter(item => item.workflowId !== active!.id || item.stageIndex !== index || item.source !== source);
+      markAutomationResolved(active!, index, source);
       dialog.close();
       if (onCreated) {
         onCreated();

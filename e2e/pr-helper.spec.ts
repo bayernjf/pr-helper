@@ -5,6 +5,7 @@ type ApiFixture = {
   workflows?: Workflow[];
   states?: unknown[];
   items?: unknown[];
+  automation?: unknown[];
   recoveryStatuses?: unknown[];
   deployments?: unknown[];
   deploymentRuns?: unknown[];
@@ -111,6 +112,7 @@ async function mockApi(page: Page, fixture: ApiFixture = {}): Promise<MockApi> {
       runs: [],
       timeline: [],
       recoveryStatuses: fixture.recoveryStatuses || [],
+      automation: fixture.automation || [],
     });
 
     if (pathname === '/api/notifications/subscription') return json(route, 200, { subscription: null });
@@ -399,6 +401,62 @@ test('抽屉合并 PR 仅在确认后通过 GitHub 代理使用当前 head SHA',
   await mergeDialog.getByRole('button', { name: '确认合并' }).click();
   await expect.poll(() => githubRequests(api, 'PUT', '/repos/acme/demo/pulls/42/merge')).toHaveLength(1);
   expect(githubRequests(api, 'PUT', '/repos/acme/demo/pulls/42/merge')[0]?.body).toEqual({ merge_method: 'merge', sha: 'head-sha-42' });
+});
+
+test('抽屉创建 PR 后自动化待办立即消失，不再等服务端重算', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-automation-create',
+    name: '自动化创建待办流程',
+    repository,
+    stages: [{ stageId: 'stage-create', source: 'feature/e2e', target: 'dev' }],
+  };
+  const api = await openWorkspace(page, {
+    workflows: [workflow],
+    items: [{ workflowId: workflow.id, workflowName: workflow.name, repository, stageIndex: 0, source: 'feature/e2e', target: 'dev', pullNumber: null, kind: 'ready-to-create', message: '等待创建 PR' }],
+    states: [{ workflowId: workflow.id, stageIndex: 0, stageId: 'stage-create', repository, source: 'feature/e2e', target: 'dev', pullNumber: null, pullState: 'none', mergedAt: null, headSha: null, checksState: 'none', checksPassed: 0, checksTotal: 0, approvals: 0, requiredApprovals: 0, mergeable: null, mergeableState: null, aheadBy: 1, lastEvent: null, updatedAt: '2026-08-03T00:00:00.000Z', decision: { kind: 'ready-to-create', actionable: true, message: '等待创建 PR' } }],
+    // Every read keeps serving the same paused row, which is what a reconciliation that has not
+    // caught up yet looks like from the board.
+    automation: [{ id: 11, workflowId: workflow.id, stageId: 'stage-create', stageIndex: 0, source: 'feature/e2e', target: 'dev', kind: 'create-pr', state: 'paused', attempts: 1, failureReason: '当前步骤尚未满足自动创建 PR 的门禁', createdAt: '2026-08-03T00:00:00.000Z', updatedAt: '2026-08-03T00:00:00.000Z' }],
+  });
+
+  await expect(page.locator('.failure-center')).toContainText('自动创建 PR');
+
+  const drawer = await openStepDrawer(page);
+  await drawer.getByRole('button', { name: '创建 PR' }).click();
+  const createDialog = page.getByRole('dialog');
+  await createDialog.locator('#create-title').fill('新增 E2E 覆盖');
+  await createDialog.getByRole('button', { name: '确认创建 PR' }).click();
+  await expect.poll(() => githubRequests(api, 'POST', '/repos/acme/demo/pulls')).toHaveLength(1);
+
+  // The projection never changes behind the scenes, so the row staying gone is what proves the board
+  // stopped re-asking for work the user has already finished.
+  await expect(page.locator('.failure-center')).toHaveCount(0);
+});
+
+test('抽屉合并 PR 后自动化待办立即消失，不再等服务端重算', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-automation-merge',
+    name: '自动化合并待办流程',
+    repository,
+    stages: [{ stageId: 'stage-merge', source: 'feature/e2e', target: 'dev' }],
+  };
+  const api = await openWorkspace(page, {
+    workflows: [workflow],
+    items: [{ workflowId: workflow.id, workflowName: workflow.name, repository, stageIndex: 0, source: 'feature/e2e', target: 'dev', pullNumber: 42, kind: 'ready-to-merge', message: '可以合并' }],
+    states: [{ workflowId: workflow.id, stageIndex: 0, stageId: 'stage-merge', repository, source: 'feature/e2e', target: 'dev', pullNumber: 42, pullState: 'open', mergedAt: null, headSha: 'head-sha-42', checksState: 'success', checksPassed: 1, checksTotal: 1, approvals: 0, requiredApprovals: 0, mergeable: true, mergeableState: 'clean', aheadBy: 0, lastEvent: null, updatedAt: '2026-08-03T00:00:00.000Z', decision: { kind: 'ready-to-merge', actionable: true, message: '可以合并' } }],
+    automation: [{ id: 12, workflowId: workflow.id, stageId: 'stage-merge', stageIndex: 0, source: 'feature/e2e', target: 'dev', kind: 'merge-pr', state: 'paused', attempts: 5, failureReason: '门禁尚未全绿', createdAt: '2026-08-03T00:00:00.000Z', updatedAt: '2026-08-03T00:00:00.000Z' }],
+  });
+
+  await expect(page.locator('.failure-center')).toContainText('自动合并 PR');
+
+  await openStepDrawer(page);
+  await page.getByRole('dialog').getByRole('button', { name: '合并 PR' }).click();
+  const mergeDialog = page.getByRole('dialog');
+  await expect(mergeDialog.getByRole('heading', { name: '合并 PR #42' })).toBeVisible();
+  await mergeDialog.getByRole('button', { name: '确认合并' }).click();
+  await expect.poll(() => githubRequests(api, 'PUT', '/repos/acme/demo/pulls/42/merge')).toHaveLength(1);
+
+  await expect(page.locator('.failure-center')).toHaveCount(0);
 });
 
 test('流程详情页可为单个步骤开启自动合并且不影响自动创建策略', async ({ page }) => {
