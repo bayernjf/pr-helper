@@ -1,6 +1,8 @@
 # 删除 `pr_helper_workflows.payload` 列（2026-08-22，方案）
 
-本文只是方案。**尚未实施，也不建议在 2026-08-28 之前实施**——是否落地由那天的一周 Supabase Usage 结论一并决定。
+本文只是方案。2026-08-22 初版写「是否落地由 8/28 的 Usage 结论一并决定」；**结论已于 2026-08-31 出：egress 收口至约 2.1 GB/月（42% 额度），宽限期内无需升档**（见母文档《八月实际账单验证与最终结论》）。据此本任务重定级为**代码债收口（消除双表示）**，不再受流量或宽限期驱动，按代码债优先级排期。`038`（08-21 落地）的读切换观察期已满一周，A / B 在时序上已解锁，等使用者批准启动。
+
+**实施记录：A 步已于 2026-08-31 完成**——7 处主键单行读全部切到 `trackedWorkflowColumns`（含 `removeWorkflowStage` 的 `FOR UPDATE` 拆分），新增 `trackedWorkflowFromSingleRow`（镜像缺失时显式报错而非「未找到」，`upsertWorkflow` / `removeWorkflow` 两处按第五节陷阱 1 的自愈理由读为容忍），`preflight.ts` 的死 import 一并删除。守护测试：`workflows-store.test.ts` 的 `payload column drop, step A` 块（4 条，先红后绿）。下一步是 B（列表读），部署 A 后按第六节跑一次门禁 SQL。
 
 - 上游待办：[`handoff.md`](../../../handoff.md) 「后续待办」第 1 条末句「剩下 `payload` 列删除一项独立步骤」。
 - 方案母文档：[`docs/supabase-egress-optimization.md`](../../supabase-egress-optimization.md)（expand → migrate → contract 的第五轮）。
@@ -23,7 +25,7 @@
 2. **每次保存少写一份完整 JSON**。`upsertWorkflow` 与 `removeWorkflowStage` 现在各写一次 payload，再由 `writeWorkflowRows` 写一遍关系表。
 3. **存储**。35 行约 70.8 kB。注意 `workflow_versions.snapshot` 仍是每个版本一份完整副本，且 `040` 已确认**全代码库没有任何读者**——如果目标是存储，那一块比这一列大得多，但它是另一件事，不欠这一步。
 
-**因此这一步的正当理由是「收口双表示」，不是「省 Egress」。** 如果 8/28 的 Usage 结论是「已经够用了」，那也不构成放弃它的理由；反之，如果结论是「还差得远」，它也救不了场。
+**因此这一步的正当理由是「收口双表示」，不是「省 Egress」。** 如果 8/28 的 Usage 结论是「已经够用了」，那也不构成放弃它的理由；反之，如果结论是「还差得远」，它也救不了场。**2026-08-31 补记：结论是「已经够用了」——按此条它没有被放弃的理由，但也不再紧急。**
 
 ## 二、读点清单（14 处，全部在 `api/_lib/workflows-store.ts`）
 
@@ -47,11 +49,13 @@
 | --- | --- | --- |
 | 1532 | `listWorkflows`（自有） | 唯一接 `hydrateGenerationRules` 的读点 |
 | 1539 | `listWorkflows`（共享） | 同上 |
-| 2461 | `listWorkflowStageStates` | |
-| 2511 | `listWorkflowConfigurationWarnings` | |
-| 2539 | `listActionableStages` | |
-| 2562 | `listRecoveryStatuses` | |
-| 2707 | `listWorkflowTimeline` | |
+| 2464 | `listWorkflowStageStates` | |
+| 2514 | `listWorkflowConfigurationWarnings` | |
+| 2542 | `listActionableStages` | |
+| 2565 | `listRecoveryStatuses` | |
+| 2710 | `listWorkflowTimeline` | |
+
+行号为 2026-08-31 核实值（8/22 版的 2461 / 2511 / 2539 / 2562 / 2707 已漂移 +3）。另有一处死 import：[`api/_lib/preflight.ts:12`](../../../api/_lib/preflight.ts) import 了 `storedWorkflowFromPayload` 但全文件无调用（2026-08-31 核实），A / B 切换完成后顺手删除，不单独立项。
 
 ### 2.3 已经现成的机械
 
@@ -80,15 +84,15 @@
 
 | 步 | 内容 | 可回滚性 | 时点 |
 | --- | --- | --- | --- |
-| A | 切第一批 7 处主键单行读 | 纯代码，`git revert` 即回滚 | 可在 8/28 前做（若批准） |
-| B | 切第二批 7 处列表读 | 纯代码 | A 稳定后 |
+| A | 切第一批 7 处主键单行读 | 纯代码，`git revert` 即回滚 | 已解锁（038 观察期已满），等使用者批准启动 |
+| B | 切第二批 7 处列表读 | 纯代码 | A 部署且门禁 SQL 通过后 |
 | C | 迁移：`ALTER TABLE pr_helper_workflows ALTER COLUMN payload DROP NOT NULL` | 无损，可再 `SET NOT NULL` | B 稳定后 |
 | D | 代码停止写 payload（含第三节第 2 点的 `INSERT` 补列）+ 迁移：`ALTER COLUMN version SET NOT NULL` | 纯代码；迁移可 `DROP NOT NULL` 回滚 | C 之后 |
-| E | 迁移：`ALTER TABLE pr_helper_workflows DROP COLUMN payload` | **单向门** | D 观察满一周后 |
+| E | 迁移：`ALTER TABLE pr_helper_workflows DROP COLUMN payload` | **单向门** | D 观察满一周 + 第八节三门槛全过 |
 
 **E 是本方案唯一不可逆的一步。** 列一删，任何仍读 payload 的旧 Vercel 部署都不能再回滚上线——`handoff.md` 已有「不要为了验收立即触发 Production 回滚」的约束，这里再加一条：E 之前要确认没有需要保留的回滚目标。若不确定，E 可以无限期推迟，A–D 的收益（少写一份 JSON、读路径单一真相）已经全部到手，**E 只是省 70.8 kB 存储**。
 
-母文档的门禁「收缩迁移只在读路径完全切换并观察一周后才应用」：`038` 于 2026-08-21 落地，故最早 2026-08-28 才谈得上 C；E 还要再加一周。
+母文档的门禁「收缩迁移只在读路径完全切换并观察一周后才应用」：`038` 于 2026-08-21 落地，观察期已于 2026-08-28 满足；E 在 D 之后再观察一周。
 
 ## 五、具体陷阱（这一节是本文的价值所在）
 
@@ -125,3 +129,19 @@
 - 第二批切完后单次 `/api/inbox` 响应体变大且无法回收 → 停在 A，B 回滚。
 - 校验 SQL 出现 `mismatched > 0` → 立即回滚该步代码，先查漂移来源，不得带着不一致往下走。
 - 没有明确的「不需要回滚到旧部署」的判断 → 永久停在 D，不做 E。
+
+## 八、E 步前置门槛（2026-08-31 补）
+
+来自当天的风险评估，作为第四节的补充。**三条全过才允许执行 E，任一条不过就停在 D**——A–D 的收益已经到手，E 只省 70.8 kB 存储，不值得带病通过：
+
+1. **备份先行**。E 之前做一次完整数据库备份/快照，并实际验证过恢复路径（至少确认 Supabase 的备份可恢复/可导出到时间点）。这是单向门唯一的回退底线——A–D 出错 `git revert` 即可，E 出错只能靠备份。
+2. **映射分支已被真实流量覆盖**。线上 45 条 stage 的 `execution_mode` 全是 `server`，映射层 `browser-session` 与「只有 autoMerge」两条分支至今只有单测覆盖、无真实数据走过。E 前确认这两条分支被真实流量覆盖；若届时仍无覆盖，必须显式记录「接受单测覆盖、带着已知风险上」的决策，不能默认沉默通过。
+3. **回滚目标清点**。列一删，任何仍读 payload 的旧 Vercel 部署都无法再回滚上线（SQL 直接报列不存在）。E 前确认当前生产部署即最新代码、近期没有需要回退到的历史部署。
+
+配套的每步测试清单（汇总既有机制，不新造）：
+
+- **代码层**：按 AGENTS.md 规则 2，每处行为改动先写失败测试；`workflow-rows.test.ts` 的 `toStrictEqual` 往返恒等测试全程守着。
+- **部署后门禁**：A / B / D 每步部署后各跑一次第六节的只读校验 SQL，`mismatched` 必须为 0；E 之前最后跑一次。
+- **E 之后**：跑一轮沙箱端到端（建流程 → 保存 → 自动建 PR → 自动合并），确认零 payload 依赖残留。
+
+建议节奏（2026-08-31 定）：A、B 可以连续做（都是机械改动，各自独立提交、独立部署验证）；C、D 跟上；E 最早在 D 部署满一周且第八节三门槛全过后执行，与 9 月账单复核（9/11 的 Usage 观察）互不阻塞。
