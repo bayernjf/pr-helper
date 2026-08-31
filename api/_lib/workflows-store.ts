@@ -555,8 +555,8 @@ async function executeWorkflowAutomationActionForUser(environment: Record<string
   const claimed = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'running', attempts = attempts + 1, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId} AND state = 'queued' RETURNING id`;
   if (!claimed.length) throw new Error('动作已被其他执行请求领取');
   try {
-    const workflowRows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${userId} AND id = ${action.workflow_id}`;
-    const workflow = storedWorkflowFromPayload(workflowRows[0]?.payload);
+    const workflowRows = await sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)} FROM pr_helper_workflows workflows WHERE workflows.user_id = ${userId} AND workflows.id = ${action.workflow_id}`;
+    const workflow = trackedWorkflowFromSingleRow(workflowRows);
     const stage = workflow ? stageForIndex(workflow, action.stage_index) : undefined;
     if (!workflow || !stage || stage.stageId !== action.stage_id) throw new Error('流程步骤自动化策略已失效');
     if (action.kind === 'merge-pr') return await runAutomationMergeAction(environment, sql, userId, installationId, actionId, action, workflow, stage);
@@ -640,7 +640,9 @@ type TrackedWorkflowRow = Omit<WorkflowColumns, 'user_id' | 'id'> & {
   reconcile_pending_since?: string | null;
 };
 
-function trackedWorkflowColumns(sql: ReturnType<typeof query>) {
+// `TransactionSql` and `Sql` are distinct types in postgres.js, so the column list accepts either —
+// writeWorkflowRows already uses the same pragmatic typing for its transaction parameter.
+function trackedWorkflowColumns(sql: any) {
   return sql`workflows.user_id, workflows.id, workflows.name, workflows.repository, workflows.archived, workflows.version, workflows.position, workflows.declared_created_at, workflows.recovery_max_retries, workflows.recovery_cooldown_seconds,
     (SELECT coalesce(jsonb_agg(to_jsonb(stages) ORDER BY stages.stage_index), '[]'::jsonb) FROM workflow_stages stages WHERE stages.user_id = workflows.user_id AND stages.workflow_id = workflows.id) AS stages,
     (SELECT coalesce(jsonb_agg(to_jsonb(deployments) ORDER BY deployments.position), '[]'::jsonb) FROM workflow_deployment_configs deployments WHERE deployments.user_id = workflows.user_id AND deployments.workflow_id = workflows.id) AS deployments`;
@@ -654,6 +656,19 @@ function trackedWorkflowFromRow(row: TrackedWorkflowRow): StoredWorkflow | null 
     return null;
   }
   return workflowFromRows({ workflow: row, stages: row.stages, deployments: row.deployments }) as StoredWorkflow;
+}
+
+// Single-row reads (payload-column drop, step A): an absent row is a normal "not found", but a
+// present row whose stage mirror is empty is a backfill bug (037) that must not masquerade as the
+// user-facing "not found" — it fails loudly instead. upsertWorkflow and removeWorkflow read
+// tolerantly on purpose: the save rewrites the relational rows (healing the mirror) and deletion
+// needs no stages, respectively.
+export function trackedWorkflowFromSingleRow(rows: readonly TrackedWorkflowRow[]): StoredWorkflow | undefined {
+  const row = rows[0];
+  if (!row) return undefined;
+  const workflow = trackedWorkflowFromRow(row);
+  if (!workflow) throw new Error(`流程 ${row.id} 的关系表镜像缺失，请重跑 db/migrations/037_workflow_relational_backfill.sql`);
+  return workflow;
 }
 
 type WorkflowAccess = { ownerUserId: string; workflow: StoredWorkflow; team?: { id: string; name: string; role: TeamRole } };
@@ -1351,12 +1366,12 @@ function withoutTeamAccess(workflow: StoredWorkflow): StoredWorkflow {
 }
 
 async function workflowAccessForUser(sql: ReturnType<typeof query>, userId: string, workflowId: string): Promise<WorkflowAccess | null> {
-  const owned = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${userId} AND id = ${workflowId} LIMIT 1`;
-  const ownedWorkflow = storedWorkflowFromPayload(owned[0]?.payload);
+  const owned = await sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)} FROM pr_helper_workflows workflows WHERE workflows.user_id = ${userId} AND workflows.id = ${workflowId} LIMIT 1`;
+  const ownedWorkflow = trackedWorkflowFromSingleRow(owned);
   if (ownedWorkflow) return { ownerUserId: userId, workflow: ensureStageIds(ownedWorkflow) };
 
-  const shared = await sql<{ owner_user_id: string; payload: unknown; team_id: string; team_name: string; role: TeamRole }[]>`
-    SELECT shared.owner_user_id, workflows.payload, teams.id AS team_id, teams.name AS team_name, members.role
+  const shared = await sql<(TrackedWorkflowRow & { owner_user_id: string; team_id: string; team_name: string; role: TeamRole })[]>`
+    SELECT shared.owner_user_id, ${trackedWorkflowColumns(sql)}, teams.id AS team_id, teams.name AS team_name, members.role
     FROM pr_helper_team_workflows shared
     JOIN pr_helper_team_members members ON members.team_id = shared.team_id
     JOIN pr_helper_teams teams ON teams.id = shared.team_id
@@ -1365,7 +1380,7 @@ async function workflowAccessForUser(sql: ReturnType<typeof query>, userId: stri
     ORDER BY CASE members.role WHEN 'owner' THEN 4 WHEN 'editor' THEN 3 WHEN 'operator' THEN 2 ELSE 1 END DESC
     LIMIT 1`;
   const row = shared[0];
-  const workflow = storedWorkflowFromPayload(row?.payload);
+  const workflow = trackedWorkflowFromSingleRow(shared);
   return row && workflow ? {
     ownerUserId: row.owner_user_id,
     workflow: { ...ensureStageIds(workflow), team: { id: row.team_id, name: row.team_name, role: row.role } },
@@ -1604,8 +1619,10 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
   const existingAccess = await workflowAccessForUser(sql, user.id, workflow.id);
   if (existingAccess?.team) assertTeamOperation(existingAccess.team.role, 'workflow-edit');
   const ownerUserId = existingAccess?.ownerUserId || user.id;
-  const previousRows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${ownerUserId} AND id = ${workflow.id}`;
-  const previous = storedWorkflowFromPayload(previousRows[0]?.payload);
+  const previousRows = await sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)} FROM pr_helper_workflows workflows WHERE workflows.user_id = ${ownerUserId} AND workflows.id = ${workflow.id}`;
+  // Tolerant on purpose: a present row with a broken mirror routes through "created", and the save
+  // below rewrites the relational rows — failing loudly here would block the very write that heals it.
+  const previous = previousRows[0] ? trackedWorkflowFromRow(previousRows[0]) ?? undefined : undefined;
   const withIds = ensureStageIds(withoutTeamAccess(workflow));
   const dehydrated = dehydrateGenerationRules(withIds);
   let savedWorkflow = dehydrated.workflow;
@@ -1668,8 +1685,11 @@ export async function removeWorkflowStage(environment: Record<string, string | u
   let savedWorkflow: StoredWorkflow | null = null;
   await sql.begin(async transaction => {
     await transaction`SELECT pg_advisory_xact_lock(hashtext(${`${access.ownerUserId}:${workflowId}`}))`;
-    const rows = await transaction<(WorkflowRow & { version: number | null })[]>`SELECT payload, version FROM pr_helper_workflows WHERE user_id = ${access.ownerUserId} AND id = ${workflowId} FOR UPDATE`;
-    const previous = storedWorkflowFromPayload(rows[0]?.payload);
+    // The row lock cannot ride along the jsonb_agg subqueries, and the advisory lock above is the
+    // real mutual exclusion anyway — FOR UPDATE only guards the version read the next save depends on.
+    const versionRows = await transaction<{ version: number | null }[]>`SELECT version FROM pr_helper_workflows WHERE user_id = ${access.ownerUserId} AND id = ${workflowId} FOR UPDATE`;
+    const definitionRows = await transaction<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(transaction)} FROM pr_helper_workflows workflows WHERE workflows.user_id = ${access.ownerUserId} AND workflows.id = ${workflowId}`;
+    const previous = trackedWorkflowFromSingleRow(definitionRows);
     if (!previous) throw new Error('未找到对应流程');
     const removalIndex = findWorkflowStageIndexForRemoval(previous, stageId, stageIndex, source, target);
     if (removalIndex === -1) { savedWorkflow = previous; return; }
@@ -1677,7 +1697,7 @@ export async function removeWorkflowStage(environment: Record<string, string | u
     const stages = previous.stages
       .filter((stage, index) => index !== removalIndex && stage.stageId !== stageId)
       .map(stage => !stage.waitFor ? stage : { ...stage, waitFor: stage.waitFor.filter(dependency => dependency !== removalIndex).map(dependency => dependency > removalIndex ? dependency - 1 : dependency) });
-    savedWorkflow = { ...ensureStageIds({ ...previous, stages }), version: (rows[0]?.version || 0) + 1 };
+    savedWorkflow = { ...ensureStageIds({ ...previous, stages }), version: (versionRows[0]?.version || 0) + 1 };
     await transaction`UPDATE pr_helper_workflows SET payload = ${transaction.json(savedWorkflow)}, updated_at = now() WHERE user_id = ${access.ownerUserId} AND id = ${workflowId}`;
     await writeWorkflowRows(transaction, access.ownerUserId, savedWorkflow);
     await transaction`DELETE FROM workflow_stage_events WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId} AND stage_id = ${stageId}`;
@@ -1698,8 +1718,10 @@ export async function removeWorkflow(environment: Record<string, string | undefi
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
   const access = await requireWorkflowOperation(sql, user.id, workflowId, 'workflow-delete');
-  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${access.ownerUserId} AND id = ${workflowId}`;
-  const workflow = storedWorkflowFromPayload(rows[0]?.payload);
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)} FROM pr_helper_workflows workflows WHERE workflows.user_id = ${access.ownerUserId} AND workflows.id = ${workflowId}`;
+  // Tolerant: deletion needs no stages, so a broken mirror only degrades the audit fields — the row
+  // still goes away. trackedWorkflowFromRow logs loudly either way.
+  const workflow = rows[0] ? trackedWorkflowFromRow(rows[0]) ?? undefined : undefined;
   const deleted = await sql<{ id: string }[]>`DELETE FROM pr_helper_workflows WHERE user_id = ${access.ownerUserId} AND id = ${workflowId} RETURNING id`;
   if (deleted.length) await recordOperationAuditForUser(sql, access.ownerUserId, identity.installationId, {
     action: 'workflow-deleted', outcome: 'success', repository: workflow?.repository || null,
@@ -2603,8 +2625,8 @@ export async function recordWorkflowRun(environment: Record<string, string | und
   if (!Number.isInteger(stageIndex) || stageIndex < 0) throw new Error('无效的流程步骤');
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  const rows = await sql<WorkflowRow[]>`SELECT payload FROM pr_helper_workflows WHERE user_id = ${user.id} AND id = ${workflowId}`;
-  const workflow = storedWorkflowFromPayload(rows[0]?.payload);
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)} FROM pr_helper_workflows workflows WHERE workflows.user_id = ${user.id} AND workflows.id = ${workflowId}`;
+  const workflow = trackedWorkflowFromSingleRow(rows);
   if (!workflow) throw new Error('未找到对应流程');
   const stage = stageForIndex(workflow, stageIndex);
   const versionRow = await sql<{ version: number }[]>`SELECT version FROM workflow_versions WHERE user_id = ${user.id} AND workflow_id = ${workflowId} ORDER BY version DESC LIMIT 1`;
