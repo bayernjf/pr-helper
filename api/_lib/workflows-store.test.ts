@@ -6,7 +6,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, generationRuleHashes, hydrateGenerationRules, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, stageGateSatisfactionAdvanced, downstreamStagesToRecheck, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, autoCreateCommitThreshold, autoCreateReachedThreshold, deploymentRunState, deploymentStateWithHealth, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, generationRuleHashes, hydrateGenerationRules, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, stageGateSatisfactionAdvanced, downstreamStagesToRecheck, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, autoCreateCommitThreshold, autoCreateReachedThreshold, deploymentRunState, deploymentStateWithHealth, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, trackedWorkflowFromSingleRow, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -2543,5 +2543,43 @@ describe('a generation rule is stored once and referenced by hash', () => {
     it('leaves the payload column in place', () => {
       expect(contract).not.toMatch(/DROP COLUMN\s+payload/i);
     });
+  });
+});
+
+// Step A of the payload-column drop plan (docs/superpowers/plans/2026-08-22-drop-workflow-payload-column.md):
+// the seven single-row reads leave the payload column behind. Two properties matter: every read goes
+// through the relational columns, and "the row does not exist" stays distinguishable from "the row
+// exists but its mirror is broken" — the second is a backfill bug that must not wear the
+// user-facing "not found" message.
+describe('payload column drop, step A: single-row reads', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+
+  it('reads workflow definitions from the relational columns, not the payload column', () => {
+    expect(source).not.toContain('SELECT payload FROM pr_helper_workflows WHERE');
+    expect(source).not.toContain('SELECT payload, version FROM pr_helper_workflows');
+  });
+
+  it('drops the payload from the shared-access join as well', () => {
+    const access = source.slice(source.indexOf('async function workflowAccessForUser'), source.indexOf('async function requireWorkflowOperation'));
+    expect(access).toContain('trackedWorkflowColumns(sql)');
+    expect(access).not.toContain('workflows.payload');
+  });
+
+  it('keeps FOR UPDATE off the jsonb_agg statement and on the version read', () => {
+    const removal = source.slice(source.indexOf('export async function removeWorkflowStage'), source.indexOf('export async function removeWorkflow('));
+    expect(removal).toContain('SELECT version FROM pr_helper_workflows WHERE user_id = ${access.ownerUserId} AND id = ${workflowId} FOR UPDATE');
+    expect(removal).toContain('trackedWorkflowColumns(transaction)');
+    // The locked statement is the version read only: nothing between it and the definition read
+    // may carry the jsonb_agg column list.
+    expect(removal.slice(removal.indexOf('FOR UPDATE'), removal.indexOf('trackedWorkflowColumns(transaction)'))).not.toContain('jsonb_agg');
+  });
+
+  it('tells an absent row from a broken mirror instead of collapsing both into "not found"', () => {
+    const base = { user_id: 'u-1', id: 'flow-1', name: 'Release', repository: 'octo/app', archived: false, version: 1, position: null, declared_created_at: null, recovery_max_retries: null, recovery_cooldown_seconds: null, deployments: [] };
+    const stage = { user_id: 'u-1', workflow_id: 'flow-1', stage_id: 's-1', stage_index: 0, source_rule: 'dev', target: 'main', independent: null, wait_for: null, auto_create: null, auto_merge: null, execution_mode: null, trigger_min_commits: null, rule_name: null, rule_captured_at: null, rule_content_hash: null };
+
+    expect(trackedWorkflowFromSingleRow([])).toBeUndefined();
+    expect(trackedWorkflowFromSingleRow([{ ...base, stages: [stage] }])).toMatchObject({ id: 'flow-1', stages: [{ source: 'dev', target: 'main', stageId: 's-1' }] });
+    expect(() => trackedWorkflowFromSingleRow([{ ...base, stages: [] }])).toThrow(/镜像缺失/);
   });
 });
