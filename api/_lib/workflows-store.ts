@@ -262,14 +262,33 @@ export function jsonFromModelText(content: string) {
   return (closing >= 0 ? withoutOpening.slice(0, closing) : withoutOpening).trim();
 }
 
-async function generateAutomationMessage(baseUrl: string, apiKey: string, model: string, source: string, target: string, commits: string[], generationRule: string) {
-  const response = await fetch(aiChatCompletionsUrl(baseUrl), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model, messages: [{ role: 'user', content: buildPrPrompt(source, target, commits, generationRule) }], temperature: 0.2, max_tokens: 1200 }), signal: AbortSignal.timeout(20_000) });
-  if (!response.ok) throw new Error(`AI 生成失败 (${response.status})`);
-  const payload = await response.json() as { choices?: { message?: { content?: string } }[] };
-  const content = payload.choices?.[0]?.message?.content || '';
-  const parsed = JSON.parse(jsonFromModelText(content)) as { title?: unknown; body?: unknown };
-  if (typeof parsed.title !== 'string' || !parsed.title.trim() || typeof parsed.body !== 'string') throw new Error('AI 返回的 PR 内容格式无效');
+// A model output capped by max_tokens ends mid-string, so JSON.parse throws the raw
+// "Unterminated string in JSON at position N" — unreadable to the operator and indistinguishable
+// from a malformed prompt. finish_reason === 'length' is the authoritative truncation signal;
+// anything else that fails to parse is reported as invalid model output rather than a SyntaxError.
+export function parseAutomationMessage(content: string, finishReason?: string): { title: string; body: string } {
+  if (finishReason === 'length') {
+    throw new Error('AI 生成内容过长被截断，请缩短生成规则或减少提交数量后重试');
+  }
+  let parsed: { title?: unknown; body?: unknown };
+  try {
+    parsed = JSON.parse(jsonFromModelText(content)) as { title?: unknown; body?: unknown };
+  } catch {
+    throw new Error('AI 返回的 PR 内容不是有效 JSON');
+  }
+  if (typeof parsed.title !== 'string' || !parsed.title.trim() || typeof parsed.body !== 'string') {
+    throw new Error('AI 返回的 PR 内容格式无效');
+  }
   return { title: parsed.title.trim().slice(0, 256), body: parsed.body.slice(0, 50_000) };
+}
+
+async function generateAutomationMessage(baseUrl: string, apiKey: string, model: string, source: string, target: string, commits: string[], generationRule: string) {
+  const response = await fetch(aiChatCompletionsUrl(baseUrl), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model, messages: [{ role: 'user', content: buildPrPrompt(source, target, commits, generationRule) }], temperature: 0.2, max_tokens: 3000 }), signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new Error(`AI 生成失败 (${response.status})`);
+  const payload = await response.json() as { choices?: { message?: { content?: string }; finish_reason?: string }[] };
+  const choice = payload.choices?.[0];
+  const content = choice?.message?.content || '';
+  return parseAutomationMessage(content, choice?.finish_reason);
 }
 
 // An open pull request for the same route means the intent is already satisfied, and an empty
