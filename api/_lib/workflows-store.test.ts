@@ -6,7 +6,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, generationRuleHashes, hydrateGenerationRules, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, stageGateSatisfactionAdvanced, downstreamStagesToRecheck, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, autoCreateCommitThreshold, autoCreateReachedThreshold, deploymentRunState, deploymentStateWithHealth, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, trackedWorkflowFromSingleRow, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, generationRuleHashes, hydrateGenerationRules, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, stageGateSatisfactionAdvanced, downstreamStagesToRecheck, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, autoCreateCommitThreshold, autoCreateReachedThreshold, deploymentRunState, deploymentStateWithHealth, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, parseAutomationMessage, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, trackedWorkflowFromSingleRow, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -879,6 +879,43 @@ describe('jsonFromModelText', () => {
 
   it('keeps a fenced block that the pull request body itself contains', () => {
     expect(jsonFromModelText('```json\n{"body":"see ```ts\\ncode\\n``` above"}\n```')).toBe('{"body":"see ```ts\\ncode\\n``` above"}');
+  });
+});
+
+describe('parseAutomationMessage', () => {
+  it('parses a valid model response into title and body', () => {
+    expect(parseAutomationMessage('{"title":"修复登录","body":"修复了登录页的 bug"}', 'stop'))
+      .toEqual({ title: '修复登录', body: '修复了登录页的 bug' });
+  });
+
+  it('strips a markdown fence before parsing', () => {
+    expect(parseAutomationMessage('```json\n{"title":"a","body":"b"}\n```', 'stop'))
+      .toEqual({ title: 'a', body: 'b' });
+  });
+
+  it('throws a readable truncation error when finish_reason is length', () => {
+    const truncated = '{"title":"修复","body":"这是一个很长的描述，还没写完就被截断了';
+    expect(() => parseAutomationMessage(truncated, 'length'))
+      .toThrow(/AI 生成内容过长被截断/);
+  });
+
+  it('throws a readable JSON error instead of the raw SyntaxError for unterminated strings', () => {
+    const truncated = '{"title":"修复","body":"这是一个很长的描述，还没写完就被截断了';
+    expect(() => parseAutomationMessage(truncated, 'stop'))
+      .toThrow(/AI 返回的 PR 内容不是有效 JSON/);
+  });
+
+  it('throws when title or body is missing', () => {
+    expect(() => parseAutomationMessage('{"title":"只有标题"}', 'stop'))
+      .toThrow(/AI 返回的 PR 内容格式无效/);
+  });
+
+  it('truncates title to 256 and body to 50000', () => {
+    const longTitle = 'a'.repeat(300);
+    const longBody = 'b'.repeat(60000);
+    const result = parseAutomationMessage(JSON.stringify({ title: longTitle, body: longBody }), 'stop');
+    expect(result.title).toHaveLength(256);
+    expect(result.body).toHaveLength(50000);
   });
 });
 
