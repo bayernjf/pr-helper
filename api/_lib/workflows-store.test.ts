@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 
-const MIGRATIONS_DIR = new URL('../../db/migrations/', import.meta.url);
+const MIGRATIONS_DIR = new URL('../../supabase/migrations/', import.meta.url);
 const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
@@ -1268,7 +1268,7 @@ describe('reaping an interrupted sweep restores the turn it spent', () => {
   });
 
   it('adds the column in an ordered migration rather than at runtime', () => {
-    const migration = readFileSync(new URL('../../db/migrations/031_reconciliation_claimed_workflows.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../supabase/migrations/031_reconciliation_claimed_workflows.sql', import.meta.url), 'utf8');
     expect(migration).toContain('ALTER TABLE reconciliation_runs');
     expect(migration).toContain('ADD COLUMN IF NOT EXISTS claimed_workflow_ids');
     expect(source).not.toContain('ALTER TABLE reconciliation_runs');
@@ -1980,7 +1980,7 @@ describe('a sweep records where its time went', () => {
   });
 
   it('adds the column in an ordered migration rather than at runtime', () => {
-    const migration = readFileSync(new URL('../../db/migrations/032_reconciliation_phase_timings.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../supabase/migrations/032_reconciliation_phase_timings.sql', import.meta.url), 'utf8');
     expect(migration).toContain('ALTER TABLE reconciliation_runs');
     expect(migration).toContain('ADD COLUMN IF NOT EXISTS phase_ms');
     expect(source).not.toContain('ALTER TABLE reconciliation_runs');
@@ -2413,6 +2413,27 @@ describe('a skipped terminal stage still records that it was verified', () => {
   // ③ 的验收看 reconciliation_runs.github_calls，不看这个计数，所以这里报实话就行。
   it('reports the stage as reconciled, so a deferred sweep is not misfiled as degraded', () => {
     expect(settled).toContain('return { reconciled: true, phases }');
+  });
+});
+
+// 归档的 workflow 不在 reconcile 的扫掠范围内（archived = false 是 line 2440 的取数条件），
+// 归档操作也不清理它的 stage 行（归档视图要展示归档时刻的状态）。readConvergenceHealth 若还是
+// 对全表取 min(updated_at)，这一行会永久冻结，/api/cron/health 在归档 45 分钟后恒 503，
+// GitHub Actions 的 Reconcile 工作流就持续失败——只有活跃 workflow 的阶段才参与收敛判定。
+describe('convergence health counts only live workflow stages', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const work = source.slice(source.indexOf('export async function readConvergenceHealth'), source.indexOf('export async function listWorkflowTimeline'));
+
+  it('joins the workflow table so the archived flag can filter the sample', () => {
+    expect(work).toMatch(/JOIN pr_helper_workflows workflows ON workflows\.user_id = states\.user_id AND workflows\.id = states\.workflow_id/);
+  });
+
+  it('drops archived workflows from the convergence sample', () => {
+    expect(work).toMatch(/WHERE workflows\.archived = false/);
+  });
+
+  it('keeps the stale-count filter on the same live stage rows', () => {
+    expect(work).toMatch(/count\(\*\) FILTER \(WHERE states\.updated_at < now\(\) - make_interval\(secs => \$\{STAGE_STALE_THRESHOLD_SECONDS\}\)\)/);
   });
 });
 

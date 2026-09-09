@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { workflowFromRows, workflowToRows } from './workflow-rows.js';
 import type { Workflow } from '../../src/lib/workflow.js';
 
-const MIGRATIONS_DIR = new URL('../../db/migrations/', import.meta.url);
+const MIGRATIONS_DIR = new URL('../../supabase/migrations/', import.meta.url);
 const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 function migrationSql() {

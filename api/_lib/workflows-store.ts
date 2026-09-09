@@ -671,7 +671,7 @@ function trackedWorkflowFromRow(row: TrackedWorkflowRow): StoredWorkflow | null 
   // Migration 038 makes a missing mirror unrepresentable, so reaching this is a bug rather than an
   // expected state. It is loud because the alternative is a workflow quietly leaving reconciliation.
   if (!row.stages.length) {
-    console.error(`workflow ${row.user_id}/${row.id} has no stage rows; reconciliation is skipping it. Re-run db/migrations/037_workflow_relational_backfill.sql.`);
+    console.error(`workflow ${row.user_id}/${row.id} has no stage rows; reconciliation is skipping it. Re-run supabase/migrations/037_workflow_relational_backfill.sql.`);
     return null;
   }
   return workflowFromRows({ workflow: row, stages: row.stages, deployments: row.deployments }) as StoredWorkflow;
@@ -686,7 +686,7 @@ export function trackedWorkflowFromSingleRow(rows: readonly TrackedWorkflowRow[]
   const row = rows[0];
   if (!row) return undefined;
   const workflow = trackedWorkflowFromRow(row);
-  if (!workflow) throw new Error(`流程 ${row.id} 的关系表镜像缺失，请重跑 db/migrations/037_workflow_relational_backfill.sql`);
+  if (!workflow) throw new Error(`流程 ${row.id} 的关系表镜像缺失，请重跑 supabase/migrations/037_workflow_relational_backfill.sql`);
   return workflow;
 }
 
@@ -2719,8 +2719,12 @@ export async function listSyncHealth(environment: Record<string, string | undefi
 
 export async function readConvergenceHealth(environment: Record<string, string | undefined>) {
   const sql = query(environment);
+  // Convergence only means anything for workflows the sweeps actually ship. An archived workflow is out
+  // of every sweep (the reconcile read filters archived = false) and its stage rows are kept on purpose
+  // for the archived view, so counting them here would freeze min(updated_at) and drive a permanent 503
+  // once a workflow has sat archived past the threshold. Join the workflow table and exclude archived.
   const [stageSample, cronSample] = await Promise.all([
-    sql<{ stage_count: number; oldest_age_seconds: number | null; stale_count: number }[]>`SELECT count(*)::int AS stage_count, floor(extract(epoch from (now() - min(updated_at))))::int AS oldest_age_seconds, count(*) FILTER (WHERE updated_at < now() - make_interval(secs => ${STAGE_STALE_THRESHOLD_SECONDS}))::int AS stale_count FROM workflow_stage_states`,
+    sql<{ stage_count: number; oldest_age_seconds: number | null; stale_count: number }[]>`SELECT count(*)::int AS stage_count, floor(extract(epoch from (now() - min(states.updated_at))))::int AS oldest_age_seconds, count(*) FILTER (WHERE states.updated_at < now() - make_interval(secs => ${STAGE_STALE_THRESHOLD_SECONDS}))::int AS stale_count FROM workflow_stage_states states JOIN pr_helper_workflows workflows ON workflows.user_id = states.user_id AND workflows.id = states.workflow_id WHERE workflows.archived = false`,
     sql<{ total: number; degraded: number }[]>`SELECT count(*)::int AS total, count(*) FILTER (WHERE state = 'degraded')::int AS degraded FROM reconciliation_runs WHERE trigger = 'cron' AND state <> 'skipped' AND started_at > now() - interval '1 hour'`,
   ]);
   const stageCount = stageSample[0]?.stage_count || 0;

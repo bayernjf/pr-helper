@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { AUTOMATION_FUNCTION_CEILING_MS, CRON_RECONCILE_BUDGET_MS, cronReconcileBudgetMs } from '../_lib/workflows-store';
 
 const workflow = readFileSync(new URL('../../.github/workflows/reconcile-pr-helper.yml', import.meta.url), 'utf8');
-const clock = readFileSync(new URL('../../db/migrations/030_reconciliation_pg_cron_clock.sql', import.meta.url), 'utf8');
+const clock = readFileSync(new URL('../../supabase/migrations/030_reconciliation_pg_cron_clock.sql', import.meta.url), 'utf8');
 const handler = readFileSync(new URL('./reconcile.ts', import.meta.url), 'utf8');
 
 describe('scheduled reconciliation cadence', () => {
