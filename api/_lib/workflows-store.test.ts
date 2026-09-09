@@ -2416,6 +2416,27 @@ describe('a skipped terminal stage still records that it was verified', () => {
   });
 });
 
+// 归档的 workflow 不在 reconcile 的扫掠范围内（archived = false 是 line 2440 的取数条件），
+// 归档操作也不清理它的 stage 行（归档视图要展示归档时刻的状态）。readConvergenceHealth 若还是
+// 对全表取 min(updated_at)，这一行会永久冻结，/api/cron/health 在归档 45 分钟后恒 503，
+// GitHub Actions 的 Reconcile 工作流就持续失败——只有活跃 workflow 的阶段才参与收敛判定。
+describe('convergence health counts only live workflow stages', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const work = source.slice(source.indexOf('export async function readConvergenceHealth'), source.indexOf('export async function listWorkflowTimeline'));
+
+  it('joins the workflow table so the archived flag can filter the sample', () => {
+    expect(work).toMatch(/JOIN pr_helper_workflows workflows ON workflows\.user_id = states\.user_id AND workflows\.id = states\.workflow_id/);
+  });
+
+  it('drops archived workflows from the convergence sample', () => {
+    expect(work).toMatch(/WHERE workflows\.archived = false/);
+  });
+
+  it('keeps the stale-count filter on the same live stage rows', () => {
+    expect(work).toMatch(/count\(\*\) FILTER \(WHERE states\.updated_at < now\(\) - make_interval\(secs => \$\{STAGE_STALE_THRESHOLD_SECONDS\}\)\)/);
+  });
+});
+
 // 44 个阶段全部带 generationRule，44 份 content 加起来 44 528 B，占单次全表读 70 837 B 的 63%——
 // 而其中只有 1 份内容是不同的。同一段提示词被抄进每个阶段的 payload，再抄进每个 workflow_versions 快照。
 // 内容按 (user_id, content_hash) 存一次，payload 里只留 hash，读的时候再查回来。
