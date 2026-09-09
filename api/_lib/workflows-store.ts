@@ -1858,6 +1858,11 @@ export function stageReconciliationIsSettled(input: { aheadBy: number; storedAhe
   if (!input.previous) return false;
   if (!TERMINAL_PULL_STATES.includes(input.previous.pull_state)) return false;
   if (!TERMINAL_CHECKS_STATES.includes(input.previous.checks_state)) return false;
+  // A merged stage with failed checks is not terminal: the person can rerun the failed workflow on
+  // GitHub and turn it green. Skipping here would freeze checks_state at 'failure' forever — the
+  // progress bar keeps reading red from the persisted projection while the detail card reads green
+  // live from GitHub. A closed PR is the genuinely unrecoverable case and stays settled.
+  if (input.previous.pull_state === 'merged' && input.previous.checks_state === 'failure') return false;
   // A merged stage's deployment is asynchronous: skipping before its run lands means nobody ever asks
   // for the result again, and checks_state stays pending, which locks the next stage.
   if (!input.deploymentConfigured) return true;
