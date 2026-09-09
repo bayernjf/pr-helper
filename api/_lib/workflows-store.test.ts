@@ -2373,6 +2373,14 @@ describe('a terminal stage with no new commits stops paying for GitHub reads', (
     expect(stageReconciliationIsSettled({ aheadBy: 0, previous: { pull_state: 'merged', checks_state: 'unknown' }, deploymentConfigured: false, deploymentStates: [] })).toBe(false);
   });
 
+  // 合并后 checks 失败不是终态：人可以在 GitHub 上 rerun 失败的 workflow 把它跑绿。
+  // 跳过就再也不会有人重新拉 checks，checks_state 永久停在 failure，顶部进度条一直红，
+  // 而详情卡片实时读 GitHub 却显示全绿——两边对不上。closed PR 才是真的不会再变。
+  it('never skips a merged stage whose post-merge checks failed, because a rerun can recover it', () => {
+    expect(stageReconciliationIsSettled({ aheadBy: 0, previous: { pull_state: 'merged', checks_state: 'failure' }, deploymentConfigured: false, deploymentStates: [] })).toBe(false);
+    expect(stageReconciliationIsSettled({ aheadBy: 0, previous: { pull_state: 'merged', checks_state: 'failure' }, deploymentConfigured: true, deploymentStates: ['success'] })).toBe(false);
+  });
+
   // 已终结阶段不得跳过未完成的部署跟踪：合并后的部署是异步的，跳过就再也不会有人去问 run 的结果。
   it('已终结阶段不得跳过未完成的部署跟踪', () => {
     expect(stageReconciliationIsSettled({ aheadBy: 0, previous: terminal, deploymentConfigured: true, deploymentStates: ['pending'] })).toBe(false);
