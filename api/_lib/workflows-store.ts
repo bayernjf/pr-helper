@@ -671,7 +671,7 @@ function trackedWorkflowFromRow(row: TrackedWorkflowRow): StoredWorkflow | null 
   // Migration 038 makes a missing mirror unrepresentable, so reaching this is a bug rather than an
   // expected state. It is loud because the alternative is a workflow quietly leaving reconciliation.
   if (!row.stages.length) {
-    console.error(`workflow ${row.user_id}/${row.id} has no stage rows; reconciliation is skipping it. Re-run db/migrations/037_workflow_relational_backfill.sql.`);
+    console.error(`workflow ${row.user_id}/${row.id} has no stage rows; reconciliation is skipping it. Re-run supabase/migrations/037_workflow_relational_backfill.sql.`);
     return null;
   }
   return workflowFromRows({ workflow: row, stages: row.stages, deployments: row.deployments }) as StoredWorkflow;
@@ -686,7 +686,7 @@ export function trackedWorkflowFromSingleRow(rows: readonly TrackedWorkflowRow[]
   const row = rows[0];
   if (!row) return undefined;
   const workflow = trackedWorkflowFromRow(row);
-  if (!workflow) throw new Error(`流程 ${row.id} 的关系表镜像缺失，请重跑 db/migrations/037_workflow_relational_backfill.sql`);
+  if (!workflow) throw new Error(`流程 ${row.id} 的关系表镜像缺失，请重跑 supabase/migrations/037_workflow_relational_backfill.sql`);
   return workflow;
 }
 
