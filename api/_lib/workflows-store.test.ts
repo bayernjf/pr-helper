@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 
-const MIGRATIONS_DIR = new URL('../../db/migrations/', import.meta.url);
+const MIGRATIONS_DIR = new URL('../../supabase/migrations/', import.meta.url);
 const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
@@ -1268,7 +1268,7 @@ describe('reaping an interrupted sweep restores the turn it spent', () => {
   });
 
   it('adds the column in an ordered migration rather than at runtime', () => {
-    const migration = readFileSync(new URL('../../db/migrations/031_reconciliation_claimed_workflows.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../supabase/migrations/031_reconciliation_claimed_workflows.sql', import.meta.url), 'utf8');
     expect(migration).toContain('ALTER TABLE reconciliation_runs');
     expect(migration).toContain('ADD COLUMN IF NOT EXISTS claimed_workflow_ids');
     expect(source).not.toContain('ALTER TABLE reconciliation_runs');
@@ -1980,7 +1980,7 @@ describe('a sweep records where its time went', () => {
   });
 
   it('adds the column in an ordered migration rather than at runtime', () => {
-    const migration = readFileSync(new URL('../../db/migrations/032_reconciliation_phase_timings.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../supabase/migrations/032_reconciliation_phase_timings.sql', import.meta.url), 'utf8');
     expect(migration).toContain('ALTER TABLE reconciliation_runs');
     expect(migration).toContain('ADD COLUMN IF NOT EXISTS phase_ms');
     expect(source).not.toContain('ALTER TABLE reconciliation_runs');

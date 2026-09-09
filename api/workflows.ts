@@ -13,7 +13,7 @@ function body(request: ApiRequest) {
 
 function responseMessage(error: unknown) {
   const databaseCode = typeof error === 'object' && error ? (error as { code?: unknown }).code : undefined;
-  if (databaseCode === '42P01') return '数据库尚未迁移。请先执行 db/migrations/001_users_and_workflows.sql。';
+  if (databaseCode === '42P01') return '数据库尚未迁移。请先执行 supabase/migrations/001_users_and_workflows.sql。';
   return error instanceof Error ? error.message : '流程同步失败';
 }
 
