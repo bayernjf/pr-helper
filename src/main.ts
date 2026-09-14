@@ -1226,7 +1226,10 @@ function drawerConfigurationWarnings(flow: Workflow, stageIndex: number, source:
 }
 function laneRunSummary(flow: Workflow) {
   const summary = workflowRunSummary(flow.stages.map((stage, index) => stageState(flow.id, index, undefined, stage.target)));
-  return { ...summary, text: t('overview.run.current', { step: summary.stageIndex + 1, total: flow.stages.length, status: stageRunPresentationText(summary) }) };
+  const text = t('overview.run.current', { step: summary.stageIndex + 1, total: flow.stages.length, status: stageRunPresentationText(summary) });
+  const latestUpdatedAt = statesForStage(flow, summary.stageIndex).map(state => state.updatedAt).filter(Boolean).sort().at(-1);
+  const updatedLabel = latestUpdatedAt ? stageUpdatedAt({ updatedAt: latestUpdatedAt } as WorkflowStageState) : '';
+  return { ...summary, text: updatedLabel ? `${text} · ${updatedLabel}` : text };
 }
 async function loadPreflight(workflowId?: string) {
   if (!cloudWorkflowStorage) { preflightResults = []; preflightError = ''; return; }
