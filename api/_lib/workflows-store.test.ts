@@ -6,7 +6,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, generationRuleHashes, hydrateGenerationRules, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, stageGateSatisfactionAdvanced, downstreamStagesToRecheck, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, autoCreateCommitThreshold, autoCreateReachedThreshold, deploymentRunState, deploymentStateWithHealth, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, parseAutomationMessage, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, trackedWorkflowFromSingleRow, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, generationRuleHashes, hydrateGenerationRules, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, stageGateSatisfactionAdvanced, downstreamStagesToRecheck, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, autoCreateCommitThreshold, autoCreateReachedThreshold, deploymentRunState, deploymentStateWithHealth, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, parseAutomationMessage, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, trackedWorkflowFromSingleRow, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, INBOX_REFRESH_RECONCILE_BUDGET_MS, INBOX_REFRESH_RECONCILE_CEILING_GAP_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -1358,11 +1358,16 @@ describe('realtimeReconcileBudgetMs', () => {
     expect(realtimeReconcileBudgetMs({}, 'webhook')).toBeGreaterThan(realtimeReconcileBudgetMs({}));
   });
 
-  // A person is waiting on these two, and a deferral is not lost work: the sweep marks the workflow
-  // pending and the next trigger carries it. So latency wins over completeness here.
-  it('keeps the interactive triggers on the short budget', () => {
+  // A person is waiting on the manual trigger. The inbox button used to share this budget, but its
+  // 15s ceiling backstop made the click answer in ~24s on average in production: it reconciles the whole
+  // installation inline. It gets a tighter budget and leaves the remainder to webhooks and the cron.
+  it('keeps the manual trigger on the short budget', () => {
     expect(realtimeReconcileBudgetMs({}, 'manual')).toBe(REALTIME_RECONCILE_BUDGET_MS);
-    expect(realtimeReconcileBudgetMs({}, 'inbox_refresh')).toBe(REALTIME_RECONCILE_BUDGET_MS);
+  });
+
+  it('gives an inbox refresh the tightest budget because a click is waiting on it', () => {
+    expect(realtimeReconcileBudgetMs({}, 'inbox_refresh')).toBe(INBOX_REFRESH_RECONCILE_BUDGET_MS);
+    expect(INBOX_REFRESH_RECONCILE_BUDGET_MS).toBeLessThan(REALTIME_RECONCILE_BUDGET_MS);
   });
 
   it('lets one override cover every realtime trigger, because the platform limit is what moves', () => {
@@ -1382,6 +1387,21 @@ describe('realtimeReconcileCeilingMs', () => {
   it('leaves the budget room to yield on its own before the backstop fires', () => {
     expect(realtimeReconcileCeilingMs(WEBHOOK_RECONCILE_BUDGET_MS)).toBeGreaterThan(WEBHOOK_RECONCILE_BUDGET_MS);
     expect(realtimeReconcileCeilingMs(REALTIME_RECONCILE_BUDGET_MS)).toBeGreaterThan(REALTIME_RECONCILE_BUDGET_MS);
+  });
+
+  // The ceiling, not the stage budget, is what bounds the click response: measured inbox refreshes ran
+  // to the default 23s backstop. The inbox backstop sits only a few seconds above its tighter budget,
+  // while every other trigger keeps the generous gap that protects in-flight stages.
+  it('gives an inbox refresh a tight ceiling and leaves the other triggers on the wide one', () => {
+    expect(realtimeReconcileCeilingMs(INBOX_REFRESH_RECONCILE_BUDGET_MS, 'inbox_refresh'))
+      .toBe(INBOX_REFRESH_RECONCILE_BUDGET_MS + INBOX_REFRESH_RECONCILE_CEILING_GAP_MS);
+    expect(realtimeReconcileCeilingMs(INBOX_REFRESH_RECONCILE_BUDGET_MS, 'inbox_refresh')).toBeLessThan(15_000);
+    expect(realtimeReconcileCeilingMs(REALTIME_RECONCILE_BUDGET_MS)).toBe(REALTIME_RECONCILE_BUDGET_MS + 15_000);
+  });
+
+  it('passes the trigger into the ceiling so an inbox sweep actually uses the tight one', () => {
+    const source = readFileSync(new URL('./workflows-store.ts', import.meta.url), 'utf8');
+    expect(source).toMatch(/withStageDeadline\(sweep, realtimeReconcileCeilingMs\(budgetMs, trigger\)\)/);
   });
 });
 
