@@ -10,6 +10,7 @@ import { activeWorkflows, archiveWorkflow, archivedWorkflows, restoreWorkflow, a
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { automationActionPresentation, latestAutomationAction, stageProgressNode, stageRunPresentation, workflowProgress, workflowRunSummary, worstStageProgress, type AutomationActionState, type StageProgressStatus, type WorkflowStageRunState } from './lib/workflow-run';
+import { detailRefreshDueAt, projectedStageStatus } from './lib/projected-stage';
 import { getCloudSyncStatus, unlockCloudSync, lockCloudSync, isCloudSyncUnlocked, encryptForCloud, decryptFromCloud, rotateCloudSyncKey, type CloudSyncStatus, type SyncableData } from './lib/encrypted-sync';
 import { canPerformTeamOperation, teamRoleLabel } from './lib/team-permissions';
 import { t, getLocale, setLocale, detectLocale, registerTranslations, type Locale } from './lib/i18n';
@@ -27,7 +28,7 @@ type GitHubWorkflowRunSummary = { name?: string; status: string; conclusion: str
 type Review = { state: string };
 type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
 type GitHubActionsWorkflow = { name: string; state: string; path: string };
-type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; checkDetails?: GitHubCheckDetail[]; actions?: ReturnType<typeof summarizeChecks>; actionDetails?: GitHubCheckDetail[]; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string; sourceBranchMissing?: boolean };
+type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; projected?: boolean; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; checkDetails?: GitHubCheckDetail[]; actions?: ReturnType<typeof summarizeChecks>; actionDetails?: GitHubCheckDetail[]; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string; sourceBranchMissing?: boolean };
 type MergeResult = { merged: boolean; message?: string; sha?: string };
 type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
 type WorkflowStageState = WorkflowStageRunState & { workflowId: string; stageIndex: number; stageId: string | null; repository: string; source: string; target: string; mergedAt: string | null; headSha: string | null; checksPassed: number; checksTotal: number; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string | null; aheadBy: number; lastEvent: string | null; updatedAt: string; decision?: { kind: string; actionable: boolean; canCreateNext?: boolean; message: string } };
@@ -78,6 +79,7 @@ let refreshOnNextDetail = false;
 let overviewSnapshotRefreshed = false;
 let overviewSnapshotRefreshing = false;
 let detailStatusRefreshing = false;
+const lastDetailLiveRead = new Map<string, number>();
 let overviewRefreshOnFocusBound = false;
 let overviewScrollControlsBound = false;
 let refreshOnFocusBound = false;
@@ -1015,7 +1017,7 @@ function render() {
 function goTo(target: Screen | 'back') {
   const previous = screen;
   screen = navigationTarget(screen, target, Boolean(active));
-  if (shouldRefreshWorkflowDetail(previous, screen)) { statuses = null; refreshOnNextDetail = true; }
+  if (shouldRefreshWorkflowDetail(previous, screen)) { statuses = active ? projectedDetailStatuses(active) : null; refreshOnNextDetail = true; }
   render();
 }
 
@@ -1812,7 +1814,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
     button.textContent = t('recovery.syncing');
     active = flow;
     try {
-      await refreshStatuses(false);
+      await refreshStatuses(false, true, true);
       const queueLoaded = await loadActionQueue(true, flow.repository);
       if (!queueLoaded && actionQueueError) showToast(actionQueueError);
       dialog.addEventListener('close', () => showProjectStepDrawer(flow.id, stageIndex, routeSource), { once: true });
@@ -2354,7 +2356,7 @@ async function executeAutoCreatePr(stageIndex: number) {
     const executed = await executeResponse.json().catch(() => ({})) as { result?: { pullNumber?: number; pullUrl?: string }; message?: string };
     if (!executeResponse.ok) throw new Error(executed.message || t('automation.executeFailed'));
     showToast(t('automation.executeSucceeded', { number: executed.result?.pullNumber || 0 }));
-    await refreshStatuses();
+    await refreshStatuses(true, true, true);
   } catch (error) { showToast(error instanceof Error ? error.message : t('automation.executeFailed')); }
 }
 
@@ -2444,7 +2446,9 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const autoNewPullAction = '';
   const newPullAction = canCreateNewPull && canOperateWorkflow(active!, 'pr-create') ? `${autoNewPullAction}<button class="timeline-action" data-create-pr="${index}">${t('status.createPr.button')}</button>` : '';
   const stateClass = status.kind === 'merged' ? mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
-  const mergeAction = status.kind === 'open' && !recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(active!, 'pull-merge') ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
+  // A projected first paint lacks the live pull's head ref and Actions detail, so the merge menu only
+  // appears once the live read replaces it.
+  const mergeAction = !status.projected && status.kind === 'open' && !recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(active!, 'pull-merge') ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
   const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';
   // The drawer owns every per-step operation (rerun, sync, deployment retry). Without an entry point
   // here a static step's recovery actions were reachable only from the board, unlike a dynamic one.
@@ -2454,7 +2458,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${drawerAction}${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
 }
 async function refreshDetailStatuses() {
-  await refreshStatuses(false, false);
+  await refreshStatuses(false, false, true);
   // The browser reads above only change what is rendered. Reconciling here is what moves the persisted
   // projection the server automation reads, so an explicit refresh has to do it for every workflow:
   // narrowing it to wildcard sources left static-branch workflows with no on-demand path at all.
@@ -2556,29 +2560,21 @@ function canMergePull(status: StepStatus) {
     mergeableState: status.mergeableState,
   });
 }
+// The detail page's live reads take several GitHub round trips per stage. Projecting from the already
+// loaded server projection gives the page a complete first paint immediately; wildcard stages stay
+// null because their rows already render straight from the same projection.
+function projectedDetailStatuses(flow: Workflow): StepStatus[] {
+  return flow.stages.map((stage, index) => {
+    const projections = statesForStage(flow, index);
+    const state = projections.find(item => item.source === stage.source)
+      || projections.find(item => item.pullState === 'open')
+      || projections[0];
+    return (state ? projectedStageStatus(state) as StepStatus : null) || { kind: 'not-created' } as StepStatus;
+  });
+}
 function laneMergeStatus(state?: WorkflowStageState): StepStatus | undefined {
-  if (!state?.pullNumber || state.pullState !== 'open' || !state.headSha) return undefined;
-  return {
-    kind: 'open',
-    pr: {
-      number: state.pullNumber,
-      state: 'open',
-      merged_at: null,
-      html_url: githubPullUrl(state.repository, state.pullNumber),
-      head: { sha: state.headSha },
-      mergeable: state.mergeable,
-      mergeable_state: state.mergeableState || undefined,
-    },
-    checks: {
-      state: state.checksState as ReturnType<typeof summarizeGitHubChecks>['state'],
-      passed: state.checksPassed,
-      total: state.checksTotal,
-    },
-    approvals: state.approvals,
-    requiredApprovals: state.requiredApprovals || undefined,
-    mergeable: state.mergeable,
-    mergeableState: state.mergeableState || undefined,
-  };
+  const status = projectedStageStatus(state);
+  return status?.kind === 'open' ? status as StepStatus : undefined;
 }
 let nativeOnlyTooltip: HTMLElement | null = null;
 function positionNativeOnlyTooltip(event: MouseEvent) {
@@ -2634,7 +2630,7 @@ function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: 
         window.setTimeout(onMerged, 1_000);
       } else {
         if (screen === 'detail') detail();
-        window.setTimeout(() => { void refreshStatuses(); }, 1_000);
+        window.setTimeout(() => { void refreshStatuses(true, true, true); }, 1_000)
       }
     } catch (err) {
       mergingStages.delete(index);
@@ -2670,15 +2666,22 @@ async function resolveDetailSource(owner: string, name: string, sourceRule: stri
 // other a window switch. Measured in production 2026-08-22, coming back issued two identical reads in
 // the same second. The flag is set here rather than in the listeners so that a refresh the user pressed
 // is never the one dropped — only an automatic one that duplicates a read already running.
-async function refreshStatuses(renderDetail = true, refreshProjectedStates = true) {
+async function refreshStatuses(renderDetail = true, refreshProjectedStates = true, force = false) {
+  // Navigation and focus refreshes share a short per-workflow TTL; an explicit refresh or an action
+  // that just changed a PR passes force and always reads live.
+  if (!force && active && !detailRefreshDueAt(lastDetailLiveRead.get(active.id), Date.now())) return;
   detailStatusRefreshing = true;
-  try { await loadDetailStatuses(renderDetail, refreshProjectedStates); }
+  try { await loadDetailStatuses(renderDetail, refreshProjectedStates, force); }
   finally { detailStatusRefreshing = false; }
 }
-async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = true) {
+async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = true, force = false) {
   if (!active) return;
-  const button = document.querySelector<HTMLButtonElement>('#refresh-status');
-  if (button) { button.disabled = true; button.textContent = t('detail.refresh.loading'); }
+  // A background revalidation paints over an already populated page, so only an explicit refresh
+  // takes over the button.
+  if (force) {
+    const button = document.querySelector<HTMLButtonElement>('#refresh-status');
+    if (button) { button.disabled = true; button.textContent = t('detail.refresh.loading'); }
+  }
   const { owner, name } = parseRepository(active.repository);
   const previous = statuses;
   statuses = await Promise.all(active.stages.map(async (stage, index) => {
@@ -2761,8 +2764,7 @@ async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = 
     } catch (err) { return { kind: 'error', message: err instanceof Error ? err.message : t('toast.unknownError') } as StepStatus; }
   }));
   statuses.forEach((status, index) => {
-    const before = previous?.[index];
-    const oldCheck = before?.checks?.state;
+    const before = previous?.[index];    const oldCheck = before?.checks?.state;
     const newCheck = status.checks?.state;
     const newPullReady = status.kind === 'merged' && Boolean(status.aheadBy) && canCreateWorkflowStage(index, active!.stages, statuses!) && !(before?.kind === 'merged' && before.aheadBy);
     const changed = Boolean(before && statusChanged({ kind: before.kind, checks: oldCheck }, { kind: status.kind, checks: newCheck }));
@@ -2775,6 +2777,7 @@ async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = 
   // The GitHub reads above only feed the step rows. The progress bar and the automation blocks read the
   // server projection, so without this the poll left them frozen until someone pressed refresh. `false`
   // keeps it a plain read: no `?refresh=1`, so the server does not call GitHub for it.
+  lastDetailLiveRead.set(active.id, Date.now());
   if (refreshProjectedStates) await loadActionQueue(false);
   if (renderDetail && screen === 'detail') detail();
 }
@@ -3105,7 +3108,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
         window.setTimeout(onCreated, 1_000);
       } else {
         if (screen === 'detail') detail();
-        window.setTimeout(() => { void refreshStatuses(); }, 1_000);
+        window.setTimeout(() => { void refreshStatuses(true, true, true); }, 1_000)
       }
     } catch (err) {
       const isAbortError = err instanceof Error && err.name === 'AbortError';

@@ -70,3 +70,28 @@ describe('refreshDetailStatuses', () => {
     expect(poll).not.toContain('loadActionQueue(true');
   });
 });
+
+describe('detail staleness while revalidating', () => {
+  // Entering the page used to blank every row until several GitHub round trips per stage completed.
+  // The server projection already loaded for the board paints the page first.
+  it('prefills statuses from the server projection when entering the detail screen', () => {
+    expect(source).toContain('statuses = active ? projectedDetailStatuses(active) : null');
+    expect(source).toMatch(/function projectedDetailStatuses[\s\S]{0,400}projectedStageStatus/);
+  });
+
+  // Navigation and focus share a short TTL so tab switches cannot issue the same GitHub reads twice;
+  // the explicit button bypasses it through the force argument.
+  it('skips an automatic live read inside the TTL but lets a forced one through', () => {
+    const refresh = body('refreshStatuses');
+    expect(refresh).toContain('if (!force && active && !detailRefreshDueAt(lastDetailLiveRead.get(active.id), Date.now())) return;');
+    const explicit = body('refreshDetailStatuses');
+    expect(explicit).toContain('refreshStatuses(false, false, true)');
+  });
+
+  // A silent background revalidation must not take over the refresh button on an already painted page.
+  it('only an explicit refresh flips the button to its loading state', () => {
+    const poll = body('loadDetailStatuses');
+    expect(poll).toContain('if (force) {');
+    expect(poll).toMatch(/if \(force\) \{[\s\S]{0,200}detail\.refresh\.loading/);
+  });
+});
