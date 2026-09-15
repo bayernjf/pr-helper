@@ -2300,6 +2300,12 @@ export function reconciliationRunInterrupted(run: { state: string; startedAt: st
 // safety net for whatever did not finish.
 export const REALTIME_RECONCILE_BUDGET_MS = 8000;
 
+// The board button reconciles the whole installation inside one click response, and production measured
+// it at ~24s on average: the 8s stage budget plus the wide ceiling backstop. The click gets a tight
+// budget and ceiling; what does not finish stays pending for webhooks and the scheduled sweep.
+export const INBOX_REFRESH_RECONCILE_BUDGET_MS = 6000;
+export const INBOX_REFRESH_RECONCILE_CEILING_GAP_MS = 5000;
+
 // Nobody reads a webhook response, so a delivery is the one realtime trigger where finishing the
 // sweep beats answering early. At the interactive budget a third of deliveries yielded and dropped
 // most of the stages they had already picked up, which is what left a merged PR's projection stale
@@ -2323,14 +2329,17 @@ export function cronReconcileBudgetMs(environment: Record<string, string | undef
 export function realtimeReconcileBudgetMs(environment: Record<string, string | undefined>, trigger?: ReconciliationTrigger) {
   const configured = Number(environment.REALTIME_RECONCILE_BUDGET_MS);
   if (Number.isFinite(configured) && configured > 0) return configured;
-  return trigger === 'webhook' ? WEBHOOK_RECONCILE_BUDGET_MS : REALTIME_RECONCILE_BUDGET_MS;
+  if (trigger === 'webhook') return WEBHOOK_RECONCILE_BUDGET_MS;
+  if (trigger === 'inbox_refresh') return INBOX_REFRESH_RECONCILE_BUDGET_MS;
+  return REALTIME_RECONCILE_BUDGET_MS;
 }
 
 // The budget is what the sweep yields to; this is only a backstop for I/O that never settles, so it
 // sits well above the budget and well under the platform limit. Doubling the budget did neither: it
 // fired close enough to the budget to abandon live sweeps, leaving a run row nothing could finish.
-export function realtimeReconcileCeilingMs(budgetMs: number) {
-  return Math.min(budgetMs + 15_000, AUTOMATION_FUNCTION_CEILING_MS - 15_000);
+export function realtimeReconcileCeilingMs(budgetMs: number, trigger?: ReconciliationTrigger) {
+  const gap = trigger === 'inbox_refresh' ? INBOX_REFRESH_RECONCILE_CEILING_GAP_MS : 15_000;
+  return Math.min(budgetMs + gap, AUTOMATION_FUNCTION_CEILING_MS - 15_000);
 }
 
 export async function withStageDeadline<T>(work: Promise<T>, deadlineMs?: number): Promise<{ outcome: 'completed'; value: T } | { outcome: 'deferred' }> {
@@ -2490,7 +2499,7 @@ export async function reconcileRealtime(environment: Record<string, string | und
   // they are created is what lets this close them for what they are, and hand their turns back at once.
   const startedRunIds: number[] = [];
   const sweep = reconcileWorkflowStages(environment, filter, trigger, { deadlineMs: budgetMs, onRunStarted: runId => startedRunIds.push(runId) }).catch(() => ({ outcome: 'failed' as const, reconciled: 0 }));
-  const raced = await withStageDeadline(sweep, realtimeReconcileCeilingMs(budgetMs));
+  const raced = await withStageDeadline(sweep, realtimeReconcileCeilingMs(budgetMs, trigger));
   if (raced.outcome !== 'completed') await closeAbandonedReconciliationRuns(environment, startedRunIds);
   return raced.outcome === 'completed' ? raced.value : { outcome: 'deferred', reconciled: 0 };
 }
