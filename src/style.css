@@ -457,13 +457,9 @@ dialog {
   text-align: center;
 }
 
-.detail-page-head-main h1 {
+.detail-header-row .detail-page-head-main h1 {
   margin: 0;
-  font-size: clamp(1.55rem, 3vw, 2.35rem);
-  overflow-wrap: anywhere;
-}
-
-.detail-page-head-main p:not(.eyebrow) {
+  font-size: clamp(1.15rem, 2vw, 1.5rem);
   overflow-wrap: anywhere;
 }
 
@@ -487,6 +483,19 @@ dialog {
   grid-template-columns: 1.5fr .8fr;
   gap: 20px;
   align-items: start;
+}
+
+.detail-side-col {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.detail-route {
+  margin: 0;
+  font-size: .8rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 
 .panel {
@@ -2086,7 +2095,7 @@ a.account-menu-item {
 
   .detail-page-head-main { order: -1; }
   .detail-page-actions { flex-wrap: wrap; }
-  .detail-page-head-main h1 { font-size: 1.7rem; }
+  .detail-header-row .detail-page-head-main h1 { font-size: 1.2rem; }
 
   .rules-sidebar {
     border-right: 0;
