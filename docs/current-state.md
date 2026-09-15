@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-08-22（出站量优化五轮全部落地并部署，迁移 001–040 已全部执行，`version` 已接入乐观锁；仅剩 `payload` 列删除一项，方案已写好未实施，最终判定等 2026-08-28 的一周 Usage 结论。服务端自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 是唯一执行入口；流程详情页的只读进度条已上线；Supabase Free Plan 出现 Egress 超额，已实测定位到「详情页轮询隐藏不停」与「同一请求内重复读 payload」两项，均已修，见《Supabase Egress 与多用户扩展方案》）
+> 最后更新：2026-09-15（出站量优化最终结论已于 2026-08-31 收口：优化后日均约 72 MB、总降幅 −94%、月投影约 2.1 GB / 5 GB 额度，见《Supabase Egress 与多用户扩展方案》同日小节；仅剩 9/20 宽限期前的 9 月账单精确复核。本地新落地一批「刷新慢」优化——详情页首屏改由服务端投影直出 + 后台 live 校正 + 自动刷新 30s TTL，首页 `inbox_refresh` 内联对账预算收紧到 6s / 天花板 +5s，尚未部署，见《2026-09-15 详情页 SWR 与首页刷新预算收紧》。迁移 001–040 已全部执行；`payload` 列删除已重定级为普通代码债、不再受宽限期驱动。服务端自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 是唯一执行入口；流程详情页的只读进度条已上线）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -18,11 +18,11 @@ PR Helper 是 GitHub-first 的 PR / Release Control Tower。用户以项目 Lane
 
 ## 当前整体评估
 
-- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（660 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
+- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（691 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
 - **功能质量：8.5/10**。流程 CRUD、Lane 看板、动态来源、多路径汇聚、PR 创建/合并、五类门禁、合并后 Actions/部署状态、失败恢复和审计均已具备；后台自动创建 PR 和逐步骤自动合并已有生产成功记录。
 - **产品完善度：7.5/10**。个人使用和小团队发布控制塔已可用；多账号权限、private/organization 边界、Web Push 关闭页面投递和部署回滚仍需外部条件验收。
 - **生产准备度：7/10**。主链路和两级自动化都已有真实 Production 证据；健康检查已于 2026-08-22 在沙箱 Preview 实测成功与失败两条路径，并借此发现它一直只落库不参与门禁（`f1bbb9df` 已修，修复上线后门禁效果亦已实测确认，见下文）；失败部署投影、确认式回滚和部分协作能力仍不能仅凭本地测试视为通过。Supabase Free Plan 在上个账单周期出现 Egress 超额（`pr-helper` 6.28GB / 5GB），当前高频 `/api/inbox` 把看板状态与历史数据绑在一起，不适合直接承载多用户轮询。
-- **结论：综合 7.5/10**。产品已超过 MVP，可继续作为受控生产工具使用；下一步优先降低 Supabase Egress（轮询时钟已整个删掉、请求内去重与 payload 内容哈希化均已完成，最终判定要等一周 Supabase Usage，最早 2026-08-28），再继续收敛 reconciliation 写入和完成外部条件验收，不建议立即投入画布或模板市场。
+- **结论：综合 7.5/10**。产品已超过 MVP，可继续作为受控生产工具使用；出站量止血已完成并经八月账单验证（−94%，月投影 2.1 GB / 5 GB），当前的刷新侧工作是交互时延（详情页首屏、首页点击响应），不是流量；再继续收敛 reconciliation 写入和完成外部条件验收，不建议立即投入画布或模板市场。
 
 ## 当前架构
 
@@ -112,6 +112,17 @@ Vercel 是 GitHub App 会话与 API 的 canonical origin。Cloudflare Pages 是�
 - 服务端模块不得引入任何顶层读 `import.meta.env` 的浏览器模块：该越界曾使 `/api/github/session` 在模块加载阶段崩溃并返回 `FUNCTION_INVOCATION_FAILED`，现由源码守卫测试沿相对导入链检查。
 - GitHub App 已订阅 Push、Pull request、Pull request review、Check run、Check suite、Status 与 Workflow run 事件。沙箱 PR #11 重开事件在 GitHub Recent Deliveries 返回 `202`（2.73 秒）；生产详情页未手动刷新，在下一个轮询周期自动展示 `feature/webhook-live-e2e-2 · PR #11`，Webhook 自动投影验收通过。
 - “重新同步”在真实全量 reconciliation 下约需 150 秒；当前以 180 秒超时保障结果正确，后台同步和局部更新体验仍是后续优化项。
+
+### 2026-09-15 详情页 SWR 与首页刷新预算收紧（本地已落地，待部署）
+
+四个提交在 `feature/20260722`，尚未合入 / 部署：`d077ff58`（投影映射）、`4394df2e`（详情 SWR + TTL）、`f3e29251`（inbox_refresh 预算）、`4bb5c3b0`（TTL 缺省项修正）。
+
+- **动机（生产 `reconciliation_runs` 近三天口径）**：首页「刷新」按钮的 `/api/inbox?refresh=1` 在一个 HTTP 请求内跑完整个安装的内联对账，平均 24.2s / 最大 42s（平均 58 次 GitHub 调用、约 60 个阶段），实际被外层天花板（8s + 15s = 23s）拖住；详情页进入 / 聚焦时对每个阶段串行 3–4 轮浏览器直连 GitHub（单轮 250–450ms），全部完成前只有占位行，且每次进入、focus、visibilitychange 都无条件触发。
+- **详情页改 stale-while-revalidate**：新增纯函数模块 `src/lib/projected-stage.ts`，`projectedStageStatus` 把首页已加载的服务端投影（PR 号、pull/checks 状态、通过数、审批数、mergeability、aheadBy）映射成详情页首屏结构；进入详情用 `projectedDetailStatuses` 预填而不是清空。live 直读在后台完成后静默替换，自动刷新不再把刷新按钮切成 loading。投影天然缺 `pr.head.ref` 与 check 明细，故门禁 `<details>` 明细与合并菜单首屏不出现，live 回来后补齐；local-only（无云存储）时投影为空，行为退化为旧逻辑。
+- **自动刷新 30s TTL**：`DETAIL_REFRESH_TTL_MS` + `detailRefreshDueAt`，按流程记录上次 live 读时间；自动路径（进入、focus、visibilitychange、仓库管理回调）30s 内不重复直读 GitHub。手动刷新按钮、抽屉「同步」、建 PR 后、合并后轮询全部 `force`，绕过 TTL；按钮 loading 只在 force 时出现。另修了 focus 与 visibilitychange 同刻双触发的重复请求（in-flight 守卫，只护自动路径）。
+- **`inbox_refresh` 独立预算**：`INBOX_REFRESH_RECONCILE_BUDGET_MS = 6000`，该 trigger 的天花板间隙从 15s 收到 5s（`realtimeReconcileCeilingMs(budget, trigger)`，总等待上限约 11s）。webhook 25s、manual 8s、cron 40s 均未动。没扫完的阶段沿用既有让出机制（`reconcile_pending_since` + `closeAbandonedReconciliationRuns`），由随后 webhook 与 `*/30` cron 接力，无新机制。
+- **部署前提（重要）**：2026-08-18 的环境变量实验曾在 Vercel Production 设 `REALTIME_RECONCILE_BUDGET_MS=25000`，而 `realtimeReconcileBudgetMs` 在 trigger 分支之前先读该变量——若它仍在，inbox_refresh 的阶段预算仍是 25s（只有天花板间隙会收到 +5s，即上限 30s），止血效果不完整。部署前需 `vercel env ls production` 核对；要让 6s 生效需删除该变量并重新部署（prebuilt 产物的生效方式见《2026-08-22 对账时钟实测》相关记录：走 `gh workflow run deploy-vercel.yml --ref main`，面板 Redeploy 会被拒）。
+- **验证**：`npm test` 31 个文件 / 691 项全绿（新增投影映射、TTL、各 trigger 预算断言），`npx tsc --noEmit` 干净。登录态浏览器手测尚未做（有 open PR 流程首屏即时出现、30s 内切窗口零新请求、手动刷新绕过 TTL、merged / not-created / 通配符流程各一次、首页点击响应降到约 11s 且 `deferred` 被后续 run 接走）。
 
 ### 2026-08-15 生产实测结论
 
@@ -311,6 +322,8 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 ## 当前最高优先级：Supabase Egress 与多用户读取扩展
 
+> **2026-08-31 收口**：本节的优化目标已达成，八月实际账单验证总降幅 −94%、月投影约 2.1 GB（5 GB 额度的 42%），9/20 宽限期前无需升档或按量付费；「保持现状、无需重启」。下文保留为根因与各轮措施的事实记录。唯一保留项：9 月账单周期的精确复核（见本节末与 [Supabase Egress 与多用户扩展方案](supabase-egress-optimization.md)《2026-08-31》小节）。
+
 2026-08-21 的 Supabase Usage 显示 Free Plan Egress 为 6.309GB / 5GB（126%），其中 `pr-helper` 项目占 6.28GB，宽限期到 2026-09-20；若仍超额，Supabase 请求可能返回 402。
 
 当前根因判断是高频 `/api/inbox` 同时返回看板当前状态与历史详情数据。浏览器轮询和页面长时间打开会重复拉取 events、timeline、workflow runs、deployment runs、audit logs 和 automation history。用户数增加时，Supabase Egress 会随在线用户近似线性增长。
@@ -319,7 +332,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 因此第一阶段的落地顺序已修正为先做前两项，`/api/board` 拆分降为可选：
 
-- **详情页轮询隐藏即停、两屏间隔改 60 秒**：已完成（`1e5c6758`）。**间隔后来不复存在**：第二轮 A3（`538a33eb`）把轮询时钟整个删掉，两屏只在回到前台和用户动作时刷新，因此「60 秒」是过期表述。2026-08-22 生产实测确认详情页隐藏期零请求；同日修掉「切回标签页触发两次相同请求」（`f40bf119`）并复测通过。进一步的「回到前台最小间隔」已决定暂不做，等一周 Supabase Usage 出结论（最早 2026-08-28）。
+- **详情页轮询隐藏即停、两屏间隔改 60 秒**：已完成（`1e5c6758`）。**间隔后来不复存在**：第二轮 A3（`538a33eb`）把轮询时钟整个删掉，两屏只在回到前台和用户动作时刷新，因此「60 秒」是过期表述。2026-08-22 生产实测确认详情页隐藏期零请求；同日修掉「切回标签页触发两次相同请求」（`f40bf119`）并复测通过。曾设想的「回到前台最小间隔」**2026-08-31 已作废**：八月账单验证后月投影 2.1 GB、远低于 5 GB 额度，不再需要节流（见 egress 方案文档同日小节）。注意 2026-09-15 详情页新增的 30s TTL（见《2026-09-15 详情页 SWR 与首页刷新预算收紧》）是另一回事：它节流的是详情页进入 / 聚焦时的浏览器直连 GitHub live 读，目标是交互时延，不是 `/api/inbox` 出站量。
 - **请求内去重**：已完成（`2b81be2c`），handler 传一个按请求的 memo 进各 list 函数，payload 与 stage_states 各只读一次。
 - **去掉无人读取的 `stage_snapshot`**：已完成（`98b5d245`），`INSERT` 保留，列和历史数据仍在。
 - 三刀实测合计：单次 594.3 → 274.0 kB（−53.9%），前台 71.3 → 16.4 MB/小时，详情页挂后台归零，5 GB 可支撑前台时长从约 70 小时升到约 312 小时。之后观察一周，再决定是否需要下列改动。
@@ -336,7 +349,8 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 - **第四轮 提示词去重**（`035` / `040`）：payload 里不再存内联提示词，只留 `contentHash`，内容集中在 `pr_helper_generation_rules`。2026-08-22 只读核对：45 个步骤零处残留内联内容。
 - **第五轮 拆关系表**（`036` expand → `037` 回填与一致性校验 → `038` 读切换 → `039` 删死索引）：流程定义提升为独立列加 `workflow_stages` / `workflow_deployment_configs`，映射集中在 `api/_lib/workflow-rows.ts` 并由往返恒等测试守住。
 - **`version` 接入乐观锁**（2026-08-22 已落地、部署、验收）：乐观锁不再读 `MAX(workflow_versions.version)`，改读同一行的 `version` 列；同时修掉「`hasPrevious` 依赖 payload 能否解析」——payload 删列后那会让锁静默放过所有保存。
-- **仍待决定**：`pr_helper_workflows.payload` 列的删除。方案已写好但**尚未实施**，见 [删除 payload 列方案](superpowers/plans/2026-08-22-drop-workflow-payload-column.md)；其收益是收口双表示而非省出站量，是否落地与一周 Usage 结论一并在 2026-08-28 决定。
+- **`payload` 列删除（已重定级，方案未变）**：方案见 [删除 payload 列方案](superpowers/plans/2026-08-22-drop-workflow-payload-column.md)。2026-08-31 八月账单结论后，其收益明确为收口双表示（消除 payload 与关系表的长期双真相）而非省出站量，不再受 9/20 宽限期驱动，按普通代码债优先级排期。
+- **八月账单最终结论（2026-08-31）**：优化前（8/19–8/20）日均 1 212 MB → 优化后（8/22–8/31）日均 72 MB，总降幅 −94%；活动量不降反升（webhook 日均 846 → 925），单位 webhook 出站从 1.62 MB 降到 0.078 MB。月投影约 2.1 GB（额度的 42%），2026-09-20 宽限期前无需升档。唯一保留的观察项是 9 月新账单周期的精确复核。
 
 ## 依赖外部条件的待办
 
@@ -361,7 +375,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 ## 测试覆盖
 
-- 本地单元/服务端测试：`npm test` 运行 30 个文件 / 660 个测试；`npx tsc --noEmit` 和 `npm run build` 同时通过。
+- 本地单元/服务端测试：`npm test` 运行 31 个文件 / 691 个测试；`npx tsc --noEmit` 和 `npm run build` 同时通过。
 - 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 26 个用例，包括 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉、创建/合并 PR、删除流程、确认式部署回滚、操作审计查询、编辑既有流程时步骤表单折叠、换仓库确认，以及流程详情进度条的步骤状态、前缀计数、同步时间标注与全部完成后不再高亮当前步。它验证真实 DOM、二次确认和浏览器请求负载，不替代真实 GitHub 写入、门禁和部署验收。
 - 已新增流程保存队列回归：连续编辑会串行使用服务端返回的新版本，且不会由旧响应覆盖最新编辑；真实跨窗口乐观锁冲突仍会明确报错。
 - Production E2E 通过项目与尚未通过的集成项目均以 [验证报告](verification-report.md) 为准。
@@ -467,7 +481,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 1. **瞬时失败的重排路径已实现，2026-08-22 验收通过（本项收尾，无待办）**。`drainWorkflowAutomationActions` 现在也读 `paused` 行，`automationDrainDecision` 对 `paused` 只在「失败原因存在且 `automationAttemptWasReached` 判为未触达供方」时返回 `requeue`，并叠加多重界限：未被更新动作取代、仍在 12 小时 stale 窗口内、距上次更新超过 `AUTOMATION_TRANSIENT_REQUEUE_COOLDOWN_MS`（15 分钟）、`attempts` 未达 `AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS`（3）。冷却是必需的：领取前抛出的故障不计 `attempts`，仅靠次数上限无法收敛。重排写入以读到的 `state = 'paused'` 为条件，期间若有真实裁决写入则裁决胜出。批次排序改为 `ORDER BY (actions.state = 'paused'), actions.created_at`，避免最老的 `paused` 行占满 10 条批次、饿死本该执行的队列行。7 条「门禁尚未全绿」是 GitHub 已给出的裁决，仍留在 `paused` 不动。**更正**：此前记录「`automationAttemptWasReached` 的正则漏掉 `CONNECT_TIMEOUT`」是错的——`timed? ?out` 在忽略大小写下已经匹配 `TIMEOUT`，无需改正则，现由测试固定该分类。超窗的瞬时失败改判 `cancel / stale` 而不是继续 `skip`：没有别的机制会重试它，留在 `paused` 就是把一个已死的意图长期钉在失败中心里；GitHub 已给出的裁决无论多老都保持 `paused`，那是操作者唯一的记录。因此 `id 6` / `58` / `80` 会被清成 `cancelled`，不会被救回；重排路径本身的生产验证要等下一次真实的瞬时故障。`id 84` 已于 2026-08-15 13:29 按预期清成 `cancelled / 超过自动化时限，未再尝试`。**2026-08-22 等到真实瞬时故障并验完**：沙箱 stage 2（`dev→main`）的 `create-pr` 在 22:58:30 因 `The operation was aborted due to timeout` 落到 `paused` / `attempts=0`，PR 未创建。22:59:53 的下一次对账没有救它（`paused` 仅 83 秒，未过 120 秒 stale 阈值，符合设计），23:02 那次对账把它重排回 `queued` 并执行成功，`attempts` 变 1、建出 PR #26。同日生产仓库另有一次同措辞超时（22:30:12 的 PR #324）表现不同：动作落 `paused` 但 `payload.pullNumber=324`，**PR 实际已创建**，后续 `merge-pr` 22:32:06 正常成功——说明超时可能发生在建 PR 之后的回写阶段，`paused` 不等于未生效，排障时要先看 `payload.pullNumber` 与 GitHub 实况再判断。
 
-2. **实时校准预算已按触发方分开，生产已验证（无待办，仅留结论）**。原先一个 8 秒常数同时服务三种触发方，而它们的约束正相反：webhook 的响应体没有任何调用方读，投递本身要求把这次事件涉及的 1–2 个步骤跑完；保存与收件箱刷新背后有人在等，让出不等于丢工作（`reconcile_pending_since` 会让下一次触发接力）。因此 `webhook` 提到 `WEBHOOK_RECONCILE_BUDGET_MS = 25000`，`manual` / `inbox_refresh` 保持 8000，`REALTIME_RECONCILE_BUDGET_MS` 环境变量仍可一并覆盖。同时把外层兜底从 `budgetMs * 2` 改为 `realtimeReconcileCeilingMs(budgetMs)`（`min(budgetMs + 15s, 60s - 15s)`）：外层只是给永不落地的 I/O 兜底，不是第二份预算，16 秒时它离预算太近，会在 sweep 还活着时把它甩掉，25 秒预算再翻倍则直接越过平台上限。依据见《2026-08-15 实时校准预算的实测重定》。**2026-08-15 14:49 部署后核对**：webhook 12 次成功、让出 0、被回收 0（部署前 24 小时 292 / 149 / 60）；p50 9.0 秒、最长 17.2 秒，全部在旧的 8 秒预算之上。cron 11 次全成功，p50 14.1 秒，校准 130 个步骤。待补齐标记为 0。`manual` / `inbox_refresh` 暂无部署后样本，仍需在日常使用中观察 p90。
+2. **实时校准预算已按触发方分开，生产已验证（无待办，仅留结论）**。原先一个 8 秒常数同时服务三种触发方，而它们的约束正相反：webhook 的响应体没有任何调用方读，投递本身要求把这次事件涉及的 1–2 个步骤跑完；保存与收件箱刷新背后有人在等，让出不等于丢工作（`reconcile_pending_since` 会让下一次触发接力）。因此 `webhook` 提到 `WEBHOOK_RECONCILE_BUDGET_MS = 25000`，`manual` 保持 8000，`REALTIME_RECONCILE_BUDGET_MS` 环境变量仍可一并覆盖。同时把外层兜底从 `budgetMs * 2` 改为 `realtimeReconcileCeilingMs(budgetMs, trigger)`（默认 `min(budgetMs + 15s, 60s - 15s)`）：外层只是给永不落地的 I/O 兜底，不是第二份预算，16 秒时它离预算太近，会在 sweep 还活着时把它甩掉，25 秒预算再翻倍则直接越过平台上限。依据见《2026-08-15 实时校准预算的实测重定》。**2026-08-15 14:49 部署后核对**：webhook 12 次成功、让出 0、被回收 0（部署前 24 小时 292 / 149 / 60）；p50 9.0 秒、最长 17.2 秒，全部在旧的 8 秒预算之上。cron 11 次全成功，p50 14.1 秒，校准 130 个步骤。待补齐标记为 0。**2026-09-15 调整（本地，待部署）**：`inbox_refresh` 从与 manual 共用的 8000 拆出——`INBOX_REFRESH_RECONCILE_BUDGET_MS = 6000`、天花板间隙 15s → 5s（该 trigger 总等待上限约 11s），因为生产实测首页点击响应平均 24.2s、瓶颈正是宽天花板；webhook / manual / cron 均不变。注意环境变量 `REALTIME_RECONCILE_BUDGET_MS` 若仍按 2026-08-18 实验设在 Production（25000），会在 trigger 分支之前整体覆盖阶段预算，部署前需核对并删除，细节见《2026-09-15 详情页 SWR 与首页刷新预算收紧》。
 
 3. **时钟已搬进数据库，生产已验证（无待办，仅留结论）**。近 7 天相邻 cron 送达的间隔：p50 46 分、p90 82 分、最大 152 分，而一次送达只覆盖约 7.5 分钟（`SWEEPS: 6` × 75 秒），约 85% 的时间没有 drain 在跑；被回收实例留下的已领取行本该 `AUTOMATION_ACTION_ABANDON_MS`（120 秒）后就能接手，实际最坏等 2.5 小时。迁移 030 用 `pg_cron` + `pg_net` 打这两个端点：**drain `*/2`**（对齐 abandon 窗口，队列空时不产生 GitHub 调用）、**reconcile `*/5`**（每次扫掠约 69 次调用，5 分钟一次 = 828 次/小时；2 分钟则单这一项 2070 次/小时，直接压第 6 项那条 2500 次/小时的线，故不取）。密钥不进仓库：迁移只建 `public.pr_helper_cron_ping(endpoint)`（`security definer`），调用时从 Vault 取 `pr_helper_cron_secret`，取不到就抛错——否则只会在 `net._http_response` 里留一片 401，看着像端点坏了。`timeout_milliseconds` 给 90 秒，因为 pg_net 默认 5 秒会把正常干完活的调用记成超时。Actions 作业保留为兜底但 `SWEEPS` 6 → 1（重叠无害：抢不到 `reconciliation_leases` 的触发记 `skipped`）。**不采用「把 Actions 循环拉长」**：仓库是 public、分钟数免费，但 p90 82 分、最大 152 分超出任何单次作业的合理循环时长，且计划工作流在仓库连续 60 天无提交后会被 GitHub 自动停用，覆盖率仍挂在会漂移的调度器上。**你要做的一次性操作**：在 Supabase SQL Editor 执行 `select vault.create_secret('<CRON_SECRET 的值>', 'pr_helper_cron_secret');`，然后应用迁移 030。**2026-08-15 17:06 UTC 上线后核对**：`net._http_response` 前 5 条全是 200,时间落在 17:06 / 17:08 / 17:10×2 / 17:12——drain 每 2 分钟、reconcile 每 5 分钟(17:10 两条即两个作业同刻),无 401、无超时。17:10:03 的 cron 扫掠成功校准 10 个步骤、57 次调用。**实测调用量比按 `*/5` 折算的高**:17:06–17:39 共 33 分钟内 cron 8 次扫掠 522 次调用、webhook 68 次 155 次调用,合计约 1230 次/小时,约为 2500 警戒线的一半。多出来的扫掠来自 Actions 兜底作业的送达(它现在每次只扫一遍,但送达本身会叠在 `*/5` 之上)。若日后逼近警戒线,第一个可动的杠杆是把兜底作业的 `schedule` 放稀或让它只打 drain 不打 reconcile。密钥同时轮换过(旧值在 Vercel 上是 Sensitive、取不回来),新值只存在于 Vercel、GitHub Secret、Supabase Vault 和 `~/.config/pr-helper/cron-secret.txt`,未进仓库。只读凭据 `prh_readonly` 看不到 `cron` schema(`permission denied`),`net._http_response` 可读,后续核对走后者。
 
