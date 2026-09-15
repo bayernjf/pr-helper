@@ -75,6 +75,11 @@ describe('detailRefreshDueAt', () => {
     expect(detailRefreshDueAt(null, 1_000)).toBe(true);
   });
 
+  // Map.get returns undefined on a first visit, so the automatic-refresh guard must treat it like null.
+  it('is always due when there is no prior read entry', () => {
+    expect(detailRefreshDueAt(undefined, 1_000)).toBe(true);
+  });
+
   it('is not due inside the TTL', () => {
     expect(detailRefreshDueAt(1_000, 1_000 + DETAIL_REFRESH_TTL_MS - 1)).toBe(false);
   });

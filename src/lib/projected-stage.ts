@@ -68,6 +68,6 @@ export function projectedStageStatus(state?: ProjectedStageState | null): Projec
 // always bypasses it.
 export const DETAIL_REFRESH_TTL_MS = 30_000;
 
-export function detailRefreshDueAt(lastReadAt: number | null, now: number) {
-  return lastReadAt === null || now - lastReadAt >= DETAIL_REFRESH_TTL_MS;
+export function detailRefreshDueAt(lastReadAt: number | null | undefined, now: number) {
+  return lastReadAt === null || lastReadAt === undefined || now - lastReadAt >= DETAIL_REFRESH_TTL_MS;
 }
