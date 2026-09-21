@@ -105,7 +105,7 @@ export function buildAgentCard(request: ApiRequest): AgentCard {
       escalationPolicy: 'auto',
       sla: { ackSeconds: 5 },
       notes:
-        'Task execution lives at POST /api/a2a/tasks (JSON-RPC: tasks/send, tasks/sendSubscribe, tasks/get, tasks/cancel). Skills run in plan mode by default; execute mode requires Zeus-delegated GitHub credentials and irreversible skills always escalate to the driver. Push notifications are not implemented. Task storage is in-memory per serverless instance: completed tasks are returned in the same request; cross-invocation tasks/get is best-effort.',
+        'Task execution lives at POST /api/a2a/agent-card (the same path that serves this card on GET; JSON-RPC: tasks/send, tasks/sendSubscribe, tasks/get, tasks/cancel). Skills run in plan mode by default; execute mode requires Zeus-delegated GitHub credentials and irreversible skills always escalate to the driver. Push notifications are not implemented. Task storage is in-memory per serverless instance: completed tasks are returned in the same request; cross-invocation tasks/get is best-effort.',
     },
   };
 }
