@@ -5,6 +5,8 @@
   ,"functions": { "api/**/*.ts": { "maxDuration": 60 } }
   ,"rewrites": [
     { "source": "/api/ai-credentials", "destination": "/api/workflows?resource=ai-credentials" },
-    { "source": "/api/automation", "destination": "/api/workflows?resource=automation" }
+    { "source": "/api/automation", "destination": "/api/workflows?resource=automation" },
+    { "source": "/.well-known/agent-card.json", "destination": "/api/a2a/agent-card" },
+    { "source": "/.well-known/agent.json", "destination": "/api/a2a/agent-card" }
   ]
 }
