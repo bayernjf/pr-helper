@@ -53,9 +53,9 @@ export function buildAgentCard(request: ApiRequest): AgentCard {
     version: AGENT_CARD_VERSION,
     provider: { organization: 'bayjf', url: 'https://github.com/jiangfeng' },
     capabilities: {
-      streaming: false,
+      streaming: true,
       pushNotifications: false,
-      stateTransitionHistory: false,
+      stateTransitionHistory: true,
     },
     defaultInputModes: ['application/json'],
     defaultOutputModes: ['application/json'],
@@ -105,7 +105,7 @@ export function buildAgentCard(request: ApiRequest): AgentCard {
       escalationPolicy: 'auto',
       sla: { ackSeconds: 5 },
       notes:
-        'Task execution (tasks/send, sendSubscribe) is not yet implemented; this card declares discovery and the vassal contract only. Production merge and rollback are explicit user actions by product safety rule and always escalate.',
+        'Task execution lives at POST /api/a2a/tasks (JSON-RPC: tasks/send, tasks/sendSubscribe, tasks/get, tasks/cancel). Skills run in plan mode by default; execute mode requires Zeus-delegated GitHub credentials and irreversible skills always escalate to the driver. Push notifications are not implemented. Task storage is in-memory per serverless instance: completed tasks are returned in the same request; cross-invocation tasks/get is best-effort.',
     },
   };
 }

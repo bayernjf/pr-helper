@@ -11,7 +11,7 @@ describe('buildAgentCard', () => {
     expect(card.name).toBe('pr-helper');
     expect(card.url).toBe('http://pr-helper.example/api/a2a/agent-card');
     expect(card.version).toBeTruthy();
-    expect(card.capabilities).toMatchObject({ streaming: false, pushNotifications: false });
+    expect(card.capabilities).toMatchObject({ streaming: true, pushNotifications: false });
     expect(Array.isArray(card.skills)).toBe(true);
     for (const skill of card.skills) {
       expect(skill.id).toBeTruthy();
