@@ -1,6 +1,6 @@
-# A2A Agent Card 与封臣声明（fealty）
+# A2A Agent Card 与注册声明（fealty）
 
-> 状态：现行（2026-09-21）。pr-helper 作为 Zeus 的**第一个封臣**，本文件记录其对外发布的 Agent Card、封臣契约与任务执行接口。协议设计全文见 zeus 仓库 `docs/design-vassal-protocol.md`。
+> 状态：现行（2026-09-21）。pr-helper 作为 Zeus 的**第一个注册执行器**，本文件记录其对外发布的 Agent Card、注册握手契约与任务执行接口。协议设计全文见 zeus 仓库 `docs/design-vassal-protocol.md`。
 
 ## 发布内容
 
@@ -17,20 +17,20 @@
 
 执行语义：每个 skill 都支持 **plan 模式**（默认，返回带 `x-zeus-report` 的行动方案 artifact，状态 completed）与 **execute 模式**（`mode: "execute"`）：
 - execute 模式目前返回 input-required——真实执行需要 Zeus 委派的 GitHub 凭据，凭据委派尚未实现（诚实声明，不做虚假完成）。
-- 不可逆 skill（merge-pr、production-rollback）在 execute 模式一律升级驾驶员（`x-zeus-escalation`），与 AGENTS.md 安全规则 5 一致。
+- 不可逆 skill（merge-pr、production-rollback）在 execute 模式一律升级人工在环操作者（`x-zeus-escalation`），与 AGENTS.md 安全规则 5 一致。
 
 消息格式：data part `{ "kind": "data", "data": { "skill": "create-pr", "owner": "...", "repo": "...", ... } }`；Zeus 注入的 `x-zeus-runId`（message.metadata）会在每个事件回显。
 
-## 封臣契约（x-zeus-fealty）
+## 注册握手契约（x-zeus-fealty）
 
 | 字段 | 值 | 说明 |
 | --- | --- | --- |
-| swornTo | zeus | 唯一效忠对象，星型拓扑，不与封臣直连 |
+| swornTo | zeus | 唯一注册归属，星型拓扑，执行器间不直连 |
 | domain | pr-release-control | 能力域，Zeus 据此路由 |
 | dataRealms | enterprise | 只服务企业数据域任务 |
 | dataPolicy | read-task-scope | 只读任务范围内的数据 |
-| reportBack | true | 战报回流：每个完成 artifact 携带 summary/evidence/cost/followUps |
-| escalationPolicy | auto | 不可逆操作一律升级驾驶员 |
+| reportBack | true | 任务产物回传：每个完成 artifact 携带 summary/evidence/cost/followUps |
+| escalationPolicy | auto | 不可逆操作一律升级人工在环操作者 |
 | sla.ackSeconds | 5 | 受理时限 |
 
 ## 已知限制
@@ -42,7 +42,7 @@
 
 1. ~~Agent Card + fealty 发布~~ ✅
 2. ~~`tasks/sendSubscribe` 全流程~~ ✅（受理→working→completed/failed，14 项单测覆盖）
-3. ~~战报回流三字段~~ ✅（summary/evidence/cost，plan artifact 上）
+3. ~~任务产物回传三字段~~ ✅（summary/evidence/cost，plan artifact 上）
 4. ~~escalation：不可逆场景走 input-required~~ ✅（merge-pr、production-rollback）
 5. Zeus 派发侧：脱敏、吊销 token、审计——待 Zeus 侧实现
 6. 纯标准 A2A 客户端可调用（守护测试）——待部署后真机验证
