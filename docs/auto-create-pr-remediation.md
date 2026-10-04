@@ -318,3 +318,47 @@ AI 生成的正文严格按生成规则模板输出（Overview / Changes / Relat
 **证据**：动作 219 于 20:20:04 记 `succeeded` / `attempts=2` / `failure_reason` 为 NULL，运行 220 `succeeded`；审计 2633 为 `pull-merged` / `success` / `{"via": "workflow-automation", "idempotent": true}`。App 从未发出合并调用——PR 的 `mergedBy` 始终是 `bayernjf`、`mergedAt` 停在 20:15:24、`reviews` 为 0。顺带第三次印证门禁退避：20:18:00 那次排空 `skipped`，因为距 `updated_at`（20:13:03.788）只有 296.2 秒，比 `attempts=1` 对应的 300 秒**早 3 秒**。
 
 **补的测试**：幂等与合并两条裁决共用成功收尾，唯一拦住已合并 PR 挨一个 merge PUT 的就是 `if (outcome.kind === 'merge')` 守卫；守卫一去，GitHub 回 405、抛错把动作打进 `paused`，一个其实已达成目标的运行会在失败中心显示为失败。已加源文本断言钉住该守卫与审计标记（把守卫改成 `if (true)` 可使其变红，已实测）。
+
+## 十八、合并后的红门禁让自动创建停摆（2026-10-04，实测于 `bayernjf/rich-sim`，**未落代码**）
+
+**现象**：`bayernjf/rich-sim` 的 `dev` 领先 `main` 11 个提交，步骤配置 `auto_create=true`、`trigger_min_commits=1`，但自动创建 PR 不再发生；面板显示「合并后验证失败 / 0/1 Checks 失败」。
+
+**证据（只读通道，全部执行到）**：
+
+- `pr_helper_workflows`：`bayernjf/rich-sim-1791021553864-8hze6`，`version 15`，未归档。
+- `workflow_stages`：`auto_create` / `auto_merge` 均 true、`execution_mode=server`、`trigger_min_commits=1`、规则 `PR-message` 于 11:03:54 捕获。
+- `workflow_stage_states`：`pull_number=3`、`pull_state=merged`、`head_sha=e68da216`、`checks_state=failure`、`checks 0/1`、**`ahead_by=11`**、`updated_at=11:04:07`。投影是新的——**不是没校准**。
+- `reconciliation_runs`：webhook 10:30:16 / 10:31:11、manual 11:04:04，`stages_reconciled` 全为 1 → 调度确实跑到过这个步骤。
+- `workflow_automation_actions`：最后一条 `create-pr` 是 3057（10-03 18:54:27，产出 PR #3），此后**零条** → 是被 skip，不是执行失败。
+- GitHub 侧：`e68da21`（PR #3 的 **merge commit**）上唯一 check 是 Cloudflare Pages，`conclusion=failure`（check-run 111370994638，状态回写 10-04 05:32:17）；`main` HEAD `62ff9a1` 同名 check 为 `success`；`curl https://rich-sim.pages.dev/` → 200。**真实流水线是绿的，红只存在于那个已被取代的提交上。**
+
+**根因链（代码级）**：
+
+1. [`workflows-store.ts:2063`](../api/_lib/workflows-store.ts) `const sha = pull.merged_at ? pull.merge_commit_sha : pull.head.sha`（同一取向见 `repairCommitSha` :800）——**已合并的步骤永远评 merge commit**；:2065-2071 用这个 sha 去拉 `check-runs` 与 `status`。
+2. `workflows-store.ts:1526` `canCreateNext = unlocked && ahead_by > 0 && checks_state !== 'failure' && pull_state ∈ {none, merged}`。
+3. `workflows-store.ts:2102` 在合并分支里确实调了 `scheduleServerAutoCreate`，但 :236 见 `canCreateNext` 为假就打 `[automation-skip] reason=not-creatable` 并 return，**不入队**。
+4. merge commit 上的 check 一旦为红就是**永久红**：GitHub 不会把 check-run 挪到后续提交。本例该提交缺 `.nvmrc`（Node 版本不对）导致 Pages 构建失败，16 分钟后由 `09ebe7d` 在 `main` 上修好——修复永远不会反映到被评的那个提交上。门禁于是从「拦住真红灯」退化成「让自动创建无限期停摆」。
+
+**与第十四节的关系（别混淆，需要给十四加限定）**：十四说「创建侧的红门禁守卫不可达」，那是 `pull_state='none'` 时 `checks_state` 被硬编码 `'unknown'`（:2054）的缘故。本例是 `pull_state='merged'`，`checks_state` 来自真实 merge commit，守卫**可达**，而且是唯一能让创建侧停下来的红。十四的结论只在「分支尚未建 PR」这个前提下成立。
+
+**停摆只作用于自动化，人工按钮可用——本节初稿在这里写错过，已按实测更正**：
+
+- 详情页的「创建 PR」由 [`src/main.ts:1775-1781`](../src/main.ts) 的 `canCreateFromDetail` 渲染，条件是 `detailStatus.kind === 'merged' && aheadBy`，**不看 `checks_state`**；:1782 是 `queueItem` / `canCreateNext` / `canCreateFromDetail` 三者取或。
+- 该按钮走 [`api/github/[action].ts`](../api/github/[action].ts)（`pull-created`，权限位 `pr-create`）直接转发 `POST /repos/{owner}/{repo}/pulls`，**不评合并后门禁**。初稿引用的 `workflows-store.ts:586` 是**自动化动作执行器**的复检，不是人工按钮，把两者混为一谈才得出「应用内无法越过」的错误结论。
+- 仍然成立的一条：「重试」在 `workflows-store.ts:1057-1064` 只查 `/actions/runs?head_sha=`，Cloudflare Pages 是 App 发的 check-suite 而非 Actions run，`failed.length === 0` 必然抛「没有找到可重试的失败 Actions」。所以第三方 check 变红时，面板上唯一有效的动作就是那个「创建 PR」。
+- 全仓确实没有 gate override / acknowledge 机制——因为不需要：合并后门禁只挡自动化。
+
+**实际结局（11:14–11:17，全部执行到）**：人工点「创建 PR」→ 审计 7104 `pull-created` / `metadata={"path":"/repos/bayernjf/rich-sim/pulls","method":"POST"}`（该路由的形状，不是自动化路径的 `via: workflow-automation`），且 `workflow_automation_actions` 里**没有对应的 create-pr 行**（3057 之后直接是 3107）→ PR #4 由 `app/pr-helper-by-bayernjf` 建出（11:14:27）。合并仍由自动化完成：动作 3107 `merge-pr` / `succeeded`，11:16:06 合入。11:17:22 投影前进到 `head_sha=0804b2c`、`checks 1/1 success`、`ahead_by=0`——**门禁一旦评到活的提交就立刻恢复**。停摆时长：最后一次 push 的 webhook 校准在 10:30:15，人工介入在 11:14:27，即至少 44 分钟；按提交时间戳折算，最早一批（08:02 UTC）起就无法自动推进，约 3 小时。
+
+**修复方案（待批，未实施）**：
+
+- **A｜评对对象**：已合并时改评**目标分支 HEAD** 的 checks。需多一次 GitHub 调用（`/repos/{owner}/{repo}/commits/{target}`）；:2035 的 compare 是 `target...source`，其 `base_commit` 是 merge-base，拿不到分支 HEAD，不能省这一次。
+- **加列，不要复用 `head_sha`**：`head_sha` 同时被重试查询（:1057）和 `deploymentParentState`（:1872）消费，把分支 HEAD 覆盖进去会让「重试」去打一个运维从未合并的提交。新增 `gate_sha`（或 `checks_scope`）保留溯源 → 迁移文件按序为 `supabase/migrations/041_*.sql`（现到 040）。
+- **B｜说对话**：`StageDecision`（:862 / :1519）新增 superseded 语义，面板显示「门禁已被后续提交取代」而不是红色失败，`canCreateNext=true`；投影层 [`src/lib/projected-stage.ts`](../src/lib/projected-stage.ts) 同步。A 修事实，B 修措辞，建议同批。
+- **C｜第三方 check 的重试语义**：`workflows-store.ts:1057-1064` 只认 Actions run，App 发的 check 一律「没有可重试」，等于把面板上唯一的按钮做成必然报错。要么按 `check_run` 走 `/check-runs/{id}/rerequest`，要么在错误文案里说明该检查由第三方提供、需在对方控制台重跑。
+- **语义边界**：若某次合并真的把 `main` 弄红且此后无人再推，target HEAD 就是那个 merge commit，仍然红、仍然停。A 不是放松门禁，是把门禁对准还活着的那个对象。
+- **测试**：`workflows-store.test.ts:437` `does not advance past a failing post-merge gate` 在「merge commit 仍是分支 HEAD」时依旧成立，不必改；要补的是 superseded 分支。
+
+**两种无效做法（都实测/推演过）**：直接 `UPDATE workflow_stage_states SET checks_state='success'` 会被下一次校准读回 failure（11:04:07 刚重写过这一行，webhook/manual 随时再来）；人工建 PR 能解套且**已验证有效**（PR #4），但它不解缺陷——下一条 merge commit 上的红照样让自动化停摆。
+
+**一次误判，记下来防重犯**：`vercel cron list` 报 *No cron jobs found* 不等于没有定时校准。时钟在 **pg_cron**（迁移 `030` / `033`，reconcile 每 30 分钟、drain 每 2 分钟），`.github/workflows/reconcile-pr-helper.yml` 的 `*/10` 只是 pg_net 不可达时的兜底。实测 12 小时内 `trigger='cron'` 27 次、最新 11:00:03。**排查调度是否存在，先读 `.github/workflows/` 与迁移注释，不要只看 Vercel。**
