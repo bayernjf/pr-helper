@@ -310,7 +310,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 | PR 草稿、Markdown 生成规则 | 浏览器 `localStorage`；可通过加密云同步上传服务端（原型） |
 | 加密云同步密文 | Supabase Postgres（`pr_helper_encrypted_sync`） |
 
-数据库迁移线上基线为 `001`–`031`，`027`–`031` 覆盖 `skipped` 动作状态、校准调用成本遥测、`pg_cron` 时钟和被回收扫描的名额归还。`024` 对应的服务端 API 还要求 Vercel 配置 `AI_CREDENTIALS_ENCRYPTION_KEY`（32 字节 hex 或 base64），不得写入代码、数据库或日志。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`。
+数据库迁移线上基线为 `001`–`040`，`027`–`031` 覆盖 `skipped` 动作状态、校准调用成本遥测、`pg_cron` 时钟和被回收扫描的名额归还，`032`–`040` 见 [`supabase/README.md`](../supabase/README.md) 的迁移地图。`024` 对应的服务端 API 还要求 Vercel 配置 `AI_CREDENTIALS_ENCRYPTION_KEY`（32 字节 hex 或 base64），不得写入代码、数据库或日志。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`。
 
 ## 最新验证结论
 
