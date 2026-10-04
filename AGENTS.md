@@ -13,7 +13,7 @@ Read `docs/current-state.md` before using historical specifications or implement
 - Browser: Vite with vanilla TypeScript and CSS. The active UI does not use React or Next.js.
 - API: Vercel Serverless Functions under `api/`.
 - Authentication/integration: GitHub App OAuth, signed HTTP-only session, short-lived installation tokens.
-- Persistence: Supabase Postgres through `DATABASE_URL`; ordered migrations live in `db/migrations/`.
+- Persistence: Supabase Postgres through `DATABASE_URL`; ordered migrations live in `supabase/migrations/`.
 - Monitoring: GitHub Webhook plus scheduled reconciliation; Web Push uses `web-push` and a Service Worker.
 - Tests: Vitest.
 
@@ -38,7 +38,7 @@ npx tsc --noEmit # TypeScript check for browser and api/ code
 - `api/*.ts`: Vercel API entry points.
 - `api/account.ts`: account deletion endpoint (`DELETE /api/account`).
 - `public/privacy.html`: static Privacy Policy page.
-- `db/migrations/`: the only source of truth for database schema; the current baseline is `001`–`031`.
+- `supabase/migrations/`: the only source of truth for database schema; the current baseline is `001`–`040`.
 - `.github/workflows/`: CI, Vercel/Cloudflare deployment, reconciliation, and confirmed Production rollback.
 - `docs/current-state.md`: current architecture, capabilities, boundaries, and backlog.
 - `docs/superpowers/specs/` and `docs/superpowers/plans/`: historical design and execution records.
