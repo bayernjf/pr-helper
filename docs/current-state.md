@@ -250,7 +250,7 @@ ahead_by=2  阈值 2  → 02:57:05 create-pr 动作 508 入队，attempts=1 成�
 
 只读测量：`reconciliation_runs` 里 `trigger='cron'` 的相邻间隔，**断崖精确落在 2026-08-21 05:00Z**。08-20 全天到 08-21 04 点，每小时 13–14 次、最差间隔 300–302 秒、零漏；05 点起变成每小时 3–5 次、最差反复出现 1800/1799/1803 秒。消失的正好是 `:05/:15/…` 那一半：断崖前 `minute % 10 = 0` 有 179 次、`= 5` 有 177 次（标准 `*/5`），断崖后 `= 0` 还有 42 次、`= 5` 只剩 5 次。
 
-原因是 [033_relax_reconciliation_clock.sql](../db/migrations/033_relax_reconciliation_clock.sql) 把 reconcile 从 `*/5` 改成 `*/30`，为的是省掉每月约 618 MB 出站量，代价是恢复保证的最坏情况从 5 分钟放宽到 30 分钟——这只在 GitHub 整条投递丢掉时才有影响。断崖时刻即该迁移的生效时刻。
+原因是 [033_relax_reconciliation_clock.sql](../supabase/migrations/033_relax_reconciliation_clock.sql) 把 reconcile 从 `*/5` 改成 `*/30`，为的是省掉每月约 618 MB 出站量，代价是恢复保证的最坏情况从 5 分钟放宽到 30 分钟——这只在 GitHub 整条投递丢掉时才有影响。断崖时刻即该迁移的生效时刻。
 
 其余每小时 3–5 次里，`*/30` 贡献 2 次，剩下是 `.github/workflows/reconcile-pr-helper.yml` 那条 `*/10` 兜底；它实测只跑出 3–5 次/小时而不是 6 次，是 GitHub 自己跳 tick 的已知行为，它本来就只是 secondary。
 
@@ -310,7 +310,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 | PR 草稿、Markdown 生成规则 | 浏览器 `localStorage`；可通过加密云同步上传服务端（原型） |
 | 加密云同步密文 | Supabase Postgres（`pr_helper_encrypted_sync`） |
 
-数据库迁移线上基线为 `001`–`031`，`027`–`031` 覆盖 `skipped` 动作状态、校准调用成本遥测、`pg_cron` 时钟和被回收扫描的名额归还。`024` 对应的服务端 API 还要求 Vercel 配置 `AI_CREDENTIALS_ENCRYPTION_KEY`（32 字节 hex 或 base64），不得写入代码、数据库或日志。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`。
+数据库迁移线上基线为 `001`–`040`，`027`–`031` 覆盖 `skipped` 动作状态、校准调用成本遥测、`pg_cron` 时钟和被回收扫描的名额归还，`032`–`040` 见 [`supabase/README.md`](../supabase/README.md) 的迁移地图。`024` 对应的服务端 API 还要求 Vercel 配置 `AI_CREDENTIALS_ENCRYPTION_KEY`（32 字节 hex 或 base64），不得写入代码、数据库或日志。迁移必须按编号在 Supabase SQL Editor 或独立 migration job 中执行；运行时 API 不创建或修改表。Vercel 已配置 `CSRF_ALLOWED_ORIGINS=https://pr-helper.pages.dev`。
 
 ## 最新验证结论
 
@@ -400,19 +400,19 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 | 顺序 | 文件 | 创建表 | 用途 |
 |---|---|---|---|
-| 1 | `db/migrations/014_reconciliation_runs.sql` | `reconciliation_runs` | 已完成 |
-| 2 | `db/migrations/015_workflow_versions_and_runs.sql` | `workflow_versions` + `workflow_runs` | 已完成 |
-| 3 | `db/migrations/016_encrypted_cloud_sync.sql` | `pr_helper_encrypted_sync` | 已完成 |
-| 4 | `db/migrations/017_reconciliation_scope_and_degraded_state.sql` | `reconciliation_runs` / `github_webhook_deliveries` 字段 | 已完成 |
-| 5 | `db/migrations/018_stage_identity_compatibility.sql` | 阶段状态、事件、部署和运行记录字段 | 已完成 |
-| 6 | `db/migrations/019_stage_identity_primary_keys.sql` | `stage_id` 正式主键、外键和非空约束 | 已完成 |
-| 7 | `db/migrations/020_operation_audit_log.sql` | 操作审计记录 | 已完成 |
-| 8 | `db/migrations/021_encrypted_sync_hardening.sql` | 密文版本、设备与历史记录 | 已完成，代码已部署，待线上回归 |
-| 9 | `db/migrations/022_data_retention.sql` | 数据保留策略配置 | 已完成，代码已部署，待 Cron 运行观察 |
-| 10 | `db/migrations/023_team_permissions.sql` | 团队、成员与流程共享模型 | 已完成，代码已部署，待多账号验收 |
-| 11 | `db/migrations/024_ai_automation_credentials.sql` | 服务端加密 AI 凭据 | 已完成，代码待部署验收 |
-| 12 | `db/migrations/025_workflow_automation_queue.sql` | 自动化运行快照与幂等动作队列 | 已完成，代码待部署验收 |
-| 13 | `db/migrations/026_ai_automation_preferences.sql` | 服务端自动生成/自动确认偏好 | 已完成，代码待部署验收 |
+| 1 | `supabase/migrations/014_reconciliation_runs.sql` | `reconciliation_runs` | 已完成 |
+| 2 | `supabase/migrations/015_workflow_versions_and_runs.sql` | `workflow_versions` + `workflow_runs` | 已完成 |
+| 3 | `supabase/migrations/016_encrypted_cloud_sync.sql` | `pr_helper_encrypted_sync` | 已完成 |
+| 4 | `supabase/migrations/017_reconciliation_scope_and_degraded_state.sql` | `reconciliation_runs` / `github_webhook_deliveries` 字段 | 已完成 |
+| 5 | `supabase/migrations/018_stage_identity_compatibility.sql` | 阶段状态、事件、部署和运行记录字段 | 已完成 |
+| 6 | `supabase/migrations/019_stage_identity_primary_keys.sql` | `stage_id` 正式主键、外键和非空约束 | 已完成 |
+| 7 | `supabase/migrations/020_operation_audit_log.sql` | 操作审计记录 | 已完成 |
+| 8 | `supabase/migrations/021_encrypted_sync_hardening.sql` | 密文版本、设备与历史记录 | 已完成，代码已部署，待线上回归 |
+| 9 | `supabase/migrations/022_data_retention.sql` | 数据保留策略配置 | 已完成，代码已部署，待 Cron 运行观察 |
+| 10 | `supabase/migrations/023_team_permissions.sql` | 团队、成员与流程共享模型 | 已完成，代码已部署，待多账号验收 |
+| 11 | `supabase/migrations/024_ai_automation_credentials.sql` | 服务端加密 AI 凭据 | 已完成，代码待部署验收 |
+| 12 | `supabase/migrations/025_workflow_automation_queue.sql` | 自动化运行快照与幂等动作队列 | 已完成，代码待部署验收 |
+| 13 | `supabase/migrations/026_ai_automation_preferences.sql` | 服务端自动生成/自动确认偏好 | 已完成，代码待部署验收 |
 
 已确认 4 个相关表存在，并确认 `reconciliation_runs.user_id`、`github_webhook_deliveries.installation_id`、外键和 `degraded` 状态约束已生效。018 新增的 5 个稳定身份索引均已存在，5 张相关表的 `stage_id` 空值数量均为 0。
 

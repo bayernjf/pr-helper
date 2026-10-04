@@ -33,7 +33,7 @@ PR Helper 已经超过纯浏览器 Mock 或 MVP 阶段，核心的 GitHub PR 发
 - Supabase 已执行并结构验证 `014`–`018`，5 张相关表的 `stage_id` 空值数量为 0，5 个稳定身份索引均已创建；应用代码尚未完成本次线上发布回归。
 - `018_stage_identity_compatibility.sql` 已完成结构校验；`019_stage_identity_primary_keys.sql` 已执行，对应服务端正式切换代码待部署并做 Preview 功能回归。
 - [`src/main.ts`](../src/main.ts) 约 1898 行；[`src/style.css`](../src/style.css) 约 2282 行；服务端工作流持久化集中在 [`api/_lib/workflows-store.ts`](../api/_lib/workflows-store.ts)。
-- 数据库迁移当前基线为 [`001`–`026`](../db/migrations)。其中 `019` 将 `stage_id` 切换为正式阶段身份，`024`–`026` 支持加密 AI 凭据、自动化队列和服务端自动化偏好。
+- 数据库迁移当前基线为 [`001`–`026`](../supabase/migrations)。其中 `019` 将 `stage_id` 切换为正式阶段身份，`024`–`026` 支持加密 AI 凭据、自动化队列和服务端自动化偏好。
 
 ## 一、代码质量评估
 

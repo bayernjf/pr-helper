@@ -53,6 +53,7 @@
 | 删 `pr_helper_workflows.payload` 列 | 14 处读点、5 步、最后一步是单向门；收益是收口双表示而非省流量。**2026-08-31 已重定级**：出站量结论已出（−94%、2.1 GB/月），不再受 9/20 宽限期驱动，按普通代码债优先级排期。**`version` 收紧为 `NOT NULL` 已于 2026-08-22 定为并入该方案的 D 步，不再单列**——实测 0 个 NULL 且今天不可达，即便出现也是主键冲突后事务回滚（响亮报错，非静默丢编辑），只有 D 步手写列清单时才第一次有防御价值。 | [`docs/superpowers/plans/2026-08-22-drop-workflow-payload-column.md`](docs/superpowers/plans/2026-08-22-drop-workflow-payload-column.md) |
 | `pr_helper_workflows.version` 收紧为 `NOT NULL` | ~~未定~~ **2026-08-22 已定：并入 payload 删列方案的 D 步，不单独做。** | 同上 |
 | AI 生成失败 → 接管弹窗的验收 | 你此前定为「单独排期」，未开始。 | 《后续高价值投入》 |
+| 合并后的红门禁让自动创建停摆 | 已合并的步骤去评 PR merge commit 的 checks，而那个提交上的红 check 永远不会自己变绿 → `canCreateNext` 恒假、自动创建不再发生。实测于 `bayernjf/rich-sim`（`ahead_by=11`、`checks_state=failure`、3057 之后零条 create-pr），停摆 ≥44 分钟，最终由人工点详情页「创建 PR」解套（PR #4，11:14 建 / 11:16 自动合并 / 11:17 投影转绿）。**不是死锁，是自动化停摆**：人工按钮不看 `checks_state`；但面板上唯一的按钮「重试」对第三方 check 必然报错。方案 A/B/C 已出，未获批、未落代码。 | [`docs/auto-create-pr-remediation.md` 第十八节](docs/auto-create-pr-remediation.md) |
 
 ### 已知但未立项（不影响当前功能）
 

@@ -6,7 +6,7 @@
 
 1. Open the target Supabase project and choose **SQL Editor**.
 2. Create a new query.
-3. Copy and run every migration in numerical order. The current applied baseline is `001_users_and_workflows.sql` through `031_reconciliation_claimed_workflows.sql`.
+3. Copy and run every migration in numerical order. The current applied baseline is `001_users_and_workflows.sql` through `040_generation_rule_contract.sql`.
 4. Confirm that the workflow, monitoring, event, push, deployment, deployment-history, reconciliation-runs, workflow-versions, workflow-runs, and encrypted-sync tables appear in Table Editor.
 
 After that, configure the same project's pooled Postgres connection string as `DATABASE_URL` in Vercel. The application will return a clear migration-required error instead of attempting to change schema when the tables are missing.
@@ -44,8 +44,17 @@ After that, configure the same project's pooled Postgres connection string as `D
 | `029` | Per-run GitHub call cost telemetry |
 | `030` | The reconciliation clock moved into `pg_cron`: drain every 2 minutes, reconcile every 5 |
 | `031` | `reconciliation_runs.claimed_workflow_ids`, so reaping a dead sweep returns the rotation turn |
+| `032` | Per-phase reconciliation timings for cost attribution |
+| `033` | Scheduled sweep relaxed from `*/5` to `*/30`; the `*/2` drain from `030` stays |
+| `034` | Index on the workflow `repository` column for scoped sweeps (superseded by `039`) |
+| `035` | Generation rule content stored per user |
+| `036`–`038` | Workflow payload expanded into relational columns, backfilled, then reads switched over |
+| `039` | Drop the jsonb repository index that `036` made redundant |
+| `040` | Generation rules referenced by content hash instead of inline text |
 
-> **当前配置的 Supabase 环境已执行 `014`–`031`，并完成 `018`–`019` 结构校验。** 5 张相关表的 `stage_id` 均已回填，`019` 已将其切换为正式主键/外键身份。自动化 PR 代码已部署生产，自动创建与逐步骤自动合并均已验收。新环境仍需按顺序执行全部迁移；不要跳过中间版本。
+> **当前配置的 Supabase 环境已执行 `014`–`040`，并完成 `018`–`019` 结构校验。** 5 张相关表的 `stage_id` 均已回填，`019` 已将其切换为正式主键/外键身份。自动化 PR 代码已部署生产，自动创建与逐步骤自动合并均已验收。新环境仍需按顺序执行全部迁移；不要跳过中间版本。
+>
+> 2026-10-04 只读复核直接验到 `036` / `039` / `040`：`workflow_stages` 15 列（`036`）、`workflow_stages.rule_content_hash` 存在（`040`）、`pr_helper_workflows_repository_idx` 已不存在（`039` 删掉了 `034` 建的索引，故 `034` 也曾落库）。`032`、`033`、`035`、`037`、`038` 未单独取证，按「迁移必须按编号顺序执行、不允许跳号」推出。
 
 > `019_stage_identity_primary_keys.sql` 执行前必须确认 `018` 的 `stage_id` 空值数量为 0；执行后服务端才可使用 `stage_id` 主键和外键查询。
 
@@ -60,4 +69,4 @@ After that, configure the same project's pooled Postgres connection string as `D
 
 ## Future schema changes
 
-Add future changes as the next ordered SQL file after `031`; do not edit or reorder an already-applied migration.
+Add future changes as the next ordered SQL file after `040`; do not edit or reorder an already-applied migration.

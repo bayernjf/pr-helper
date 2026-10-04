@@ -134,7 +134,7 @@
 
 所以 pg_cron `*/5` 的定位是**webhook 丢投递时的补漏网**，不是功能主干。这一认识是下面 A1 的依据。
 
-注意：[030 迁移](../db/migrations/030_reconciliation_pg_cron_clock.sql) 里「`*/10` 实测 46 分钟才投递一次」的教训只适用于 GitHub Actions 的 `schedule:`；`on: push` / `on: check_suite` 是 webhook 驱动，秒级投递，不受该问题影响。
+注意：[030 迁移](../supabase/migrations/030_reconciliation_pg_cron_clock.sql) 里「`*/10` 实测 46 分钟才投递一次」的教训只适用于 GitHub Actions 的 `schedule:`；`on: push` / `on: check_suite` 是 webhook 驱动，秒级投递，不受该问题影响。
 
 ## 设计目标
 
@@ -362,7 +362,7 @@ GET /api/board?workflowId=<id>
 
 ### A1：pg_cron reconcile `*/5` → `*/30`（已完成，提交 `e65daa6c`）
 
-- **改哪里**：[`db/migrations/033_relax_reconciliation_clock.sql`](../db/migrations/033_relax_reconciliation_clock.sql)，`cron.unschedule('pr-helper-reconcile')` 后重新 `cron.schedule` 为 `*/30 * * * *`。按 AGENTS.md 第 7 条，030 未被修改。
+- **改哪里**：[`supabase/migrations/033_relax_reconciliation_clock.sql`](../supabase/migrations/033_relax_reconciliation_clock.sql)，`cron.unschedule('pr-helper-reconcile')` 后重新 `cron.schedule` 为 `*/30 * * * *`。按 AGENTS.md 第 7 条，030 未被修改。
 - **收益**：289.1 → 48 次/天，**−515 MB/月**。
 - **代价**：webhook 丢投递时的兜底延迟从 ≤5 分钟变成 ≤30 分钟。
 - **附带检查**：`.github/workflows/reconcile-pr-helper.yml` 的 `*/10` 兜底也在调 `/api/cron/reconcile`，pg_cron 拉长后它的相对占比会变大，需要一并决定是否放宽。
@@ -557,7 +557,7 @@ CREATE TABLE pr_helper_workflows (
 );
 ```
 
-见 [`db/migrations/001_users_and_workflows.sql:10`](../db/migrations/001_users_and_workflows.sql)。整张表只有 `user_id` 与 `id` 是真正的列；流程名、仓库、每个 stage 的源/目标分支、自动化开关、AI 提示词、部署配置、重试策略全部在 `payload` 里。而 `payload` 装的不是为数据库设计的结构，是前端 `Workflow` 对象（[`src/lib/workflow.ts:26`](../src/lib/workflow.ts)）的整体序列化。
+见 [`supabase/migrations/001_users_and_workflows.sql:10`](../supabase/migrations/001_users_and_workflows.sql)。整张表只有 `user_id` 与 `id` 是真正的列；流程名、仓库、每个 stage 的源/目标分支、自动化开关、AI 提示词、部署配置、重试策略全部在 `payload` 里。而 `payload` 装的不是为数据库设计的结构，是前端 `Workflow` 对象（[`src/lib/workflow.ts:26`](../src/lib/workflow.ts)）的整体序列化。
 
 ### 三个后果
 
