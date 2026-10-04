@@ -91,12 +91,12 @@
 ### P8 执行器查询了不存在的列（未落代码，**自动创建从未成功的真正根因**）
 
 - **现象**：动作停在 `state='queued'`、`attempts=0`，`failure_reason` 为 `column "stage_index" does not exist`。
-- **根因**：`workflow_automation_actions` 表**没有** `stage_index` 列——`db/migrations/025_workflow_automation_queue.sql` 只把它建在 `workflow_automation_runs` 上，后续迁移也没有补。但有两条查询在 SELECT 它：
+- **根因**：`workflow_automation_actions` 表**没有** `stage_index` 列——`supabase/migrations/025_workflow_automation_queue.sql` 只把它建在 `workflow_automation_runs` 上，后续迁移也没有补。但有两条查询在 SELECT 它：
   - `executeWorkflowAutomationActionForUser` 的第一条语句。它在 `UPDATE ... state = 'running', attempts = attempts + 1` **之前**就抛错，所以动作既不被领取、`attempts` 也不自增，错误由 `scheduleServerAutoCreate` 的 catch（P2 修好的那个）写进 `failure_reason`。
   - `listWorkflowAutomationActions`，即 UI 的自动化队列面板，同样会 500。
 - **为何一直没被发现**：`api/workflows.ts` 的手动执行入口调用的是另一条路径，不经过这条 SELECT；而在 P2 之前失败是完全静默的，队列看起来只是空闲。P1 修好身份归一化、P2 修好静默失败之后，这条错误才第一次被写进库里。
 - **修法**：不加迁移，把这两条查询改为 JOIN `workflow_automation_runs` 取 `stage_index`。该列已存在于 runs 表，动作与 run 是多对一且必然有 run，JOIN 是最小改动。另一条路是加迁移在 actions 表冗余一列，但需要 NOT NULL 回填、且数据重复，代价更大。
-- **测试形态**：这里无法 mock SQL，因此按 `AGENTS.md` 第 2 条先写一条**静态一致性守卫**：从 `db/migrations/` 解析出 `workflow_automation_actions` 的真实列集合，再从 `api/_lib/workflows-store.ts` 抽出所有针对该表的 SELECT 列名，断言前者包含后者。当前会因 `stage_index` 失败，修完转绿，此后任何「查了不存在的列」都会在 CI 被拦住。
+- **测试形态**：这里无法 mock SQL，因此按 `AGENTS.md` 第 2 条先写一条**静态一致性守卫**：从 `supabase/migrations/` 解析出 `workflow_automation_actions` 的真实列集合，再从 `api/_lib/workflows-store.ts` 抽出所有针对该表的 SELECT 列名，断言前者包含后者。当前会因 `stage_index` 失败，修完转绿，此后任何「查了不存在的列」都会在 CI 被拦住。
 - **位置**：`api/_lib/workflows-store.ts`。
 
 ### P9 AI 响应的 markdown 围栏未被剥离（已落代码，待部署验收）
@@ -131,7 +131,7 @@
 | 7 | 执行器与队列列表改为 JOIN `workflow_automation_runs` 取 `stage_index`（P8），并加迁移列与 SELECT 的静态一致性守卫 | `api/_lib/workflows-store.ts`、`api/_lib/workflows-store.test.ts` | 已落代码，已部署生产并验证生效 |
 | 8 | 抽出 `jsonFromModelText` 正确剥离 AI 响应的 markdown 围栏（P9） | `api/_lib/workflows-store.ts`、`api/_lib/workflows-store.test.ts` | 已落代码，待部署 |
 
-步骤 5 的落地形态：新增纯函数 `automationCreateOutcome(openPulls, commitCount)` 作为可测接缝，`idempotent` 走与成功一致的收尾并在审计 `metadata` 打 `idempotent: true`；`cancelled` 写入 `workflow_automation_actions.state = 'cancelled'` 与 `workflow_automation_runs.state = 'cancelled'`，原因写在 `failure_reason`。两张表的 `CHECK` 约束在 `db/migrations/025` 中已包含 `cancelled`，因此**没有新增迁移**。命中已存在开放 PR 时不再请求 `compare`，少一次 GitHub 调用。
+步骤 5 的落地形态：新增纯函数 `automationCreateOutcome(openPulls, commitCount)` 作为可测接缝，`idempotent` 走与成功一致的收尾并在审计 `metadata` 打 `idempotent: true`；`cancelled` 写入 `workflow_automation_actions.state = 'cancelled'` 与 `workflow_automation_runs.state = 'cancelled'`，原因写在 `failure_reason`。两张表的 `CHECK` 约束在 `supabase/migrations/025` 中已包含 `cancelled`，因此**没有新增迁移**。命中已存在开放 PR 时不再请求 `compare`，少一次 GitHub 调用。
 
 提交按功能拆分，`api` 与 CI 配置分开，commit message 用英文。
 
