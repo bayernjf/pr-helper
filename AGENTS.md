@@ -41,6 +41,8 @@ npx tsc --noEmit # TypeScript check for browser and api/ code
 - `supabase/migrations/`: the only source of truth for database schema; the current baseline is `001`–`040`.
 - `.github/workflows/`: CI, Vercel/Cloudflare deployment, reconciliation, and confirmed Production rollback.
 - `docs/current-state.md`: current architecture, capabilities, boundaries, and backlog.
+- `docs/code-audit-report.md`: project-level code audit (severity-ranked findings, re-checked against code).
+- `docs/feature-catalog.md`: full product feature inventory with implementation evidence and test-coverage level.
 - `docs/superpowers/specs/` and `docs/superpowers/plans/`: historical design and execution records.
 
 ## Development rules

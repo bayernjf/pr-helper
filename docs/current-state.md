@@ -612,6 +612,7 @@ bigint 身份修复（`6aa011c2`）部署后，12:36–13:11 之间 `id 113`–`
 
 ## 文档维护规则
 
-- 当前事实优先更新本文、根目录 `README.md`、`AGENTS.md` 和 `db/README.md`。
+- 当前事实优先更新本文、根目录 `README.md`、`AGENTS.md` 和 `supabase/README.md`。
+- 全量功能点与其测试覆盖等级见 [`feature-catalog.md`](feature-catalog.md)；分级风险与修复顺序见 [`code-audit-report.md`](code-audit-report.md)。二者与本文冲突时以代码实测为准。
 - 历史规格和实施计划保留原始假设；若已完成或被替代，在文件顶部写明状态并链接到本文。
 - 历史计划中的未勾选项不自动等于当前 backlog。
