@@ -6,6 +6,7 @@ import { canCreateWorkflowStage, canMergeOpenPull, deploymentSummaryForTarget, g
 import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel, generationRuleById, loadGenerationRules, markdownRuleName, setDefaultGenerationRule, stageGenerationRule, stageGenerationRuleUpdate, updateGenerationRule, type GenerationRule } from './lib/generation-rules';
 import { navigationClass, navigationTarget, selectWorkflowAfterCloudLoad, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
+import { initPrReferenceTooltip, prReferenceHtml } from './lib/pr-reference';
 import { activeWorkflows, archiveWorkflow, archivedWorkflows, restoreWorkflow, addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type StageRouteMode, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
@@ -1228,7 +1229,9 @@ function drawerConfigurationWarnings(flow: Workflow, stageIndex: number, source:
 }
 function laneRunSummary(flow: Workflow) {
   const summary = workflowRunSummary(flow.stages.map((stage, index) => stageState(flow.id, index, undefined, stage.target)));
-  const text = t('overview.run.current', { step: summary.stageIndex + 1, total: flow.stages.length, status: stageRunPresentationText(summary) });
+  const prChip = summary.pullNumber ? prReferenceHtml(githubPullUrl(flow.repository, summary.pullNumber), `PR #${summary.pullNumber}`) : '';
+  const status = prChip ? `${prChip} · ${t(`overview.run.${summary.status}`)}` : stageRunPresentationText(summary);
+  const text = t('overview.run.current', { step: summary.stageIndex + 1, total: flow.stages.length, status });
   const latestUpdatedAt = statesForStage(flow, summary.stageIndex).map(state => state.updatedAt).filter(Boolean).sort().at(-1);
   const updatedLabel = latestUpdatedAt ? stageUpdatedAt({ updatedAt: latestUpdatedAt } as WorkflowStageState) : '';
   return { ...summary, text: updatedLabel ? `${text} · ${updatedLabel}` : text };
@@ -1407,7 +1410,7 @@ function failureCenterPanel(): string {
     const flow = workflows.find(w => w.id === item.workflowId);
     const icon = item.kind === 'checks-failed' ? '✗' : '⏳';
     const tone = item.kind === 'checks-failed' ? 'failed' : 'attention';
-    const prLink = item.pullNumber && flow ? `<a href="${githubPullUrl(flow.repository, item.pullNumber)}" target="_blank" rel="noreferrer">#${item.pullNumber}</a>` : '';
+    const prLink = item.pullNumber && flow ? prReferenceHtml(githubPullUrl(flow.repository, item.pullNumber), `#${item.pullNumber}`) : '';
     const recovery = item.kind === 'checks-failed' ? recoveryStatusFor(item.workflowId, item.stageIndex, item.source) : undefined;
     const retryDisabled = recovery ? (recovery.exhausted || recovery.cooldownRemainingSeconds > 0) : false;
     const actions = item.kind === 'checks-failed' && flow && canOperateWorkflow(flow, 'actions-rerun')
@@ -1585,7 +1588,7 @@ function laneRunHistory(flow: Workflow): string {
   return `<details class="lane-run-history"><summary class="eyebrow">${t('overview.run.history')}</summary><ol>${runs.map(run => {
     const stateClass = run.state === 'completed' ? 'completed' : run.state === 'failed' ? 'failed' : 'active';
     const stateLabel = t(`runHistory.state.${run.state}`);
-    const prLink = run.pullNumber ? `<a href="${githubPullUrl(flow.repository, run.pullNumber)}" target="_blank" rel="noreferrer">#${run.pullNumber} ↗</a>` : '';
+    const prLink = run.pullNumber ? prReferenceHtml(githubPullUrl(flow.repository, run.pullNumber), `#${run.pullNumber}`) : '';
     const finishedAt = run.completedAt ? new Date(run.completedAt) : null;
     const time = finishedAt ? stageUpdatedAt({ updatedAt: finishedAt.toISOString() } as WorkflowStageState) : stageUpdatedAt({ updatedAt: run.startedAt } as WorkflowStageState);
     return `<li class="${stateClass}"><div><b>${escape(run.source)} → ${escape(run.target)}</b><small>v${run.version} · ${stateLabel}</small></div><time>${escape(time)}</time><span>${prLink}</span></li>`;
@@ -1621,7 +1624,7 @@ function workflowTimelineSection(flow: Workflow): string {
   if (!entries.length) return '';
   return `<details class="lane-timeline"><summary class="eyebrow">${t('timeline.eyebrow')}</summary><ol>${entries.map(entry => {
     const icon = timelineEntryIcon(entry.kind);
-    const prLink = entry.pullNumber ? `<a href="${githubPullUrl(flow.repository, entry.pullNumber)}" target="_blank" rel="noreferrer">#${entry.pullNumber}</a>` : '';
+    const prLink = entry.pullNumber ? prReferenceHtml(githubPullUrl(flow.repository, entry.pullNumber), `#${entry.pullNumber}`) : '';
     return `<li><span class="timeline-icon">${icon}</span><div><b>${escape(entry.message)}</b><small>${escape(entry.source)} → ${escape(entry.target)}${prLink ? ` · ${prLink}` : ''}</small></div><time>${escape(stageUpdatedAt({ updatedAt: entry.occurredAt } as WorkflowStageState))}</time></li>`;
   }).join('')}</ol></details>`;
 }
@@ -1672,7 +1675,7 @@ function projectLane(flow: Workflow) {
   const orderInput = laneSortMode === 'custom'
     ? `<label class="lane-order-input"><input type="text" inputmode="numeric" pattern="[0-9]*" value="${orderIndex + 1}" data-lane-position="${escape(flow.id)}" aria-label="${escape(t('overview.board.orderFor', { name: flow.name }))}" ${sortingDisabled ? 'disabled' : ''} /></label>`
     : '';
-  return `<article class="project-lane${expanded ? ' is-expanded' : ''}${archived ? ' is-archived' : ''}${returnHighlight === flow.id ? ' is-return-highlight' : ''}" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div>${orderInput}</div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${flowName}</h2>${archived ? `<span class="lane-archived-badge">${t('overview.board.archivedBadge')}</span>` : ''}${sharedWorkflowBadge(flow)}<p class="lane-run-summary ${runSummary.tone}">${escape(runSummary.text)}</p></div></div><button type="button" class="lane-collapse-toggle" data-lane-collapse="${escape(flow.id)}" aria-expanded="${expanded}" aria-label="${escape(collapseLabel)}" title="${escape(collapseLabel)}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.75" y="2.75" width="10.5" height="10.5" rx="1.5"/><path d="m5.25 8 2.75-2.75L10.75 8"/></svg></button><div class="lane-actions">${archived ? `<button data-restore-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.restore')}</button>` : `<button data-edit-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.edit')}</button><button data-archive-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.archive')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button>`}</div></header><div class="lane-body"${expanded ? '' : ' hidden'}>${warning}<div class="lane-track${hasFanIn ? ' has-fan-in' : ''}">${steps}</div>${timelineSection}${runHistory}</div></article>`;
+  return `<article class="project-lane${expanded ? ' is-expanded' : ''}${archived ? ' is-archived' : ''}${returnHighlight === flow.id ? ' is-return-highlight' : ''}" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div>${orderInput}</div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${flowName}</h2>${archived ? `<span class="lane-archived-badge">${t('overview.board.archivedBadge')}</span>` : ''}${sharedWorkflowBadge(flow)}<p class="lane-run-summary ${runSummary.tone}">${runSummary.text}</p></div></div><button type="button" class="lane-collapse-toggle" data-lane-collapse="${escape(flow.id)}" aria-expanded="${expanded}" aria-label="${escape(collapseLabel)}" title="${escape(collapseLabel)}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.75" y="2.75" width="10.5" height="10.5" rx="1.5"/><path d="m5.25 8 2.75-2.75L10.75 8"/></svg></button><div class="lane-actions">${archived ? `<button data-restore-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.restore')}</button>` : `<button data-edit-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.edit')}</button><button data-archive-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.archive')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button>`}</div></header><div class="lane-body"${expanded ? '' : ' hidden'}>${warning}<div class="lane-track${hasFanIn ? ' has-fan-in' : ''}">${steps}</div>${timelineSection}${runHistory}</div></article>`;
 }
 function bindLaneSorting() {
   const lanes = [...document.querySelectorAll<HTMLElement>('[data-project-lane]')];
@@ -1765,7 +1768,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const drawerActions = detailStatus?.actions?.total
     ? gateDisclosure(t('status.actions.runs.summary', { passed: detailStatus.actions.passed, total: detailStatus.actions.total, state: detailStatus.actions.state === 'success' ? t('status.actions.passed') : detailStatus.actions.state === 'failure' ? t('status.actions.failed') : t('status.actions.running') }), detailStatus.actionDetails, 'actions', stage.target)
     : '';
-  const pull = pullNumber ? `<a class="drawer-pr-link" href="${githubPullUrl(flow.repository, pullNumber)}" target="_blank" rel="noreferrer">PR #${pullNumber} ↗</a>` : `<p>${t('overview.board.noPull')}</p>`;
+  const pull = pullNumber ? prReferenceHtml(githubPullUrl(flow.repository, pullNumber), `PR #${pullNumber}`, 'drawer-pr-link') : `<p>${t('overview.board.noPull')}</p>`;
   const events = stageEvents(workflowId, stageIndex, routeSource);
   const history = events.length ? `<details class="drawer-events"><summary class="eyebrow">${t('overview.run.history')}</summary><ol>${events.map(event => `<li><b>${escape(event.message)}</b><time>${escape(stageUpdatedAt({ updatedAt: event.occurredAt } as WorkflowStageState))}</time></li>`).join('')}</ol></details>` : '';
   const deployments = deploymentCards(workflowId, stageIndex, routeSource);
@@ -3182,4 +3185,5 @@ document.addEventListener('click', event => {
 
 if (!localStorage.getItem('pr-helper-locale')) setLocale(detectLocale());
 applyTheme(currentTheme);
+initPrReferenceTooltip(showToast);
 void restoreConnection();

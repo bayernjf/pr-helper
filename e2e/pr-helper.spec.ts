@@ -769,11 +769,11 @@ test('需要处理列表里的 PR 编号在深色主题下不是浏览器默认�
     workflows: [workflow],
     items: [{ workflowId: workflow.id, workflowName: workflow.name, repository, stageIndex: 0, source: 'fix/urgent', target: 'dev', pullNumber: 42, kind: 'checks-failed', message: '第 1 步 Actions 失败' }],
   });
-  const link = page.locator('.failure-center a', { hasText: '#42' });
+  const link = page.locator('.failure-center .pr-ref', { hasText: '#42' });
   await expect(link).toBeVisible();
 
-  // The panel never styled its own links, so they fell through to the user agent's #0000EE, which is
-  // unreadable on the dark card. Pinning "not the UA default" keeps the palette free to change.
+  // The reference is a copy button now, so it inherits the card's text colour instead of the UA's link
+  // blue. Pinning "not #0000EE" still catches a regression back to an unstyled anchor.
   await expect(page.locator(':root')).toHaveAttribute('data-theme', 'light');
   await expect(link).not.toHaveCSS('color', 'rgb(0, 0, 238)');
   await page.locator('#theme-toggle').click();
@@ -812,4 +812,31 @@ test('仓库没有 Environment 时提示这个字段应当留空', async ({ page
   // Every other input in this form always carries a placeholder, so this one keeps hers too — it just
   // must not name an Environment that does not exist.
   await expect(input).toHaveAttribute('placeholder', '留空');
+});
+
+test('看板摘要里的 PR 引用悬停显示地址，点击复制而不是跳转', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'http://127.0.0.1:4373' });
+  const workflow: Workflow = {
+    id: 'flow-copy-pr',
+    name: '复制 PR 地址',
+    repository,
+    stages: [{ stageId: 'stage-copy-pr', source: 'feature/e2e', target: 'dev' }],
+  };
+  await openWorkspace(page, {
+    workflows: [workflow],
+    states: [{ workflowId: workflow.id, stageIndex: 0, stageId: 'stage-copy-pr', repository, source: 'feature/e2e', target: 'dev', pullNumber: 42, pullState: 'open', mergedAt: null, headSha: 'head-sha-42', checksState: 'success', checksPassed: 1, checksTotal: 1, approvals: 0, requiredApprovals: 0, mergeable: true, mergeableState: 'clean', aheadBy: 0, lastEvent: null, updatedAt: '2026-08-03T00:00:00.000Z', decision: { kind: 'ready-to-merge', actionable: true, message: '可以合并' } }],
+  });
+
+  const chip = page.locator('.lane-run-summary .pr-ref');
+  await expect(chip).toHaveText('PR #42');
+
+  await chip.hover();
+  const tip = page.locator('.pr-ref-tip');
+  await expect(tip.locator('code')).toHaveText('https://github.com/acme/demo/pull/42');
+  // The chip replaced a link, so the tooltip has to carry the navigation the chip no longer performs.
+  await expect(tip.getByRole('link', { name: '在 GitHub 打开 ↗' })).toHaveAttribute('href', 'https://github.com/acme/demo/pull/42');
+
+  await chip.click();
+  await expect(page.locator('.toast-message')).toHaveText('已复制 PR 地址');
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('https://github.com/acme/demo/pull/42');
 });
