@@ -3056,3 +3056,38 @@ a.account-menu-item {
 .project-lane.is-archived .lane-body { opacity: .62; }
 .project-lane.is-archived:hover > header > .lane-heading,
 .project-lane.is-archived:hover .lane-body { opacity: 1; }
+
+/* Pull request references copy on click, so the tooltip is fixed-positioned: every surface that shows one
+   (lane summary, failure centre, timeline, step drawer) clips or scrolls its own box differently. */
+.pr-ref {
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  border-bottom: 1px dotted var(--border-accent);
+}
+.pr-ref:hover, .pr-ref:focus-visible { color: var(--text-accent-light); border-bottom-style: solid; }
+.pr-ref:focus-visible { outline: 2px solid var(--border-accent); outline-offset: 2px; }
+.pr-ref-tip {
+  position: fixed;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 340px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-card);
+  box-shadow: var(--shadow-dropdown);
+  font-size: .76rem;
+}
+.pr-ref-tip code { color: var(--text-secondary); overflow-wrap: anywhere; }
+.pr-ref-tip a { color: var(--text-accent-light); text-decoration: none; }
+.pr-ref-tip a:hover { text-decoration: underline; }
+.pr-ref-clipboard-helper { position: fixed; top: -1000px; opacity: 0; }
+/* The drawer chip replaces an <a> that carried its own weight and colour, so it keeps that appearance. */
+.pr-ref.drawer-pr-link { display: inline-flex; margin-top: 10px; color: var(--text-accent); font: 700 .76rem Manrope; border-bottom: 0; }
+.pr-ref.drawer-pr-link:hover, .pr-ref.drawer-pr-link:focus-visible { text-decoration: underline; }
