@@ -1,6 +1,6 @@
 # PR Helper Handoff
 
-> 最后更新：2026-09-15（本地新落地一批「刷新慢」优化，尚未部署：详情页首屏由服务端投影直出 + 后台 live 校正 + 自动刷新 30s TTL，首页 `inbox_refresh` 内联对账预算收紧到 6s / 天花板 +5s，提交 `d077ff58` / `4394df2e` / `f3e29251` / `4bb5c3b0`，详见下方《2026-09-15 刷新慢优化（本地已落地，待部署与浏览器手测）》。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
+> 最后更新：2026-10-10（修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」：GitHub 5xx 被误判为已有结论的暂停而永久 parked，且取代机制看不到系统外完成的合并。两处修复见《2026-10-10 已暂停自动化动作永不消失》）（本地新落地一批「刷新慢」优化，尚未部署：详情页首屏由服务端投影直出 + 后台 live 校正 + 自动刷新 30s TTL，首页 `inbox_refresh` 内联对账预算收紧到 6s / 天花板 +5s，提交 `d077ff58` / `4394df2e` / `f3e29251` / `4bb5c3b0`，详见下方《2026-09-15 刷新慢优化（本地已落地，待部署与浏览器手测）》。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 > **待办的唯一索引在下方《待处理事项（2026-08-22 汇总）》一节**，其余小节只记已完成的事实与理由。
 > 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
@@ -26,6 +26,25 @@
 - **2026-08-21 第二、三轮已落地并部署生产**（`origin/main` 头 `613fd350`，07:12:05 UTC，经 PR #305 / #306）。第二轮 A1 / A2 / A3 见方案文档；第三轮把 `archived` / `repository` / `installationId` 过滤和 cron 批次下推进 SQL，新增迁移 `034`（`(payload->>'repository')` 表达式索引，用户已执行）。部署后实测：`pr_helper_workflows_repository_idx` 12 次扫描共读 28 行，**单次 webhook 投影读 35 → 约 2.3 行（−93%）**；webhook 5 次 success、11 次 skipped、`stages_failed` 全 0、最慢 9 秒，无回归。索引命中用 `pg_stat_user_indexes` 验证而非 `EXPLAIN`——只读通道拒绝 `EXPLAIN`，且 35 行下 Seq Scan 本就是正确计划。
 - **A1 引发过一次收敛阈值回归，已处置。** 033 把 pg_cron reconcile 从 `*/5` 改成 `*/30`（实测断点 05:20:03 UTC，cron 日频次 ~336 → ~84），但没有同时校准依赖时钟的告警阈值：35 个活跃流程 ÷ 每次 8 个 ÷ 3.5 次/小时 = **一圈约 75 分钟**，而 `STAGE_UNCONVERGED_THRESHOLD_SECONDS` 默认 2700（45 分钟）是按 `*/5`（一圈 22 分钟）校准的，于是 `/api/cron/health` 恒 503、`reconcile-pr-helper.yml` 每次报红，最老投影年龄涨到 6459 秒、61 个阶段中 40 个超阈值（`stages_failed` 全程为 0，不是收敛故障）。**调大批次是错的修法**：真正的卡点是 40 秒预算（`CRON_RECONCILE_BUDGET_MS = 60_000 - 20_000`），`06:43` 那次已用 44.9 秒撞线并记下「校准未在预算内完成，已让给下一次触发」，8 个流程就已装不下一次预算。实际处置是 Vercel Production 加 `STAGE_UNCONVERGED_THRESHOLD_SECONDS=9000`；处置后最老投影 3913 秒、超阈值 0 个、工作流转 success。**注意生效方式**：面板 Redeploy 会被拒（`Prebuilt deployments cannot be redeployed...`），因为生产部署是 Actions 上传的 prebuilt 产物；正确路径是 `gh workflow run deploy-vercel.yml --ref main`，该工作流第一步 `vercel pull` 会拉最新环境变量。
 - 遗留未处理：一圈的长度由 GitHub 往返决定（每阶段约 7.8 次调用，218 ÷ 28；`github_ms` 52.9 秒 > 墙钟 24.6 秒说明已并行），降这个数才能真正缩短轮转，属代码工作、未立项。另有小浪费：撞预算的 sweep 似乎没推进那批流程的 `last_reconcile_attempt_at`，`06:43 → 07:00` 领取了完全相同的 8 个流程。Actions 的 `*/10` 兜底不需要再放宽——`gh run list` 显示 GitHub 对 schedule 事件限流，实际间隔已是 30–60 分钟。
+
+## 2026-10-10 已暂停自动化动作永不消失（本地已修复，待部署）
+
+**现象**：生产失败中心持续显示 `bayernjf/pr-helper` dev→main「自动合并 PR · 已暂停，需要处理 · 已尝试 1 次 · Internal Server Error」，点解决后过一阵又出现。
+
+**根因（三个机制叠加）**：
+
+1. PR #387 自动合并时执行器抛了 GitHub 5xx（`Internal Server Error`），动作置 `paused`；`automationAttemptWasReached` 只把 rate limit / timeout / aborted 当临时故障，5xx 被当成「已有结论的暂停」——drain 对有结论的 paused 永远 `skip`，不重试也不过期取消。
+2. drain 的取代判断（`hasNewer` / `hasNewerSucceeded`）只查 `workflow_automation_actions` 表；PR #387 于 2026-10-07 17:19 UTC 在系统外被合并，没有新动作行，取代永远不触发。
+3. 前端「标记已解决」只是浏览器内存里 15 分钟 TTL 的本地隐藏，服务端 paused 行还在，过期就回来了。
+
+**修复**（`api/_lib/workflows-store.ts`，先写失败测试再改）：
+
+- `automationAttemptWasReached` 把 `Internal Server Error` / `Bad Gateway` / `Service Unavailable` 归入「未到达结论的临时故障」：此类暂停会被 drain 重试，超窗自动取消，不再永久 parked。
+- drain 决策新增 `routeMerged`：SQL 顺带查 `workflow_stage_states` 中该路由在动作创建之后已有 `pull_state='merged'` 的记录，命中则以新取消原因 `fulfilled`（「该步骤的 PR 已合并，自动化动作无需再执行」）取消 paused 动作。
+
+**验证**：`npx tsc --noEmit` 通过；`npm test` 33 文件 / 721 项全过（新增 6 项：5xx 分类 1、routeMerged 取消/保留 4、原有语义不变）。
+
+**部署后效果**：生产那条存量 paused 行（PR #387 已 merged）会在下一次 drain（pg_cron 每 2 分钟）被自动取消为 `fulfilled`，失败中心自行清空，无需手动清数据。
 
 ## 待处理事项（2026-09-15 汇总）
 
