@@ -1080,6 +1080,12 @@ describe('automationAttemptWasReached', () => {
     expect(automationAttemptWasReached('The operation was aborted due to timeout')).toBe(false);
   });
 
+  it('treats a GitHub 5xx as a refusal that never reached a verdict', () => {
+    expect(automationAttemptWasReached('Internal Server Error')).toBe(false);
+    expect(automationAttemptWasReached('502 Bad Gateway')).toBe(false);
+    expect(automationAttemptWasReached('503 Service Unavailable')).toBe(false);
+  });
+
   it('spends it on a verdict GitHub did reach, so a conflict still retires', () => {
     expect(automationAttemptWasReached('GitHub 合并状态为 dirty')).toBe(true);
     expect(automationAttemptWasReached('分支落后于目标分支，需要先在 GitHub 更新分支')).toBe(true);
@@ -1704,6 +1710,28 @@ describe('automationDrainDecision', () => {
   // one record of why the step stopped.
   it('keeps an aged-out verdict paused rather than cancelling it', () => {
     expect(automationDrainDecision(action({ state: 'paused', failureReason: '门禁尚未全绿（当前 failure）', createdAt: '2026-08-14T13:00:00.000Z', updatedAt: '2026-08-14T13:30:00.000Z' }), now)).toEqual({ kind: 'skip' });
+  });
+
+  // A merge that lands outside the automation — a person clicking merge on GitHub or in the app —
+  // writes no action row, so neither `hasNewer` nor `hasNewerSucceeded` ever fires. In production a
+  // dev→main merge paused on a GitHub 5xx outlived the PR itself by two days and kept the failure
+  // centre at "needs attention" the whole time.
+  it('cancels a paused action whose route already merged outside the automation', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: 'Internal Server Error', routeMerged: true }), now)).toEqual({ kind: 'cancel', reason: 'fulfilled' });
+  });
+
+  it('cancels a paused verdict too once the route has merged, because the intent is fulfilled', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: 'GitHub 合并状态为 dirty', routeMerged: true }), now)).toEqual({ kind: 'cancel', reason: 'fulfilled' });
+  });
+
+  it('keeps a paused verdict while the route is still unmerged', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: 'GitHub 合并状态为 dirty', routeMerged: false }), now)).toEqual({ kind: 'skip' });
+  });
+
+  // A merge recorded before the action exists belongs to an earlier round; the action speaks for the
+  // commits pushed since, so it must not be retired by history it postdates.
+  it('keeps a paused action when only an earlier round of the route has merged', () => {
+    expect(automationDrainDecision(action({ state: 'paused', failureReason: 'GitHub 合并状态为 dirty', routeMerged: false }), now)).toEqual({ kind: 'skip' });
   });
 
   // Every one of the nine rows the failure centre showed as needing attention was superseded, and in
