@@ -253,28 +253,46 @@ async function scheduleServerAutoCreate(environment: Record<string, string | und
 
 // Models routinely wrap the JSON in a markdown fence and sometimes prepend a blank line, which
 // anchored stripping misses. The closing fence is searched from the end so a fenced snippet inside
-// the pull request body survives.
+// the pull request body survives. When the model emits a fence that frames nothing recoverable
+// (e.g. a fence with no closing backtick on a truncated response), we fall back to the trimmed
+// text so callers can still attempt the prose-aware extraction below.
 export function jsonFromModelText(content: string) {
   const trimmed = content.trim();
   if (!trimmed.startsWith('```')) return trimmed;
   const withoutOpening = trimmed.slice(trimmed.indexOf('\n') + 1);
   const closing = withoutOpening.lastIndexOf('```');
-  return (closing >= 0 ? withoutOpening.slice(0, closing) : withoutOpening).trim();
+  const fenced = (closing >= 0 ? withoutOpening.slice(0, closing) : withoutOpening).trim();
+  return fenced || trimmed;
 }
 
 // A model output capped by max_tokens ends mid-string, so JSON.parse throws the raw
 // "Unterminated string in JSON at position N" — unreadable to the operator and indistinguishable
 // from a malformed prompt. finish_reason === 'length' is the authoritative truncation signal;
 // anything else that fails to parse is reported as invalid model output rather than a SyntaxError.
+// On failure we surface a preview of the raw model text so the operator can tell an empty/error
+// envelope (credential or model gone) apart from a truncated or prose-wrapped response.
 export function parseAutomationMessage(content: string, finishReason?: string): { title: string; body: string } {
   if (finishReason === 'length') {
     throw new Error('AI 生成内容过长被截断，请缩短生成规则或减少提交数量后重试');
   }
+  const raw = content.trim();
+  if (!raw) {
+    throw new Error('AI 返回内容为空（多半是 API Key 失效或 model 不存在，请检查 AI 凭证配置）');
+  }
+  // Models sometimes wrap the JSON in a prose preamble/suffix without a fence, e.g.
+  // "好的，这里是 PR 内容：\n{...}". Locate the outermost {...} span instead of demanding
+  // that the whole string be JSON — this tolerates that wrapping without mis-slicing a fenced
+  // code block the PR body legitimately contains.
+  const candidate = jsonFromModelText(content);
+  const start = candidate.indexOf('{');
+  const end = candidate.lastIndexOf('}');
+  const jsonText = start >= 0 && end > start ? candidate.slice(start, end + 1) : candidate;
   let parsed: { title?: unknown; body?: unknown };
   try {
-    parsed = JSON.parse(jsonFromModelText(content)) as { title?: unknown; body?: unknown };
+    parsed = JSON.parse(jsonText) as { title?: unknown; body?: unknown };
   } catch {
-    throw new Error('AI 返回的 PR 内容不是有效 JSON');
+    const preview = raw.replace(/\s+/g, ' ').slice(0, 200);
+    throw new Error(`AI 返回的 PR 内容不是有效 JSON（原始返回前 200 字：${preview}）`);
   }
   if (typeof parsed.title !== 'string' || !parsed.title.trim() || typeof parsed.body !== 'string') {
     throw new Error('AI 返回的 PR 内容格式无效');
@@ -283,7 +301,7 @@ export function parseAutomationMessage(content: string, finishReason?: string): 
 }
 
 async function generateAutomationMessage(baseUrl: string, apiKey: string, model: string, source: string, target: string, commits: string[], generationRule: string) {
-  const response = await fetch(aiChatCompletionsUrl(baseUrl), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model, messages: [{ role: 'user', content: buildPrPrompt(source, target, commits, generationRule) }], temperature: 0.2, max_tokens: 3000 }), signal: AbortSignal.timeout(20_000) });
+  const response = await fetch(aiChatCompletionsUrl(baseUrl), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model, messages: [{ role: 'user', content: buildPrPrompt(source, target, commits, generationRule) }], temperature: 0.2, max_tokens: 6000 }), signal: AbortSignal.timeout(20_000) });
   if (!response.ok) throw new Error(`AI 生成失败 (${response.status})`);
   const payload = await response.json() as { choices?: { message?: { content?: string }; finish_reason?: string }[] };
   const choice = payload.choices?.[0];
