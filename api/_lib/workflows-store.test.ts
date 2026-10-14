@@ -880,6 +880,10 @@ describe('jsonFromModelText', () => {
   it('keeps a fenced block that the pull request body itself contains', () => {
     expect(jsonFromModelText('```json\n{"body":"see ```ts\\ncode\\n``` above"}\n```')).toBe('{"body":"see ```ts\\ncode\\n``` above"}');
   });
+
+  it('falls back to the trimmed text when a fence frames nothing', () => {
+    expect(jsonFromModelText('```json\n{"title":"a"}\n')).toBe('{"title":"a"}');
+  });
 });
 
 describe('parseAutomationMessage', () => {
@@ -903,6 +907,27 @@ describe('parseAutomationMessage', () => {
     const truncated = '{"title":"修复","body":"这是一个很长的描述，还没写完就被截断了';
     expect(() => parseAutomationMessage(truncated, 'stop'))
       .toThrow(/AI 返回的 PR 内容不是有效 JSON/);
+  });
+
+  it('surfaces a raw preview in the error so the operator can tell empty/truncated/prose apart', () => {
+    const truncated = '{"title":"修复","body":"这是一个很长的描述，还没写完就被截断了';
+    expect(() => parseAutomationMessage(truncated, 'stop'))
+      .toThrow(/原始返回前 200 字/);
+  });
+
+  it('treats an empty model response as a distinct credential/model error', () => {
+    expect(() => parseAutomationMessage('   ', 'stop'))
+      .toThrow(/AI 返回内容为空/);
+  });
+
+  it('extracts JSON wrapped in a prose preamble without a fence', () => {
+    expect(parseAutomationMessage('好的，这是 PR 内容：\n{"title":"修复登录","body":"修了登录 bug"}', 'stop'))
+      .toEqual({ title: '修复登录', body: '修了登录 bug' });
+  });
+
+  it('extracts JSON wrapped in a prose suffix after a fence', () => {
+    expect(parseAutomationMessage('```json\n{"title":"a","body":"b"}\n```\n希望这个 PR 有用', 'stop'))
+      .toEqual({ title: 'a', body: 'b' });
   });
 
   it('throws when title or body is missing', () => {
