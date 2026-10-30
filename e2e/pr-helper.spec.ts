@@ -907,3 +907,67 @@ test('看板摘要里的 PR 引用悬停显示地址，点击复制而不是跳�
   await expect(page.locator('.toast-message')).toHaveText('已复制 PR 地址');
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('https://github.com/acme/demo/pull/42');
 });
+
+test.describe('mobile viewport (narrow-screen adaptation)', () => {
+  // Narrow-screen adaptation runs in the same chromium project; only the
+  // viewport and touch flags differ, no browser engine switch.
+  test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+
+  test('看板在手机竖屏无整页横向溢出，Lane 与抽屉可用', async ({ page }) => {
+    const workflow: Workflow = {
+      id: 'flow-mobile',
+      name: '移动端看板流程',
+      repository,
+      version: 1,
+      stages: [
+        { stageId: 'stage-a', source: 'feature/e2e', target: 'dev' },
+        { stageId: 'stage-b', source: 'dev', target: 'main' },
+      ],
+    };
+    await openWorkspace(page, { workflows: [workflow] });
+
+    // No whole-page horizontal overflow: the only scroller should be the lane track itself.
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+    await expect(page.locator('.project-lane')).toBeVisible();
+    // Lane bodies are collapsed by default; expand via the collapse toggle only
+    // when the body is still hidden (mobile may render it expanded).
+    const body = page.locator('.lane-body').first();
+    await expect(body).toBeAttached();
+    if (await body.isHidden()) {
+      await page.locator('[data-lane-collapse]').first().click();
+    }
+    await body.scrollIntoViewIfNeeded();
+    await expect(body).toBeVisible();
+    await expect(body.locator('.lane-step')).toHaveCount(2);
+
+    // Step drawer opens as a full-width sheet and remains usable.
+    await page.locator('[data-lane-step]').first().click();
+    const drawer = page.getByRole('dialog');
+    await expect(drawer.getByRole('heading', { name: 'feature/e2e → dev' })).toBeVisible();
+    const drawerBox = await drawer.boundingBox();
+    expect(drawerBox?.width).toBeGreaterThanOrEqual(390 - 2);
+  });
+
+  test('手机竖屏失败中心与创建弹窗不溢出', async ({ page }) => {
+    const workflow: Workflow = {
+      id: 'flow-mobile-fc',
+      name: '移动端失败中心流程',
+      repository,
+      stages: [{ stageId: 'stage-merge', source: 'feature/e2e', target: 'dev' }],
+    };
+    await openWorkspace(page, {
+      workflows: [workflow],
+      automationReady: true,
+      automation: [{ id: 31, workflowId: workflow.id, stageId: 'stage-merge', stageIndex: 0, source: 'feature/e2e', target: 'dev', kind: 'create-pr', state: 'paused', attempts: 1, failureReason: 'AI 生成失败 (429)', createdAt: '2026-10-30T00:00:00.000Z', updatedAt: '2026-10-30T00:00:00.000Z' }],
+    });
+
+    await expect(page.locator('.failure-center')).toBeVisible();
+    await expect(page.locator('.failure-center')).toContainText('AI 生成失败 (429)');
+
+    await page.locator('[data-fc-takeover-action="31"]').click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.locator('#takeover-title')).toBeVisible();
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
+});

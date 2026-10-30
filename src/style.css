@@ -3091,3 +3091,64 @@ a.account-menu-item {
 /* The drawer chip replaces an <a> that carried its own weight and colour, so it keeps that appearance. */
 .pr-ref.drawer-pr-link { display: inline-flex; margin-top: 10px; color: var(--text-accent); font: 700 .76rem Manrope; border-bottom: 0; }
 .pr-ref.drawer-pr-link:hover, .pr-ref.drawer-pr-link:focus-visible { text-decoration: underline; }
+
+/* =============================================================================
+   Mobile / narrow-screen adaptation (2026-10-30). The lane track keeps its
+   horizontal swipe (the natural phone pattern for a step pipeline); everything
+   else stacks, shrinks or goes full-width. Breakpoints were previously
+   620/760px scattered per component; 700px below is the shared narrow norm.
+   ========================================================================== */
+@media (max-width: 700px) {
+  body { padding: 12px; }
+  html { -webkit-text-size-adjust: 100%; }
+
+  /* Top bar: wrap instead of squeezing. */
+  .topbar { flex-wrap: wrap; gap: 10px; padding-bottom: 14px; }
+  .brand { font-size: .95rem; }
+  .topbar nav { flex-wrap: wrap; gap: 4px; }
+  .nav-button { padding: 7px 9px; font-size: .76rem; }
+
+  /* Board header and summary. */
+  .board-head { flex-wrap: wrap; gap: 12px; padding: 18px 0 12px; }
+  .board-title p { display: none; }
+  .board-summary { flex-wrap: wrap; }
+  .board-summary button { flex: 1 1 auto; justify-content: center; }
+
+  /* Project lane cards. */
+  .project-lane > header { padding: 12px 14px; gap: 10px; }
+  .lane-heading { gap: 8px; }
+  .project-lane h2 { font-size: .96rem; }
+  .lane-actions { gap: 3px; }
+
+  /* Step track: keep horizontal swipe, slightly narrower steps. */
+  .lane-track { padding: 12px; gap: 8px; }
+  .lane-step { flex: 0 0 178px; padding: 11px; }
+  .lane-step-index { width: 24px; height: 24px; }
+  .lane-merge-group { min-width: 194px; padding: 10px; }
+
+  /* Step drawer: full-width sheet on phones. */
+  .step-drawer { width: 100vw; max-width: 100vw; border-left: 0; }
+  .step-drawer > section { padding: 20px 16px 28px; }
+  .drawer-close { right: 14px; top: 14px; }
+
+  /* Dialogs: more room for content, tighter padding. */
+  .create-dialog { width: calc(100vw - 20px); padding: 18px 16px; max-height: 88vh; overflow-y: auto; }
+
+  /* Failure centre: compact rows, buttons wrap. */
+  .failure-center li { gap: 8px; padding: 10px; }
+  .fc-actions { flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+
+  /* Timeline and automation rows. */
+  .timeline article { gap: 10px; padding: 14px 0; }
+  .timeline-automation { padding: 10px; }
+  .timeline-automation input[type="number"] { max-width: 64px; }
+
+  /* Deployment cards stack their actions under the text. */
+  .deployment-card { align-items: flex-start; }
+  .deployment-card > span { justify-content: flex-start; margin-top: 6px; }
+  .deployment-card > span .ghost, .deployment-card > span a { white-space: normal; }
+
+  /* Run history and lane details breathe on narrow screens. */
+  .lane-run-history li { grid-template-columns: minmax(0, 1fr); }
+  .lane-run-history li time { grid-column: 1 / -1; }
+}
