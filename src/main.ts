@@ -7,7 +7,7 @@ import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel,
 import { navigationClass, navigationTarget, selectWorkflowAfterCloudLoad, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
 import { initPrReferenceTooltip, prReferenceHtml } from './lib/pr-reference';
-import { activeWorkflows, archiveWorkflow, archivedWorkflows, restoreWorkflow, addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type StageRouteMode, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
+import { activeWorkflows, archiveWorkflow, archivedWorkflows, restoreWorkflow, addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoAdvance, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type StageRouteMode, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { automationActionPresentation, latestAutomationAction, stageProgressNode, stageRunPresentation, workflowProgress, workflowRunSummary, worstStageProgress, type AutomationActionState, type StageProgressStatus, type WorkflowStageRunState } from './lib/workflow-run';
@@ -1430,7 +1430,10 @@ function failureCenterPanel(): string {
     const presentation = automationActionPresentation(action);
     const icon = presentation.tone === 'failed' ? '✗' : '⏸';
     const reason = escape(action.failureReason?.trim() || t('automation.reasonUnknown'));
-    return `<li class="${presentation.tone}"><span class="fc-icon">${icon}</span><div><b>${escape(flow.name)}</b><small>${escape(action.source)} → ${escape(action.target)} · ${escape(automationActionSummary(action))}</small><p>${reason}</p></div><div class="fc-actions"><button class="link-button fc-open" data-fc-workflow="${escape(action.workflowId)}" data-fc-stage="${action.stageIndex}" data-fc-source="${escape(action.source)}">${t('overview.board.stepDetail')}</button></div></li>`;
+    const takeover = action.kind === 'create-pr' && action.state === 'paused'
+      ? `<button class="ghost fc-takeover" data-fc-takeover-action="${action.id}">${t('takeover.open')}</button>`
+      : '';
+    return `<li class="${presentation.tone}"><span class="fc-icon">${icon}</span><div><b>${escape(flow.name)}</b><small>${escape(action.source)} → ${escape(action.target)} · ${escape(automationActionSummary(action))}</small><p>${reason}</p></div><div class="fc-actions">${takeover}<button class="link-button fc-open" data-fc-workflow="${escape(action.workflowId)}" data-fc-stage="${action.stageIndex}" data-fc-source="${escape(action.source)}">${t('overview.board.stepDetail')}</button></div></li>`;
   }).join('');
   const total = failures.length + deploymentFailures.length + blockedAutomationActions().length;
   return `<section class="failure-center"><div class="fc-head"><p class="eyebrow">${t('failureCenter.eyebrow')}</p><span class="fc-count">${t('failureCenter.count', { count: total })}</span></div><ul>${items}${deployItems}${automationItems}</ul></section>`;
@@ -1573,6 +1576,12 @@ function bindFailureCenter() {
       showToast(error instanceof Error ? error.message : t('recovery.retryFailed'));
       button.disabled = false;
     }
+  }));
+  document.querySelectorAll<HTMLButtonElement>('.fc-takeover').forEach(button => button.addEventListener('click', () => {
+    const actionId = Number(button.dataset.fcTakeoverAction);
+    const action = automationActions.find(candidate => candidate.id === actionId);
+    if (!action) return;
+    showTakeoverDialog(action);
   }));
   document.querySelectorAll<HTMLButtonElement>('.fc-repair').forEach(button => button.addEventListener('click', () => {
     const workflowId = button.dataset.fcWorkflow;
@@ -2259,6 +2268,15 @@ function detail() {
       render();
     })();
   }));
+  document.querySelectorAll<HTMLInputElement>('[data-detail-auto-advance-stage]').forEach(input => input.addEventListener('change', () => {
+    if (!active) return;
+    const stageIndex = Number(input.dataset.detailAutoAdvanceStage);
+    const updated = setStageAutoAdvance(active, stageIndex, input.checked);
+    if (updated === active) { input.checked = !input.checked; showToast(t('detail.autoAdvanceLegacyPolicy')); return; }
+    save(updated);
+    showToast(input.checked ? t('draft.autoAdvanceEnabled') : t('draft.autoAdvanceDisabled'));
+    render();
+  }));
   document.querySelectorAll<HTMLInputElement>('[data-detail-auto-create-threshold]').forEach(input => input.addEventListener('change', () => {
     if (!active) return;
     const stageIndex = Number(input.dataset.detailAutoCreateThreshold);
@@ -2408,12 +2426,17 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const mergeDisabled = autoDisabled || !canMergeAutomation || mergeLegacyPolicy;
   const mergeHint = !canEditAutomation ? t('detail.autoCreateReadonly') : !autoCreatePrerequisites() ? t('draft.autoCreatePrerequisites') : !canMergeAutomation ? t('detail.autoMergeReadonly') : mergeLegacyPolicy ? t('detail.autoMergeLegacyPolicy') : t('detail.autoMergeDesc');
   const mergeControl = `<label class="timeline-auto-merge"><input type="checkbox" data-detail-auto-merge-stage="${index}" ${mergeEnabled ? 'checked' : ''} ${mergeDisabled ? 'disabled' : ''} /><span>${t('draft.autoMerge')}</span></label>`;
+  const advanceEnabled = (stage.automation as { autoAdvanceNext?: true } | undefined)?.autoAdvanceNext === true;
+  const advanceLegacyPolicy = stage.automation?.executionMode === 'browser-session';
+  const advanceDisabled = autoDisabled || !canMergeAutomation || advanceLegacyPolicy;
+  const advanceHint = !canEditAutomation ? t('detail.autoCreateReadonly') : !autoCreatePrerequisites() ? t('draft.autoCreatePrerequisites') : !canMergeAutomation ? t('detail.autoMergeReadonly') : advanceLegacyPolicy ? t('detail.autoAdvanceLegacyPolicy') : t('detail.autoAdvanceDesc');
+  const advanceControl = `<label class="timeline-auto-merge"><input type="checkbox" data-detail-auto-advance-stage="${index}" ${advanceEnabled ? 'checked' : ''} ${advanceDisabled ? 'disabled' : ''} /><span>${t('draft.autoAdvance')}</span></label>`;
   // 自动化只认 stage 钉住的那一版提示词，改了默认规则不会自己传过来，所以过期时给一个显式的同步入口。
   const ruleUpdate = autoEnabled && stage.automation?.executionMode === 'server' ? stageGenerationRuleUpdate(stage.automation.generationRule, generationRules) : undefined;
   const ruleNotice = ruleUpdate
     ? `<p class="timeline-rule-outdated">${escape(ruleUpdate.kind === 'content' ? t('detail.ruleOutdated.content', { name: ruleUpdate.name }) : t('detail.ruleOutdated.rule', { name: ruleUpdate.name, stored: stage.automation!.generationRule!.name }))}<button type="button" class="link-button" data-detail-rule-sync="${index}" ${canEditAutomation ? '' : 'disabled'}>${t('detail.ruleOutdated.sync')}</button></p>`
     : '';
-  const autoControl = `<div class="timeline-automation"><label class="timeline-auto-create"><input type="checkbox" data-detail-auto-create-stage="${index}" ${autoEnabled ? 'checked' : ''} ${autoDisabled ? 'disabled' : ''} /><span>${t('draft.autoCreate')}</span><span>${t('draft.autoCreateThreshold')}</span><input class="auto-create-threshold" type="number" min="1" max="20" step="1" value="${threshold}" data-detail-auto-create-threshold="${index}" aria-label="${escape(t('draft.autoCreateThreshold'))}" title="${escape(t('draft.autoCreateThresholdTooltip'))}" ${autoDisabled ? 'disabled' : ''} /></label>${mergeControl}<small>${escape(autoHint)}</small>${mergeHint === autoHint ? '' : `<small>${escape(mergeHint)}</small>`}${ruleNotice}${automationDetailBlock(active!.id, index, stage.source, false)}</div>`;
+  const autoControl = `<div class="timeline-automation"><label class="timeline-auto-create"><input type="checkbox" data-detail-auto-create-stage="${index}" ${autoEnabled ? 'checked' : ''} ${autoDisabled ? 'disabled' : ''} /><span>${t('draft.autoCreate')}</span><span>${t('draft.autoCreateThreshold')}</span><input class="auto-create-threshold" type="number" min="1" max="20" step="1" value="${threshold}" data-detail-auto-create-threshold="${index}" aria-label="${escape(t('draft.autoCreateThreshold'))}" title="${escape(t('draft.autoCreateThresholdTooltip'))}" ${autoDisabled ? 'disabled' : ''} /></label>${mergeControl}${advanceControl}<small>${escape(autoHint)}</small>${mergeHint === autoHint ? '' : `<small>${escape(mergeHint)}</small>`}${advanceHint === autoHint || advanceHint === mergeHint ? '' : `<small>${escape(advanceHint)}</small>`}${ruleNotice}${automationDetailBlock(active!.id, index, stage.source, false)}</div>`;
   if (stage.source.includes('*')) {
     const states = active ? statesForStage(active, index) : [];
     const runs = states.map(state => `<button type="button" class="timeline-action" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(state.source)}"><b>${escape(state.source)}</b><small>${escape(dynamicBranchStatusText(state))}</small></button>`).join('');
@@ -2438,7 +2461,8 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const mergeability = status.mergeable === false || status.mergeableState === 'dirty' ? t('status.merge.conflict') : status.mergeableState === 'behind' ? t('status.merge.behind') : status.mergeableState === 'blocked' ? t('status.merge.blocked') : '';
   const mergeabilityPending = status.mergeable !== true || status.mergeableState !== 'clean';
   const mergedVerification = status.checks?.state;
-  const state = status.kind === 'merged' ? mergedVerification === 'success' ? t('state.postMerge.passed') : mergedVerification === 'failure' ? t('state.postMerge.failed') : status.checks ? t('state.postMerge.running') : t('state.merged') : status.kind === 'closed' ? t('state.closed') : status.checks?.state === 'failure' ? t('state.actionsFailed') : status.checks?.state === 'pending' ? t('state.waitingActions') : status.requiredApprovals && (status.approvals || 0) < status.requiredApprovals ? t('state.waitingApprovals') : mergeability ? t('state.mergeBlocked') : mergeabilityPending ? t('state.mergeChecking') : t('state.waitingMerge');
+  const superseded = status.kind === 'merged' && mergedVerification === 'failure' && Boolean(status.aheadBy);
+  const state = superseded ? t('state.superseded') : status.kind === 'merged' ? mergedVerification === 'success' ? t('state.postMerge.passed') : mergedVerification === 'failure' ? t('state.postMerge.failed') : status.checks ? t('state.postMerge.running') : t('state.merged') : status.kind === 'closed' ? t('state.closed') : status.checks?.state === 'failure' ? t('state.actionsFailed') : status.checks?.state === 'pending' ? t('state.waitingActions') : status.requiredApprovals && (status.approvals || 0) < status.requiredApprovals ? t('state.waitingApprovals') : mergeability ? t('state.mergeBlocked') : mergeabilityPending ? t('state.mergeChecking') : t('state.waitingMerge');
   const approvalGate = approvals ? `<span>${approvals}</span>` : '';
   const mergeabilityGate = mergeability ? `<span>${mergeability}</span>` : '';
   const gates = status.kind === 'merged' ? [checks, actions] : [checks, actions, approvalGate, mergeabilityGate];
@@ -2448,7 +2472,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
     : '';
   const autoNewPullAction = '';
   const newPullAction = canCreateNewPull && canOperateWorkflow(active!, 'pr-create') ? `${autoNewPullAction}<button class="timeline-action" data-create-pr="${index}">${t('status.createPr.button')}</button>` : '';
-  const stateClass = status.kind === 'merged' ? mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
+  const stateClass = status.kind === 'merged' ? superseded ? 'neutral' : mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
   // A projected first paint lacks the live pull's head ref and Actions detail, so the merge menu only
   // appears once the live read replaces it.
   const mergeAction = !status.projected && status.kind === 'open' && !recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(active!, 'pull-merge') ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
@@ -2927,6 +2951,62 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
   dialog.showModal();
   dialog.addEventListener('cancel', event => { event.preventDefault(); requestClose(); });
   dialog.addEventListener('close', () => { renderGeneration += 1; importRequest += 1; onRulesChanged(); dialog.remove(); });
+}
+
+function showTakeoverDialog(action: AutomationAction) {
+  const flow = workflows.find(w => w.id === action.workflowId);
+  if (!flow || !canOperateWorkflow(flow, 'pr-create')) return;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'create-dialog pr-takeover-dialog';
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('takeover.eyebrow')}</p><h2>${escape(action.source)} → ${escape(action.target)}</h2><p class="meta">${t('takeover.context', { id: action.id })}</p><label>${t('takeover.titleLabel')}<input id="takeover-title" value="${escape(`${action.source} → ${action.target}`)}" /></label><label>${t('takeover.bodyLabel')}<textarea id="takeover-body" placeholder="${t('takeover.bodyPlaceholder')}"></textarea></label><p id="takeover-operation-status" class="meta" role="status" aria-live="polite" aria-atomic="true"></p><div class="dialog-actions"><button id="takeover-regenerate" type="button" class="ghost">${t('takeover.regenerate')}</button><button value="cancel" class="ghost">${t('takeover.cancel')}</button><button id="takeover-confirm" class="primary">${t('takeover.confirm')}</button></div></form>`;
+  document.body.append(dialog); dialog.showModal();
+  const rect = dialog.getBoundingClientRect();
+  dialog.style.position = 'fixed'; dialog.style.inset = 'auto';
+  dialog.style.left = `${rect.left}px`; dialog.style.top = `${rect.top}px`; dialog.style.margin = '0';
+  const form = dialog.querySelector<HTMLFormElement>('form')!;
+  const titleInput = dialog.querySelector<HTMLInputElement>('#takeover-title')!;
+  const bodyInput = dialog.querySelector<HTMLTextAreaElement>('#takeover-body')!;
+  const regenerateButton = dialog.querySelector<HTMLButtonElement>('#takeover-regenerate')!;
+  const confirmButton = dialog.querySelector<HTMLButtonElement>('#takeover-confirm')!;
+  const operationStatus = dialog.querySelector<HTMLElement>('#takeover-operation-status')!;
+  let busy = false;
+  const setBusy = (value: boolean) => { busy = value; titleInput.disabled = value; bodyInput.disabled = value; regenerateButton.disabled = value; confirmButton.disabled = value; form.setAttribute('aria-busy', String(value)); };
+  const runTakeoverRequest = async (endpoint: string, payload: Record<string, unknown>) => {
+    const response = await fetch(githubAppApiUrl(endpoint), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data = await response.json().catch(() => ({})) as { result?: { message?: { title?: string; body?: string }; state?: string; pullNumber?: number; pullUrl?: string | null }; message?: string };
+    if (!response.ok) throw new Error(data.message || t('takeover.failed'));
+    return data.result;
+  };
+  regenerateButton.addEventListener('click', async () => {
+    if (busy) return;
+    setBusy(true); operationStatus.textContent = t('takeover.regenerating');
+    try {
+      const result = await runTakeoverRequest('/api/automation?action=regenerate', { actionId: action.id });
+      if (result?.message?.title) titleInput.value = result.message.title;
+      if (result?.message?.body) bodyInput.value = result.message.body;
+      operationStatus.textContent = '';
+    } catch (error) {
+      operationStatus.textContent = error instanceof Error ? error.message : t('takeover.regenerateFailed');
+    } finally { setBusy(false); }
+  });
+  confirmButton.addEventListener('click', async (event) => {
+    event.preventDefault();
+    if (busy) return;
+    const title = titleInput.value.trim();
+    if (!title) { operationStatus.textContent = t('takeover.titleRequired'); return; }
+    setBusy(true); operationStatus.textContent = t('takeover.submitting');
+    try {
+      const result = await runTakeoverRequest('/api/automation?action=takeover', { actionId: action.id, title, body: bodyInput.value });
+      if (result?.pullNumber) showToast(t('takeover.confirmSucceeded', { number: result.pullNumber }));
+      dialog.close();
+      markAutomationResolved(flow, action.stageIndex, action.source);
+      render();
+    } catch (error) {
+      operationStatus.textContent = error instanceof Error ? error.message : t('takeover.failed');
+      setBusy(false);
+    }
+  });
+  dialog.addEventListener('close', () => dialog.remove());
 }
 
 function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?: string) {

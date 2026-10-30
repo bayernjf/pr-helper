@@ -1,6 +1,6 @@
 import { requestErrorStatus, type ApiRequest, type ApiResponse } from './_lib/http.js';
 import { currentGitHubIdentity } from './_lib/session.js';
-import { addTeamMember, createTeam, deleteAiAutomationCredential, enqueueWorkflowAutomationAction, executeWorkflowAutomationAction, getAiAutomationCredential, isStoredWorkflow, listTeamMembers, listTeams, listWorkflowAutomationActions, listWorkflows, recordOperationAudit, removeTeamMember, removeWorkflow, reconcileRealtime, removeWorkflowStage, saveAiAutomationCredential, shareWorkflowWithTeam, testSavedAiAutomationCredential, upsertWorkflow, type TeamRole } from './_lib/workflows-store.js';
+import { addTeamMember, createTeam, deleteAiAutomationCredential, enqueueWorkflowAutomationAction, executeWorkflowAutomationAction, getAiAutomationCredential, isStoredWorkflow, listTeamMembers, listTeams, listWorkflowAutomationActions, listWorkflows, recordOperationAudit, regenerateAutomationMessage, removeTeamMember, removeWorkflow, reconcileRealtime, removeWorkflowStage, saveAiAutomationCredential, shareWorkflowWithTeam, takeoverAutomationAction, testSavedAiAutomationCredential, upsertWorkflow, type TeamRole } from './_lib/workflows-store.js';
 import { testAiConnection } from '../src/lib/ai.js';
 import { validateAiBaseUrl } from './_lib/ai-credentials.js';
 
@@ -52,6 +52,16 @@ export default async function handler(request: ApiRequest, response: ApiResponse
         const payload = body(request) as Record<string, unknown>;
         const actionId = typeof payload.actionId === 'number' ? payload.actionId : Number(payload.actionId);
         response.status(200).json({ result: await executeWorkflowAutomationAction(process.env, identity, actionId) }); return;
+      }
+      if (request.method === 'POST' && request.query?.action === 'regenerate') {
+        const payload = body(request) as Record<string, unknown>;
+        const actionId = typeof payload.actionId === 'number' ? payload.actionId : Number(payload.actionId);
+        response.status(200).json({ result: await regenerateAutomationMessage(process.env, identity, actionId) }); return;
+      }
+      if (request.method === 'POST' && request.query?.action === 'takeover') {
+        const payload = body(request) as Record<string, unknown>;
+        const actionId = typeof payload.actionId === 'number' ? payload.actionId : Number(payload.actionId);
+        response.status(200).json({ result: await takeoverAutomationAction(process.env, identity, actionId, typeof payload.title === 'string' ? payload.title : '', typeof payload.body === 'string' ? payload.body : '') }); return;
       }
       if (request.method === 'POST') {
         const payload = body(request) as Record<string, unknown>;
