@@ -887,7 +887,7 @@ export type ActionableStage = {
   kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create';
   message: string;
 };
-export type StageDecisionKind = 'none' | 'locked' | 'waiting' | 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create' | 'merged';
+export type StageDecisionKind = 'none' | 'locked' | 'waiting' | 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create' | 'merged' | 'superseded';
 export type StageDecision = { kind: StageDecisionKind; actionable: boolean; canCreateNext: boolean; message: string };
 export type ReconciliationTrigger = 'cron' | 'webhook' | 'inbox_refresh' | 'manual';
 export type ReconciliationRun = { id: number; trigger: ReconciliationTrigger; state: 'running' | 'success' | 'degraded' | 'failure' | 'skipped'; stagesTotal: number; stagesReconciled: number; stagesFailed: number; durationMs: number | null; errorMessage: string | null; repository: string | null; startedAt: string; finishedAt: string | null; interrupted: boolean };
@@ -1551,8 +1551,18 @@ export function deriveStageDecision(workflow: StoredWorkflow, stageIndex: number
   const comparableStates = allStates.filter(candidate => Boolean(candidate.stage_id)).map(candidate => ({ ...candidate, stage_id: candidate.stage_id! }));
   const unlocked = stageIsUnlocked(workflow, stageIndex, comparableStates);
   // `kind` is the display state and cannot also carry the affordance: a merged route with new
-  // commits is both. A red post-merge gate withholds it so nothing is pushed downstream unattended.
+  // commits is both. A red gate on a merged commit does not withhold creation — the next PR is
+  // gated by its own checks — so the superseded branch above re-opens it; a red gate on a route
+  // that has no newer commits still withholds it until the branch recovers.
   const canCreateNext = unlocked && state.ahead_by > 0 && state.checks_state !== 'failure' && (state.pull_state === 'none' || state.pull_state === 'merged');
+  // A merged step whose gate is red while newer source commits wait is superseded, not failed:
+  // the red belongs to the commit that already merged (or to a target head that later delivery
+  // replaced), and the next PR's gate is that PR's own checks, so a stale red must not hold
+  // creation hostage. actionable stays false: nothing here needs the human action queue, which
+  // is why `kind` is a display state and not the affordance.
+  if (state.pull_state === 'merged' && state.checks_state === 'failure' && state.ahead_by > 0) {
+    return { kind: 'superseded', actionable: false, canCreateNext: true, message: '上一步已合并，其门禁失败属于已合并的提交；新提交可以创建 PR' };
+  }
   if (state.checks_state === 'failure') return { kind: 'checks-failed', actionable: true, canCreateNext, message: `第 ${stageIndex + 1} 步 Actions 失败` };
   if (state.pull_state === 'open' && state.approvals < state.required_approvals) return { kind: 'needs-approval', actionable: true, canCreateNext, message: `PR 还需要 ${state.required_approvals - state.approvals} 个 Approval` };
   if (state.pull_state === 'open' && state.checks_state === 'success' && state.approvals >= state.required_approvals && state.mergeable === true && state.mergeable_state === 'clean') return { kind: 'ready-to-merge', actionable: true, canCreateNext, message: 'PR 已满足合并条件' };
@@ -1569,6 +1579,7 @@ export function deriveStageDecision(workflow: StoredWorkflow, stageIndex: number
 
 export function actionableStageEntry(decision: StageDecision): { kind: ActionableStage['kind']; message: string } | null {
   if (decision.kind === 'merged') return decision.canCreateNext ? { kind: 'ready-to-create', message: decision.message } : null;
+  if (decision.kind === 'superseded') return null;
   if (!decision.actionable || decision.kind === 'none' || decision.kind === 'locked' || decision.kind === 'waiting') return null;
   return { kind: decision.kind, message: decision.message };
 }
@@ -2089,23 +2100,32 @@ async function reconcileStageWork(environment: Record<string, string | undefined
     if (comparison.ahead_by > 0 && comparisonHeadSha) await phase('queue', () => scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha));
     return { reconciled: true, phases };
   }
+  // A: a merged step's gate is evaluated against the target branch head, not the merge commit.
+  // A check that went red on the merge commit stays red forever even after the branch recovered,
+  // and parking the verdict on it permanently blocks auto-create (rich-sim stalled ≥ 44 minutes
+  // on exactly that). gateSha is what this verdict is pinned to; `sha` keeps its old meaning —
+  // the merged commit — for the retry and deployment-parent readers that consume head_sha.
+  const branchHead = pull.merged_at
+    ? await phase('targetHead', () => installationRequest<{ commit?: { sha?: string } }>(config, installationId, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}`).catch(() => null))
+    : null;
   const sha = pull.merged_at ? pull.merge_commit_sha : pull.head.sha;
+  const gateSha = pull.merged_at ? (branchHead?.commit?.sha || pull.merge_commit_sha) : pull.head.sha;
   if (!pull.merged_at) await phase('write', () => sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
   const [runs, statuses, reviews, protection, rules] = await phase('checks', () => Promise.all([
-    sha ? installationRequest<{ check_runs: CheckRun[] }>(config, installationId, `/repos/${owner}/${name}/commits/${sha}/check-runs?per_page=100`).catch(() => ({ check_runs: [] })) : Promise.resolve({ check_runs: [] }),
-    sha ? installationRequest<{ statuses: CommitStatus[] }>(config, installationId, `/repos/${owner}/${name}/commits/${sha}/status`).catch(() => ({ statuses: [] })) : Promise.resolve({ statuses: [] }),
+    gateSha ? installationRequest<{ check_runs: CheckRun[] }>(config, installationId, `/repos/${owner}/${name}/commits/${gateSha}/check-runs?per_page=100`).catch(() => ({ check_runs: [] })) : Promise.resolve({ check_runs: [] }),
+    gateSha ? installationRequest<{ statuses: CommitStatus[] }>(config, installationId, `/repos/${owner}/${name}/commits/${gateSha}/status`).catch(() => ({ statuses: [] })) : Promise.resolve({ statuses: [] }),
     pull.merged_at ? Promise.resolve([] as Review[]) : installationRequest<Review[]>(config, installationId, `/repos/${owner}/${name}/pulls/${pull.number}/reviews?per_page=100`).catch(() => []),
     pull.merged_at ? Promise.resolve(null as BranchProtection | null) : installationRequest<BranchProtection>(config, installationId, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}/protection`).catch(() => null),
     pull.merged_at ? Promise.resolve([] as BranchRule[]) : installationRequest<BranchRule[]>(config, installationId, `/repos/${owner}/${name}/rules/branches/${encodeURIComponent(stage.target)}`).catch(() => []),
   ]));
-  const deploymentStates = pull.merged_at && sha ? await phase('deploy', () => reconcileStageDeployments(environment, sql, row, workflow, stageIndex, source, stage.target, sha, phase)) : [];
+  const deploymentStates = pull.merged_at && gateSha ? await phase('deploy', () => reconcileStageDeployments(environment, sql, row, workflow, stageIndex, source, stage.target, gateSha, phase)) : [];
   const observedChecks = runs.check_runs.length || statuses.statuses.length
     ? summarizeGitHubChecks(runs.check_runs, statuses.statuses)
     : { state: 'success' as const, passed: 0, total: 0 };
   const checks = mergeChecksWithDeployments(observedChecks, deploymentStates);
   const requiredApprovals = requiredApprovalsFromProtection(protection, rules);
   const approvals = reviews.filter(review => review.state === 'APPROVED').length;
-  await phase('write', () => sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${workflow.repository}, ${stage.source}, ${stage.target}, ${pull.number}, ${pull.merged_at ? 'merged' : pull.state}, ${pull.merged_at || null}, ${sha || null}, ${checks.state}, ${checks.passed}, ${checks.total}, ${approvals}, ${requiredApprovals}, ${pull.mergeable ?? null}, ${pull.mergeable_state || null}, ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, head_sha = EXCLUDED.head_sha, checks_state = EXCLUDED.checks_state, checks_passed = EXCLUDED.checks_passed, checks_total = EXCLUDED.checks_total, approvals = EXCLUDED.approvals, required_approvals = EXCLUDED.required_approvals, mergeable = EXCLUDED.mergeable, mergeable_state = EXCLUDED.mergeable_state, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`);
+  await phase('write', () => sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, gate_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${workflow.repository}, ${stage.source}, ${stage.target}, ${pull.number}, ${pull.merged_at ? 'merged' : pull.state}, ${pull.merged_at || null}, ${sha || null}, ${gateSha || null}, ${checks.state}, ${checks.passed}, ${checks.total}, ${approvals}, ${requiredApprovals}, ${pull.mergeable ?? null}, ${pull.mergeable_state || null}, ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, head_sha = EXCLUDED.head_sha, gate_sha = EXCLUDED.gate_sha, checks_state = EXCLUDED.checks_state, checks_passed = EXCLUDED.checks_passed, checks_total = EXCLUDED.checks_total, approvals = EXCLUDED.approvals, required_approvals = EXCLUDED.required_approvals, mergeable = EXCLUDED.mergeable, mergeable_state = EXCLUDED.mergeable_state, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`);
   const before = previous[0];
   if (!before || before.pull_number !== pull.number) await phase('write', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:pull:${pull.number}`, 'pull-detected', `已发现 PR #${pull.number}`, stageId, stage.target));
   if (before?.pull_state !== (pull.merged_at ? 'merged' : pull.state) && pull.merged_at) {
@@ -2114,10 +2134,10 @@ async function reconcileStageWork(environment: Record<string, string | undefined
     const stageSnapshot = { source: stage.source, target: stage.target, stageId };
     await phase('write', () => sql`INSERT INTO workflow_runs (user_id, workflow_id, version, stage_index, stage_id, source, target, stage_snapshot, pull_number) VALUES (${row.user_id}, ${workflow.id}, ${versionRow[0]?.version || 1}, ${stageIndex}, ${stageId}, ${source}, ${stage.target}, ${sql.json(stageSnapshot)}, ${pull.number})`);
   }
-  if (before?.checks_state !== checks.state && ['success', 'failure'].includes(checks.state)) await phase('write', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:checks:${sha}:${checks.state}`, `checks-${checks.state}`, checks.state === 'success' ? 'Actions 已全绿' : 'Actions 失败，需要处理', stageId, stage.target));
+  if (before?.checks_state !== checks.state && ['success', 'failure'].includes(checks.state)) await phase('write', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:checks:${gateSha}:${checks.state}`, `checks-${checks.state}`, checks.state === 'success' ? 'Actions 已全绿' : 'Actions 失败，需要处理', stageId, stage.target));
   const route = `${stage.source} → ${stage.target}`;
   if (before?.checks_state !== checks.state && ['success', 'failure'].includes(checks.state)) {
-    await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:checks:${sha}:${checks.state}`, kind: `checks-${checks.state}`, title: checks.state === 'failure' ? 'Actions 失败，需要处理' : 'Actions 已全绿', body: `${workflow.repository} · ${route}`, url: `/` }));
+    await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:checks:${gateSha}:${checks.state}`, kind: `checks-${checks.state}`, title: checks.state === 'failure' ? 'Actions 失败，需要处理' : 'Actions 已全绿', body: `${workflow.repository} · ${route}`, url: `/` }));
   }
   const runState = workflowRunCompletionState(Boolean(pull.merged_at), checks.state);
   if (runState) await phase('write', () => sql`UPDATE workflow_runs SET state = ${runState}, completed_at = now() WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND pull_number = ${pull.number} AND state = 'active'`);

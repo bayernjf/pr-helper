@@ -494,6 +494,7 @@ const zh: TranslationDict = {
   'state.postMerge.passed': '合并后验证通过',
   'state.postMerge.failed': '合并后验证失败',
   'state.postMerge.running': '合并后验证中',
+  'state.superseded': '门禁已被后续提交取代',
   'state.merged': '已合并',
   'state.closed': '已关闭',
   'state.actionsFailed': 'Actions 失败',

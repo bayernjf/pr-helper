@@ -433,8 +433,12 @@ describe('stage decision affordances', () => {
     expect(deriveStageDecision(workflow, 0, state({ pull_state: 'merged', checks_state: 'success' }), allStates)).toMatchObject({ kind: 'merged', canCreateNext: false, actionable: false });
   });
 
-  it('does not advance past a failing post-merge gate', () => {
-    expect(deriveStageDecision(workflow, 0, state({ pull_state: 'merged', checks_state: 'failure', ahead_by: 2 }), allStates)).toMatchObject({ kind: 'checks-failed', canCreateNext: false });
+  it('marks a failing post-merge gate superseded while newer commits wait, and still creates', () => {
+    expect(deriveStageDecision(workflow, 0, state({ pull_state: 'merged', checks_state: 'failure', ahead_by: 2 }), allStates)).toMatchObject({ kind: 'superseded', canCreateNext: true, actionable: false });
+  });
+
+  it('does not advance past a failing post-merge gate when no newer commits wait', () => {
+    expect(deriveStageDecision(workflow, 0, state({ pull_state: 'merged', checks_state: 'failure', ahead_by: 0 }), allStates)).toMatchObject({ kind: 'checks-failed', canCreateNext: false });
   });
 
   it('reports a never created route with new commits as creatable', () => {
@@ -601,6 +605,10 @@ describe('actionable stage projection', () => {
 
   it('lists a failing gate once and does not also offer creation', () => {
     expect(actionableStageEntry(decision({ kind: 'checks-failed', actionable: true, message: '第 1 步 Actions 失败' }))).toEqual({ kind: 'checks-failed', message: '第 1 步 Actions 失败' });
+  });
+
+  it('keeps a superseded gate out of the human action queue: nothing needs attention', () => {
+    expect(actionableStageEntry(decision({ kind: 'superseded', actionable: false, canCreateNext: true, message: '上一步已合并，其门禁失败属于已合并的提交；新提交可以创建 PR' }))).toBeNull();
   });
 
   it('omits states that carry no operation', () => {

@@ -494,6 +494,7 @@ const en: TranslationDict = {
   'state.postMerge.passed': 'Post-merge checks passed',
   'state.postMerge.failed': 'Post-merge checks failed',
   'state.postMerge.running': 'Post-merge checks running',
+  'state.superseded': 'Gate superseded by newer commits',
   'state.merged': 'Merged',
   'state.closed': 'Closed',
   'state.actionsFailed': 'Actions failed',
