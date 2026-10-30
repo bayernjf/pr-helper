@@ -118,6 +118,8 @@ async function mockApi(page: Page, fixture: ApiFixture = {}): Promise<MockApi> {
     if (pathname === '/api/notifications/subscription') return json(route, 200, { subscription: null });
     if (pathname === '/api/rerun-actions' && request.method() === 'POST') return json(route, 200, { ok: true, count: 1 });
     if (pathname === '/api/deployment-rollback' && request.method() === 'POST') return json(route, 200, { ok: true, workflowName: 'Rollback production' });
+    if (pathname === '/api/automation' && request.method() === 'POST' && url.searchParams.get('action') === 'regenerate') return json(route, 200, { result: { message: { title: 'AI 生成的标题', body: 'AI 生成的正文' } } });
+    if (pathname === '/api/automation' && request.method() === 'POST' && url.searchParams.get('action') === 'takeover') return json(route, 200, { result: { pullNumber: 43, pullUrl: 'https://github.com/acme/demo/pull/43' } });
     return json(route, 404, { message: `Unexpected API request: ${pathname}` });
   });
 
@@ -457,6 +459,71 @@ test('抽屉合并 PR 后自动化待办立即消失，不再等服务端重算'
   await expect.poll(() => githubRequests(api, 'PUT', '/repos/acme/demo/pulls/42/merge')).toHaveLength(1);
 
   await expect(page.locator('.failure-center')).toHaveCount(0);
+});
+
+test('失败中心可接管被 AI 生成失败暂停的自动创建动作', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-takeover',
+    name: '接管弹窗流程',
+    repository,
+    stages: [{ stageId: 'stage-create', source: 'feature/e2e', target: 'dev' }],
+  };
+  const api = await openWorkspace(page, {
+    workflows: [workflow],
+    automationReady: true,
+    automation: [{ id: 21, workflowId: workflow.id, stageId: 'stage-create', stageIndex: 0, source: 'feature/e2e', target: 'dev', kind: 'create-pr', state: 'paused', attempts: 1, failureReason: 'AI 生成失败 (429)', createdAt: '2026-10-30T00:00:00.000Z', updatedAt: '2026-10-30T00:00:00.000Z' }],
+  });
+
+  await expect(page.locator('.failure-center')).toContainText('AI 生成失败 (429)');
+  const takeoverButton = page.locator('[data-fc-takeover-action="21"]');
+  await expect(takeoverButton).toContainText('接管 AI 内容');
+  await takeoverButton.click();
+
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('heading', { name: 'feature/e2e → dev' })).toBeVisible();
+  const titleInput = dialog.locator('#takeover-title');
+  const bodyInput = dialog.locator('#takeover-body');
+  await expect(titleInput).toHaveValue('feature/e2e → dev');
+
+  // Regenerate fills the title and body from the server-side credential snapshot.
+  await dialog.getByRole('button', { name: '重新生成' }).click();
+  await expect.poll(() => titleInput.inputValue()).toBe('AI 生成的标题');
+  await expect.poll(() => bodyInput.inputValue()).toBe('AI 生成的正文');
+
+  // Confirm sends the takeover request with the action id, then the failure row disappears.
+  await dialog.getByRole('button', { name: '确认并继续自动流程' }).click();
+  await expect.poll(() => api.requests.filter(request => request.pathname === '/api/automation' && new URLSearchParams(request.search).get('action') === 'takeover')).toHaveLength(1);
+  await expect(page.locator('.failure-center')).toHaveCount(0);
+});
+
+test('流程详情页可开启合并后自动推进且不影响其它策略', async ({ page }) => {
+  const workflow: Workflow = {
+    id: 'flow-auto-advance',
+    name: '自动推进流程',
+    repository,
+    version: 4,
+    stages: [
+      { stageId: 'stage-1', source: 'feature/e2e', target: 'dev', automation: { autoCreatePullRequest: true, autoMergePullRequest: true, executionMode: 'server', triggerMinCommits: 1, generationRule: { name: 'E2E 规则', content: '## Overview', capturedAt: '2026-08-01T00:00:00.000Z' } } },
+      { stageId: 'stage-2', source: 'dev', target: 'main' },
+    ],
+  };
+  const api = await openWorkspace(page, { workflows: [workflow], automationReady: true });
+
+  const drawer = await openStepDrawer(page);
+  await drawer.getByRole('button', { name: '查看完整流程' }).click();
+
+  const advanceToggles = page.locator('[data-detail-auto-advance-stage]');
+  await expect(advanceToggles).toHaveCount(2);
+  await expect(advanceToggles.first()).not.toBeChecked();
+  // A bare stage has no server policy, so its advance toggle stays disabled.
+  await expect(advanceToggles.nth(1)).toBeDisabled();
+
+  await advanceToggles.first().check();
+  await expect.poll(() => api.workflows[0]?.stages[0]?.automation).toMatchObject({ autoCreatePullRequest: true, autoMergePullRequest: true, autoAdvanceNext: true });
+
+  await advanceToggles.first().uncheck();
+  await expect.poll(() => api.workflows[0]?.stages[0]?.automation).not.toHaveProperty('autoAdvanceNext');
+  await expect.poll(() => api.workflows[0]?.stages[0]?.automation).toMatchObject({ autoCreatePullRequest: true, autoMergePullRequest: true });
 });
 
 test('流程详情页可为单个步骤开启自动合并且不影响自动创建策略', async ({ page }) => {

@@ -2427,7 +2427,9 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const mergeHint = !canEditAutomation ? t('detail.autoCreateReadonly') : !autoCreatePrerequisites() ? t('draft.autoCreatePrerequisites') : !canMergeAutomation ? t('detail.autoMergeReadonly') : mergeLegacyPolicy ? t('detail.autoMergeLegacyPolicy') : t('detail.autoMergeDesc');
   const mergeControl = `<label class="timeline-auto-merge"><input type="checkbox" data-detail-auto-merge-stage="${index}" ${mergeEnabled ? 'checked' : ''} ${mergeDisabled ? 'disabled' : ''} /><span>${t('draft.autoMerge')}</span></label>`;
   const advanceEnabled = (stage.automation as { autoAdvanceNext?: true } | undefined)?.autoAdvanceNext === true;
-  const advanceLegacyPolicy = stage.automation?.executionMode === 'browser-session';
+  // Advancing needs an existing server automation; a bare stage or a legacy browser-session policy
+  // cannot carry it, mirroring setStageAutoAdvance's refusal.
+  const advanceLegacyPolicy = !stage.automation || stage.automation.executionMode !== 'server';
   const advanceDisabled = autoDisabled || !canMergeAutomation || advanceLegacyPolicy;
   const advanceHint = !canEditAutomation ? t('detail.autoCreateReadonly') : !autoCreatePrerequisites() ? t('draft.autoCreatePrerequisites') : !canMergeAutomation ? t('detail.autoMergeReadonly') : advanceLegacyPolicy ? t('detail.autoAdvanceLegacyPolicy') : t('detail.autoAdvanceDesc');
   const advanceControl = `<label class="timeline-auto-merge"><input type="checkbox" data-detail-auto-advance-stage="${index}" ${advanceEnabled ? 'checked' : ''} ${advanceDisabled ? 'disabled' : ''} /><span>${t('draft.autoAdvance')}</span></label>`;
