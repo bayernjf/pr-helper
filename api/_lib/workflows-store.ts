@@ -672,8 +672,6 @@ export async function listWorkflowAutomationActions(environment: Record<string, 
 }
 
 type DatabaseUser = { id: string };
-type WorkflowRow = { payload: unknown; version?: number };
-type VisibleWorkflowRow = WorkflowRow & { id: string };
 // The columns the sweep and the webhook projection rebuild a workflow from, plus the two child arrays
 // carried as raw column objects. `to_jsonb(row)` is transport, not a second encoding: the shapes are
 // exactly WorkflowStageColumns and WorkflowDeploymentColumns, so workflowFromRows stays the only place
@@ -1456,12 +1454,12 @@ function visibleWorkflowPredicate(sql: ReturnType<typeof query>, userId: string,
 
 /** Per-request memo so one `/api/inbox` reads each visible workflow payload and stage state set once. */
 export type VisibleWorkflowReads = {
-  workflows?: Promise<VisibleWorkflowRow[]>;
+  workflows?: Promise<TrackedWorkflowRow[]>;
   stageStates?: Promise<StageStateRow[]>;
 };
 
 function visibleWorkflowRows(sql: ReturnType<typeof query>, userId: string, reads?: VisibleWorkflowReads) {
-  const read = () => sql<VisibleWorkflowRow[]>`SELECT workflows.id, workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, userId, 'workflows.user_id', 'workflows.id')}`;
+  const read = () => sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)} FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, userId, 'workflows.user_id', 'workflows.id')}`;
   if (!reads) return read();
   return reads.workflows ??= read();
 }
@@ -1592,9 +1590,9 @@ export async function listWorkflows(environment: Record<string, string | undefin
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
   const [ownedRows, sharedRows] = await Promise.all([
-    sql<(WorkflowRow & { version: number })[]>`SELECT workflows.payload, COALESCE(workflows.version, 0)::int AS version FROM pr_helper_workflows workflows WHERE workflows.user_id = ${user.id} ORDER BY workflows.updated_at DESC`,
-    sql<(WorkflowRow & { owner_user_id: string; version: number; team_id: string; team_name: string; role: TeamRole })[]>`
-      SELECT workflows.payload, shared.owner_user_id, COALESCE(workflows.version, 0)::int AS version, teams.id AS team_id, teams.name AS team_name, members.role
+    sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)} FROM pr_helper_workflows workflows WHERE workflows.user_id = ${user.id} ORDER BY workflows.updated_at DESC`,
+    sql<(TrackedWorkflowRow & { owner_user_id: string; team_id: string; team_name: string; role: TeamRole })[]>`
+      SELECT ${trackedWorkflowColumns(sql)}, shared.owner_user_id, teams.id AS team_id, teams.name AS team_name, members.role
       FROM pr_helper_team_workflows shared
       JOIN pr_helper_team_members members ON members.team_id = shared.team_id
       JOIN pr_helper_teams teams ON teams.id = shared.team_id
@@ -1603,20 +1601,20 @@ export async function listWorkflows(environment: Record<string, string | undefin
       ORDER BY workflows.updated_at DESC`,
   ]);
   const owned = ownedRows.map(row => {
-    const workflow = storedWorkflowFromPayload(row.payload);
+    const workflow = trackedWorkflowFromRow(row);
     if (!workflow) return undefined;
     const normalized = ensureStageIds(workflow);
-    return row.version > 0 ? { ...normalized, version: row.version } : normalized;
+    return row.version && row.version > 0 ? { ...normalized, version: row.version } : normalized;
   }).filter((workflow): workflow is StoredWorkflow => Boolean(workflow)).map(workflow => ({ userId: user.id, workflow }));
   const sharedByWorkflow = new Map<string, { userId: string; workflow: StoredWorkflow }>();
   for (const row of sharedRows) {
-    const workflow = storedWorkflowFromPayload(row.payload);
+    const workflow = trackedWorkflowFromRow(row);
     if (!workflow || sharedByWorkflow.has(workflow.id)) continue;
     const normalized = ensureStageIds(workflow);
     sharedByWorkflow.set(workflow.id, {
       userId: row.owner_user_id,
       workflow: {
-        ...(row.version > 0 ? { ...normalized, version: row.version } : normalized),
+        ...(row.version && row.version > 0 ? { ...normalized, version: row.version } : normalized),
         team: { id: row.team_id, name: row.team_name, role: row.role },
       },
     });
@@ -2565,7 +2563,7 @@ export async function listWorkflowStageStates(environment: Record<string, string
     visibleWorkflowRows(sql, user.id, reads),
   ]);
   const workflowById = new Map(workflowRows.flatMap(row => {
-    const workflow = storedWorkflowFromPayload(row.payload);
+    const workflow = trackedWorkflowFromRow(row);
     return workflow ? [[workflow.id, ensureStageIds(workflow)] as const] : [];
   }));
   return rows.map(row => ({
@@ -2615,7 +2613,7 @@ export async function listWorkflowConfigurationWarnings(environment: Record<stri
   const rows = await visibleWorkflowRows(sql, user.id, reads);
   // An archived workflow is not being shipped, so a gate it never reaches is not a warning worth
   // showing — and checking it would spend two GitHub calls per workflow to say so.
-  const stored = rows.map(row => storedWorkflowFromPayload(row.payload)).filter((workflow): workflow is StoredWorkflow => Boolean(workflow) && !workflow!.archived);
+  const stored = rows.map(row => trackedWorkflowFromRow(row)).filter((workflow): workflow is StoredWorkflow => Boolean(workflow) && !workflow!.archived);
   if (!identity.installationId) return stored.flatMap(workflow => workflowConfigurationWarnings(workflow, { actionsAvailable: false, workflows: [], environmentsAvailable: false, environments: [] }));
   const config = parseGithubAppConfig(environment);
   const results = await Promise.all(stored.map(async workflow => {
@@ -2643,7 +2641,7 @@ export async function listActionableStages(environment: Record<string, string | 
   const workflows = await visibleWorkflowRows(sql, user.id, reads);
   const states = await visibleStageStateRows(sql, user.id, reads);
   return workflows.flatMap(row => {
-    const stored = storedWorkflowFromPayload(row.payload);
+    const stored = trackedWorkflowFromRow(row);
     const workflow = stored && !stored.archived ? ensureStageIds(stored) : undefined;
     if (!workflow) return [];
     return workflow.stages.reduce<ActionableStage[]>((items, stage, stageIndex) => {
@@ -2666,7 +2664,7 @@ export async function listRecoveryStatuses(environment: Record<string, string | 
   const policyByWorkflow = new Map<string, RecoveryPolicy>();
   const stageIndexByIdentity = new Map<string, number>();
   for (const row of workflowRows) {
-    const wf = storedWorkflowFromPayload(row.payload);
+    const wf = trackedWorkflowFromRow(row);
     if (!wf || wf.archived) continue;
     const normalized = ensureStageIds(wf);
     if (normalized.recoveryPolicy) policyByWorkflow.set(normalized.id, normalized.recoveryPolicy);
@@ -2815,7 +2813,7 @@ export async function listWorkflowTimeline(environment: Record<string, string | 
   ]);
   const workflows = await visibleWorkflowRows(sql, user.id, reads);
   const workflowMap = new Map(workflows.map(row => {
-    const wf = storedWorkflowFromPayload(row.payload);
+    const wf = trackedWorkflowFromRow(row);
     return [row.id, wf] as const;
   }));
   const timeline: TimelineEntry[] = [];
