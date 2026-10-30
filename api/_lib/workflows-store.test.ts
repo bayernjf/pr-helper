@@ -781,7 +781,7 @@ describe('store queries against the migration schema', () => {
   // promises the verdict is never overwritten. The promise is kept (or broken) in the sweep's own
   // final writes: an orphan that finishes late must not clobber the abandoned verdict or its duration.
   it('guards every reconciliation_runs write by runId so an abandoned verdict is never overwritten', () => {
-    const updates = source.match(/UPDATE reconciliation_runs SET[^`]*?WHERE id = \$\{runId\}/g) || [];
+    const updates = source.match(/UPDATE reconciliation_runs SET[^`]*?WHERE id = \$\{runId\}[^`]*`/g) || [];
     expect(updates.length).toBeGreaterThanOrEqual(4);
     for (const update of updates) expect(update).toContain("state = 'running'");
   });
