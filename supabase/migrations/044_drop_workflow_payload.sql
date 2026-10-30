@@ -1,0 +1,33 @@
+-- =====================================================
+-- Migration 044: Drop the pr_helper_workflows.payload column
+-- File: 044_drop_workflow_payload.sql
+-- Date: 2026-10-31
+-- Depends on: 043_version_not_null.sql
+-- Run: Supabase SQL Editor, execute once (back up the table first)
+-- =====================================================
+-- Note: Final step of the payload-column drop. 036 promoted every read
+--       field to relational columns, 037 backfilled the mirror, 038
+--       switched the reads, 039 dropped the jsonb index, 042 made
+--       payload nullable and the writer stopped populating it. The
+--       column is now neither read nor written by any code path and has
+--       no index, view, or function depending on it, so it only stores a
+--       stale copy that must be kept consistent.
+--       Irreversible: take a backup (pg_dump of the table or a
+--       `payload_backup` copy) before running. Recovering afterwards
+--       means restoring from that backup; the relational tables are the
+--       source of truth.
+-- -----------------------------------------------------
+
+-- 044: Drop the legacy jsonb payload now that the relational tables are the
+-- only source of truth.
+--
+-- Pre-flight verified on production 2026-10-31:
+--   * every workflow read goes through trackedWorkflowColumns(), which does not
+--     select payload;
+--   * the upsert INSERT/UPDATE column lists no longer write payload (042);
+--   * no index, view, or function references the column;
+--   * the 47 existing rows still carry their pre-relational payload (37 kB),
+--     but the relational tables are the source of truth, so dropping the column
+--     only removes the redundant legacy copy. Back up first to retain it.
+ALTER TABLE pr_helper_workflows
+  DROP COLUMN IF EXISTS payload;
