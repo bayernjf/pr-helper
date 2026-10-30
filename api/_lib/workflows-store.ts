@@ -236,11 +236,55 @@ export function automationAdvanceIdempotencyKey(route: { workflowId: string; sta
   return `${route.workflowId}:${route.stageId}:${route.source}:${route.target}:advance`;
 }
 
+// Phase 6 "advance on merge" is a step-level conclusion, not a route-level one: a route that turned
+// green only finished its own path, and a converging stage must wait until every non-abandoned route
+// is merged with a green gate. Closed unmerged routes are abandoned, matching the convergence gate.
+export function stageRoutesComplete(routes: readonly { pull_state: string; checks_state: string }[]) {
+  return routes.length > 0 && routes.every(route => route.pull_state === 'merged' && route.checks_state === 'success');
+}
+
+export type AdvanceDeploymentGateRow = { state: string; health_state: string | null; health_detail: string | null; failure_summary: string | null };
+export type AutomationAdvanceVerdict = { kind: 'succeeded' } | { kind: 'waiting'; reason: string } | { kind: 'paused'; reason: string };
+
+// Deployments and the health probe are explicit gates here even though reconciliation folds them into
+// checks_state: reading the rows lets a parked action name the probe or deploy step that is holding,
+// instead of a bare checks=pending that hides which of the two is stuck.
+export function automationAdvanceVerdict(input: { route: { pull_state: string; checks_state: string } | undefined; siblingRoutes: readonly { pull_state: string; checks_state: string }[]; deployments: readonly AdvanceDeploymentGateRow[] }): AutomationAdvanceVerdict {
+  const route = input.route;
+  if (!route) return { kind: 'paused', reason: '步骤状态缺失，无法确认自动推进' };
+  if (route.pull_state !== 'merged') return { kind: 'paused', reason: '该步骤尚未合并，不能推进下一步' };
+  // The route's own gate speaks first: a single-route stage (the common case) gets the precise
+  // checks reason, and only a green route falls through to the convergence and deployment gates.
+  if (route.checks_state !== 'success') return { kind: 'waiting', reason: `门禁尚未全绿（checks=${route.checks_state}），等待合并后验证完成` };
+  // Closed unmerged routes are abandoned and must not hold the step, so the verdict filters them
+  // itself instead of trusting every caller to pre-filter.
+  const liveRoutes = input.siblingRoutes.filter(item => item.pull_state !== 'closed');
+  if (!stageRoutesComplete(liveRoutes)) {
+    const done = liveRoutes.filter(item => item.pull_state === 'merged' && item.checks_state === 'success').length;
+    return { kind: 'waiting', reason: `该步骤共 ${liveRoutes.length} 条路径，仅 ${done} 条合并且门禁绿，等待多路径汇聚完成` };
+  }
+  if (input.deployments.some(deployment => deployment.state === 'pending')) return { kind: 'waiting', reason: '部署尚未完成，等待部署门禁出结果' };
+  const failed = input.deployments.filter(deployment => deployment.state === 'failure');
+  if (failed.length) {
+    const reasons = failed.map(deployment => deployment.failure_summary?.trim() || (deployment.health_state === 'failure' ? `健康检查失败${deployment.health_detail ? `（${deployment.health_detail}）` : ''}` : '部署失败')).filter(Boolean);
+    return { kind: 'paused', reason: reasons.length ? `部署或健康检查失败，需要处理：${reasons.join('；')}` : '部署或健康检查失败，需要处理' };
+  }
+  return { kind: 'succeeded' };
+}
+
 async function scheduleServerAdvance(sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string) {
   const stage = workflow.stages[stageIndex];
   const automation = stage?.automation;
   // Advancing is a server-side action; a browser-session policy has no executor on the server.
   if (!stage || !stage.stageId || automation?.executionMode !== 'server' || (automation as { autoAdvanceNext?: true } | undefined)?.autoAdvanceNext !== true) return;
+  // A route that just turned green must not record the step's advance while a sibling route of the
+  // same stage is still open — multi-path convergence advances once, when the last route lands.
+  // Deployments need no check here: a red or pending deployment already folds into checks_state.
+  const routes = await sql<{ pull_state: string; checks_state: string }[]>`SELECT pull_state, checks_state FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stage.stageId} AND pull_state <> 'closed'`;
+  if (!stageRoutesComplete(routes)) {
+    console.info(automationSkipLine({ kind: 'advance-stage', repository: workflow.repository, route: `${source} → ${stage.target}`, reason: 'routes-incomplete', routes: routes.length, merged: routes.filter(item => item.pull_state === 'merged' && item.checks_state === 'success').length }));
+    return;
+  }
   const idempotencyKey = automationAdvanceIdempotencyKey({ workflowId: workflow.id, stageId: stage.stageId, source, target: stage.target });
   const existing = await sql<{ id: number; state: WorkflowAutomationAction['state']; attempts: number; updated_at: string }[]>`SELECT id, state, attempts, updated_at FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
   if (existing[0]) {
@@ -625,18 +669,25 @@ async function runAutomationMergeAction(environment: Record<string, string | und
 // Phase 6 "advance on merge": a purely confirmatory action. The gate was already checked by the
 // reconciliation that enqueued it (merged + post-merge checks green, deployments folded in), so the
 // executor re-verifies from the persisted stage state rather than calling GitHub, then records the
-// advancement and its audit trail. A gate that no longer holds pauses with the reason, same as merge.
+// advancement and its audit trail. A gate that no longer holds pauses with the reason, same as merge;
+// a gate still in flight — checks, a sibling converging route, a deployment — stays queued.
 async function runAutomationAdvanceAction(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, userId: string, installationId: string, actionId: number, action: AutomationActionRow, workflow: StoredWorkflow, stage: StoredWorkflowStage) {
   if (stage.automation?.executionMode !== 'server' || (stage.automation as { autoAdvanceNext?: true } | undefined)?.autoAdvanceNext !== true) throw new Error('流程步骤自动推进策略已失效');
   const states = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
   const current = states.find(state => state.stage_id === action.stage_id && state.source === action.source);
   if (!current) throw new Error('步骤状态缺失，无法确认自动推进');
-  if (current.pull_state !== 'merged') throw new Error('该步骤尚未合并，不能推进下一步');
-  if (current.checks_state !== 'success') {
-    // The merge may still be running Actions, or a deployment may still be in flight. Keep the action
-    // queued so the next reconciliation (or the check-completion event) executes it when the gate goes
-    // green; the reason doubles as the drain's backoff marker.
-    await sql`UPDATE workflow_automation_actions SET failure_reason = ${(`门禁尚未全绿（checks=${current.checks_state}），等待合并后验证完成`).slice(0, 800)}, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId} AND state = 'queued'`;
+  // The re-verification mirrors the enqueue: every non-abandoned route of the step merged and green,
+  // this route's deployments (health probe folded in) finished. The verdict names what still holds.
+  const siblingRoutes = states.filter(state => state.stage_id === action.stage_id && state.pull_state !== 'closed');
+  const deployments = await sql<AdvanceDeploymentGateRow[]>`SELECT state, health_state, health_detail, failure_summary FROM workflow_stage_deployments WHERE user_id = ${userId} AND workflow_id = ${workflow.id} AND stage_id = ${action.stage_id} AND source = ${action.source}`;
+  const verdict = automationAdvanceVerdict({ route: current, siblingRoutes, deployments });
+  if (verdict.kind === 'paused') throw new Error(verdict.reason);
+  if (verdict.kind === 'waiting') {
+    // The merge may still be running Actions, a deployment may still be in flight, or a sibling path
+    // of a converging stage has not landed. Keep the action queued so the next reconciliation (or the
+    // check-completion event) executes it when the hold clears; the reason doubles as the drain's
+    // backoff marker.
+    await sql`UPDATE workflow_automation_actions SET failure_reason = ${verdict.reason.slice(0, 800)}, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId} AND state = 'queued'`;
     await sql`UPDATE workflow_automation_runs SET state = 'waiting-gates', updated_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
     return { state: 'queued' as const };
   }

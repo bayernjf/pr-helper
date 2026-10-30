@@ -6,7 +6,7 @@ const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
 
 import { describe, expect, it } from 'vitest';
 
-import { addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, generationRuleHashes, hydrateGenerationRules, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, stageGateSatisfactionAdvanced, downstreamStagesToRecheck, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, autoCreateCommitThreshold, autoCreateReachedThreshold, deploymentRunState, deploymentStateWithHealth, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, parseAutomationMessage, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, trackedWorkflowFromSingleRow, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, INBOX_REFRESH_RECONCILE_BUDGET_MS, INBOX_REFRESH_RECONCILE_CEILING_GAP_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
+import { automationAdvanceVerdict, stageRoutesComplete, addPhaseTotals, pendingPhaseTotals, createPhaseRecorder, dehydrateGenerationRules, deploymentRowChanged, generationRuleContent, generationRuleContentHash, generationRuleHashes, hydrateGenerationRules, staleDeploymentProviders, type StagePhaseTracker, AUTOMATION_TRANSIENT_REQUEUE_MAX_ATTEMPTS, automationDrainDecision, AUTOMATION_GATE_WAIT_MAX_MS, automationGateWaitDelayMs, automationCancelReason, automationDrainFailureReason, automationDrainHasStartBudget, AUTOMATION_DRAIN_START_BUDGET_MS, AUTOMATION_FUNCTION_CEILING_MS, missingDeploymentSummary, serverAutomationActivated, stageGateChanged, stageGateSatisfactionAdvanced, downstreamStagesToRecheck, reconcileTimingLine, automationSkipLine, actionableStageEntry, automationActionId, reconciliationLeaseTtlSeconds, reconciliationLeaseRenewIntervalMs, RECONCILIATION_LEASE_TTL_SECONDS, reconciliationRunInterrupted, RECONCILIATION_ABANDONED_MESSAGE, RECONCILIATION_DEFERRED_MESSAGE, reconciliationLockKey, realtimeReconcileBudgetMs, realtimeReconcileCeilingMs, WEBHOOK_RECONCILE_BUDGET_MS, withStageDeadline, deferredRunState, reconciliationBranchScope, reconciliationRunIsAbandoned, webhookBranchesForEvent, webhookCanChangeStageState, automationCreateOutcome, automationIdempotencyKey, automationMergeOutcome, automationRetryIsExhausted, automationAttemptWasReached, workflowArchiveTransition, workflowSaveConflicts, branchSourcesForRule, canCheckDeploymentUrl, compactFailureDetails, deriveStageDecision, deploymentFailureSummary, deploymentNotification, deploymentParentState, deploymentProviderForWorkflowRun, autoCreateCommitThreshold, autoCreateReachedThreshold, deploymentRunState, deploymentStateWithHealth, dynamicSourceCandidates, ensureStageIds, findWorkflowStageIndexForRemoval, initialWebhookChecksState, isStoredWorkflow, jsonFromModelText, parseAutomationMessage, mergeChecksWithDeployments, matchingWorkflowStages, pullDetailPath, reconciliationBatchSize, reconciliationState, repairCommitSha, requiredApprovalsFromProtection, retentionCutoffs, rollbackDeploymentIsAvailable, selectReconciliationBatch, mergeCatchUpCandidates, REALTIME_CATCH_UP_LIMIT, selectRepairPullNumber, sortStoredWorkflows, stageIdentity, stageReconciliationIsSettled, storedWorkflowFromPayload, trackedWorkflowFromSingleRow, RECONCILE_WORKFLOW_BATCH_SIZE, REALTIME_RECONCILE_BUDGET_MS, INBOX_REFRESH_RECONCILE_BUDGET_MS, INBOX_REFRESH_RECONCILE_CEILING_GAP_MS, STAGE_STALE_THRESHOLD_SECONDS, STAGE_UNCONVERGED_THRESHOLD_SECONDS, stageUnconvergedThresholdSeconds, stageConvergenceVerdict, DEFAULT_RECOVERY_POLICY, workflowConfigurationWarnings, workflowRunCompletionState, workflowStageStateMatchesDefinition } from './workflows-store';
 
 describe('stored workflow validation', () => {
   it('fetches a pull detail after discovery so mergeability is authoritative', () => {
@@ -459,6 +459,66 @@ describe('stage decision affordances', () => {
 
   it('refuses to create when the state does not belong to the stage', () => {
     expect(deriveStageDecision(workflow, 0, state({ stage_id: 'stage-dev', ahead_by: 5 }), allStates)).toMatchObject({ kind: 'none', canCreateNext: false });
+  });
+});
+
+// 推进是步骤级结论而不是路由级结论：一条路由绿了只说明这条路径完成，多路径汇聚必须等
+// 全部未放弃（非 closed）路由都合并且门禁绿；部署与健康检查是显式门，失败要能点名原因。
+describe('phase 6 advance verdict', () => {
+  const green = { pull_state: 'merged', checks_state: 'success' };
+
+  it('waits while a sibling route of the same stage has not merged', () => {
+    const verdict = automationAdvanceVerdict({ route: green, siblingRoutes: [green, { pull_state: 'open', checks_state: 'pending' }], deployments: [] });
+    expect(verdict).toMatchObject({ kind: 'waiting' });
+  });
+
+  it('advances once every non-closed route of the stage is merged and green', () => {
+    expect(automationAdvanceVerdict({ route: green, siblingRoutes: [green, green], deployments: [] })).toEqual({ kind: 'succeeded' });
+  });
+
+  it('ignores an abandoned closed route when counting convergence', () => {
+    expect(automationAdvanceVerdict({ route: green, siblingRoutes: [green, { pull_state: 'closed', checks_state: 'success' }], deployments: [] })).toEqual({ kind: 'succeeded' });
+  });
+
+  it('keeps waiting with the gate reason while the merged route checks are in flight', () => {
+    const verdict = automationAdvanceVerdict({ route: { pull_state: 'merged', checks_state: 'pending' }, siblingRoutes: [{ pull_state: 'merged', checks_state: 'pending' }], deployments: [] });
+    expect(verdict.kind === 'waiting' && verdict.reason).toContain('pending');
+  });
+
+  it('waits on a deployment that has not finished', () => {
+    const verdict = automationAdvanceVerdict({ route: green, siblingRoutes: [green], deployments: [{ state: 'pending', health_state: null, health_detail: null, failure_summary: null }] });
+    expect(verdict.kind === 'waiting' && verdict.reason).toContain('部署');
+  });
+
+  it('pauses and names a failed health probe', () => {
+    const verdict = automationAdvanceVerdict({ route: green, siblingRoutes: [green], deployments: [{ state: 'failure', health_state: 'failure', health_detail: 'HTTP 503', failure_summary: null }] });
+    expect(verdict.kind === 'paused' && verdict.reason).toContain('HTTP 503');
+  });
+
+  it('pauses and names the failed deployment step', () => {
+    const verdict = automationAdvanceVerdict({ route: green, siblingRoutes: [green], deployments: [{ state: 'failure', health_state: null, health_detail: null, failure_summary: 'Deploy：失败步骤 build' }] });
+    expect(verdict.kind === 'paused' && verdict.reason).toContain('失败步骤 build');
+  });
+
+  it('refuses to advance a route that has not merged', () => {
+    expect(automationAdvanceVerdict({ route: { pull_state: 'open', checks_state: 'success' }, siblingRoutes: [{ pull_state: 'open', checks_state: 'success' }], deployments: [] }).kind).toBe('paused');
+  });
+});
+
+describe('stage route completeness', () => {
+  const green = { pull_state: 'merged', checks_state: 'success' };
+
+  it('is false with no routes', () => {
+    expect(stageRoutesComplete([])).toBe(false);
+  });
+
+  it('is false while any route is unmerged or its gate is not green', () => {
+    expect(stageRoutesComplete([{ pull_state: 'merged', checks_state: 'pending' }])).toBe(false);
+    expect(stageRoutesComplete([green, { pull_state: 'open', checks_state: 'success' }])).toBe(false);
+  });
+
+  it('is true only when every route is merged and green', () => {
+    expect(stageRoutesComplete([green, green])).toBe(true);
   });
 });
 
