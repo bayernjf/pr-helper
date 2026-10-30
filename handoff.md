@@ -18,7 +18,7 @@
 - **合并后自动推进骨架**（`814e12b7`）：步骤配置新增「合并后自动推进下一步」开关（服务端 `autoAdvanceNext`，仅 server 模式可开）；对账在该步 `merged && checks success`（含部署）时入队 `advance-stage` 动作，执行器重验后记 succeeded + 审计，门禁在途时 queued 等待。**第 6 阶段剩余项已于 2026-10-30 收口**：`2d06158e` 把推进改为步骤级结论——入队与执行重验都要求该步骤全部未放弃（非 closed）路由合并且门禁绿（多路径汇聚完整推进），并把部署与健康检查作为显式门读 `workflow_stage_deployments` 行（pending → queued 点名等待，failure → paused 点名失败的部署步骤或健康探测，复用 `failure_summary`/`health_detail`）；`d49e0ee7` 增强进度条——节点 tooltip 在存在服务端动作行时展示当前动作名（自动创建/合并/推进；自动合并关闭时天然不出现「自动合并中」），条下新增「下一步及其解锁条件」行（原样引用服务端 decision 文案）。本地验证：`npm test` 748 项、`npx tsc --noEmit`、`npm run build`、`npm run test:e2e` 34 用例全绿。
 - **`workflow_versions.snapshot` 停止新写入**：全库无读者（`040` 已确认），新版本行不再携带全量快照，历史行保留。
 - **待用户操作**：Supabase SQL Editor 按序执行 `041` → `042` → `043`（参考 `040` 迁移文件头注释惯例）；GitHub 仓库 Secrets 配置 `FEISHU_WEBHOOK` 才能让移动监控 ① 生效；`prh_readonly` 口令轮换仍为手动项；9 月 Supabase 账单复核需登录 Dashboard（宽限期 9/20 已过，当前只读查询未遇 402）。
-- 观察项：生产 `inbox_refresh` 时长 ~29s 与代码 6s 预算矛盾，需登录态浏览器手测刷新后才能最终裁决（接力核对在近 48 小时又录得一次 29.1s degraded `inbox_refresh`，矛盾仍开放）。
+- 观察项 **已裁决（2026-10-30，`1d5067db`+`9144958e`）**：「inbox_refresh ~29s vs 代码 6s 预算」不是度量口径问题——Vercel Production 配有 secret `REALTIME_RECONCILE_BUDGET_MS`（约 2026-08-17 添加，值不可读），它把 inbox 预算覆盖为 ~24s（由 ABANDONED 行 duration ≈ budget+5s 天花板反推），请求真实等待上限即 ceiling ≈ 29s。inbox sweep 对 51 个阶段的自然工作时长本身就是 ~29s（10-25 14:05 success 行：29.7s、github_ms 28.4s、53 次调用），24s 预算必然 defer。**若要降请求等待：删 4 个沙盒流程（生产实测 25 个阶段、占 sweep 约一半工作量，UI 删除入口）比调环境变量更治本**；`REALTIME_RECONCILE_BUDGET_MS` 当初添加动机待确认后决定去留。10-14/10-24 出现过的 dbRead/write 150–250s 巨慢（phase_ms 实测）在 10-25 后未复现，保持观察。顺带修复：reconciliation_runs 的 4 处按 runId 收尾写补上 `state='running'` 守卫，孤儿 sweep 迟到收尾不再覆盖 closeAbandoned 的放弃判定与时长。
 
 ### 2026-10-30 只读核对（接力会话，`prh_readonly` 生产库实测）
 
