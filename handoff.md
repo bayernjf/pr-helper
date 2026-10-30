@@ -82,7 +82,7 @@
 
 | 事项 | 一句话 | 去处 |
 | --- | --- | --- |
-| 执行迁移 `044`（DROP payload 列） | 已开 [PR #394](https://github.com/bayernjf/pr-helper/pull/394)（CI 全绿）。**先备份 `pr_helper_workflows`**（47 行 payload 共 37 kB），再在 Supabase 执行；合并与执行先后由你定。不可逆。 | [`supabase/migrations/044_drop_workflow_payload.sql`](supabase/migrations/044_drop_workflow_payload.sql) |
+| 执行迁移 `044`（DROP payload 列） | 已开 [PR #394](https://github.com/bayernjf/pr-helper/pull/394)（CI 全绿）。**备份已备好**：2026-10-30 20:26 UTC 由 AI 经只读通道导出 47 行 `(id, payload)` 至本机 `~/.config/pr-helper/backup-pr_helper_workflows-payload-20261030.json`（33 kB，权限 600；payload 自 042 起代码零写入、内容冻结）。可直接在 Supabase 执行；合并与执行先后由你定。不可逆，执行并验证后可删备份文件。 | [`supabase/migrations/044_drop_workflow_payload.sql`](supabase/migrations/044_drop_workflow_payload.sql) |
 | 仓库 Secret `FEISHU_WEBHOOK` | 移动监控①的 `if: failure()` 飞书通知依赖它；未配置只 warning 跳过。甩 webhook URL 可由你在仓库 Settings 配。 | 《2026-10-30 批量落地》 |
 | `prh_readonly` 口令轮换 | 该口令曾出现在会话记录中；`alter role ... password` 后同步 `~/.config/pr-helper/db.env`。 | [只读查询通道](docs/supabase-readonly-debugging.md) |
 | 9 月 + 10 月账单复核 | 9/20 宽限期已过，当前只读查询未遇 402；需登录 Dashboard 用实际值确认 −94% / 2.1 GB 月投影是否仍成立。 | [egress 方案](docs/supabase-egress-optimization.md) |
