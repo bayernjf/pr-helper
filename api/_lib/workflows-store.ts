@@ -2841,8 +2841,10 @@ export async function listRecoveryStatuses(environment: Record<string, string | 
 // Deriving it a second time from `MAX(workflow_versions.version)` would be a second authority that can
 // disagree with the one the optimistic lock reads, and history that numbers a save differently from the
 // row it snapshots is worse than no history.
+// `snapshot` has no reader anywhere in the codebase (migration 040 audit), and it copies the whole
+// workflow on every save, so new rows stop carrying it; existing rows keep their data for history.
 async function saveWorkflowVersion(sql: any, userId: string, workflow: StoredWorkflow) {
-  await sql`INSERT INTO workflow_versions (user_id, workflow_id, version, snapshot) VALUES (${userId}, ${workflow.id}, ${workflow.version}, ${sql.json(workflow)})`;
+  await sql`INSERT INTO workflow_versions (user_id, workflow_id, version) VALUES (${userId}, ${workflow.id}, ${workflow.version})`;
 }
 
 export async function recordWorkflowRun(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string, stageIndex: number, source: string, pullNumber: number) {

@@ -1,11 +1,23 @@
 # PR Helper Handoff
 
-> 最后更新：2026-10-10（修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」：GitHub 5xx 被误判为已有结论的暂停而永久 parked，且取代机制看不到系统外完成的合并。两处修复见《2026-10-10 已暂停自动化动作永不消失》）（本地新落地一批「刷新慢」优化，尚未部署：详情页首屏由服务端投影直出 + 后台 live 校正 + 自动刷新 30s TTL，首页 `inbox_refresh` 内联对账预算收紧到 6s / 天花板 +5s，提交 `d077ff58` / `4394df2e` / `f3e29251` / `4bb5c3b0`，详见下方《2026-09-15 刷新慢优化（本地已落地，待部署与浏览器手测）》。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
+> 最后更新：2026-10-30（本轮批量落地 6 个特性 commit，待合入 main 部署：红门禁停摆修复 `b6c9ed17`、停写 payload 列 B/C/D 步（`8ee8d574` 及同批次提交）、AI 失败接管弹窗 `5bd1f2e8`、移动端状态监控 ①② `a75b26e4`、合并后自动推进骨架 `814e12b7`、`workflow_versions.snapshot` 停止新写入；迁移 041–043 待用户在 Supabase SQL Editor 执行，代码上线前务必先跑 042（否则新流程 INSERT 撞 NOT NULL）；E 步 DROP payload 按三门槛推迟；9 月账单复核仍待用户登录 Dashboard。此前：2026-10-10 修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」；2026-09-15 刷新慢优化（`d077ff58`/`4394df2e`/`f3e29251`/`4bb5c3b0`）已于 2026-10-14 部署生产并验证。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 > **待办的唯一索引在下方《待处理事项（2026-08-22 汇总）》一节**，其余小节只记已完成的事实与理由。
 > 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
 
 ## 当前状态
+
+### 2026-10-30 批量落地（本地 `feature/20260722`，待合入 main 部署）
+
+- **红门禁停摆修复**（`b6c9ed17` + 迁移 `041`）：已合并步骤的门禁改按目标分支 HEAD 评估并落库 `gate_sha`（而非合并 commit），派生新 `superseded` 决策（merged + 门禁失败 + 有新提交 → 可建新 PR 且不进人工队列）。详见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md) 第十八节，方案取 A+B 不用 C。
+- **停写 payload 列**（B/C/D 步，`8ee8d574` + 同批次提交 + 迁移 `042`/`043`）：7 处列表读已全切关系表；`upsertWorkflow` 的 INSERT 首次手写全列清单不再写 payload；`removeWorkflowStage` 的 UPDATE 不再写 payload。E 步 DROP COLUMN 被方案第八节三门槛挡住，明确推迟。
+- **AI 失败接管弹窗**（`5bd1f2e8`）：失败中心对 paused 的 create-pr 动作提供「接管 AI 内容」弹窗——可重新生成（用存储凭据 + 该动作规则快照）或手写标题/描述后确认；确认前重跑同门禁预检（无同路开放 PR、source 领先、canCreateNext、幂等），在原动作身份下完成，不会重复建 PR。生产已有首个真实样本：动作 4024 `paused`「AI 生成失败 (429)」（2026-10-30 01:02），可用于验收。
+- **移动端状态监控 ①②**（`a75b26e4`）：ci / deploy-vercel / reconcile 三个工作流各加 `if: failure()` 飞书通知 step（仓库 secret `FEISHU_WEBHOOK`，未配置则 warning 跳过）；新增 `scripts/gh-status-summary.sh` 聚合脚本（PR/CI/git 状态表，可被手机远程调用）。③ 统一状态页后置；仓库清单待使用者点名（候选见用户维护的 Agent 项目矩阵）。
+- **合并后自动推进骨架**（`814e12b7`）：步骤配置新增「合并后自动推进下一步」开关（服务端 `autoAdvanceNext`，仅 server 模式可开）；对账在该步 `merged && checks success`（含部署）时入队 `advance-stage` 动作，执行器重验后记 succeeded + 审计，门禁在途时 queued 等待。健康检查、多路径汇聚的完整推进与进度条展示仍属方案第 6 阶段剩余项。
+- **`workflow_versions.snapshot` 停止新写入**：全库无读者（`040` 已确认），新版本行不再携带全量快照，历史行保留。
+- **待用户操作**：Supabase SQL Editor 按序执行 `041` → `042` → `043`（参考 `040` 迁移文件头注释惯例）；GitHub 仓库 Secrets 配置 `FEISHU_WEBHOOK` 才能让移动监控 ① 生效；`prh_readonly` 口令轮换仍为手动项；9 月 Supabase 账单复核需登录 Dashboard（宽限期 9/20 已过，当前只读查询未遇 402）。
+- 观察项：生产 `inbox_refresh` 时长 ~29s 与代码 6s 预算矛盾，需登录态浏览器手测刷新后才能最终裁决。
+
 
 - 当前分支：`feature/20260722`。`origin/main` 头为 `ded87697`（PR #337，2026-08-22 04:20:04 UTC），`version` 接入乐观锁已合入。核对分支同步状态请直接跑 `git log --oneline origin/main..HEAD`，不要引用本文档里的快照。
 - 用户已确认本批代码已上线 Production。
