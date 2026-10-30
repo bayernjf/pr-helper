@@ -1,6 +1,6 @@
 # PR Helper Handoff
 
-> 最后更新：2026-10-30（2026-10-30 批量落地已全部合入 main 并部署：PR #393 合并 6 个特性 commit（`b6c9ed17`、`8ee8d574` 等）、状态页与 E2E 补强 `2736f334`、主应用窄屏适配 `91d6dec0`；CI / Vercel / Cloudflare 均 success。迁移 041–043 **已于 2026-10-30 ~19:40 UTC 在生产执行并只读验证**（`gate_sha` 列存在、`payload` 可空、`version` NOT NULL；20:00–20:02 的 webhook 全部 success/skipped；20:00 的 `*/30` cron 校准 11/11 阶段 success（`stages_failed=0`；末次 `gate_sha` 报错定格 19:37:03，迁移后至 20:24 UTC 共 70 次 reconciliation 失败合计 0），活故障关闭）；E 步 DROP payload 的迁移 `044` 已写好并开出 [PR #394](https://github.com/bayernjf/pr-helper/pull/394)（CI 全绿，未合并、未执行），代码侧零读零写且无索引/视图/函数依赖、47 行 payload 共 37 kB 为冗余副本，**待用户备份后在 Supabase 执行**；9 月账单复核仍待用户登录 Dashboard。此前：2026-10-10 修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」；2026-09-15 刷新慢优化（`d077ff58`/`4394df2e`/`f3e29251`/`4bb5c3b0`）已于 2026-10-14 部署生产并验证。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
+> 最后更新：2026-10-31（**2026-10-31 追加**：调研纠偏——**归档已于 2026-08-17 实现并完成生产验收**，「缺可逆中间态」是过时记录，真正缺的只有静音，设计已出 [PR #395](https://github.com/bayernjf/pr-helper/pull/395)（含 4 个待拍板决策点，未获批）；ETag 只读遥测已落 [PR #396](https://github.com/bayernjf/pr-helper/pull/396)，等日志积累再算命中率；沙盒 4 流程**建议先用现成的归档**替代删除——同样把 sweep ~29s 砍到 ~15s 且可逆。2026-10-30：批量落地已全部合入 main 并部署：PR #393 合并 6 个特性 commit（`b6c9ed17`、`8ee8d574` 等）、状态页与 E2E 补强 `2736f334`、主应用窄屏适配 `91d6dec0`；CI / Vercel / Cloudflare 均 success。迁移 041–043 **已于 2026-10-30 ~19:40 UTC 在生产执行并只读验证**（`gate_sha` 列存在、`payload` 可空、`version` NOT NULL；20:00–20:02 的 webhook 全部 success/skipped；20:00 的 `*/30` cron 校准 11/11 阶段 success（`stages_failed=0`；末次 `gate_sha` 报错定格 19:37:03，迁移后至 20:24 UTC 共 70 次 reconciliation 失败合计 0），活故障关闭）；E 步 DROP payload 的迁移 `044` 已写好并开出 [PR #394](https://github.com/bayernjf/pr-helper/pull/394)（CI 全绿，未合并、未执行），代码侧零读零写且无索引/视图/函数依赖、47 行 payload 共 37 kB 为冗余副本，**待用户备份后在 Supabase 执行**；9 月账单复核仍待用户登录 Dashboard。此前：2026-10-10 修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」；2026-09-15 刷新慢优化（`d077ff58`/`4394df2e`/`f3e29251`/`4bb5c3b0`）已于 2026-10-14 部署生产并验证。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 > **待办的唯一索引在下方《待处理事项（2026-08-22 汇总）》一节**，其余小节只记已完成的事实与理由。
 > 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
@@ -87,7 +87,7 @@
 | `prh_readonly` 口令轮换 | 该口令曾出现在会话记录中；`alter role ... password` 后同步 `~/.config/pr-helper/db.env`。 | [只读查询通道](docs/supabase-readonly-debugging.md) |
 | 9 月 + 10 月账单复核 | 9/20 宽限期已过，当前只读查询未遇 402；需登录 Dashboard 用实际值确认 −94% / 2.1 GB 月投影是否仍成立。 | [egress 方案](docs/supabase-egress-optimization.md) |
 | 登录态浏览器手测 | `REALTIME_RECONCILE_BUDGET_MS=25000` 已于 2026-10-30 从 Production 删除并重部署，inbox_refresh 应恢复 ≤11s；需真实登录刷新一次确认。 | 《2026-09-15 刷新慢优化》 |
-| UI 删 4 个沙盒流程 | 约 25 阶段、占 sweep 约一半；删除可把 sweep 自然时长 ~29s 砍到 ~15s。删除是级联操作，二次确认。 | 《2026-10-30 批量落地》 |
+| 沙盒 4 流程处置（原「UI 删 4 个沙盒流程」） | **纠偏（2026-10-31）**：现成的**归档**即可拿到 sweep 收益（~29s → ~15s，归档流程不进 cron/webhook 校准，2026-08-17 已验收）且可逆；删除仍是选项，但不可逆、级联二次确认。 | 《2026-10-30 批量落地》 |
 | 外部条件类验收 | Required approval、private/organization 安装边界、双账号团队角色边界、加密同步 v1/v2 与口令轮换、保留 Cron 批次、失败部署投影+确认式生产回滚——都缺账号或环境。 | 《剩余生产验收》 |
 
 ### 已定性的残留，不再当待办（2026-08-22）
@@ -100,14 +100,14 @@
 
 | 事项 | 一句话 | 去处 |
 | --- | --- | --- |
-| 流程归档 / 静音 | 沙盒、下线流程现在只有「保留（长期占收件箱待办）」和「级联删除」，缺可逆中间态。2026-10-31 已起头调研后暂停；设计至少要先定：归档是否仍被 cron 校准、是否仍接收 webhook 投影、与团队共享和自动化开关的关系。 | [current-state 第八节](docs/current-state.md)、[remediation P7](docs/auto-create-pr-remediation.md) |
+| 流程静音（设计待批） | **纠偏（2026-10-31）**：归档已于 2026-08-17 实现并验收，「缺可逆中间态」为过时记录（[PR #395](https://github.com/bayernjf/pr-helper/pull/395) 已回填 current-state 第八节与 remediation P7）。真正缺的只有静音：活跃流程照常校准与自动化、只关 Web Push；迁移 `045` 加 `muted` 列、5 个推送触发点过滤、lane 静音按钮/徽标；设计含 4 个待拍板决策点（v1 范围、全局静音、无确认弹窗、沙盒先归档）。 | [PR #395](https://github.com/bayernjf/pr-helper/pull/395) |
 | 方案第 7 项 | 自动动作 run 级详情（含重试原因）+ 按仓库的成本/限流展示；自动化方案内最后一块未立项工程。 | [`docs/automated-workflow-plan.md`](docs/automated-workflow-plan.md) |
 | inbox 刷新异步化 | 交互请求不再同步等 sweep（治本，waitUntil 化）；等待已降到 ≤11s，现行结论是先观察几天再定，不急。 | 《2026-09-15 刷新慢优化》 |
 | AI 失败接管弹窗验收 | 功能已上线（`5bd1f2e8`），生产有真实样本动作 4024（AI 429）；剩你在失败中心点一次「接管 AI 内容」做 UI 验收。 | 《2026-10-30 批量落地》 |
 
 ### 已知但未立项（不影响当前功能）
 
-- **ETag / `If-None-Match` 需先测命中率再做**：304 省的是 GitHub rate limit（峰值仅占基线 18–34%），但 GitHub 304 不返回 body，要落库缓存 ETag+body，未命中还要回写，反而给已过线的 Supabase 出站加压。正确第一步是加只读遥测，量化相邻 sweep 重复读同路径且未变的比例，命中率高再建缓存。
+- **ETag / `If-None-Match`：只读遥测已落地（[PR #396](https://github.com/bayernjf/pr-helper/pull/396)），等日志积累再做命中率分析**：304 省的是 GitHub rate limit（峰值仅占基线 18–34%），但 GitHub 304 不返回 body，要落库缓存 ETag+body，未命中还要回写，反而给已过线的 Supabase 出站加压。遥测按 GET 路径在实例内备忘录记 ETag，sweep 级打 `[reconcile-etag]` 行（stable/changed/firstSeen，不改任何请求行为、不落库）；跑几天后按日算 `stable/(stable+changed+firstSeen)` 得 304 命中率上界——高再建缓存，低（③ 短路已覆盖的场景）就维持现状不做。
 - 一圈对账的长度由 GitHub 往返决定（每阶段约 7.8 次调用），降这个数才能真正缩短轮转；属代码工作。
 - 撞预算的 sweep 似乎没推进 `last_reconcile_attempt_at`，下一次会领到完全相同的一批流程。
 - bayjf 的健康检查地址被清空而非设为 `/`，因此零个配置带健康检查，探针没有线上回归信号。
