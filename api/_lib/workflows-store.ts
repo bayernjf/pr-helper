@@ -2181,6 +2181,12 @@ export function reconcileTimingLine(fields: Record<string, string | number | und
   return `[reconcile-timing] ${logFields(fields)}`;
 }
 
+// ETag telemetry shares the one-greppable-line convention; emitted once per sweep scope, only when at
+// least one GET was observed with an ETag, so silent scopes add no log noise.
+export function etagTelemetryLine(fields: Record<string, string | number | undefined>) {
+  return `[reconcile-etag] ${logFields(fields)}`;
+}
+
 function logFields(fields: Record<string, string | number | boolean | undefined>) {
   return Object.entries(fields)
     .filter(([, value]) => value !== undefined)
@@ -2226,7 +2232,7 @@ export function createPhaseRecorder(tracker?: StagePhaseTracker) {
   return { phases, phase };
 }
 
-type ReconcileBudget = { calls: number; ms: number; phases: Record<string, number>; pending: Set<StagePhaseTracker> };
+type ReconcileBudget = { calls: number; ms: number; etagStable: number; etagChanged: number; etagFirstSeen: number; phases: Record<string, number>; pending: Set<StagePhaseTracker> };
 
 async function reconcileOneStage(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string, budget?: ReconcileBudget) {
   const startedAt = performance.now();
@@ -2236,6 +2242,9 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   if (budget) {
     budget.calls += tracked.stats.calls;
     budget.ms += tracked.stats.totalMs;
+    budget.etagStable += tracked.stats.etagStable;
+    budget.etagChanged += tracked.stats.etagChanged;
+    budget.etagFirstSeen += tracked.stats.etagFirstSeen;
     addPhaseTotals(budget.phases, tracked.value.phases);
   }
   console.log(reconcileTimingLine({
@@ -2424,7 +2433,7 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
   try {
     // The installation quota is flat and shared by every sweep, so the only way to attribute a burn
     // afterwards is to store what each sweep spent alongside the stages it settled.
-    const githubBudget = { calls: 0, ms: 0, phases: {} as Record<string, number>, pending: new Set<StagePhaseTracker>() };
+    const githubBudget = { calls: 0, ms: 0, etagStable: 0, etagChanged: 0, etagFirstSeen: 0, phases: {} as Record<string, number>, pending: new Set<StagePhaseTracker>() };
     const pruneAt = performance.now();
     for (const item of workflowsToReconcile) await pruneStaleWorkflowStageData(sql, item.row.user_id, item.workflow);
     githubBudget.phases.prune = Math.round(performance.now() - pruneAt);
@@ -2446,6 +2455,9 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     })));
     githubBudget.calls += routes.stats.calls;
     githubBudget.ms += routes.stats.totalMs;
+    githubBudget.etagStable += routes.stats.etagStable;
+    githubBudget.etagChanged += routes.stats.etagChanged;
+    githubBudget.etagFirstSeen += routes.stats.etagFirstSeen;
     const flatTasks = routes.value.flat();
     const routesMs = Math.round(performance.now() - routesAt);
     githubBudget.phases.routes = routesMs;
@@ -2494,6 +2506,17 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
       outcome: raced.outcome,
       total: durationMs,
     }));
+    if (githubBudget.etagStable + githubBudget.etagChanged + githubBudget.etagFirstSeen > 0) {
+      console.log(etagTelemetryLine({
+        scope: 'sweep',
+        trigger,
+        repository: repository || '*',
+        calls: githubBudget.calls,
+        stable: githubBudget.etagStable,
+        changed: githubBudget.etagChanged,
+        firstSeen: githubBudget.etagFirstSeen,
+      }));
+    }
     const errorMessage = firstFailure ? String(firstFailure instanceof Error ? firstFailure.message : firstFailure).slice(0, 800) : null;
     if (raced.outcome === 'deferred') {
       // The stages the deadline abandoned are the ones whose time is missing, so the phase they are

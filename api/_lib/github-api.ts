@@ -12,16 +12,36 @@ type CachedInstallationToken = { token: string; expiresAt: number };
 const installationTokenCache = new Map<string, CachedInstallationToken>();
 const installationTokenRequests = new Map<string, Promise<string>>();
 
-export type GitHubCallStats = { calls: number; totalMs: number; slowest: { path: string; ms: number } | null };
+export type GitHubCallStats = { calls: number; totalMs: number; slowest: { path: string; ms: number } | null; etagStable: number; etagChanged: number; etagFirstSeen: number };
 
 const callStats = new AsyncLocalStorage<GitHubCallStats>();
 
 // Attribution has to follow the async context, not a module-level counter: a sweep runs many stages
 // concurrently, so a shared counter would report one stage's latency as another's.
 export async function trackGitHubCalls<T>(run: () => Promise<T>): Promise<{ value: T; stats: GitHubCallStats }> {
-  const stats: GitHubCallStats = { calls: 0, totalMs: 0, slowest: null };
+  const stats: GitHubCallStats = { calls: 0, totalMs: 0, slowest: null, etagStable: 0, etagChanged: 0, etagFirstSeen: 0 };
   const value = await callStats.run(stats, run);
   return { value, stats };
+}
+
+// Read-only ETag telemetry: remember the ETag GitHub returned per request path on this serverless
+// instance and compare it with the previous observation. A repeat with an identical ETag means a
+// conditional request would have answered 304 without a body — that ratio is the go/no-go signal for
+// building a real ETag cache (the egress plan decided to measure before building). Nothing conditional
+// is sent and nothing is cached beyond these headers; the memo is instance-local by design, so cold
+// starts show up as firstSeen and dilute the ratio rather than skewing it.
+const etagMemo = new Map<string, string>();
+const ETAG_MEMO_MAX = 4096;
+
+function noteEtag(path: string, etag: string | null, stats: GitHubCallStats | undefined) {
+  if (!etag) return;
+  if (etagMemo.size >= ETAG_MEMO_MAX) etagMemo.clear();
+  const previous = etagMemo.get(path);
+  etagMemo.set(path, etag);
+  if (!stats) return;
+  if (previous === undefined) stats.etagFirstSeen += 1;
+  else if (previous === etag) stats.etagStable += 1;
+  else stats.etagChanged += 1;
 }
 
 export class GitHubApiError extends Error {
@@ -73,6 +93,8 @@ async function githubFetch<T>(path: string, token: string, init?: RequestInit): 
     const detail = await response.json().catch(() => ({ message: response.statusText })) as { message?: string };
     throw new GitHubApiError(response.status, detail.message || `GitHub 请求失败 (${response.status})`);
   }
+  // Only GETs are conditional candidates; token minting and mutations would pollute the ratio.
+  if ((init?.method ?? 'GET') === 'GET') noteEtag(path, response.headers.get('etag'), callStats.getStore());
   if (response.status === 204 || response.headers.get('content-length') === '0') return {} as T;
   return response.json() as Promise<T>;
 }
