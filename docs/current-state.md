@@ -376,7 +376,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 ## 测试覆盖
 
 - 本地单元/服务端测试：`npm test` 运行 33 个文件 / 732 个测试；`npx tsc --noEmit` 和 `npm run build` 同时通过。
-- 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 26 个用例，包括 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉、创建/合并 PR、删除流程、确认式部署回滚、操作审计查询、编辑既有流程时步骤表单折叠、换仓库确认，以及流程详情进度条的步骤状态、前缀计数、同步时间标注与全部完成后不再高亮当前步。它验证真实 DOM、二次确认和浏览器请求负载，不替代真实 GitHub 写入、门禁和部署验收。
+- 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 32 个用例，包括 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉、创建/合并 PR、删除流程、确认式部署回滚、操作审计查询、编辑既有流程时步骤表单折叠、换仓库确认、流程详情进度条的步骤状态、前缀计数、同步时间标注与全部完成后不再高亮当前步、AI 失败接管弹窗（打开/重新生成/确认后失败中心消失）、合并后自动推进开关（仅 server 策略可开、保存 `autoAdvanceNext`、裸步骤禁用）。它验证真实 DOM、二次确认和浏览器请求负载，不替代真实 GitHub 写入、门禁和部署验收。
 - 已新增流程保存队列回归：连续编辑会串行使用服务端返回的新版本，且不会由旧响应覆盖最新编辑；真实跨窗口乐观锁冲突仍会明确报错。
 - Production E2E 通过项目与尚未通过的集成项目均以 [验证报告](verification-report.md) 为准。
 - `src/lib/` 核心业务逻辑覆盖率 81%+，包括 domain、workflow、generation-rules、pr-drafts、encrypted-sync、navigation 等。
