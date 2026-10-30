@@ -10,7 +10,7 @@ import { initPrReferenceTooltip, prReferenceHtml } from './lib/pr-reference';
 import { activeWorkflows, archiveWorkflow, archivedWorkflows, restoreWorkflow, addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoAdvance, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type StageRouteMode, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
-import { automationActionPresentation, latestAutomationAction, stageProgressNode, stageRunPresentation, workflowProgress, workflowRunSummary, worstStageProgress, type AutomationActionState, type StageProgressStatus, type WorkflowStageRunState } from './lib/workflow-run';
+import { automationActionPresentation, latestAutomationAction, nextStepSummary, progressActionKey, stageProgressNode, stageRunPresentation, workflowProgress, workflowRunSummary, worstStageProgress, type AutomationActionState, type StageProgressStatus, type WorkflowStageRunState } from './lib/workflow-run';
 import { detailRefreshDueAt, projectedStageStatus } from './lib/projected-stage';
 import { getCloudSyncStatus, unlockCloudSync, lockCloudSync, isCloudSyncUnlocked, encryptForCloud, decryptFromCloud, rotateCloudSyncKey, type CloudSyncStatus, type SyncableData } from './lib/encrypted-sync';
 import { canPerformTeamOperation, teamRoleLabel } from './lib/team-permissions';
@@ -47,7 +47,7 @@ type Team = { id: string; name: string; role: 'owner' | 'editor' | 'operator' | 
 type TeamMember = { githubLogin: string; role: Team['role'] };
 type PreflightCheck = { code: string; severity: 'error' | 'warning' | 'info'; title: string; detail: string; workflowId: string; stageIndex: number | null; source: string | null; fix?: string };
 type PreflightResult = { workflowId: string; workflowName: string; repository: string; checks: PreflightCheck[]; summary: { errors: number; warnings: number; info: number }; ok: boolean };
-type AutomationAction = { id: number; workflowId: string; stageId: string | null; stageIndex: number; source: string; target: string; kind: 'create-pr' | 'merge-pr'; state: AutomationActionState; attempts: number; failureReason: string | null; createdAt: string; updatedAt: string };
+type AutomationAction = { id: number; workflowId: string; stageId: string | null; stageIndex: number; source: string; target: string; kind: 'create-pr' | 'merge-pr' | 'advance-stage'; state: AutomationActionState; attempts: number; failureReason: string | null; createdAt: string; updatedAt: string };
 type RecoveryStatus = { workflowId: string; stageIndex: number; source: string; retryCount: number; maxRetries: number; lastRetryAt: string | null; cooldownRemainingSeconds: number; exhausted: boolean; escalationNeeded: boolean };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
@@ -1319,6 +1319,10 @@ function stageProgressTooltip(flow: Workflow, stageIndex: number): string {
   const lines = [`${flow.stages[stageIndex]!.source} → ${flow.stages[stageIndex]!.target}`];
   const message = states.map(state => state.decision?.message).find(Boolean);
   if (message) lines.push(message);
+  // Name the running automation only when a server action exists: with auto-merge off there is no
+  // action row, so a moving node must not read as "auto-merging" — that step merges by hand.
+  const actionKey = progressActionKey(action?.kind);
+  if (actionKey && !automationActionPresentation(action!).blocked) lines.push(`${t('detail.progress.currentAction')}：${t(actionKey)}`);
   if (action && automationActionPresentation(action).blocked && action.failureReason?.trim()) lines.push(action.failureReason.trim());
   return lines.join(' · ');
 }
@@ -1339,8 +1343,12 @@ function flowProgressBar(flow: Workflow): string {
   const syncedAt = flow.stages.flatMap((_, index) => statesForStage(flow, index).map(state => state.updatedAt)).filter(Boolean).sort().at(-1);
   const age = syncedAt ? relativeAgeText(Math.max(0, Math.floor((Date.now() - new Date(syncedAt).getTime()) / 1000))) : '';
   const syncedNote = age ? `<p class="flow-progress-sync">${escape(t('detail.progress.syncedAt', { time: age }))}</p>` : '';
+  // The "next" line names the step the flow is actually waiting on and copies the server decision's
+  // unlock condition, so a locked bar explains itself instead of only showing a color.
+  const next = nextStepSummary(progress.nodes, progress.nodes.map((_, index) => statesForStage(flow, index).map(state => state.decision?.message).find(Boolean)));
+  const nextLine = next && synced ? `<p class="flow-progress-next"><span>${escape(t('detail.progress.next', { step: next.index + 1 }))}</span>${next.reason ? `<span class="flow-progress-next-reason">${escape(next.reason)}</span>` : ''}</p>` : '';
   const nodes = progress.nodes.map((status, index) => `<button type="button" class="fp-node is-${status} ${progress.currentIndex !== null && index === progress.currentIndex && synced ? 'is-current' : ''}" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(statesForStage(flow, index)[0]?.source || flow.stages[index]!.source)}" title="${escape(stageProgressTooltip(flow, index))}" aria-label="${escape(`${t('detail.progress.step', { step: index + 1 })} · ${t(`detail.progress.node.${status}`)}`)}"><span class="fp-node-index">${index + 1}</span><span class="fp-node-status">${t(`detail.progress.node.${status}`)}</span></button>`).join('');
-  return `<div class="flow-progress"><p class="eyebrow">${t('detail.progress.eyebrow')}</p><p class="flow-progress-headline">${escape(headline)}</p><div class="flow-progress-nodes">${nodes}</div>${syncedNote}</div>`;
+  return `<div class="flow-progress"><p class="eyebrow">${t('detail.progress.eyebrow')}</p><p class="flow-progress-headline">${escape(headline)}</p><div class="flow-progress-nodes">${nodes}</div>${nextLine}${syncedNote}</div>`;
 }
 function automationStepKey(workflowId: string, stageIndex: number, source: string) {
   return `${workflowId}|${stageIndex}|${source}`;

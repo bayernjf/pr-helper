@@ -769,6 +769,9 @@ test('流程详情顶部的进度条按服务端阶段决策标注每一步', as
   await expect(page.locator('.fp-node').nth(0)).toHaveClass(/is-succeeded/);
   await expect(page.locator('.fp-node').nth(1)).toHaveClass(/is-waiting-gates/);
   await expect(page.locator('.fp-node').nth(1)).toHaveAttribute('title', /Approval/);
+  // 「下一步」行指向卡住的步骤，并原样引用服务端决策的解锁条件。
+  await expect(page.locator('.flow-progress-next')).toHaveText(/下一步 · 第 2 步/);
+  await expect(page.locator('.flow-progress-next')).toContainText('PR 还需要 1 个 Approval');
 
   // Each node is the same entry point as the timeline row, so the bar stays a navigation aid rather
   // than a decorative percentage.
