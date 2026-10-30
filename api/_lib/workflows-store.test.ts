@@ -777,6 +777,15 @@ describe('store queries against the migration schema', () => {
     expect(source).toMatch(/await markPending\(failed > 0\);/);
   });
 
+  // closeAbandonedReconciliationRuns closes a sweep the real-time ceiling gave up on, and its comment
+  // promises the verdict is never overwritten. The promise is kept (or broken) in the sweep's own
+  // final writes: an orphan that finishes late must not clobber the abandoned verdict or its duration.
+  it('guards every reconciliation_runs write by runId so an abandoned verdict is never overwritten', () => {
+    const updates = source.match(/UPDATE reconciliation_runs SET[^`]*?WHERE id = \$\{runId\}/g) || [];
+    expect(updates.length).toBeGreaterThanOrEqual(4);
+    for (const update of updates) expect(update).toContain("state = 'running'");
+  });
+
   // The stamp was unconditional, but a branch-narrowed sweep only looks at the routes the pushed
   // branches can reach. A repository with frequent deliveries therefore renewed its turn every few
   // minutes without ever reconciling the dropped routes, so it never came back to the front of the

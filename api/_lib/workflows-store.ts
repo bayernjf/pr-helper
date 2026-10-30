@@ -2451,7 +2451,7 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     githubBudget.phases.routes = routesMs;
     // Recording the intent before the work means a sweep that is killed mid-flight still shows how
     // much it meant to do, instead of looking like a sweep that found nothing.
-    await sql`UPDATE reconciliation_runs SET stages_total = ${flatTasks.length} WHERE id = ${runId}`;
+    await sql`UPDATE reconciliation_runs SET stages_total = ${flatTasks.length} WHERE id = ${runId} AND state = 'running'`;
     let reconciled = 0;
     let failed = 0;
     let firstFailure: unknown;
@@ -2502,19 +2502,19 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
       const breakdown = Object.keys(pending).length ? { ...githubBudget.phases, pending } : githubBudget.phases;
       // Closing the row here is the whole point: a deferred sweep used to stay 'running' until the
       // scheduled sweep reaped it, which read as in flight for minutes and hid the deferral.
-      await sql`UPDATE reconciliation_runs SET state = ${deferredRunState(reconciled, failed, flatTasks.length)}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, github_calls = ${githubBudget.calls}, github_ms = ${Math.round(githubBudget.ms)}, phase_ms = ${sql.json(breakdown)}, error_message = ${errorMessage || RECONCILIATION_DEFERRED_MESSAGE}, finished_at = now() WHERE id = ${runId}`;
+      await sql`UPDATE reconciliation_runs SET state = ${deferredRunState(reconciled, failed, flatTasks.length)}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, github_calls = ${githubBudget.calls}, github_ms = ${Math.round(githubBudget.ms)}, phase_ms = ${sql.json(breakdown)}, error_message = ${errorMessage || RECONCILIATION_DEFERRED_MESSAGE}, finished_at = now() WHERE id = ${runId} AND state = 'running'`;
       await markPending(true);
       return { reconciled, outcome: 'deferred' as const };
     }
     const finalState = reconciliationState(failed, reconciled);
-    await sql`UPDATE reconciliation_runs SET state = ${finalState}, stages_total = ${flatTasks.length}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, github_calls = ${githubBudget.calls}, github_ms = ${Math.round(githubBudget.ms)}, phase_ms = ${sql.json(githubBudget.phases)}, error_message = ${errorMessage}, finished_at = now() WHERE id = ${runId}`;
+    await sql`UPDATE reconciliation_runs SET state = ${finalState}, stages_total = ${flatTasks.length}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, github_calls = ${githubBudget.calls}, github_ms = ${Math.round(githubBudget.ms)}, phase_ms = ${sql.json(githubBudget.phases)}, error_message = ${errorMessage}, finished_at = now() WHERE id = ${runId} AND state = 'running'`;
     await markPending(failed > 0);
     if (failed > 0 && reconciled === 0) throw firstFailure || new Error('Reconciliation failed');
     return { reconciled, outcome: 'completed' as const };
   } catch (error) {
     const durationMs = Date.now() - startedAt;
     await markPending(true);
-    await sql`UPDATE reconciliation_runs SET state = 'failure', duration_ms = ${durationMs}, error_message = ${String(error instanceof Error ? error.message : error).slice(0, 800)}, finished_at = now() WHERE id = ${runId}`.catch(() => undefined);
+    await sql`UPDATE reconciliation_runs SET state = 'failure', duration_ms = ${durationMs}, error_message = ${String(error instanceof Error ? error.message : error).slice(0, 800)}, finished_at = now() WHERE id = ${runId} AND state = 'running'`.catch(() => undefined);
     throw error;
   } finally {
     clearInterval(renewal);
