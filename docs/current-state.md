@@ -426,9 +426,9 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 | 15 | `supabase/migrations/042_payload_nullable.sql` | `pr_helper_workflows.payload` 改可空 | 停写 payload 列方案 C 步；新建流程的 INSERT 不再带 payload |
 | 16 | `supabase/migrations/043_version_not_null.sql` | `pr_helper_workflows.version` 改非空 | 停写 payload 列方案 D 步 |
 
-验证：2026-10-30 ~19:40 UTC 执行后，`information_schema` 确认三列状态正确；20:00–20:02 webhook 全部 success/skipped、`stages_failed=0`、无 `gate_sha` 报错。
+验证：2026-10-30 ~19:40 UTC 执行后，`information_schema` 确认三列状态正确；20:00–20:02 webhook 全部 success/skipped、20:00:04 的 `*/30` cron 校准 11/11 阶段 success；执行后至 20:24 UTC 共 70 次 reconciliation `stages_failed` 合计 0、无 `gate_sha` 报错（末次报错 19:37:03，迁移完成前）。
 
-**停写 payload 列方案 E 步（DROP COLUMN）：迁移 `044_drop_workflow_payload.sql` 已写（`feature/20261031-egress`，commit `df084c74`，尚未合 main、未执行）**。代码侧已零读零写、无索引/视图/函数依赖，47 行 payload（约 37 kB）是关系表之外的冗余历史副本。**不可逆，需先备份 `pr_helper_workflows` 再在 Supabase 执行。**
+**停写 payload 列方案 E 步（DROP COLUMN）：迁移 `044_drop_workflow_payload.sql` 已开 [PR #394](https://github.com/bayernjf/pr-helper/pull/394)（CI 全绿，未合并、未执行）**。代码侧已零读零写、无索引/视图/函数依赖，47 行 payload（约 37 kB）是关系表之外的冗余历史副本。**不可逆，需先备份 `pr_helper_workflows` 再在 Supabase 执行。**
 
 ### 二、代码部署状态
 

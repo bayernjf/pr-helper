@@ -1,6 +1,6 @@
 # PR Helper Handoff
 
-> 最后更新：2026-10-30（2026-10-30 批量落地已全部合入 main 并部署：PR #393 合并 6 个特性 commit（`b6c9ed17`、`8ee8d574` 等）、状态页与 E2E 补强 `2736f334`、主应用窄屏适配 `91d6dec0`；CI / Vercel / Cloudflare 均 success。迁移 041–043 **已于 2026-10-30 ~19:40 UTC 在生产执行并只读验证**（`gate_sha` 列存在、`payload` 可空、`version` NOT NULL；20:00–20:02 的 webhook 全部 success/skipped、`stages_failed=0`、无 `gate_sha` 报错，活故障关闭，下一轮 `*/30` cron 可再复核）；E 步 DROP payload 的迁移 `044` 已写好（`feature/20261031-egress` 分支 commit `df084c74`，尚未合 main、未执行），代码侧零读零写且无索引/视图/函数依赖、47 行 payload 共 37 kB 为冗余副本，**待用户备份后在 Supabase 执行**；9 月账单复核仍待用户登录 Dashboard。此前：2026-10-10 修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」；2026-09-15 刷新慢优化（`d077ff58`/`4394df2e`/`f3e29251`/`4bb5c3b0`）已于 2026-10-14 部署生产并验证。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
+> 最后更新：2026-10-30（2026-10-30 批量落地已全部合入 main 并部署：PR #393 合并 6 个特性 commit（`b6c9ed17`、`8ee8d574` 等）、状态页与 E2E 补强 `2736f334`、主应用窄屏适配 `91d6dec0`；CI / Vercel / Cloudflare 均 success。迁移 041–043 **已于 2026-10-30 ~19:40 UTC 在生产执行并只读验证**（`gate_sha` 列存在、`payload` 可空、`version` NOT NULL；20:00–20:02 的 webhook 全部 success/skipped；20:00 的 `*/30` cron 校准 11/11 阶段 success（`stages_failed=0`；末次 `gate_sha` 报错定格 19:37:03，迁移后至 20:24 UTC 共 70 次 reconciliation 失败合计 0），活故障关闭）；E 步 DROP payload 的迁移 `044` 已写好并开出 [PR #394](https://github.com/bayernjf/pr-helper/pull/394)（CI 全绿，未合并、未执行），代码侧零读零写且无索引/视图/函数依赖、47 行 payload 共 37 kB 为冗余副本，**待用户备份后在 Supabase 执行**；9 月账单复核仍待用户登录 Dashboard。此前：2026-10-10 修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」；2026-09-15 刷新慢优化（`d077ff58`/`4394df2e`/`f3e29251`/`4bb5c3b0`）已于 2026-10-14 部署生产并验证。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 > **待办的唯一索引在下方《待处理事项（2026-08-22 汇总）》一节**，其余小节只记已完成的事实与理由。
 > 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
@@ -29,7 +29,7 @@
 ### 2026-10-30 迁移 041–043 执行与验证（接力会话，`prh_readonly` 生产库实测）
 
 - **已执行并验证关闭活故障**：用户于 ~19:40 UTC 在 Supabase 按序执行 041 → 042 → 043。执行前预检 47 行 `version` 空值为 0（043 不会失败）。执行后 `information_schema` 实测：`workflow_stage_states.gate_sha` 存在（text，可空）、`pr_helper_workflows.payload` 可空、`pr_helper_workflows.version` NOT NULL。
-- 20:00–20:02 UTC 的 webhook 投递全部 `success`/`skipped`、`stages_reconciled` 有正值、`stages_failed=0`、无 `gate_sha` 报错——webhook 与 cron 走同一条 gate_sha 投影，足以确认列缺失故障消失。下一轮 `*/30` cron 可再作例行复核。
+- 20:00–20:02 UTC 的 webhook 投递全部 `success`/`skipped`、`stages_reconciled` 有正值、`stages_failed=0`、无 `gate_sha` 报错——webhook 与 cron 走同一条 gate_sha 投影，足以确认列缺失故障消失。**cron 侧复核亦已完成**：20:00:04 UTC 的 `*/30` 校准 `success`、11/11 阶段、`stages_failed=0`；迁移后至 20:24 UTC 共 70 次 reconciliation `stages_failed` 合计 0，末次 `gate_sha` 报错定格在 19:37:03（迁移完成前）。复核关闭，无需再等下一轮。
 - **E 步解锁情况**：执行前核对 `trackedWorkflowColumns()` 是唯一工作流读入口且不选 payload（[`api/_lib/workflows-store.ts`](api/_lib/workflows-store.ts)），034 的 jsonb 索引已由 039 删除，无视图/函数依赖；47 行 payload 共 37 kB 且为关系表之外的冗余副本。迁移 `044_drop_workflow_payload.sql` 已写在 `feature/20261031-egress`（commit `df084c74`），**不可逆，待用户备份后执行**，合 main 与执行顺序由用户决定。
 - 排障通道备注：Vercel `DATABASE_URL` 是 Sensitive 变量、`vercel env pull` 取回空串，生产只读查询统一走 `~/.local/bin/prh-sql.mjs`（`prh_readonly`），见 [`docs/supabase-readonly-debugging.md`](docs/supabase-readonly-debugging.md)。
 
@@ -82,7 +82,7 @@
 
 | 事项 | 一句话 | 去处 |
 | --- | --- | --- |
-| 执行迁移 `044`（DROP payload 列） | 文件已在 `feature/20261031-egress`（commit `df084c74`）。**先备份 `pr_helper_workflows`**（47 行 payload 共 37 kB），再在 Supabase 执行；该分支尚未合 main，合并与执行先后由你定。不可逆。 | [`supabase/migrations/044_drop_workflow_payload.sql`](supabase/migrations/044_drop_workflow_payload.sql) |
+| 执行迁移 `044`（DROP payload 列） | 已开 [PR #394](https://github.com/bayernjf/pr-helper/pull/394)（CI 全绿）。**先备份 `pr_helper_workflows`**（47 行 payload 共 37 kB），再在 Supabase 执行；合并与执行先后由你定。不可逆。 | [`supabase/migrations/044_drop_workflow_payload.sql`](supabase/migrations/044_drop_workflow_payload.sql) |
 | 仓库 Secret `FEISHU_WEBHOOK` | 移动监控①的 `if: failure()` 飞书通知依赖它；未配置只 warning 跳过。甩 webhook URL 可由你在仓库 Settings 配。 | 《2026-10-30 批量落地》 |
 | `prh_readonly` 口令轮换 | 该口令曾出现在会话记录中；`alter role ... password` 后同步 `~/.config/pr-helper/db.env`。 | [只读查询通道](docs/supabase-readonly-debugging.md) |
 | 9 月 + 10 月账单复核 | 9/20 宽限期已过，当前只读查询未遇 402；需登录 Dashboard 用实际值确认 −94% / 2.1 GB 月投影是否仍成立。 | [egress 方案](docs/supabase-egress-optimization.md) |
