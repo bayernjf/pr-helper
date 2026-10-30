@@ -1,6 +1,6 @@
 # PR Helper Handoff
 
-> 最后更新：2026-10-30（2026-10-30 批量落地已全部合入 main 并部署：PR #393 合并 6 个特性 commit（`b6c9ed17`、`8ee8d574` 等）、状态页与 E2E 补强 `2736f334`、主应用窄屏适配 `91d6dec0`；CI / Vercel / Cloudflare 均 success。迁移 041–043 待用户在 Supabase SQL Editor 执行，代码上线前务必先跑 042（否则新流程 INSERT 撞 NOT NULL）；E 步 DROP payload 按三门槛推迟；9 月账单复核仍待用户登录 Dashboard。此前：2026-10-10 修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」；2026-09-15 刷新慢优化（`d077ff58`/`4394df2e`/`f3e29251`/`4bb5c3b0`）已于 2026-10-14 部署生产并验证。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
+> 最后更新：2026-10-30（2026-10-30 批量落地已全部合入 main 并部署：PR #393 合并 6 个特性 commit（`b6c9ed17`、`8ee8d574` 等）、状态页与 E2E 补强 `2736f334`、主应用窄屏适配 `91d6dec0`；CI / Vercel / Cloudflare 均 success。迁移 041–043 **经 2026-10-30 只读核对确认仍未执行，且已产生真实失败**（当天 03:00/03:30 UTC 两次 cron 校准各失败 1 个阶段，`column "gate_sha" does not exist`；新建流程会撞 `payload NOT NULL`），请尽快在 Supabase SQL Editor 按序执行；E 步 DROP payload 按三门槛推迟；9 月账单复核仍待用户登录 Dashboard。此前：2026-10-10 修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」；2026-09-15 刷新慢优化（`d077ff58`/`4394df2e`/`f3e29251`/`4bb5c3b0`）已于 2026-10-14 部署生产并验证。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 > **待办的唯一索引在下方《待处理事项（2026-08-22 汇总）》一节**，其余小节只记已完成的事实与理由。
 > 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
@@ -18,10 +18,16 @@
 - **合并后自动推进骨架**（`814e12b7`）：步骤配置新增「合并后自动推进下一步」开关（服务端 `autoAdvanceNext`，仅 server 模式可开）；对账在该步 `merged && checks success`（含部署）时入队 `advance-stage` 动作，执行器重验后记 succeeded + 审计，门禁在途时 queued 等待。健康检查、多路径汇聚的完整推进与进度条展示仍属方案第 6 阶段剩余项。
 - **`workflow_versions.snapshot` 停止新写入**：全库无读者（`040` 已确认），新版本行不再携带全量快照，历史行保留。
 - **待用户操作**：Supabase SQL Editor 按序执行 `041` → `042` → `043`（参考 `040` 迁移文件头注释惯例）；GitHub 仓库 Secrets 配置 `FEISHU_WEBHOOK` 才能让移动监控 ① 生效；`prh_readonly` 口令轮换仍为手动项；9 月 Supabase 账单复核需登录 Dashboard（宽限期 9/20 已过，当前只读查询未遇 402）。
-- 观察项：生产 `inbox_refresh` 时长 ~29s 与代码 6s 预算矛盾，需登录态浏览器手测刷新后才能最终裁决。
+- 观察项：生产 `inbox_refresh` 时长 ~29s 与代码 6s 预算矛盾，需登录态浏览器手测刷新后才能最终裁决（接力核对在近 48 小时又录得一次 29.1s degraded `inbox_refresh`，矛盾仍开放）。
+
+### 2026-10-30 只读核对（接力会话，`prh_readonly` 生产库实测）
+
+- **迁移 041–043 确认未执行**：`information_schema` 实测 `workflow_stage_states` 无 `gate_sha` 列、`pr_helper_workflows.payload` 仍 NOT NULL、`version` 仍 nullable。新代码已上线，当天 03:00 / 03:30 UTC 两次 cron 校准各失败 1 个阶段，错误均为 `column "gate_sha" of relation "workflow_stage_states" does not exist`——**每次校准只要扫到非终结阶段就会失败**，新建流程也会撞 `payload NOT NULL`。这是当前生产唯一活跃故障，用户执行 041 → 042 → 043 即消除。
+- **接力项 2「对账轮转缩短」实测结论**：`reconciliation_runs` 近 14 天——cron 每天 53–56 次、合计 530–770 次 GitHub 调用（均值 12.4 次/run、9.5 阶段/run，最慢 38.8s）；webhook 每天 23–1770 次。cron 占比活跃日约 35%、安静日可达 95%（即「88% 来自定时扫描」的语境），但绝对量只占每小时 5000 配额约 0.5%；③ 短路已生效（76 个阶段里 69 个 = 91% 每圈只花 1 次 compare）。剩余手段只有两条：批次 8 调大（最慢 tick 已贴近 40s 预算，调大有频繁 deferred 风险）或 cron `*/30` → `*/15`（兜底一圈 ~3h → ~1.5h，代价约 +600 调用/天，仍 <1%）。**结论：配额不是问题，维持现状；若在意兜底延迟再调频次（需新迁移 044）。**
+- 已删本地已合并分支 `feature/20260722`（曾指向 `3d952343`）；`origin/feature/20260722` 仍在，删远端属破坏性操作，待用户点名。
 
 
-- 当前分支：`feature/20260722`。`origin/main` 头为 `ded87697`（PR #337，2026-08-22 04:20:04 UTC），`version` 接入乐观锁已合入。核对分支同步状态请直接跑 `git log --oneline origin/main..HEAD`，不要引用本文档里的快照。
+- 当前分支：`main`（历史工作分支 `feature/20260722` 已于 2026-10-30 确认合并后删除）。核对分支同步状态请直接跑 `git log --oneline origin/main..HEAD`，不要引用本文档里的快照。
 - 用户已确认本批代码已上线 Production。
 - 2026-08-19 生产核对（当日第二次，合并 PR #288 之后）：最近 6 小时 cron 80 success / 1 degraded / 1 skipped、webhook 53 success / 4 degraded / 252 skipped、inbox_refresh 2 success，无 failure；55 行 stage 投影最老 1187 秒、平均 609 秒，距 `/api/cron/health` 的 2700 秒阈值余量充足；`workflow_automation_actions` 只有 263 succeeded / 35 cancelled，没有 `paused` / `queued` / `running` / `failed` 行。当日较早一次核对为 cron 78 success / 1 degraded / 2 skipped、投影最老 1370 秒、246 succeeded / 31 cancelled。
 - 2026-08-03 验证报告见 [`docs/verification-report.md`](docs/verification-report.md)：真实 E2E 已通过 GitHub App 授权、PR 创建、严格门禁、应用内合并、合并后 Actions 与多路径汇聚；未通过项均已明确标注。
