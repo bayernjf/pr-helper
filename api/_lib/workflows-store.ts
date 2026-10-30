@@ -1699,7 +1699,10 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
     // name and repository are supplied even though writeWorkflowRows below sets them in this same
     // transaction: 038 promoted both to NOT NULL, and Postgres checks the proposed tuple before it
     // resolves ON CONFLICT, so leaving them out fails every save — including one that only updates.
-    await transaction`INSERT INTO pr_helper_workflows (id, user_id, name, repository, payload) VALUES (${savedWorkflow.id}, ${ownerUserId}, ${savedWorkflow.name}, ${savedWorkflow.repository}, ${transaction.json(savedWorkflow)}) ON CONFLICT (user_id, id) DO UPDATE SET name = EXCLUDED.name, repository = EXCLUDED.repository, payload = EXCLUDED.payload, updated_at = now()`;
+    // Step D of the payload-column drop: payload is no longer written here, and this is the first
+    // place that hand-writes the full column list, so version must be spelled out — the 043
+    // NOT NULL would reject a save that forgot it instead of silently storing NULL.
+    await transaction`INSERT INTO pr_helper_workflows (id, user_id, name, repository, archived, version, position, declared_created_at, recovery_max_retries, recovery_cooldown_seconds) VALUES (${savedWorkflow.id}, ${ownerUserId}, ${savedWorkflow.name}, ${savedWorkflow.repository}, ${savedWorkflow.archived === true}, ${savedWorkflow.version ?? null}, ${savedWorkflow.position ?? null}, ${savedWorkflow.createdAt ?? null}, ${savedWorkflow.recoveryPolicy?.maxRetries ?? null}, ${savedWorkflow.recoveryPolicy?.cooldownSeconds ?? null}) ON CONFLICT (user_id, id) DO UPDATE SET name = EXCLUDED.name, repository = EXCLUDED.repository, archived = EXCLUDED.archived, version = EXCLUDED.version, position = EXCLUDED.position, declared_created_at = EXCLUDED.declared_created_at, recovery_max_retries = EXCLUDED.recovery_max_retries, recovery_cooldown_seconds = EXCLUDED.recovery_cooldown_seconds, updated_at = now()`;
     await writeWorkflowRows(transaction, ownerUserId, savedWorkflow);
     if (previous) {
       const changedStageIds = previous.stages.flatMap((stage, index) => {
@@ -1755,7 +1758,9 @@ export async function removeWorkflowStage(environment: Record<string, string | u
       .filter((stage, index) => index !== removalIndex && stage.stageId !== stageId)
       .map(stage => !stage.waitFor ? stage : { ...stage, waitFor: stage.waitFor.filter(dependency => dependency !== removalIndex).map(dependency => dependency > removalIndex ? dependency - 1 : dependency) });
     savedWorkflow = { ...ensureStageIds({ ...previous, stages }), version: (versionRows[0]?.version || 0) + 1 };
-    await transaction`UPDATE pr_helper_workflows SET payload = ${transaction.json(savedWorkflow)}, updated_at = now() WHERE user_id = ${access.ownerUserId} AND id = ${workflowId}`;
+    // Step D of the payload-column drop: the payload write is gone; the relational mirror
+    // below (writeWorkflowRows) carries every column that still has to change.
+    await transaction`UPDATE pr_helper_workflows SET updated_at = now() WHERE user_id = ${access.ownerUserId} AND id = ${workflowId}`;
     await writeWorkflowRows(transaction, access.ownerUserId, savedWorkflow);
     await transaction`DELETE FROM workflow_stage_events WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId} AND stage_id = ${stageId}`;
     await pruneStaleWorkflowStageData(transaction, access.ownerUserId, savedWorkflow);
