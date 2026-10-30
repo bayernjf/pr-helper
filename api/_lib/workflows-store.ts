@@ -660,6 +660,81 @@ export async function executeWorkflowAutomationAction(environment: Record<string
   return executeWorkflowAutomationActionForUser(environment, user.id, identity.installationId, actionId);
 }
 
+// The takeover path (automated-workflow-plan "AI 失败处理"): an AI generation failure leaves the
+// action `paused`, and the user either regenerates with the stored server-side credential and the
+// action's own rule snapshot, or writes the title/description by hand, then confirms. Confirmation
+// re-runs the same pre-flight the unattended path uses (no open pull on the route, source ahead,
+// gate canCreateNext, idempotency against an already-created pull) so a takeover can never create a
+// duplicate, and completes under the original action's identity so the queue stays consistent.
+async function resolveAutomationActionForTakeover(environment: Record<string, string | undefined>, userId: string, installationId: string, actionId: number, expectedState: 'paused') {
+  if (!Number.isInteger(actionId) || actionId <= 0 || !installationId) throw new Error('无效的接管请求');
+  const sql = query(environment);
+  const rows = await sql<AutomationActionRow[]>`SELECT actions.id, actions.run_id, actions.workflow_id, actions.stage_id, runs.stage_index, actions.source, actions.target, actions.kind, actions.state, actions.attempts, actions.payload FROM workflow_automation_actions actions JOIN workflow_automation_runs runs ON runs.user_id = actions.user_id AND runs.id = actions.run_id WHERE actions.user_id = ${userId} AND actions.id = ${actionId} LIMIT 1`;
+  const action = rows[0];
+  if (!action) throw new Error('未找到自动化动作');
+  if (action.state !== expectedState) throw new Error(`当前动作状态为 ${action.state}，不能接管`);
+  if (action.kind !== 'create-pr') throw new Error('当前仅支持接管自动创建 PR 动作');
+  if (!action.payload?.generationRule?.trim()) throw new Error('自动化动作缺少生成规则快照');
+  const workflowRows = await sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)} FROM pr_helper_workflows workflows WHERE workflows.user_id = ${userId} AND workflows.id = ${action.workflow_id}`;
+  const workflow = trackedWorkflowFromSingleRow(workflowRows);
+  const stage = workflow ? stageForIndex(workflow, action.stage_index) : undefined;
+  if (!workflow || !stage || stage.stageId !== action.stage_id) throw new Error('流程步骤自动化策略已失效');
+  if (stage.automation?.autoCreatePullRequest !== true || stage.automation.executionMode !== 'server') throw new Error('流程步骤自动创建策略已失效');
+  const credential = await readAiAutomationCredentialForUser(environment, userId);
+  const { owner, name } = ownerAndName(workflow.repository);
+  const config = parseGithubAppConfig(environment);
+  const openPulls = await installationRequest<Pull[]>(config, installationId, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(`${owner}:${action.source}`)}&base=${encodeURIComponent(action.target)}&per_page=10`);
+  const comparison = openPulls[0] ? { commits: [] as { commit: { message: string } }[] } : await installationRequest<{ commits: { commit: { message: string } }[] }>(config, installationId, `/repos/${owner}/${name}/compare/${encodeURIComponent(action.target)}...${encodeURIComponent(action.source)}`);
+  return { sql, action, workflow, stage, credential, config, installationId, owner, name, openPulls, comparison };
+}
+
+export async function regenerateAutomationMessage(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, actionId: number) {
+  if (!identity.installationId) throw new Error('无效的接管请求');
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const { action, stage, credential, comparison, workflow } = await resolveAutomationActionForTakeover(environment, user.id, identity.installationId, actionId, 'paused');
+  if (!credential || !credential.autoGeneratePrMessage) throw new Error('服务端 AI 自动生成设置未开启');
+  const message = await generateAutomationMessage(credential.baseUrl, credential.apiKey, credential.model, action.source, action.target, comparison.commits.map(item => item.commit.message), action.payload?.generationRule || '');
+  return { message, workflow: { repository: workflow.repository }, stage: { source: action.source, target: stage.target } };
+}
+
+export async function takeoverAutomationAction(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, actionId: number, title: string, body: string) {
+  if (!identity.installationId) throw new Error('无效的接管请求');
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const { sql, action, workflow, stage, owner, name, comparison, openPulls, config, installationId } = await resolveAutomationActionForTakeover(environment, user.id, identity.installationId, actionId, 'paused');
+  const trimmedTitle = title.trim();
+  const trimmedBody = body.trim();
+  if (!trimmedTitle) throw new Error('PR 标题不能为空');
+  const currentStates = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${user.id} AND workflow_id = ${workflow.id}`;
+  const current = currentStates.find(state => state.stage_id === action.stage_id && state.source === action.source);
+  if (!current || !deriveStageDecision(workflow, action.stage_index, current, currentStates).canCreateNext) throw new Error('当前步骤尚未满足自动创建 PR 的门禁');
+  if (!autoCreateReachedThreshold(stage.automation, current.ahead_by)) throw new Error(`新提交数未达到自动创建阈值（需要 ${autoCreateCommitThreshold(stage.automation)} 个）`);
+  const outcome = automationCreateOutcome(openPulls, comparison.commits.length);
+  if (outcome.kind === 'idempotent') {
+    await sql`UPDATE workflow_automation_actions SET state = 'succeeded', failure_reason = NULL, updated_at = now(), payload = ${sql.json({ ...(action.payload || {}), pullNumber: outcome.pullNumber })} WHERE user_id = ${user.id} AND id = ${actionId}`;
+    await sql`UPDATE workflow_automation_runs SET state = 'succeeded', updated_at = now(), completed_at = now() WHERE user_id = ${user.id} AND id = ${action.run_id}`;
+    await recordOperationAuditForUser(sql, user.id, installationId, {
+      action: 'pull-created', outcome: 'success', repository: workflow.repository, workflowId: workflow.id,
+      stageId: action.stage_id, source: action.source, target: action.target, pullNumber: outcome.pullNumber, runId: action.run_id,
+      metadata: { via: 'user-takeover', idempotent: true }, failureReason: null,
+    });
+    return { state: 'succeeded' as const, pullNumber: outcome.pullNumber, pullUrl: outcome.pullUrl };
+  }
+  if (outcome.kind === 'cancelled') {
+    await sql`UPDATE workflow_automation_actions SET state = 'cancelled', failure_reason = ${outcome.reason}, updated_at = now() WHERE user_id = ${user.id} AND id = ${actionId}`;
+    await sql`UPDATE workflow_automation_runs SET state = 'cancelled', updated_at = now(), completed_at = now() WHERE user_id = ${user.id} AND id = ${action.run_id}`;
+    return { state: 'cancelled' as const, pullNumber: null };
+  }
+  const created = await installationRequest<Pull>(config, installationId, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify({ title: trimmedTitle, head: action.source, base: action.target, body: trimmedBody }) });
+  await sql`UPDATE workflow_automation_actions SET state = 'succeeded', updated_at = now(), payload = ${sql.json({ ...(action.payload || {}), pullNumber: created.number })} WHERE user_id = ${user.id} AND id = ${actionId}`;
+  await sql`UPDATE workflow_automation_runs SET state = 'succeeded', updated_at = now(), completed_at = now() WHERE user_id = ${user.id} AND id = ${action.run_id}`;
+  await recordOperationAuditForUser(sql, user.id, installationId, {
+    action: 'pull-created', outcome: 'success', repository: workflow.repository, workflowId: workflow.id,
+    stageId: action.stage_id, source: action.source, target: action.target, pullNumber: created.number, runId: action.run_id,
+    metadata: { via: 'user-takeover' }, failureReason: null,
+  });
+  return { state: 'succeeded' as const, pullNumber: created.number, pullUrl: created.html_url };
+}
+
 // Bounded because the board polls it, and the unfinished filter exists because a blocked action is the
 // only reason to read this: without it the newest terminal rows push a week-old paused one past the limit.
 export const AUTOMATION_ACTION_VIEW_LIMIT = 200;
