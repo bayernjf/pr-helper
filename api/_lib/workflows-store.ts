@@ -19,8 +19,8 @@ export type StoredWorkflowStage = {
   waitFor?: number[];
   stageId?: string;
   automation?: { autoCreatePullRequest: true; autoMergePullRequest?: undefined; executionMode: 'browser-session'; triggerMinCommits?: number; generationRule?: undefined }
-    | { autoCreatePullRequest: true; autoMergePullRequest?: true; executionMode: 'server'; triggerMinCommits?: number; generationRule: { name: string; capturedAt: string; content?: string; contentHash?: string } }
-    | { autoCreatePullRequest?: undefined; autoMergePullRequest: true; executionMode: 'server'; triggerMinCommits?: undefined; generationRule?: undefined };
+    | { autoCreatePullRequest: true; autoMergePullRequest?: true; executionMode: 'server'; triggerMinCommits?: number; generationRule: { name: string; capturedAt: string; content?: string; contentHash?: string }; autoAdvanceNext?: true }
+    | { autoCreatePullRequest?: undefined; autoMergePullRequest: true; executionMode: 'server'; triggerMinCommits?: undefined; generationRule?: undefined; autoAdvanceNext?: true };
 };
 
 export type StoredWorkflow = {
@@ -227,6 +227,37 @@ async function scheduleServerAutoMerge(sql: ReturnType<typeof query>, row: Track
   // gate nothing is behind any more. Clearing it lets the next tick execute instead of waiting out a delay
   // that has grown to as much as half an hour for a merge that is ready now.
   await sql`UPDATE workflow_automation_actions SET failure_reason = NULL, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${actionId} AND state = 'queued' AND failure_reason IS NOT NULL`.catch(() => undefined);
+}
+
+// The advance intent is one per route, not one per commit: the workflow only ever advances a step
+// once its merged gate turns green. The stable key therefore carries no head sha, so repeated
+// reconciliation converges on the same row instead of piling up actions.
+export function automationAdvanceIdempotencyKey(route: { workflowId: string; stageId: string; source: string; target: string }) {
+  return `${route.workflowId}:${route.stageId}:${route.source}:${route.target}:advance`;
+}
+
+async function scheduleServerAdvance(sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string) {
+  const stage = workflow.stages[stageIndex];
+  const automation = stage?.automation;
+  // Advancing is a server-side action; a browser-session policy has no executor on the server.
+  if (!stage || !stage.stageId || automation?.executionMode !== 'server' || (automation as { autoAdvanceNext?: true } | undefined)?.autoAdvanceNext !== true) return;
+  const idempotencyKey = automationAdvanceIdempotencyKey({ workflowId: workflow.id, stageId: stage.stageId, source, target: stage.target });
+  const existing = await sql<{ id: number; state: WorkflowAutomationAction['state']; attempts: number; updated_at: string }[]>`SELECT id, state, attempts, updated_at FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
+  if (existing[0]) {
+    if (existing[0].state === 'queued') return automationActionId(existing[0].id);
+    const stale = ['running', 'paused'].includes(existing[0].state) && Date.now() - Date.parse(existing[0].updated_at) > 120_000;
+    if (!stale || automationRetryIsExhausted(existing[0].attempts, workflow.recoveryPolicy)) return null;
+    const reset = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'queued', failure_reason = NULL, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${existing[0].id} AND state IN ('running', 'paused') RETURNING id`;
+    return automationActionId(reset[0]?.id);
+  }
+  const version = (await sql<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`)[0]?.version || workflow.version || 1;
+  const snapshot = { ...workflow, stages: workflow.stages.map(item => ({ ...item })) };
+  const run = await sql<{ id: number }[]>`INSERT INTO workflow_automation_runs (user_id, workflow_id, workflow_version, stage_index, stage_id, source, target, workflow_snapshot) VALUES (${row.user_id}, ${workflow.id}, ${version}, ${stageIndex}, ${stage.stageId}, ${source}, ${stage.target}, ${sql.json(snapshot)}) RETURNING id`;
+  const actions = await sql<{ id: number }[]>`INSERT INTO workflow_automation_actions (user_id, run_id, workflow_id, stage_id, source, target, kind, idempotency_key, payload) VALUES (${row.user_id}, ${run[0].id}, ${workflow.id}, ${stage.stageId}, ${source}, ${stage.target}, 'advance-stage', ${idempotencyKey}, ${sql.json({})}) ON CONFLICT (user_id, idempotency_key) DO NOTHING RETURNING id`;
+  if (actions[0]) return automationActionId(actions[0].id);
+  await sql`DELETE FROM workflow_automation_runs WHERE user_id = ${row.user_id} AND id = ${run[0].id}`;
+  const concurrent = await sql<{ id: number; state: WorkflowAutomationAction['state'] }[]>`SELECT id, state FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
+  return concurrent[0]?.state === 'queued' ? automationActionId(concurrent[0].id) : null;
 }
 
 async function scheduleServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string) {
@@ -591,6 +622,34 @@ async function runAutomationMergeAction(environment: Record<string, string | und
   return { state: 'succeeded' as const, pullNumber };
 }
 
+// Phase 6 "advance on merge": a purely confirmatory action. The gate was already checked by the
+// reconciliation that enqueued it (merged + post-merge checks green, deployments folded in), so the
+// executor re-verifies from the persisted stage state rather than calling GitHub, then records the
+// advancement and its audit trail. A gate that no longer holds pauses with the reason, same as merge.
+async function runAutomationAdvanceAction(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, userId: string, installationId: string, actionId: number, action: AutomationActionRow, workflow: StoredWorkflow, stage: StoredWorkflowStage) {
+  if (stage.automation?.executionMode !== 'server' || (stage.automation as { autoAdvanceNext?: true } | undefined)?.autoAdvanceNext !== true) throw new Error('流程步骤自动推进策略已失效');
+  const states = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
+  const current = states.find(state => state.stage_id === action.stage_id && state.source === action.source);
+  if (!current) throw new Error('步骤状态缺失，无法确认自动推进');
+  if (current.pull_state !== 'merged') throw new Error('该步骤尚未合并，不能推进下一步');
+  if (current.checks_state !== 'success') {
+    // The merge may still be running Actions, or a deployment may still be in flight. Keep the action
+    // queued so the next reconciliation (or the check-completion event) executes it when the gate goes
+    // green; the reason doubles as the drain's backoff marker.
+    await sql`UPDATE workflow_automation_actions SET failure_reason = ${(`门禁尚未全绿（checks=${current.checks_state}），等待合并后验证完成`).slice(0, 800)}, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId} AND state = 'queued'`;
+    await sql`UPDATE workflow_automation_runs SET state = 'waiting-gates', updated_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
+    return { state: 'queued' as const };
+  }
+  await sql`UPDATE workflow_automation_actions SET state = 'succeeded', failure_reason = NULL, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId}`;
+  await sql`UPDATE workflow_automation_runs SET state = 'succeeded', updated_at = now(), completed_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
+  await recordOperationAuditForUser(sql, userId, installationId, {
+    action: 'stage-advanced', outcome: 'success', repository: workflow.repository, workflowId: workflow.id,
+    stageId: action.stage_id, source: action.source, target: action.target, pullNumber: current.pull_number, runId: action.run_id,
+    metadata: { via: 'workflow-automation', mergedAt: current.merged_at }, failureReason: null,
+  });
+  return { state: 'succeeded' as const, pullNumber: current.pull_number };
+}
+
 async function executeWorkflowAutomationActionForUser(environment: Record<string, string | undefined>, userId: string, installationId: string, actionId: number) {
   if (!Number.isInteger(actionId) || actionId <= 0 || !installationId) throw new Error('无效的自动化执行请求');
   const sql = query(environment);
@@ -599,7 +658,7 @@ async function executeWorkflowAutomationActionForUser(environment: Record<string
   if (!action) throw new Error('未找到自动化动作');
   if (action.state === 'succeeded') return { state: action.state, pullNumber: null };
   if (action.state !== 'queued') throw new Error(`当前动作状态为 ${action.state}，不能执行`);
-  if (action.kind !== 'create-pr' && action.kind !== 'merge-pr') throw new Error('当前仅支持执行自动创建和自动合并 PR 动作');
+  if (action.kind !== 'create-pr' && action.kind !== 'merge-pr' && action.kind !== 'advance-stage') throw new Error('当前仅支持执行自动创建、自动合并和自动推进动作');
   const claimed = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'running', attempts = attempts + 1, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId} AND state = 'queued' RETURNING id`;
   if (!claimed.length) throw new Error('动作已被其他执行请求领取');
   try {
@@ -608,6 +667,7 @@ async function executeWorkflowAutomationActionForUser(environment: Record<string
     const stage = workflow ? stageForIndex(workflow, action.stage_index) : undefined;
     if (!workflow || !stage || stage.stageId !== action.stage_id) throw new Error('流程步骤自动化策略已失效');
     if (action.kind === 'merge-pr') return await runAutomationMergeAction(environment, sql, userId, installationId, actionId, action, workflow, stage);
+    if (action.kind === 'advance-stage') return await runAutomationAdvanceAction(environment, sql, userId, installationId, actionId, action, workflow, stage);
     if (stage.automation?.autoCreatePullRequest !== true || stage.automation.executionMode !== 'server') throw new Error('流程步骤自动创建策略已失效');
     if (!action.payload?.generationRule?.trim()) throw new Error('自动化动作缺少生成规则快照');
     const currentStates = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
@@ -1045,7 +1105,7 @@ export type WorkflowStageDeployment = {
 };
 export type WorkflowStageDeploymentRun = WorkflowStageDeployment & { firstSeenAt: string };
 export type CodexRepairContext = { markdown: string; pullNumber: number; pullUrl: string };
-export type OperationAuditAction = 'workflow-created' | 'workflow-updated' | 'workflow-deleted' | 'pull-created' | 'pull-merged' | 'actions-rerun' | 'deployment-rerun' | 'deployment-rollback';
+export type OperationAuditAction = 'workflow-created' | 'workflow-updated' | 'workflow-deleted' | 'pull-created' | 'pull-merged' | 'stage-advanced' | 'actions-rerun' | 'deployment-rerun' | 'deployment-rollback';
 export type OperationAuditOutcome = 'success' | 'failure';
 export type OperationAuditEntry = {
   id: number;
@@ -2227,6 +2287,10 @@ async function reconcileStageWork(environment: Record<string, string | undefined
     await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:${pull.number}`, kind: 'new-pr-ready', title: '有新提交，可以创建新 PR', body: `${workflow.repository} · ${route}`, url: '/' }));
   }
   if (comparison.ahead_by > 0 && comparisonHeadSha) await phase('queue', () => scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha));
+  // Phase 6 "advance on merge": once this step is merged and its post-merge gate (deployments are
+  // folded into checks.state) is green, record the advancement. The next step's own automation
+  // switches decide what happens there; this action only confirms and audits the advance.
+  if (pull.merged_at && checks.state === 'success') await phase('queue', () => scheduleServerAdvance(sql, row, workflow, stageIndex, source));
   // Only an open pull request can be merged, and the gate verdict is pinned to the head sha just stored.
   // The gate goes in already computed, so a wait that only a later event can end costs no second read.
   if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await phase('queue', () => scheduleServerAutoMerge(sql, row, workflow, stageIndex, source, pull.number, pull.head.sha, { checksState: checks.state, approvals, requiredApprovals, mergeable: pull.mergeable ?? null, mergeableState: pull.mergeable_state || '' }));

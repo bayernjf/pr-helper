@@ -7,7 +7,7 @@ import { createGenerationRule, defaultGenerationRule, generationRuleButtonLabel,
 import { navigationClass, navigationTarget, selectWorkflowAfterCloudLoad, shouldRefreshWorkflowDetail, startsNewWorkflow, type Screen } from './lib/navigation';
 import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, upsertPullRequestDraft, type PullRequestDraftIdentity } from './lib/pr-drafts';
 import { initPrReferenceTooltip, prReferenceHtml } from './lib/pr-reference';
-import { activeWorkflows, archiveWorkflow, archivedWorkflows, restoreWorkflow, addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type StageRouteMode, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
+import { activeWorkflows, archiveWorkflow, archivedWorkflows, restoreWorkflow, addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoAdvance, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type StageRouteMode, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
 import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
 import { automationActionPresentation, latestAutomationAction, stageProgressNode, stageRunPresentation, workflowProgress, workflowRunSummary, worstStageProgress, type AutomationActionState, type StageProgressStatus, type WorkflowStageRunState } from './lib/workflow-run';
@@ -2268,6 +2268,15 @@ function detail() {
       render();
     })();
   }));
+  document.querySelectorAll<HTMLInputElement>('[data-detail-auto-advance-stage]').forEach(input => input.addEventListener('change', () => {
+    if (!active) return;
+    const stageIndex = Number(input.dataset.detailAutoAdvanceStage);
+    const updated = setStageAutoAdvance(active, stageIndex, input.checked);
+    if (updated === active) { input.checked = !input.checked; showToast(t('detail.autoAdvanceLegacyPolicy')); return; }
+    save(updated);
+    showToast(input.checked ? t('draft.autoAdvanceEnabled') : t('draft.autoAdvanceDisabled'));
+    render();
+  }));
   document.querySelectorAll<HTMLInputElement>('[data-detail-auto-create-threshold]').forEach(input => input.addEventListener('change', () => {
     if (!active) return;
     const stageIndex = Number(input.dataset.detailAutoCreateThreshold);
@@ -2417,12 +2426,17 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const mergeDisabled = autoDisabled || !canMergeAutomation || mergeLegacyPolicy;
   const mergeHint = !canEditAutomation ? t('detail.autoCreateReadonly') : !autoCreatePrerequisites() ? t('draft.autoCreatePrerequisites') : !canMergeAutomation ? t('detail.autoMergeReadonly') : mergeLegacyPolicy ? t('detail.autoMergeLegacyPolicy') : t('detail.autoMergeDesc');
   const mergeControl = `<label class="timeline-auto-merge"><input type="checkbox" data-detail-auto-merge-stage="${index}" ${mergeEnabled ? 'checked' : ''} ${mergeDisabled ? 'disabled' : ''} /><span>${t('draft.autoMerge')}</span></label>`;
+  const advanceEnabled = (stage.automation as { autoAdvanceNext?: true } | undefined)?.autoAdvanceNext === true;
+  const advanceLegacyPolicy = stage.automation?.executionMode === 'browser-session';
+  const advanceDisabled = autoDisabled || !canMergeAutomation || advanceLegacyPolicy;
+  const advanceHint = !canEditAutomation ? t('detail.autoCreateReadonly') : !autoCreatePrerequisites() ? t('draft.autoCreatePrerequisites') : !canMergeAutomation ? t('detail.autoMergeReadonly') : advanceLegacyPolicy ? t('detail.autoAdvanceLegacyPolicy') : t('detail.autoAdvanceDesc');
+  const advanceControl = `<label class="timeline-auto-merge"><input type="checkbox" data-detail-auto-advance-stage="${index}" ${advanceEnabled ? 'checked' : ''} ${advanceDisabled ? 'disabled' : ''} /><span>${t('draft.autoAdvance')}</span></label>`;
   // 自动化只认 stage 钉住的那一版提示词，改了默认规则不会自己传过来，所以过期时给一个显式的同步入口。
   const ruleUpdate = autoEnabled && stage.automation?.executionMode === 'server' ? stageGenerationRuleUpdate(stage.automation.generationRule, generationRules) : undefined;
   const ruleNotice = ruleUpdate
     ? `<p class="timeline-rule-outdated">${escape(ruleUpdate.kind === 'content' ? t('detail.ruleOutdated.content', { name: ruleUpdate.name }) : t('detail.ruleOutdated.rule', { name: ruleUpdate.name, stored: stage.automation!.generationRule!.name }))}<button type="button" class="link-button" data-detail-rule-sync="${index}" ${canEditAutomation ? '' : 'disabled'}>${t('detail.ruleOutdated.sync')}</button></p>`
     : '';
-  const autoControl = `<div class="timeline-automation"><label class="timeline-auto-create"><input type="checkbox" data-detail-auto-create-stage="${index}" ${autoEnabled ? 'checked' : ''} ${autoDisabled ? 'disabled' : ''} /><span>${t('draft.autoCreate')}</span><span>${t('draft.autoCreateThreshold')}</span><input class="auto-create-threshold" type="number" min="1" max="20" step="1" value="${threshold}" data-detail-auto-create-threshold="${index}" aria-label="${escape(t('draft.autoCreateThreshold'))}" title="${escape(t('draft.autoCreateThresholdTooltip'))}" ${autoDisabled ? 'disabled' : ''} /></label>${mergeControl}<small>${escape(autoHint)}</small>${mergeHint === autoHint ? '' : `<small>${escape(mergeHint)}</small>`}${ruleNotice}${automationDetailBlock(active!.id, index, stage.source, false)}</div>`;
+  const autoControl = `<div class="timeline-automation"><label class="timeline-auto-create"><input type="checkbox" data-detail-auto-create-stage="${index}" ${autoEnabled ? 'checked' : ''} ${autoDisabled ? 'disabled' : ''} /><span>${t('draft.autoCreate')}</span><span>${t('draft.autoCreateThreshold')}</span><input class="auto-create-threshold" type="number" min="1" max="20" step="1" value="${threshold}" data-detail-auto-create-threshold="${index}" aria-label="${escape(t('draft.autoCreateThreshold'))}" title="${escape(t('draft.autoCreateThresholdTooltip'))}" ${autoDisabled ? 'disabled' : ''} /></label>${mergeControl}${advanceControl}<small>${escape(autoHint)}</small>${mergeHint === autoHint ? '' : `<small>${escape(mergeHint)}</small>`}${advanceHint === autoHint || advanceHint === mergeHint ? '' : `<small>${escape(advanceHint)}</small>`}${ruleNotice}${automationDetailBlock(active!.id, index, stage.source, false)}</div>`;
   if (stage.source.includes('*')) {
     const states = active ? statesForStage(active, index) : [];
     const runs = states.map(state => `<button type="button" class="timeline-action" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(state.source)}"><b>${escape(state.source)}</b><small>${escape(dynamicBranchStatusText(state))}</small></button>`).join('');

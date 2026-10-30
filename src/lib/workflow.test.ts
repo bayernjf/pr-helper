@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { activeWorkflows, addDeployment, archiveWorkflow, archivedWorkflows, isWorkflowArchived, restoreWorkflow, replaceDeployment, deploymentSuggestions, defaultDeployments, deploymentsForRepository, syncedDeployments, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type Workflow } from './workflow';
+import { activeWorkflows, addDeployment, archiveWorkflow, archivedWorkflows, isWorkflowArchived, restoreWorkflow, replaceDeployment, deploymentSuggestions, defaultDeployments, deploymentsForRepository, syncedDeployments, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoAdvance, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type Workflow } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -98,6 +98,35 @@ describe('workflow configuration', () => {
     const workflow = createWorkflow('octo/app', 'feature/a', 'dev');
     const legacy = { ...workflow, stages: [{ ...workflow.stages[0], automation: { autoCreatePullRequest: true as const, executionMode: 'browser-session' as const } }] };
     expect(setStageAutoMerge(legacy, 0, true)).toEqual(legacy);
+  });
+
+  it('adds an auto-advance flag on top of an existing server policy', () => {
+    const workflow = addStage(createWorkflow('octo/app', 'feature/a', 'dev'), 'dev', 'main');
+    const merged = setStageAutoMerge(workflow, 1, true);
+    const advanced = setStageAutoAdvance(merged, 1, true);
+    expect(advanced.stages[1].automation).toMatchObject({ autoMergePullRequest: true, executionMode: 'server', autoAdvanceNext: true });
+    const cleared = setStageAutoAdvance(advanced, 1, false);
+    expect(cleared.stages[1].automation).toEqual({ autoMergePullRequest: true, executionMode: 'server' });
+  });
+
+  it('does not enable auto-advance on a bare stage without a server policy', () => {
+    const workflow = addStage(createWorkflow('octo/app', 'feature/a', 'dev'), 'dev', 'main');
+    expect(setStageAutoAdvance(workflow, 1, true)).toEqual(workflow);
+  });
+
+  it('keeps auto-create and auto-merge when advance is toggled off', () => {
+    const workflow = addStage(createWorkflow('octo/app', 'feature/a', 'dev'), 'dev', 'main');
+    const both = setStageAutoMerge(setStageAutoCreate(workflow, 1, true, { name: 'Default', content: '# Rule' }), 1, true);
+    const advanced = setStageAutoAdvance(both, 1, true);
+    const cleared = setStageAutoAdvance(advanced, 1, false);
+    expect(cleared.stages[1].automation).toMatchObject({ autoCreatePullRequest: true, autoMergePullRequest: true });
+    expect(cleared.stages[1].automation).not.toHaveProperty('autoAdvanceNext');
+  });
+
+  it('does not enable auto-advance on a legacy browser-session policy', () => {
+    const workflow = createWorkflow('octo/app', 'feature/a', 'dev');
+    const legacy = { ...workflow, stages: [{ ...workflow.stages[0], automation: { autoCreatePullRequest: true as const, executionMode: 'browser-session' as const } }] };
+    expect(setStageAutoAdvance(legacy, 0, true)).toEqual(legacy);
   });
 
   it('does not enable auto-create without a generation rule snapshot', () => {

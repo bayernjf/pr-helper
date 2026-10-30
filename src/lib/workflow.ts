@@ -5,6 +5,7 @@ export type WorkflowStageAutomation = {
   triggerMinCommits?: number;
   // 内容存在 pr_helper_generation_rules，payload 只留 hash。035 之前保存的仍然带 content，两种都要读。
   generationRule: { name: string; capturedAt: string; content?: string; contentHash?: string };
+  autoAdvanceNext?: true;
 } | {
   // Legacy browser-only policies are intentionally not promoted automatically.
   autoCreatePullRequest: true;
@@ -19,6 +20,7 @@ export type WorkflowStageAutomation = {
   executionMode: 'server';
   triggerMinCommits?: undefined;
   generationRule?: undefined;
+  autoAdvanceNext?: true;
 };
 export type WorkflowStage = { source: string; target: string; independent?: boolean; waitFor?: number[]; stageId?: string; automation?: WorkflowStageAutomation };
 export type DeploymentProvider = 'vercel' | 'cloudflare';
@@ -264,6 +266,26 @@ export function setStageAutoMerge(workflow: Workflow, stageIndex: number, enable
     : { autoMergePullRequest: true as const, executionMode: 'server' as const };
   if (creating && !enabled) delete (automation as { autoMergePullRequest?: true }).autoMergePullRequest;
   return { ...workflow, stages: workflow.stages.map((current, index) => index === stageIndex ? { ...current, automation } : current) };
+}
+
+// Phase 6 switch "advance after merge". Advancing is a server-side action, so it requires an existing
+// server automation on the stage; toggling it on against a browser-session policy (or a bare stage)
+// is refused (returns the workflow unchanged), same as auto-merge. Turning it off keeps create/merge
+// switches intact and only clears the advancement intent; if nothing else is left on the stage, the
+// automation is removed.
+export function setStageAutoAdvance(workflow: Workflow, stageIndex: number, enabled: boolean): Workflow {
+  const stage = Number.isInteger(stageIndex) ? workflow.stages[stageIndex] : undefined;
+  if (!stage) return workflow;
+  if (!stage.automation || stage.automation.executionMode !== 'server') return workflow;
+  if (!enabled) {
+    const automation = { ...stage.automation } as WorkflowStageAutomation & { autoAdvanceNext?: true };
+    delete automation.autoAdvanceNext;
+    if (automation.autoCreatePullRequest !== true && automation.autoMergePullRequest !== true) {
+      return { ...workflow, stages: workflow.stages.map((current, index) => index === stageIndex ? { ...current, automation: undefined } : current) };
+    }
+    return { ...workflow, stages: workflow.stages.map((current, index) => index === stageIndex ? { ...current, automation } : current) };
+  }
+  return { ...workflow, stages: workflow.stages.map((current, index) => index === stageIndex ? { ...current, automation: { ...stage.automation!, autoAdvanceNext: true as const } } : current) };
 }
 
 export type StageRouteMode =
