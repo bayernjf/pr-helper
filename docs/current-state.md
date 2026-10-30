@@ -418,15 +418,17 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 `018`–`031` 已执行并完成用户确认；自动创建 PR 与逐步骤自动合并均已部署且在生产验收通过，「幂等命中记成功」已于 2026-08-15 在沙箱验完，自动化验收清单无未验项。
 
-**待用户执行（2026-10-30 批次，顺序执行 041 → 042 → 043，代码部署前后皆可但不能晚于代码上线；参考 040 迁移文件头注释的格式与「Run: Supabase SQL Editor, execute once」惯例）：**
+**2026-10-30 批次（已执行并只读验证；执行前预检 47 行 `version` 空值为 0）：**
 
 | 顺序 | 文件 | 内容 | 说明 |
 |---|---|---|---|
-| 14 | `supabase/migrations/041_stage_gate_sha.sql` | `workflow_stage_states.gate_sha` 列 | 红门禁修复：已合并步骤按目标分支 HEAD 评估门禁并落库 |
-| 15 | `supabase/migrations/042_payload_nullable.sql` | `workflow_automation_actions.payload` 改可空 | 停写 payload 列方案 C 步；代码上线后若未执行，新建流程的 INSERT 不再带 payload 会撞 NOT NULL |
-| 16 | `supabase/migrations/043_version_not_null.sql` | `workflow_automation_actions.version` 改非空 | 停写 payload 列方案 D 步，同上 |
+| 14 | `supabase/migrations/041_stage_gate_sha.sql` | `workflow_stage_states.gate_sha` 列 | 红门禁修复：已合并步骤按目标分支 HEAD 评估门禁并落库。已消除 `column "gate_sha" does not exist` 活故障 |
+| 15 | `supabase/migrations/042_payload_nullable.sql` | `pr_helper_workflows.payload` 改可空 | 停写 payload 列方案 C 步；新建流程的 INSERT 不再带 payload |
+| 16 | `supabase/migrations/043_version_not_null.sql` | `pr_helper_workflows.version` 改非空 | 停写 payload 列方案 D 步 |
 
-**停写 payload 列方案 E 步（DROP COLUMN）未执行**：按方案第八节三门槛（备份、browser-session/autoMerge 分支真实流量覆盖、回滚目标清点）未过，明确推迟。
+验证：2026-10-30 ~19:40 UTC 执行后，`information_schema` 确认三列状态正确；20:00–20:02 webhook 全部 success/skipped、`stages_failed=0`、无 `gate_sha` 报错。
+
+**停写 payload 列方案 E 步（DROP COLUMN）：迁移 `044_drop_workflow_payload.sql` 已写（`feature/20261031-egress`，commit `df084c74`，尚未合 main、未执行）**。代码侧已零读零写、无索引/视图/函数依赖，47 行 payload（约 37 kB）是关系表之外的冗余历史副本。**不可逆，需先备份 `pr_helper_workflows` 再在 Supabase 执行。**
 
 ### 二、代码部署状态
 
