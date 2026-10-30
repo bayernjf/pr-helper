@@ -1,13 +1,15 @@
 # PR Helper Handoff
 
-> 最后更新：2026-10-30（本轮批量落地 6 个特性 commit，待合入 main 部署：红门禁停摆修复 `b6c9ed17`、停写 payload 列 B/C/D 步（`8ee8d574` 及同批次提交）、AI 失败接管弹窗 `5bd1f2e8`、移动端状态监控 ①② `a75b26e4`、合并后自动推进骨架 `814e12b7`、`workflow_versions.snapshot` 停止新写入；迁移 041–043 待用户在 Supabase SQL Editor 执行，代码上线前务必先跑 042（否则新流程 INSERT 撞 NOT NULL）；E 步 DROP payload 按三门槛推迟；9 月账单复核仍待用户登录 Dashboard。此前：2026-10-10 修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」；2026-09-15 刷新慢优化（`d077ff58`/`4394df2e`/`f3e29251`/`4bb5c3b0`）已于 2026-10-14 部署生产并验证。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
+> 最后更新：2026-10-30（2026-10-30 批量落地已全部合入 main 并部署：PR #393 合并 6 个特性 commit（`b6c9ed17`、`8ee8d574` 等）、状态页与 E2E 补强 `2736f334`、主应用窄屏适配 `91d6dec0`；CI / Vercel / Cloudflare 均 success。迁移 041–043 待用户在 Supabase SQL Editor 执行，代码上线前务必先跑 042（否则新流程 INSERT 撞 NOT NULL）；E 步 DROP payload 按三门槛推迟；9 月账单复核仍待用户登录 Dashboard。此前：2026-10-10 修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」；2026-09-15 刷新慢优化（`d077ff58`/`4394df2e`/`f3e29251`/`4bb5c3b0`）已于 2026-10-14 部署生产并验证。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 > **待办的唯一索引在下方《待处理事项（2026-08-22 汇总）》一节**，其余小节只记已完成的事实与理由。
 > 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
 
 ## 当前状态
 
-### 2026-10-30 批量落地（本地 `feature/20260722`，待合入 main 部署）
+### 2026-10-30 批量落地（已合入 main 部署）
+
+- **主应用窄屏适配**（`91d6dec0`，后随 docs `6e4918a2`）：统一 700px 断点覆盖核心看板——顶部栏换行、摘要按钮满宽、Lane 头与步骤卡收紧（210→178px）、步骤抽屉全宽 sheet、弹窗全宽 + 88vh 内滚、失败中心/时间线/自动化行/部署卡紧凑化；Lane 步骤轨道保留横向滑动（手机自然手势）。仅动 `src/style.css`，业务逻辑零改动。E2E 新增 2 个手机竖屏（390×844）用例（整页无横向溢出、抽屉全宽、接管弹窗不出界），套件现为 34 用例。
 
 - **红门禁停摆修复**（`b6c9ed17` + 迁移 `041`）：已合并步骤的门禁改按目标分支 HEAD 评估并落库 `gate_sha`（而非合并 commit），派生新 `superseded` 决策（merged + 门禁失败 + 有新提交 → 可建新 PR 且不进人工队列）。详见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md) 第十八节，方案取 A+B 不用 C。
 - **停写 payload 列**（B/C/D 步，`8ee8d574` + 同批次提交 + 迁移 `042`/`043`）：7 处列表读已全切关系表；`upsertWorkflow` 的 INSERT 首次手写全列清单不再写 payload；`removeWorkflowStage` 的 UPDATE 不再写 payload。E 步 DROP COLUMN 被方案第八节三门槛挡住，明确推迟。
