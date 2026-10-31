@@ -573,7 +573,7 @@ bigint 身份修复（`6aa011c2`）部署后，12:36–13:11 之间 `id 113`–`
 - **数据保留与清理**：已部署 Webhook、密文历史、reconciliation、事件、部署运行和审计日志的 30/90/180/365 天保留策略；现有 Cron 每次受限清理 2,000 条，`022` 已执行，待运行观察。
 - **团队协作闭环**：已部署团队管理界面、成员角色更新/移除、流程共享、共享流程投影和服务端角色强制执行；`023` 已执行。实际多账号协作与 GitHub App 安装边界仍需 Production 验收。
 - **reconciliation 调用预算（已降级为阈值观察）**：`github_calls` / `github_ms` 遥测已上线；按小时复核后峰值只占基线的 18%–34%，且真正的约束是单次 GitHub 往返的时延而非调用数，触发条件与依据见「下一阶段优先级」第 6 项。
-- **流程归档 / 静音（未开始，待设计）**：现在只有「保留」和「删除整个流程」两种状态，中间态缺失。沙盒、演示和已下线的流程会长期占据收件箱待办，唯一的消除办法是不可逆删除（级联清空全部状态与历史）。需要一个可逆的「归档 / 静音」态：流程与历史保留可查，但不进动作队列、不参与自动化入队、不发通知。设计时至少要定清楚归档流程是否仍被 cron 校准、是否仍接收 Webhook 投影、以及归档态与团队共享和自动化开关的关系。触发这条需求的具体场景见 [`docs/auto-create-pr-remediation.md`](auto-create-pr-remediation.md) 第三节 P7。
+- **流程静音（设计已出，待批准）**：~~中间态缺失~~ 此句为过时表述——**归档已于 2026-08-17 实现并完成生产验收**（可逆、停校准、取消动作，见 [`handoff.md`](../handoff.md)《2026-08-17 流程归档》与 `feature-catalog.md`），cron/webhook/manual/inbox_refresh 四路全排除，沙盒类诉求用归档即可解决。仍缺的只有**静音**：活跃维护的流程照常校准与自动化，但不再发 Web Push。设计见 [`docs/superpowers/plans/2026-10-31-workflow-mute.md`](superpowers/plans/2026-10-31-workflow-mute.md)（v1 只静推送、全局静音、无确认弹窗，待拍板）。原始触发场景见 [`docs/auto-create-pr-remediation.md`](auto-create-pr-remediation.md) 第三节 P7。
 
 ## 变更日志
 
