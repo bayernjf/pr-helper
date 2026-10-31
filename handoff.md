@@ -24,7 +24,7 @@
 
 - **迁移 041–043 确认未执行**：`information_schema` 实测 `workflow_stage_states` 无 `gate_sha` 列、`pr_helper_workflows.payload` 仍 NOT NULL、`version` 仍 nullable。新代码已上线，当天 03:00 / 03:30 UTC 两次 cron 校准各失败 1 个阶段，错误均为 `column "gate_sha" of relation "workflow_stage_states" does not exist`——**每次校准只要扫到非终结阶段就会失败**，新建流程也会撞 `payload NOT NULL`。这是当前生产唯一活跃故障，用户执行 041 → 042 → 043 即消除。
 - **接力项 2「对账轮转缩短」实测结论**：`reconciliation_runs` 近 14 天——cron 每天 53–56 次、合计 530–770 次 GitHub 调用（均值 12.4 次/run、9.5 阶段/run，最慢 38.8s）；webhook 每天 23–1770 次。cron 占比活跃日约 35%、安静日可达 95%（即「88% 来自定时扫描」的语境），但绝对量只占每小时 5000 配额约 0.5%；③ 短路已生效（76 个阶段里 69 个 = 91% 每圈只花 1 次 compare）。剩余手段只有两条：批次 8 调大（最慢 tick 已贴近 40s 预算，调大有频繁 deferred 风险）或 cron `*/30` → `*/15`（兜底一圈 ~3h → ~1.5h，代价约 +600 调用/天，仍 <1%）。**结论：配额不是问题，维持现状；若在意兜底延迟再调频次（需新迁移 044）。**
-- 已删本地已合并分支 `feature/20260722`（曾指向 `3d952343`）；`origin/feature/20260722` 仍在，删远端属破坏性操作，待用户点名。
+- 已删本地已合并分支 `feature/20260722`（曾指向 `3d952343`）；**2026-10-31 用户点名后 `origin/feature/20260722` 远端分支也已删除**（删前用 `git merge-base --is-ancestor 3d952343 origin/main` 复核过合并关系）。
 
 ### 2026-10-30 迁移 041–043 执行与验证（接力会话，`prh_readonly` 生产库实测）
 
@@ -84,7 +84,7 @@
 | --- | --- | --- |
 | 执行迁移 `044`（DROP payload 列） | 已开 [PR #394](https://github.com/bayernjf/pr-helper/pull/394)（CI 全绿）。**备份已备好**：2026-10-30 20:26 UTC 由 AI 经只读通道导出 47 行 `(id, payload)` 至本机 `~/.config/pr-helper/backup-pr_helper_workflows-payload-20261030.json`（33 kB，权限 600；payload 自 042 起代码零写入、内容冻结）。可直接在 Supabase 执行；合并与执行先后由你定。不可逆，执行并验证后可删备份文件。 | [`supabase/migrations/044_drop_workflow_payload.sql`](supabase/migrations/044_drop_workflow_payload.sql) |
 | 仓库 Secret `FEISHU_WEBHOOK` | 移动监控①的 `if: failure()` 飞书通知依赖它；未配置只 warning 跳过。甩 webhook URL 可由你在仓库 Settings 配。 | 《2026-10-30 批量落地》 |
-| `prh_readonly` 口令轮换 | 该口令曾出现在会话记录中；`alter role ... password` 后同步 `~/.config/pr-helper/db.env`。 | [只读查询通道](docs/supabase-readonly-debugging.md) |
+| `prh_readonly` 口令轮换 | **已备好（2026-10-31）**：新 32 位口令已生成至本机 `~/.config/pr-helper/db.env.new`（600，未进任何会话记录）。你在 Supabase SQL Editor 跑 `alter role prh_readonly password '<db.env.new 里 : 与 @ 之间那段>'`，跑完说一声，AI 把 `db.env.new` 换正 `db.env` 并验证连通；在那之前旧口令照常可用。 | [只读查询通道](docs/supabase-readonly-debugging.md) |
 | 9 月 + 10 月账单复核 | 9/20 宽限期已过，当前只读查询未遇 402；需登录 Dashboard 用实际值确认 −94% / 2.1 GB 月投影是否仍成立。 | [egress 方案](docs/supabase-egress-optimization.md) |
 | 登录态浏览器手测 | `REALTIME_RECONCILE_BUDGET_MS=25000` 已于 2026-10-30 从 Production 删除并重部署，inbox_refresh 应恢复 ≤11s；需真实登录刷新一次确认。 | 《2026-09-15 刷新慢优化》 |
 | 沙盒 4 流程处置（原「UI 删 4 个沙盒流程」） | **纠偏（2026-10-31）**：现成的**归档**即可拿到 sweep 收益（~29s → ~15s，归档流程不进 cron/webhook 校准，2026-08-17 已验收）且可逆；删除仍是选项，但不可逆、级联二次确认。 | 《2026-10-30 批量落地》 |
