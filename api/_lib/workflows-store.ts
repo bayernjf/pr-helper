@@ -34,6 +34,7 @@ export type StoredWorkflow = {
   recoveryPolicy?: RecoveryPolicy;
   version?: number;
   archived?: true;
+  muted?: true;
   team?: { id: string; name: string; role: TeamRole };
 };
 
@@ -875,7 +876,7 @@ type TrackedWorkflowRow = Omit<WorkflowColumns, 'user_id' | 'id'> & {
 // `TransactionSql` and `Sql` are distinct types in postgres.js, so the column list accepts either —
 // writeWorkflowRows already uses the same pragmatic typing for its transaction parameter.
 function trackedWorkflowColumns(sql: any) {
-  return sql`workflows.user_id, workflows.id, workflows.name, workflows.repository, workflows.archived, workflows.version, workflows.position, workflows.declared_created_at, workflows.recovery_max_retries, workflows.recovery_cooldown_seconds,
+  return sql`workflows.user_id, workflows.id, workflows.name, workflows.repository, workflows.archived, workflows.muted, workflows.version, workflows.position, workflows.declared_created_at, workflows.recovery_max_retries, workflows.recovery_cooldown_seconds,
     (SELECT coalesce(jsonb_agg(to_jsonb(stages) ORDER BY stages.stage_index), '[]'::jsonb) FROM workflow_stages stages WHERE stages.user_id = workflows.user_id AND stages.workflow_id = workflows.id) AS stages,
     (SELECT coalesce(jsonb_agg(to_jsonb(deployments) ORDER BY deployments.position), '[]'::jsonb) FROM workflow_deployment_configs deployments WHERE deployments.user_id = workflows.user_id AND deployments.workflow_id = workflows.id) AS deployments`;
 }
@@ -1888,7 +1889,7 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
     // Step D of the payload-column drop: payload is no longer written here, and this is the first
     // place that hand-writes the full column list, so version must be spelled out — the 043
     // NOT NULL would reject a save that forgot it instead of silently storing NULL.
-    await transaction`INSERT INTO pr_helper_workflows (id, user_id, name, repository, archived, version, position, declared_created_at, recovery_max_retries, recovery_cooldown_seconds) VALUES (${savedWorkflow.id}, ${ownerUserId}, ${savedWorkflow.name}, ${savedWorkflow.repository}, ${savedWorkflow.archived === true}, ${savedWorkflow.version ?? null}, ${savedWorkflow.position ?? null}, ${savedWorkflow.createdAt ?? null}, ${savedWorkflow.recoveryPolicy?.maxRetries ?? null}, ${savedWorkflow.recoveryPolicy?.cooldownSeconds ?? null}) ON CONFLICT (user_id, id) DO UPDATE SET name = EXCLUDED.name, repository = EXCLUDED.repository, archived = EXCLUDED.archived, version = EXCLUDED.version, position = EXCLUDED.position, declared_created_at = EXCLUDED.declared_created_at, recovery_max_retries = EXCLUDED.recovery_max_retries, recovery_cooldown_seconds = EXCLUDED.recovery_cooldown_seconds, updated_at = now()`;
+    await transaction`INSERT INTO pr_helper_workflows (id, user_id, name, repository, archived, muted, version, position, declared_created_at, recovery_max_retries, recovery_cooldown_seconds) VALUES (${savedWorkflow.id}, ${ownerUserId}, ${savedWorkflow.name}, ${savedWorkflow.repository}, ${savedWorkflow.archived === true}, ${savedWorkflow.muted === true}, ${savedWorkflow.version ?? null}, ${savedWorkflow.position ?? null}, ${savedWorkflow.createdAt ?? null}, ${savedWorkflow.recoveryPolicy?.maxRetries ?? null}, ${savedWorkflow.recoveryPolicy?.cooldownSeconds ?? null}) ON CONFLICT (user_id, id) DO UPDATE SET name = EXCLUDED.name, repository = EXCLUDED.repository, archived = EXCLUDED.archived, muted = EXCLUDED.muted, version = EXCLUDED.version, position = EXCLUDED.position, declared_created_at = EXCLUDED.declared_created_at, recovery_max_retries = EXCLUDED.recovery_max_retries, recovery_cooldown_seconds = EXCLUDED.recovery_cooldown_seconds, updated_at = now()`;
     await writeWorkflowRows(transaction, ownerUserId, savedWorkflow);
     if (previous) {
       const changedStageIds = previous.stages.flatMap((stage, index) => {
@@ -1902,7 +1903,7 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
     await recordOperationAuditForUser(transaction, ownerUserId, identity.installationId, {
       action: previous ? 'workflow-updated' : 'workflow-created', outcome: 'success', repository: savedWorkflow.repository,
       workflowId: savedWorkflow.id, stageId: null, source: null, target: null, pullNumber: null, runId: null,
-      metadata: { version: savedWorkflow.version, stageCount: savedWorkflow.stages.length, archived: savedWorkflow.archived === true }, failureReason: null,
+      metadata: { version: savedWorkflow.version, stageCount: savedWorkflow.stages.length, archived: savedWorkflow.archived === true, muted: savedWorkflow.muted === true }, failureReason: null,
     });
   });
   const archiveTransition = workflowArchiveTransition(previous ?? null, savedWorkflow);
@@ -2164,7 +2165,7 @@ async function reconcileStageDeployments(environment: Record<string, string | un
     if (['success', 'failure'].includes(state) && (previous?.state !== state || previous.run_id !== run.id)) {
       const notification = deploymentNotification(provider, configuration.environment, state);
       await phase('deployWrite', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:deployment:${provider}:${run.id}:${state}`, notification.kind, notification.title, stageId, target));
-      await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:deployment:${provider}:${run.id}:${state}`, kind: notification.kind, title: notification.title, body: `${workflow.repository} · ${source} → ${target} · ${notification.message}`, url: run.html_url || '/' }));
+      await phase('notify', () => stagePush(workflow, environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:deployment:${provider}:${run.id}:${state}`, kind: notification.kind, title: notification.title, body: `${workflow.repository} · ${source} → ${target} · ${notification.message}`, url: run.html_url || '/' }));
     }
   }));
   const placeholders = configurations
@@ -2252,6 +2253,12 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   return { reconciled: tracked.value.reconciled, advanced: tracked.value.advanced === true };
 }
 
+// A muted workflow keeps reconciling, projecting and automating; only the push channel goes quiet
+// (mute v1 — the phase('notify') sites below are the sole Web Push triggers in reconciliation).
+function stagePush(workflow: { muted?: true }, environment: Record<string, string | undefined>, sql: Parameters<typeof sendPushNotifications>[1], userId: string, event: Parameters<typeof sendPushNotifications>[3]) {
+  return workflow.muted === true ? Promise.resolve(0) : sendPushNotifications(environment, sql, userId, event);
+}
+
 async function reconcileStageWork(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string, tracker?: StagePhaseTracker): Promise<{ reconciled: boolean; phases: Record<string, number>; advanced?: boolean }> {
   const { phases, phase } = createPhaseRecorder(tracker);
   if (!row.github_installation_id) return { reconciled: false, phases };
@@ -2284,7 +2291,7 @@ async function reconcileStageWork(environment: Record<string, string | undefined
     if (previous[0]?.pull_state && previous[0].pull_state !== 'none') await phase('write', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:pull-cleared:${Date.now()}`, 'pull-cleared', 'PR 状态已清除，等待新提交', stageId, stage.target));
     const unlocked = stageIsUnlocked(workflow, stageIndex, preceding);
     if (unlocked && comparison.ahead_by > 0 && (previous[0]?.ahead_by || 0) === 0) {
-      await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:none`, kind: 'new-pr-ready', title: '可以创建下一步 PR', body: `${workflow.repository} · ${stage.source} → ${stage.target}`, url: '/' }));
+      await phase('notify', () => stagePush(workflow, environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:none`, kind: 'new-pr-ready', title: '可以创建下一步 PR', body: `${workflow.repository} · ${stage.source} → ${stage.target}`, url: '/' }));
     }
     if (comparison.ahead_by > 0 && comparisonHeadSha) await phase('queue', () => scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha));
     return { reconciled: true, phases };
@@ -2326,16 +2333,16 @@ async function reconcileStageWork(environment: Record<string, string | undefined
   if (before?.checks_state !== checks.state && ['success', 'failure'].includes(checks.state)) await phase('write', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:checks:${gateSha}:${checks.state}`, `checks-${checks.state}`, checks.state === 'success' ? 'Actions 已全绿' : 'Actions 失败，需要处理', stageId, stage.target));
   const route = `${stage.source} → ${stage.target}`;
   if (before?.checks_state !== checks.state && ['success', 'failure'].includes(checks.state)) {
-    await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:checks:${gateSha}:${checks.state}`, kind: `checks-${checks.state}`, title: checks.state === 'failure' ? 'Actions 失败，需要处理' : 'Actions 已全绿', body: `${workflow.repository} · ${route}`, url: `/` }));
+    await phase('notify', () => stagePush(workflow, environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:checks:${gateSha}:${checks.state}`, kind: `checks-${checks.state}`, title: checks.state === 'failure' ? 'Actions 失败，需要处理' : 'Actions 已全绿', body: `${workflow.repository} · ${route}`, url: `/` }));
   }
   const runState = workflowRunCompletionState(Boolean(pull.merged_at), checks.state);
   if (runState) await phase('write', () => sql`UPDATE workflow_runs SET state = ${runState}, completed_at = now() WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND pull_number = ${pull.number} AND state = 'active'`);
   if (!pull.merged_at && requiredApprovals > 0 && approvals >= requiredApprovals && (!before || before.approvals < before.required_approvals)) {
-    await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:merge-ready:${pull.number}:${pull.head.sha}`, kind: 'merge-ready', title: 'PR 已满足合并条件', body: `${workflow.repository} · ${route} · PR #${pull.number}`, url: `/` }));
+    await phase('notify', () => stagePush(workflow, environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:merge-ready:${pull.number}:${pull.head.sha}`, kind: 'merge-ready', title: 'PR 已满足合并条件', body: `${workflow.repository} · ${route} · PR #${pull.number}`, url: `/` }));
   }
   const unlocked = stageIsUnlocked(workflow, stageIndex, preceding);
   if (pull.merged_at && unlocked && comparison.ahead_by > 0 && (before?.ahead_by || 0) === 0) {
-    await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:${pull.number}`, kind: 'new-pr-ready', title: '有新提交，可以创建新 PR', body: `${workflow.repository} · ${route}`, url: '/' }));
+    await phase('notify', () => stagePush(workflow, environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:${pull.number}`, kind: 'new-pr-ready', title: '有新提交，可以创建新 PR', body: `${workflow.repository} · ${route}`, url: '/' }));
   }
   if (comparison.ahead_by > 0 && comparisonHeadSha) await phase('queue', () => scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha));
   // Phase 6 "advance on merge": once this step is merged and its post-merge gate (deployments are
