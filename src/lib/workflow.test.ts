@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { activeWorkflows, addDeployment, archiveWorkflow, archivedWorkflows, isWorkflowArchived, restoreWorkflow, replaceDeployment, deploymentSuggestions, defaultDeployments, deploymentsForRepository, syncedDeployments, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoAdvance, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type Workflow } from './workflow';
+import { activeWorkflows, addDeployment, archiveWorkflow, archivedWorkflows, isWorkflowArchived, isWorkflowMuted, muteWorkflow, unmuteWorkflow, restoreWorkflow, replaceDeployment, deploymentSuggestions, defaultDeployments, deploymentsForRepository, syncedDeployments, missingDeploymentWorkflowNames, addStage, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigsForTarget, immediateAutomationEffect, matchingStageProjections, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, deleteWorkflow, setStageAutoAdvance, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type Workflow } from './workflow';
 
 describe('workflow configuration', () => {
   it('accepts the authoritative workflow returned after deleting a stage', () => {
@@ -665,5 +665,34 @@ describe('archiving a workflow', () => {
     const board = [archiveWorkflow(flow), other];
     expect(activeWorkflows(board).map(item => item.id)).toEqual(['flow-2']);
     expect(archivedWorkflows(board).map(item => item.id)).toEqual(['flow-1']);
+  });
+});
+
+// A muted workflow stays fully alive — reconciling, projecting, automating — and only the push
+// channel goes quiet. The flag follows the same delete-don't-write-false convention as `archived`.
+describe('muting a workflow', () => {
+  const flow: Workflow = { id: 'flow-1', name: 'Landing', repository: 'octo/landing', stages: [{ source: 'dev', target: 'main', stageId: 's-1' }] };
+
+  it('marks the workflow without disturbing anything else about it', () => {
+    const muted = muteWorkflow(flow);
+    expect(isWorkflowMuted(muted)).toBe(true);
+    expect({ ...muted, muted: undefined }).toEqual({ ...flow, muted: undefined });
+  });
+
+  it('leaves no trace of the flag once unmuted', () => {
+    expect('muted' in unmuteWorkflow(muteWorkflow(flow))).toBe(false);
+    expect(isWorkflowMuted(unmuteWorkflow(muteWorkflow(flow)))).toBe(false);
+  });
+
+  it('is idempotent both ways, so a double click cannot produce a third state', () => {
+    expect(muteWorkflow(muteWorkflow(flow))).toEqual(muteWorkflow(flow));
+    expect(unmuteWorkflow(unmuteWorkflow(flow))).toEqual(flow);
+  });
+
+  it('does not move a muted workflow off the active board — muting is not archiving', () => {
+    const other: Workflow = { ...flow, id: 'flow-2' };
+    const board = [muteWorkflow(flow), other];
+    expect(activeWorkflows(board).map(item => item.id)).toEqual(['flow-1', 'flow-2']);
+    expect(archivedWorkflows(board)).toEqual([]);
   });
 });

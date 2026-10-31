@@ -6,6 +6,7 @@ export type WorkflowColumns = {
   name: string;
   repository: string;
   archived: boolean;
+  muted: boolean;
   version: number | null;
   position: number | null;
   declared_created_at: string | null;
@@ -69,6 +70,7 @@ export function workflowToRows(userId: string, workflow: Workflow): WorkflowRows
       name: workflow.name,
       repository: workflow.repository,
       archived: workflow.archived === true,
+      muted: workflow.muted === true,
       version: workflow.version ?? null,
       position: workflow.position ?? null,
       declared_created_at: workflow.createdAt ?? null,
@@ -156,5 +158,6 @@ export function workflowFromRows(rows: WorkflowRows): Workflow {
       : { recoveryPolicy: { maxRetries: workflow.recovery_max_retries, cooldownSeconds: workflow.recovery_cooldown_seconds } }),
     ...(workflow.version === null ? {} : { version: workflow.version }),
     ...(workflow.archived ? { archived: true as const } : {}),
+    ...(workflow.muted ? { muted: true as const } : {}),
   };
 }
