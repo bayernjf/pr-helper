@@ -2791,7 +2791,7 @@ describe('payload column drop, step A: single-row reads', () => {
   });
 
   it('tells an absent row from a broken mirror instead of collapsing both into "not found"', () => {
-    const base = { user_id: 'u-1', id: 'flow-1', name: 'Release', repository: 'octo/app', archived: false, version: 1, position: null, declared_created_at: null, recovery_max_retries: null, recovery_cooldown_seconds: null, deployments: [] };
+    const base = { user_id: 'u-1', id: 'flow-1', name: 'Release', repository: 'octo/app', archived: false, muted: false, version: 1, position: null, declared_created_at: null, recovery_max_retries: null, recovery_cooldown_seconds: null, deployments: [] };
     const stage = { user_id: 'u-1', workflow_id: 'flow-1', stage_id: 's-1', stage_index: 0, source_rule: 'dev', target: 'main', independent: null, wait_for: null, auto_create: null, auto_merge: null, execution_mode: null, trigger_min_commits: null, rule_name: null, rule_captured_at: null, rule_content_hash: null };
 
     expect(trackedWorkflowFromSingleRow([])).toBeUndefined();

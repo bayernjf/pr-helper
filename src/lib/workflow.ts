@@ -26,7 +26,7 @@ export type WorkflowStage = { source: string; target: string; independent?: bool
 export type DeploymentProvider = 'vercel' | 'cloudflare';
 export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string; healthCheckPath?: string; rollbackWorkflowName?: string };
 export type RecoveryPolicy = { maxRetries: number; cooldownSeconds: number };
-export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; createdAt?: string; deployments?: DeploymentConfig[]; position?: number; recoveryPolicy?: RecoveryPolicy; version?: number; archived?: true; team?: { id: string; name: string; role: 'owner' | 'editor' | 'operator' | 'viewer' } };
+export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; createdAt?: string; deployments?: DeploymentConfig[]; position?: number; recoveryPolicy?: RecoveryPolicy; version?: number; archived?: true; muted?: true; team?: { id: string; name: string; role: 'owner' | 'editor' | 'operator' | 'viewer' } };
 export type WorkflowStageProjection = { workflowId: string; stageIndex: number; stageId?: string | null; source: string; target: string };
 
 export function sourceRuleMatches(rule: string, source: string) {
@@ -367,6 +367,21 @@ export function activeWorkflows(workflows: readonly Workflow[]): Workflow[] {
 
 export function archivedWorkflows(workflows: readonly Workflow[]): Workflow[] {
   return workflows.filter(isWorkflowArchived);
+}
+
+export function isWorkflowMuted(workflow: Pick<Workflow, 'muted'>) {
+  return workflow.muted === true;
+}
+
+export function muteWorkflow(workflow: Workflow): Workflow {
+  return { ...workflow, muted: true };
+}
+
+// Same delete-don't-write-false convention as restoreWorkflow: the flag rides audit metadata and
+// version history, and a falsy leftover would outlive the decision that produced it.
+export function unmuteWorkflow(workflow: Workflow): Workflow {
+  const { muted: _muted, ...rest } = workflow;
+  return rest;
 }
 
 export function sortWorkflows(workflows: readonly Workflow[]): Workflow[] {
