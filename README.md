@@ -33,6 +33,16 @@ npx tsc --noEmit
 npm run lint
 ```
 
+## Git WIP overview (local only)
+
+`npm run wip` starts a local read-only dashboard that lists every registered git repo (default scan root: `~/000mycodes`, extra paths via the comma-separated `WIP_EXTRA_REPOS` env var) with branch, ahead/behind, staged/unstaged/untracked counts, and the last commit; clicking a repo shows per-file numstat and diffs. Run `npm run build` once first so `dist/wip.html` exists.
+
+- The server binds to `127.0.0.1` only (never `0.0.0.0`) and prints a full URL with a one-time random token at startup; every `/api/*` request must carry that token (query param or `Authorization: Bearer`).
+- It is strictly read-only: the only git commands executed are `status`, `diff`, and `log` — never `checkout`, `stash`, `clean`, `reset`, or any other writing command.
+- Sensitive files (`.env`, `.env.*`, `*.key`, `*.pem`, `id_rsa*`, `*.p12`, `*.pfx`, case-insensitive) are masked in the diff endpoint — the API returns a `masked` flag instead of content. Listing and counts are unaffected.
+- All file paths are validated and resolved with `realpath`; anything escaping a registered repo root is rejected with 400/403. Diffs larger than ~2000 lines are truncated with a `truncated` flag.
+- Change notifications use `fs.watch` + 400 ms debounce over SSE; there is no polling. Token in hand plus loopback binding are the security boundary — do not expose the port through a tunnel or reverse proxy.
+
 ## Architecture
 
 | Layer | Current implementation |
