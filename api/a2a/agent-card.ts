@@ -1,5 +1,6 @@
 import { type ApiRequest } from '../_lib/http.js';
 import { serveAgentCard } from '../_lib/agent-card.js';
+import { evaluateA2aAccess } from '../_lib/a2a/auth.js';
 import { handleJsonRpc, isValidJsonRpcRequest, type JsonRpcRequest } from '../_lib/a2a/rpc.js';
 import { createTaskStore } from '../_lib/a2a/task-store.js';
 
@@ -44,8 +45,19 @@ export default async function handler(request: NodeRequest, response: NodeRespon
   }
 
   response.setHeader('Cache-Control', 'no-store');
-  const expected = process.env.ZEUS_A2A_TOKEN;
-  if (expected && bearerToken(request.headers) !== expected) {
+  // fail-closed：未配置 ZEUS_A2A_TOKEN 一律拒绝服务；PR_HELPER_A2A_ALLOW_INSECURE_ANONYMOUS=1
+  // 是本机调试的显式逃生门，默认关闭。已配置时按常数时间比较校验 bearer。
+  const decision = evaluateA2aAccess({
+    presentedToken: bearerToken(request.headers),
+    expectedToken: process.env.ZEUS_A2A_TOKEN?.trim() || undefined,
+    allowInsecureAnonymous: process.env.PR_HELPER_A2A_ALLOW_INSECURE_ANONYMOUS === '1',
+  });
+  if (decision === 'unconfigured') {
+    response.setHeader('Content-Type', 'application/json');
+    response.status(503).json({ message: 'A2A 未配置 ZEUS_A2A_TOKEN，服务不可用' });
+    return;
+  }
+  if (decision === 'unauthorized') {
     response.setHeader('Content-Type', 'application/json');
     response.setHeader('WWW-Authenticate', 'Bearer');
     response.status(401).json({ message: 'Unauthorized' });
