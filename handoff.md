@@ -1,6 +1,6 @@
 # PR Helper Handoff
 
-> 最后更新：2026-10-30（2026-10-30 批量落地已全部合入 main 并部署：PR #393 合并 6 个特性 commit（`b6c9ed17`、`8ee8d574` 等）、状态页与 E2E 补强 `2736f334`、主应用窄屏适配 `91d6dec0`；CI / Vercel / Cloudflare 均 success。迁移 041–043 **经 2026-10-30 只读核对确认仍未执行，且已产生真实失败**（当天 03:00/03:30 UTC 两次 cron 校准各失败 1 个阶段，`column "gate_sha" does not exist`；新建流程会撞 `payload NOT NULL`），请尽快在 Supabase SQL Editor 按序执行；E 步 DROP payload 按三门槛推迟；9 月账单复核仍待用户登录 Dashboard。此前：2026-10-10 修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」；2026-09-15 刷新慢优化（`d077ff58`/`4394df2e`/`f3e29251`/`4bb5c3b0`）已于 2026-10-14 部署生产并验证。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
+> 最后更新：2026-10-31（**2026-10-31 追加**：调研纠偏——**归档已于 2026-08-17 实现并完成生产验收**，「缺可逆中间态」是过时记录，真正缺的只有静音；设计已出 [PR #395](https://github.com/bayernjf/pr-helper/pull/395) 并于当日获批（4 个决策点全按推荐），**实施已落 [PR #397](https://github.com/bayernjf/pr-helper/pull/397)**（迁移 `045` 加 `muted` 列 + 5 处推送过滤 + lane 静音按钮/徽标；合并后按序执行 `044` → `045`）；ETag 只读遥测已落 [PR #396](https://github.com/bayernjf/pr-helper/pull/396)，等日志积累再算命中率；沙盒 4 流程**已定先归档**（用户在 UI 点归档即可拿 sweep 收益，是否再删留待归档后决定）。2026-10-30：批量落地已全部合入 main 并部署：PR #393 合并 6 个特性 commit（`b6c9ed17`、`8ee8d574` 等）、状态页与 E2E 补强 `2736f334`、主应用窄屏适配 `91d6dec0`；CI / Vercel / Cloudflare 均 success。迁移 041–043 **已于 2026-10-30 ~19:40 UTC 在生产执行并只读验证**（`gate_sha` 列存在、`payload` 可空、`version` NOT NULL；20:00–20:02 的 webhook 全部 success/skipped；20:00 的 `*/30` cron 校准 11/11 阶段 success（`stages_failed=0`；末次 `gate_sha` 报错定格 19:37:03，迁移后至 20:24 UTC 共 70 次 reconciliation 失败合计 0），活故障关闭）；E 步 DROP payload 的迁移 `044` 已写好并开出 [PR #394](https://github.com/bayernjf/pr-helper/pull/394)（CI 全绿，未合并、未执行），代码侧零读零写且无索引/视图/函数依赖、47 行 payload 共 37 kB 为冗余副本，**待用户备份后在 Supabase 执行**；9 月账单复核仍待用户登录 Dashboard。此前：2026-10-10 修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」；2026-09-15 刷新慢优化（`d077ff58`/`4394df2e`/`f3e29251`/`4bb5c3b0`）已于 2026-10-14 部署生产并验证。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 > **待办的唯一索引在下方《待处理事项（2026-08-22 汇总）》一节**，其余小节只记已完成的事实与理由。
 > 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
@@ -24,7 +24,15 @@
 
 - **迁移 041–043 确认未执行**：`information_schema` 实测 `workflow_stage_states` 无 `gate_sha` 列、`pr_helper_workflows.payload` 仍 NOT NULL、`version` 仍 nullable。新代码已上线，当天 03:00 / 03:30 UTC 两次 cron 校准各失败 1 个阶段，错误均为 `column "gate_sha" of relation "workflow_stage_states" does not exist`——**每次校准只要扫到非终结阶段就会失败**，新建流程也会撞 `payload NOT NULL`。这是当前生产唯一活跃故障，用户执行 041 → 042 → 043 即消除。
 - **接力项 2「对账轮转缩短」实测结论**：`reconciliation_runs` 近 14 天——cron 每天 53–56 次、合计 530–770 次 GitHub 调用（均值 12.4 次/run、9.5 阶段/run，最慢 38.8s）；webhook 每天 23–1770 次。cron 占比活跃日约 35%、安静日可达 95%（即「88% 来自定时扫描」的语境），但绝对量只占每小时 5000 配额约 0.5%；③ 短路已生效（76 个阶段里 69 个 = 91% 每圈只花 1 次 compare）。剩余手段只有两条：批次 8 调大（最慢 tick 已贴近 40s 预算，调大有频繁 deferred 风险）或 cron `*/30` → `*/15`（兜底一圈 ~3h → ~1.5h，代价约 +600 调用/天，仍 <1%）。**结论：配额不是问题，维持现状；若在意兜底延迟再调频次（需新迁移 044）。**
-- 已删本地已合并分支 `feature/20260722`（曾指向 `3d952343`）；`origin/feature/20260722` 仍在，删远端属破坏性操作，待用户点名。
+- 已删本地已合并分支 `feature/20260722`（曾指向 `3d952343`）；**2026-10-31 用户点名后 `origin/feature/20260722` 远端分支也已删除**（删前用 `git merge-base --is-ancestor 3d952343 origin/main` 复核过合并关系）。
+
+### 2026-10-30 迁移 041–043 执行与验证（接力会话，`prh_readonly` 生产库实测）
+
+- **已执行并验证关闭活故障**：用户于 ~19:40 UTC 在 Supabase 按序执行 041 → 042 → 043。执行前预检 47 行 `version` 空值为 0（043 不会失败）。执行后 `information_schema` 实测：`workflow_stage_states.gate_sha` 存在（text，可空）、`pr_helper_workflows.payload` 可空、`pr_helper_workflows.version` NOT NULL。
+- 20:00–20:02 UTC 的 webhook 投递全部 `success`/`skipped`、`stages_reconciled` 有正值、`stages_failed=0`、无 `gate_sha` 报错——webhook 与 cron 走同一条 gate_sha 投影，足以确认列缺失故障消失。**cron 侧复核亦已完成**：20:00:04 UTC 的 `*/30` 校准 `success`、11/11 阶段、`stages_failed=0`；迁移后至 20:24 UTC 共 70 次 reconciliation `stages_failed` 合计 0，末次 `gate_sha` 报错定格在 19:37:03（迁移完成前）。复核关闭，无需再等下一轮。
+- **E 步解锁情况**：执行前核对 `trackedWorkflowColumns()` 是唯一工作流读入口且不选 payload（[`api/_lib/workflows-store.ts`](api/_lib/workflows-store.ts)），034 的 jsonb 索引已由 039 删除，无视图/函数依赖；47 行 payload 共 37 kB 且为关系表之外的冗余副本。迁移 `044_drop_workflow_payload.sql` 已写在 `feature/20261031-egress`（commit `df084c74`），**不可逆，待用户备份后执行**，合 main 与执行顺序由用户决定。
+- 排障通道备注：Vercel `DATABASE_URL` 是 Sensitive 变量、`vercel env pull` 取回空串，生产只读查询统一走 `~/.local/bin/prh-sql.mjs`（`prh_readonly`），见 [`docs/supabase-readonly-debugging.md`](docs/supabase-readonly-debugging.md)。
+
 
 
 - 当前分支：`main`（历史工作分支 `feature/20260722` 已于 2026-10-30 确认合并后删除）。核对分支同步状态请直接跑 `git log --oneline origin/main..HEAD`，不要引用本文档里的快照。
@@ -66,7 +74,7 @@
 
 **部署后效果**：生产那条存量 paused 行（PR #387 已 merged）会在下一次 drain（pg_cron 每 2 分钟）被自动取消为 `fulfilled`，失败中心自行清空，无需手动清数据。
 
-## 待处理事项（2026-09-15 汇总）
+## 待处理事项（2026-10-31 汇总）
 
 本节是全文待办的**唯一索引**，按「谁能动手」分组；细节仍在各自小节里，此处只给一句话和去处。做完一项就从这里删掉，不要在这里累积历史。
 
@@ -74,10 +82,13 @@
 
 | 事项 | 一句话 | 去处 |
 | --- | --- | --- |
-| 部署 2026-09-15 刷新优化并先核对环境变量 | 合并部署前 `vercel env ls production` 查 `REALTIME_RECONCILE_BUDGET_MS`（2026-08-18 实验设的 25000），仍在则删除再部署，否则 inbox_refresh 的 6s 不生效；prebuilt 生效走 `gh workflow run deploy-vercel.yml --ref main`。 | 《2026-09-15 刷新慢优化》 |
-| 登录态浏览器手测 | 首屏投影直出、30s 内切窗口零新请求、手动刷新绕过 TTL、首页点击约 11s 返回；我无法登录真实环境。 | 《2026-09-15 刷新慢优化》 |
-| 9 月账单精确复核 | 2026-09-20 宽限期结束前看一次 9 月 Usage 累计，用精确值替换八月估算列，确认 2.1 GB/月投影无偏差。 | [egress 方案《2026-08-31》](docs/supabase-egress-optimization.md) |
-| 外部条件类验收（5 项） | Required approval、private/organization 安装边界、双账号团队角色边界、加密同步 v1/v2 与口令轮换、保留 Cron 批次确认——都缺账号或环境，不是没实现。 | 《剩余生产验收》 |
+| 执行迁移 `044`（DROP payload 列） | 已开 [PR #394](https://github.com/bayernjf/pr-helper/pull/394)（CI 全绿）。**备份已备好**：2026-10-30 20:26 UTC 由 AI 经只读通道导出 47 行 `(id, payload)` 至本机 `~/.config/pr-helper/backup-pr_helper_workflows-payload-20261030.json`（33 kB，权限 600；payload 自 042 起代码零写入、内容冻结）。可直接在 Supabase 执行；合并与执行先后由你定。不可逆，执行并验证后可删备份文件。 | [`supabase/migrations/044_drop_workflow_payload.sql`](supabase/migrations/044_drop_workflow_payload.sql) |
+| 仓库 Secret `FEISHU_WEBHOOK` | 移动监控①的 `if: failure()` 飞书通知依赖它；未配置只 warning 跳过。甩 webhook URL 可由你在仓库 Settings 配。 | 《2026-10-30 批量落地》 |
+| `prh_readonly` 口令轮换 | **已备好（2026-10-31）**：新 32 位口令已生成至本机 `~/.config/pr-helper/db.env.new`（600，未进任何会话记录）。你在 Supabase SQL Editor 跑 `alter role prh_readonly password '<db.env.new 里 : 与 @ 之间那段>'`，跑完说一声，AI 把 `db.env.new` 换正 `db.env` 并验证连通；在那之前旧口令照常可用。 | [只读查询通道](docs/supabase-readonly-debugging.md) |
+| 9 月 + 10 月账单复核 | 9/20 宽限期已过，当前只读查询未遇 402；需登录 Dashboard 用实际值确认 −94% / 2.1 GB 月投影是否仍成立。 | [egress 方案](docs/supabase-egress-optimization.md) |
+| 登录态浏览器手测 | `REALTIME_RECONCILE_BUDGET_MS=25000` 已于 2026-10-30 从 Production 删除并重部署，inbox_refresh 应恢复 ≤11s；需真实登录刷新一次确认。 | 《2026-09-15 刷新慢优化》 |
+| 沙盒 4 流程处置（原「UI 删 4 个沙盒流程」） | **已定（2026-10-31）：先归档**——现成的归档即可拿到 sweep 收益（~29s → ~15s，归档流程不进 cron/webhook 校准，2026-08-17 已验收）且可逆，你在 UI lane 头点「归档」即可；是否再删除留待归档后单独决定（删除不可逆、级联二次确认）。 | 《2026-10-30 批量落地》 |
+| 外部条件类验收 | Required approval、private/organization 安装边界、双账号团队角色边界、加密同步 v1/v2 与口令轮换、保留 Cron 批次、失败部署投影+确认式生产回滚——都缺账号或环境。 | 《剩余生产验收》 |
 
 ### 已定性的残留，不再当待办（2026-08-22）
 
@@ -85,17 +96,18 @@
 - **自动化动作 512 停在 `paused` 是正确终态。** `5xdwc`（E2E Failure and Dynamic Rule）的 `merge-pr`，PR #4、`门禁尚未全绿（当前 failure）`、`attempts=3` 已达 `recoveryPolicy.maxRetries` 故不再重排。该流程本身就是用来注入失败门禁的，红灯是它的测试目的。留作排障痕迹，不清理。
 - **动作 509 已于 2026-08-22 03:28 自行 `cancelled`**（`已被后续提交的自动化动作取代`），此前记的「等 1 个 Approval」已不成立，取代逻辑按设计生效。
 
-### 等我方案获批后再动手（已出方案，未实施）
+### 等我方案获批后再动手（未实施）
 
 | 事项 | 一句话 | 去处 |
 | --- | --- | --- |
-| 删 `pr_helper_workflows.payload` 列 | 14 处读点、5 步、最后一步是单向门；收益是收口双表示而非省流量。**2026-08-31 已重定级**：出站量结论已出（−94%、2.1 GB/月），不再受 9/20 宽限期驱动，按普通代码债优先级排期。**`version` 收紧为 `NOT NULL` 已于 2026-08-22 定为并入该方案的 D 步，不再单列**——实测 0 个 NULL 且今天不可达，即便出现也是主键冲突后事务回滚（响亮报错，非静默丢编辑），只有 D 步手写列清单时才第一次有防御价值。 | [`docs/superpowers/plans/2026-08-22-drop-workflow-payload-column.md`](docs/superpowers/plans/2026-08-22-drop-workflow-payload-column.md) |
-| `pr_helper_workflows.version` 收紧为 `NOT NULL` | ~~未定~~ **2026-08-22 已定：并入 payload 删列方案的 D 步，不单独做。** | 同上 |
-| AI 生成失败 → 接管弹窗的验收 | 你此前定为「单独排期」，未开始。 | 《后续高价值投入》 |
-| 合并后的红门禁让自动创建停摆 | 已合并的步骤去评 PR merge commit 的 checks，而那个提交上的红 check 永远不会自己变绿 → `canCreateNext` 恒假、自动创建不再发生。实测于 `bayernjf/rich-sim`（`ahead_by=11`、`checks_state=failure`、3057 之后零条 create-pr），停摆 ≥44 分钟，最终由人工点详情页「创建 PR」解套（PR #4，11:14 建 / 11:16 自动合并 / 11:17 投影转绿）。**不是死锁，是自动化停摆**：人工按钮不看 `checks_state`；但面板上唯一的按钮「重试」对第三方 check 必然报错。方案 A/B/C 已出，未获批、未落代码。 | [`docs/auto-create-pr-remediation.md` 第十八节](docs/auto-create-pr-remediation.md) |
+| 流程静音（已批准，实施 [PR #397](https://github.com/bayernjf/pr-helper/pull/397)） | **2026-10-31 获批**：4 个决策点全按推荐拍板（v1 只静推送、全局静音、无确认弹窗、沙盒先归档）。活跃流程照常校准与自动化、只关 Web Push；迁移 `045` 加 `muted` 列、`stagePush` 包裹 5 个推送触发点、lane 静音按钮/徽标（`workflow-edit` 权限、无确认弹窗）。**合并后按序在 Supabase 执行 `044` → `045`**；验收清单见设计文档第七节。 | [PR #397](https://github.com/bayernjf/pr-helper/pull/397)、[设计文档](docs/superpowers/plans/2026-10-31-workflow-mute.md) |
+| 方案第 7 项 | 自动动作 run 级详情（含重试原因）+ 按仓库的成本/限流展示；自动化方案内最后一块未立项工程。 | [`docs/automated-workflow-plan.md`](docs/automated-workflow-plan.md) |
+| inbox 刷新异步化 | 交互请求不再同步等 sweep（治本，waitUntil 化）；等待已降到 ≤11s，现行结论是先观察几天再定，不急。 | 《2026-09-15 刷新慢优化》 |
+| AI 失败接管弹窗验收 | 功能已上线（`5bd1f2e8`），生产有真实样本动作 4024（AI 429）；剩你在失败中心点一次「接管 AI 内容」做 UI 验收。 | 《2026-10-30 批量落地》 |
 
 ### 已知但未立项（不影响当前功能）
 
+- **ETag / `If-None-Match`：只读遥测已落地（[PR #396](https://github.com/bayernjf/pr-helper/pull/396)），等日志积累再做命中率分析**：304 省的是 GitHub rate limit（峰值仅占基线 18–34%），但 GitHub 304 不返回 body，要落库缓存 ETag+body，未命中还要回写，反而给已过线的 Supabase 出站加压。遥测按 GET 路径在实例内备忘录记 ETag，sweep 级打 `[reconcile-etag]` 行（stable/changed/firstSeen，不改任何请求行为、不落库）；跑几天后按日算 `stable/(stable+changed+firstSeen)` 得 304 命中率上界——高再建缓存，低（③ 短路已覆盖的场景）就维持现状不做。
 - 一圈对账的长度由 GitHub 往返决定（每阶段约 7.8 次调用），降这个数才能真正缩短轮转；属代码工作。
 - 撞预算的 sweep 似乎没推进 `last_reconcile_attempt_at`，下一次会领到完全相同的一批流程。
 - bayjf 的健康检查地址被清空而非设为 `/`，因此零个配置带健康检查，探针没有线上回归信号。
