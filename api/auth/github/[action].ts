@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { githubAppRequest } from '../../_lib/github-api.js';
 import { createSignedSession, createSignedState, parseGithubAppConfig, readSignedSession, readSignedState } from '../../_lib/github-app.js';
 import { type ApiRequest, type ApiResponse, queryValue, readCookie, requestMustBeGet, setSecureCookie } from '../../_lib/http.js';
-import { installationForLogin, type GitHubAppInstallation } from '../../_lib/installations.js';
+import { installationBelongsToSession, installationForLogin, type GitHubAppInstallation } from '../../_lib/installations.js';
 
 type OAuthToken = { access_token?: string; error?: string; error_description?: string };
 type GitHubUser = { id: number; login: string; avatar_url?: string };
@@ -78,7 +78,14 @@ async function installation(request: ApiRequest, response: ApiResponse) {
     const session = readSignedSession(readCookie(request, 'pr-helper-session'), config.sessionSecret);
     const installationId = queryValue(request, 'installation_id');
     if (!installationId) throw new Error('GitHub 未返回安装信息');
-    await githubAppRequest(config, `/app/installations/${encodeURIComponent(installationId)}`);
+    const installation = await githubAppRequest<GitHubAppInstallation>(config, `/app/installations/${encodeURIComponent(installationId)}`);
+    // IDOR 防线（2026-11-03 修复）：存在性校验不等于归属校验。
+    // 会话绑定前必须确认 installation 的账号就是当前登录用户，否则越权 403。
+    const ownershipGranted = installationBelongsToSession(installation, session);
+    if (!ownershipGranted) {
+      response.status(403).json({ message: '该 GitHub App 安装不属于当前登录账号' });
+      return;
+    }
     setSecureCookie(response, 'pr-helper-session', createSignedSession({ ...session, installationId }, config.sessionSecret), 7 * 24 * 60 * 60);
     response.redirect(302, `${config.appOrigin}${session.returnTo || '/'}?github=connected`);
   } catch (error) {

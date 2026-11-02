@@ -1,4 +1,7 @@
 import { requestErrorStatus, type ApiRequest, type ApiResponse } from './_lib/http.js';
+import { githubAppRequest } from './_lib/github-api.js';
+import { type GitHubAppConfig, type GitHubSession } from './_lib/github-app.js';
+import { repositoryAllowedForInstallation, repositoryOwner, type GitHubAppInstallation } from './_lib/installations.js';
 import { currentGitHubIdentity } from './_lib/session.js';
 import { addTeamMember, createTeam, deleteAiAutomationCredential, enqueueWorkflowAutomationAction, executeWorkflowAutomationAction, getAiAutomationCredential, isStoredWorkflow, listTeamMembers, listTeams, listWorkflowAutomationActions, listWorkflows, recordOperationAudit, removeTeamMember, removeWorkflow, reconcileRealtime, removeWorkflowStage, saveAiAutomationCredential, shareWorkflowWithTeam, testSavedAiAutomationCredential, upsertWorkflow, type TeamRole } from './_lib/workflows-store.js';
 import { testAiConnection } from '../src/lib/ai.js';
@@ -22,12 +25,26 @@ function automationIdentity(request: ApiRequest) {
   return { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId };
 }
 
+/**
+ * workflow 写操作二次校验（IDOR 防线）：已绑定 installation 时，仓库 owner 必须与
+ * installation 账号一致（经 GitHub App API 实时核实）；未绑定时退化为与登录用户一致。
+ */
+async function workflowRepositoryAllowed(config: GitHubAppConfig, session: GitHubSession, repository: string) {
+  if (session.installationId) {
+    const installation = await githubAppRequest<GitHubAppInstallation>(config, `/app/installations/${encodeURIComponent(session.installationId)}`);
+    return repositoryAllowedForInstallation(repository, installation);
+  }
+  return repositoryOwner(repository).toLowerCase() === session.login.toLowerCase();
+}
+
+// 调用点：下方 PUT 分支在 upsertWorkflow 之前强制执行该校验，越权一律 403。
+
 export default async function handler(request: ApiRequest, response: ApiResponse) {
   let identity: { login: string; githubUserId?: number; installationId?: string } | null = null;
   let audit: { action: 'workflow-created' | 'workflow-updated' | 'workflow-deleted'; repository: string | null; workflowId: string | null } | null = null;
   try {
     response.setHeader('Cache-Control', 'private, no-store, max-age=0');
-    const { session } = currentGitHubIdentity(request);
+    const { config, session } = currentGitHubIdentity(request);
     identity = { login: session.login, githubUserId: session.githubUserId, installationId: session.installationId };
     if (request.query?.resource === 'ai-credentials') {
       if (!request.method || request.method === 'GET') { response.status(200).json({ credential: await getAiAutomationCredential(process.env, identity) }); return; }
@@ -80,6 +97,12 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     const payload = body(request) as { workflow?: unknown; id?: unknown; workflowId?: unknown; stageId?: unknown; stageIndex?: unknown; source?: unknown; target?: unknown } | undefined;
     if (request.method === 'PUT' && isStoredWorkflow(payload?.workflow)) {
       audit = { action: payload.workflow.version === undefined ? 'workflow-created' : 'workflow-updated', repository: payload.workflow.repository, workflowId: payload.workflow.id };
+      // workflowRepositoryAllowed（本文件 L32）：经 GitHub App API 核实仓库归属，越权 403
+      const repositoryAllowed = await workflowRepositoryAllowed(config, session, payload.workflow.repository);
+      if (!repositoryAllowed) {
+        response.status(403).json({ message: '流程仓库不属于当前 GitHub App 安装账号' });
+        return;
+      }
       const saved = await upsertWorkflow(process.env, identity, payload.workflow);
       // Either toggle earns an immediate sweep. Auto-merge acts on a pull request that already exists,
       // so waiting for the next GitHub event removes no consequence; the tick-time confirmation is
