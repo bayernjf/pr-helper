@@ -235,24 +235,21 @@ cd ~ && node ~/.local/bin/prh-sql.mjs "select table_name, string_agg(column_name
 - **表名前缀不统一。** `pr_helper_users` / `pr_helper_workflows` / `pr_helper_ai_automation_credentials` 有前缀；`workflow_stage_states` / `workflow_automation_actions` / `workflow_automation_runs` / `workflow_stage_deployments` / `reconciliation_runs` / `reconciliation_leases` / `github_webhook_deliveries` **没有**。写 `pr_helper_workflow_stage_states` 一定报表不存在。
 - **`github_installation_id` 在 `pr_helper_users` 上，不在 `pr_helper_workflows` 上。** 服务端代码里的 `row.github_installation_id` 是 join 出来的（[`api/_lib/workflows-store.ts:1196`](../api/_lib/workflows-store.ts:1196)）。
 - `workflow_stage_states` 有 `ahead_by`，**没有** `behind_by`，也没有 `locked`——锁定是 `stageIsUnlocked()` 从前序步骤状态算出来的，不是存的字段。
-- 工作流的步骤和自动化策略全在 `pr_helper_workflows.payload` 这个 JSONB 里。展开步骤：
+- ~~工作流的步骤和自动化策略全在 `pr_helper_workflows.payload` 这个 JSONB 里~~ **2026-10-31 更新：已关系化**（迁移 `036`），步骤在 `workflow_stages` 表，自动化开关在它的 `auto_create / auto_merge / execution_mode / trigger_min_commits / rule_*` 列；`044` 执行后 `payload` 列整体删除。展开步骤：
 
 ```sql
-select w.payload->>'repository' as repo, s.ord-1 as stage_index,
-       s.stage->>'source' as source, s.stage->>'target' as target,
-       s.stage->'automation'->>'executionMode' as mode,
-       s.stage->'automation'->>'autoCreatePullRequest' as auto_create,
-       s.stage->'automation'->>'triggerMinCommits' as min_commits,
-       length(coalesce(s.stage->'automation'->'generationRule'->>'content','')) as rule_len
-from pr_helper_workflows w, jsonb_array_elements(w.payload->'stages') with ordinality as s(stage, ord)
-order by repo, stage_index
+select w.repository, s.stage_index, s.source_rule, s.target, s.execution_mode,
+       s.auto_create, s.trigger_min_commits, s.rule_name, s.rule_content_hash
+from pr_helper_workflows w
+join workflow_stages s on s.user_id = w.user_id and s.workflow_id = w.id
+order by w.repository, s.stage_index
 ```
 
 - **没有 `webhook_events` 表**，webhook 投递记在 `github_webhook_deliveries`，列只有 `delivery_id / event_name / action / repository / received_at / installation_id`（没有 `created_at`，按 `received_at` 排序）。
 - **`reconciliation_runs` 的状态列叫 `state`，不叫 `status`。** 完整列：`id, trigger, state, stages_total, stages_reconciled, stages_failed, duration_ms, error_message, repository, started_at, finished_at, user_id, github_calls, github_ms, claimed_workflow_ids`（末列自迁移 `031`，记录该次扫描认领过的工作流 id）。
 - **`workflow_automation_actions` 没有 `finished_at`，也没有 `stage_index`。** 时间只有 `created_at` / `updated_at`；`stage_index` 在 `workflow_automation_runs` 上，要 join 才拿得到（下一节第 5 条查询即如此）。
-- **`workflow_automation_runs` 没有 `trigger`，也没有 `repository`。** 想知道仓库要 join `pr_helper_workflows` 取 `payload->>'repository'`。
-- **`pr_helper_workflows` 只有 7 列**：`id, user_id, payload, created_at, updated_at, last_reconcile_attempt_at, reconcile_pending_since`。流程名、仓库、步骤全在 `payload` 里，`w.name` / `w.repository` 一定报列不存在。
+- **`workflow_automation_runs` 没有 `trigger`，也没有 `repository`。** 想知道仓库要 join `pr_helper_workflows` 取 `repository` 列（036 起已是关系列，不再走 payload）。
+- **`pr_helper_workflows` 的列清单（2026-10-31 生产实测，15 列；`044` 执行后 payload 列删除、余 14 列）**：`id, user_id, payload, created_at, updated_at, last_reconcile_attempt_at, reconcile_pending_since, name, repository, archived, version, position, declared_created_at, recovery_max_retries, recovery_cooldown_seconds`。`name` / `repository` / `archived` / `version` 都是关系列，直接查。
 - **只读角色看不到 `cron` schema**（`permission denied`），所以迁移 `030` 的 pg_cron 计划本身查不到；但 `net._http_response` **可读**，那里有每次定时打点的状态码和响应体——排空和校准的实际节奏与结果从这张表看。
 - BIGSERIAL 主键经 postgres.js 回来是**字符串**，不是数字。比较 id 时注意。
 
