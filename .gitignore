@@ -9,3 +9,5 @@ test-results/
 .codegraph/
 .env*
 .claude/settings.local.json
+status/
+.trae-html-share-packages/
