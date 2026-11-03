@@ -1,9 +1,10 @@
 import { aiChatCompletionsUrl, type AiConfig } from './ai';
+import { t } from './i18n';
 
 export type PrMessage = { title: string; body: string };
 
-const invalidJsonMessage = 'AI 响应不是有效的 PR JSON';
-const missingTitleMessage = 'AI 未返回标题';
+const invalidJsonMessage = 'error.ai.invalidJson';
+const missingTitleMessage = 'error.ai.missingTitle';
 
 type StringBounds = { end: number; complete: boolean };
 
@@ -189,19 +190,19 @@ export function parseFinalPrMessage(source: string): PrMessage {
   try {
     parsed = JSON.parse(jsonSource);
   } catch {
-    throw new Error(invalidJsonMessage);
+    throw new Error(t(invalidJsonMessage));
   }
 
   if (parsed === null || Array.isArray(parsed) || typeof parsed !== 'object') {
-    throw new Error(invalidJsonMessage);
+    throw new Error(t(invalidJsonMessage));
   }
 
   const message = parsed as Record<string, unknown>;
   if (typeof message.title !== 'string' || message.title.trim() === '') {
-    throw new Error(missingTitleMessage);
+    throw new Error(t(missingTitleMessage));
   }
   if ('body' in message && typeof message.body !== 'string') {
-    throw new Error(invalidJsonMessage);
+    throw new Error(t(invalidJsonMessage));
   }
 
   return { title: message.title, body: (message.body as string | undefined) ?? '' };
@@ -307,14 +308,14 @@ export async function streamPrMessage(
 
   if (!response.ok) {
     await cancelResponseBody(response.body);
-    throw new Error(`AI 请求失败 (${response.status})`);
+    throw new Error(t('error.ai.requestFailed', { status: response.status }));
   }
   const mediaType = response.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase();
   if (mediaType !== 'text/event-stream') {
     await cancelResponseBody(response.body);
-    throw new Error('当前模型服务不支持流式生成');
+    throw new Error(t('error.ai.streamUnsupported'));
   }
-  if (!response.body) throw new Error('AI 流式响应没有内容');
+  if (!response.body) throw new Error(t('error.ai.emptyStream'));
 
   let content = '';
   let latest: PrMessage = { title: '', body: '' };
@@ -329,7 +330,7 @@ export async function streamPrMessage(
     try {
       event = JSON.parse(data) as unknown;
     } catch {
-      throw new Error('AI 流式响应格式错误');
+      throw new Error(t('error.ai.malformedStream'));
     }
 
     if (event === null || typeof event !== 'object') continue;
@@ -344,7 +345,7 @@ export async function streamPrMessage(
     }
   }
 
-  if (!sawDone) throw new Error('AI 流式响应意外中断');
+  if (!sawDone) throw new Error(t('error.ai.interrupted'));
   const final = parseFinalPrMessage(content);
   if (final.title !== latest.title || final.body !== latest.body) options.onUpdate({ ...final });
   return final;
