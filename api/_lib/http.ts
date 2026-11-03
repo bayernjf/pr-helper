@@ -20,9 +20,12 @@ function headerValue(headers: ApiRequest['headers'], name: string) {
   return Array.isArray(value) ? value[0] : value;
 }
 
-export function requestOriginAllowed(headers: ApiRequest['headers'], environment: Record<string, string | undefined>) {
+export function requestOriginAllowed(headers: ApiRequest['headers'], environment: Record<string, string | undefined>, hasSessionCookie = false) {
   const origin = headerValue(headers, 'origin')?.trim();
-  if (!origin) return true;
+  // A mutation carrying the session cookie must present a matching Origin: browsers always send one
+  // on cross-site POSTs, so absence there means an obfuscated channel. Cookie-less calls (curl,
+  // server-to-server) carry no ambient authority and stay allowed.
+  if (!origin) return !hasSessionCookie;
   const configured = [environment.APP_ORIGIN, ...(environment.CSRF_ALLOWED_ORIGINS || '').split(',')]
     .map(value => value?.trim().replace(/\/$/, ''))
     .filter((value): value is string => Boolean(value));
@@ -30,7 +33,8 @@ export function requestOriginAllowed(headers: ApiRequest['headers'], environment
 }
 
 export function assertRequestOrigin(request: ApiRequest, environment: Record<string, string | undefined>) {
-  if (isMutationRequest(request.method) && !requestOriginAllowed(request.headers, environment)) throw new Error('请求来源校验失败');
+  const hasSessionCookie = Boolean(readCookie(request, 'pr-helper-session'));
+  if (isMutationRequest(request.method) && !requestOriginAllowed(request.headers, environment, hasSessionCookie)) throw new Error('请求来源校验失败');
 }
 
 export function requestErrorStatus(error: unknown, fallback = 500) {
