@@ -13,8 +13,10 @@ export function currentGitHubIdentity(request: ApiRequest) {
   const config = parseGithubAppConfig(process.env);
   const session = readSignedSession(readCookie(request, 'pr-helper-session'), config.sessionSecret);
   if (request.method && !['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase())) {
-    const action = Array.isArray(request.query?.action) ? request.query.action[0] : request.query?.action || 'request';
-    const result = consumeRateLimit(`${session.login}:${action}`);
+    // Bucket per login only: the action name comes from the query string and would let a caller
+    // mint unlimited buckets. Note this limiter is an in-process abuse backstop, not a security
+    // boundary — serverless instances do not share it.
+    const result = consumeRateLimit(session.login);
     if (!result.allowed) throw new Error(`请求过于频繁，请 ${result.retryAfterSeconds} 秒后重试。`);
   }
   return { config, session };
