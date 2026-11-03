@@ -52,6 +52,9 @@ export function pullRequestBranches(request: ApiRequest) {
 
 export function isAllowedGithubRequest(path: string, method = 'GET') {
   const normalizedMethod = method.toUpperCase();
+  // Dot segments would let the path escape its prefix when fetch normalises the URL
+  // (git refs themselves can never contain "..").
+  if (path.split('?')[0].split('/').includes('..')) return false;
   if (path.startsWith('/user/repos')) return normalizedMethod === 'GET';
   const repository = '/repos/[^/?]+/[^/?]+';
   if (new RegExp(`^${repository}/branches/[^/?]+/protection(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';

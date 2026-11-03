@@ -46,3 +46,11 @@ describe('pull request branch validation', () => {
     expect(() => pullRequestBranches(request('{"head":"a","base":"b"}'))).not.toThrow();
   });
 });
+
+describe('proxy path traversal guard', () => {
+  it('rejects dot segments that would escape the matched prefix after URL normalisation', () => {
+    expect(isAllowedGithubRequest('/repos/octo/app/branches/../../user', 'GET')).toBe(false);
+    expect(isAllowedGithubRequest('/user/repos/../user', 'GET')).toBe(false);
+    expect(isAllowedGithubRequest('/repos/octo/app/branches/feature/20260707', 'GET')).toBe(true);
+  });
+});
