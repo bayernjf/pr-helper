@@ -15,7 +15,8 @@ env:
   DEPLOY_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
 concurrency:
-  group: vercel-${{ env.DEPLOY_BRANCH }}
+  # env context is not available in concurrency.group — inline the branch expression.
+  group: vercel-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
