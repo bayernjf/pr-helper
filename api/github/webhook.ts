@@ -28,8 +28,8 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     const payload = JSON.parse(body) as { action?: string; repository?: { full_name?: string }; installation?: { id?: number }; pull_request?: { number: number; state: string; merged_at?: string | null; head: { ref: string }; base: { ref: string } } };
     const accepted = await recordWebhookDelivery(process.env, { deliveryId, eventName, action: payload.action, repository: payload.repository?.full_name, installationId: payload.installation?.id ? String(payload.installation.id) : undefined });
     const pull = payload.pull_request;
-    const projectedStages = accepted && eventName === 'pull_request' && pull && payload.repository?.full_name
-      ? await projectPullRequestWebhook(process.env, { repository: payload.repository.full_name, source: pull.head.ref, target: pull.base.ref, number: pull.number, state: pull.state, mergedAt: pull.merged_at })
+    const projectedStages = accepted && eventName === 'pull_request' && pull && payload.repository?.full_name && payload.installation?.id
+      ? await projectPullRequestWebhook(process.env, { repository: payload.repository.full_name, installationId: String(payload.installation.id), source: pull.head.ref, target: pull.base.ref, number: pull.number, state: pull.state, mergedAt: pull.merged_at })
       : 0;
     const shouldReconcile = accepted && Boolean(payload.repository?.full_name && payload.installation?.id) && webhookCanChangeStageState(eventName, payload.action);
     // Narrowing the sweep to the branches this delivery touched makes it small enough to run inline,

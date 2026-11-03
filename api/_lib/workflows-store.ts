@@ -722,7 +722,7 @@ export function trackedWorkflowFromSingleRow(rows: readonly TrackedWorkflowRow[]
 type WorkflowAccess = { ownerUserId: string; workflow: StoredWorkflow; team?: { id: string; name: string; role: TeamRole } };
 
 type WebhookDelivery = { deliveryId: string; eventName: string; action?: string; repository?: string; installationId?: string };
-export type PullRequestWebhook = { repository: string; source: string; target: string; number: number; state: string; mergedAt?: string | null };
+export type PullRequestWebhook = { repository: string; installationId?: string; source: string; target: string; number: number; state: string; mergedAt?: string | null };
 type Pull = { number: number; state: string; merged_at: string | null; merge_commit_sha?: string | null; mergeable?: boolean | null; mergeable_state?: string | null; html_url?: string; head: { sha: string; ref?: string } };
 type Branch = { name: string };
 type CheckRun = { status: string; conclusion: string | null };
@@ -1789,7 +1789,10 @@ export async function projectPullRequestWebhook(environment: Record<string, stri
   // An archived workflow is out of every sweep, so a state written here would never be refreshed again:
   // it would sit on the archived view as a fact from an afternoon that has since moved on. Both tests
   // belong in SQL because only rows for this repository can ever match a branch pair from this delivery.
-  const rows = await sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)}, users.github_installation_id FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id WHERE workflows.archived = false AND workflows.repository = ${pull.repository}`;
+  // The installation filter is the tenant boundary: without it, a user who registers another tenant's
+  // repository full name would get that tenant's PR events projected into their stage states.
+  if (!pull.installationId) return 0;
+  const rows = await sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)}, users.github_installation_id FROM pr_helper_workflows workflows JOIN pr_helper_users users ON users.id = workflows.user_id WHERE workflows.archived = false AND workflows.repository = ${pull.repository} AND users.github_installation_id = ${pull.installationId}`;
   const tracked = rows.flatMap(row => {
     const workflow = trackedWorkflowFromRow(row);
     return workflow ? [{ userId: row.user_id, workflowId: row.id, workflow: ensureStageIds(workflow) }] : [];

@@ -2738,3 +2738,12 @@ describe('account deletion transaction', () => {
   });
 });
 
+describe('webhook projection tenant boundary', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+
+  it('matches workflows by the delivery installation, not by repository name alone', () => {
+    const projection = source.slice(source.indexOf('export async function projectPullRequestWebhook'), source.indexOf('// A configured deployment'));
+    expect(projection).toContain('users.github_installation_id = ${pull.installationId}');
+    expect(projection).toContain('if (!pull.installationId) return 0');
+  });
+});
