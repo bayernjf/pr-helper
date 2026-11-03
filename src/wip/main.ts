@@ -61,6 +61,17 @@ async function apiFetch<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+async function apiPost<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${path}?token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  if (!res.ok) throw new Error(data.error || `${res.status}`);
+  return data as T;
+}
+
 let repos: RepoSummary[] = [];
 let collectedAt: string | null = null;
 let query = '';
@@ -282,20 +293,135 @@ function renderList(body: HTMLElement): void {
   body.append(table);
 }
 
+let bodyEl: HTMLElement | null = null;
+let detailStatus: HTMLElement | null = null;
+let writePending = false;
+
+function setDetailStatus(message: string, isError = false): void {
+  if (!detailStatus) return;
+  detailStatus.textContent = message;
+  detailStatus.className = isError ? 'notice warn' : 'notice';
+}
+
+async function reloadDetail(): Promise<void> {
+  const name = detail?.summary.name;
+  if (!name) return;
+  const data = await apiFetch<RepoDetail>(`/api/repo?path=${encodeURIComponent(name)}`);
+  if (detail && detail.summary.name === name) {
+    detail = data;
+    diffCache.clear();
+  }
+  const idx = repos.findIndex((r) => r.name === name);
+  if (idx !== -1) {
+    repos[idx] = data.summary;
+    repos = sortRepos(repos);
+  }
+  render();
+}
+
+async function runWrite(label: string, action: () => Promise<void>): Promise<void> {
+  if (writePending) return;
+  writePending = true;
+  setDetailStatus(`${label}…`);
+  try {
+    await action();
+    await reloadDetail();
+    setDetailStatus(`${label}完成`);
+  } catch (err) {
+    setDetailStatus(`${label}失败：${(err as Error).message}`, true);
+  } finally {
+    writePending = false;
+  }
+}
+
+function actionButton(label: string, onClick: () => void, danger = false): HTMLButtonElement {
+  const btn = el('button', danger ? 'file-action danger' : 'file-action', label);
+  btn.type = 'button';
+  // Do not bubble: the row itself toggles the diff.
+  btn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    onClick();
+  });
+  return btn;
+}
+
+function renderFileActions(row: HTMLElement, repoName: string, file: FileEntry): void {
+  if (file.area === 'staged') {
+    row.append(
+      actionButton('取消暂存', () => {
+        void runWrite('取消暂存', async () => {
+          await apiPost('/api/wip/stage', { repo: repoName, file: file.path, action: 'unstage' });
+        });
+      }),
+    );
+    return;
+  }
+  row.append(
+    actionButton('暂存', () => {
+      void runWrite('暂存', async () => {
+        await apiPost('/api/wip/stage', { repo: repoName, file: file.path, action: 'stage' });
+      });
+    }),
+  );
+  if (file.area === 'unstaged') {
+    row.append(
+      actionButton(
+        '丢弃改动',
+        () => {
+          if (!window.confirm(`丢弃「${file.path}」的未暂存改动？此操作不可撤销。`)) return;
+          void runWrite('丢弃', async () => {
+            await apiPost('/api/wip/discard', { repo: repoName, file: file.path, confirm: true });
+          });
+        },
+        true,
+      ),
+    );
+  }
+}
+
+function renderCommitBox(body: HTMLElement, repoName: string, stagedCount: number): void {
+  const box = el('div', 'commit-box');
+  box.append(el('div', 'wip-meta', '提交已暂存改动：message 必填，≤500 字，且不能以 “-” 开头。'));
+  const input = el('textarea', 'commit-input');
+  input.rows = 3;
+  input.maxLength = 500;
+  input.placeholder = 'feat(wip): 描述本次改动';
+  const row = el('div', 'commit-actions');
+  const submit = el('button', undefined, stagedCount > 0 ? `提交 ${stagedCount} 个已暂存文件` : '没有可提交的暂存改动');
+  submit.disabled = stagedCount === 0;
+  submit.addEventListener('click', () => {
+    const message = input.value.trim();
+    if (!message) {
+      setDetailStatus('commit message 不能为空', true);
+      return;
+    }
+    void runWrite('提交', async () => {
+      await apiPost('/api/wip/commit', { repo: repoName, message });
+      input.value = '';
+    });
+  });
+  row.append(submit);
+  box.append(input, row);
+  body.append(box);
+}
+
 function renderDetail(body: HTMLElement): void {
   if (!detail) return;
   const back = el('button', 'back-link', '← 返回列表');
-  back.addEventListener('click', () => { detail = null; render(); });
+  back.addEventListener('click', () => { detail = null; detailStatus = null; render(); });
   body.append(back);
   const s = detail.summary;
   const title = el('h2', undefined, `${s.name}（${s.branch ?? '—'}）`);
   title.style.margin = '12px 0 4px';
   body.append(title);
   body.append(el('div', 'wip-meta', `${s.path} · 采集时间：${formatTime(detail.collectedAt)}`));
+  detailStatus = el('div', 'notice', '');
+  body.append(detailStatus);
   if (detail.files.length === 0) {
     body.append(el('div', 'error-box', '工作区干净，没有改动文件。'));
     return;
   }
+  renderCommitBox(body, s.name, detail.files.filter((f) => f.area === 'staged').length);
   const list = el('ul', 'files');
   for (const file of detail.files) {
     const item = el('li');
@@ -305,14 +431,13 @@ function renderDetail(body: HTMLElement): void {
     row.append(el('span', 'stat-del', `-${file.deleted}`));
     const areaLabel = file.area === 'staged' ? '已暂存' : file.area === 'unstaged' ? '未暂存' : '未跟踪';
     row.append(el('span', 'area-tag', areaLabel));
+    renderFileActions(row, s.name, file);
     row.addEventListener('click', () => { void toggleDiff(item, file); });
     item.append(row);
     list.append(item);
   }
   body.append(list);
 }
-
-let bodyEl: HTMLElement | null = null;
 
 function renderBody(): void {
   if (!bodyEl) return;
