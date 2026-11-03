@@ -55,6 +55,12 @@ npm run lint
 | Notifications | Web Push + Service Worker |
 | Static mirror | Cloudflare Pages using `VITE_AUTH_ORIGIN` for the canonical Vercel API |
 
+### Module and build boundaries
+
+`src/main.ts` is still the screen orchestration layer. Commit `3f60ef2d` extracted leaf modules only — `src/app/types.ts`, `src/app/dom.ts`, and `src/app/ui/{audit,confirm,format,lane-sorting,theme,toast,tooltip}.ts` — and took `src/main.ts` from 3,189 to 2,864 lines (`wc -l`). The file still holds 67 module-level `let` bindings (plus six mutable `const` Map/Set containers). Screen rendering and event binding continue to read and mutate that shared state (`screen`, `active`, `workflows`, `statuses`, …), so extracting a renderer or handler module requires an explicit state container (or injected getters/setters) first; without one, the split would only move imports, not ownership. Treat the line and binding counts as a snapshot of that commit, not a target.
+
+`vite.config.ts` uses `manualChunks` to split two stable boundaries: `i18n-dicts` (`src/lib/translations/`) and `app-lib` (other `src/lib/` modules except `src/lib/wip/`). Measured by building `43a739da` and its parent with `npm run build` and summing `dist/assets/*.js`: the entry `main-*.js` chunk went from 262.58 to 150.05 kB (gzip 74.18 to 39.96), while total JS went from 272.37 to 274.17 kB (+1.80 kB, +0.66%). The entry shrinks but the total grows slightly because `src/main.ts` still eagerly imports both `en` and `zh` and calls `registerTranslations` for each, so the 83.00 kB `i18n-dicts` chunk is preloaded on first paint (`dist/index.html` lists it under `modulepreload`). The gain is cache granularity, not initial payload. A possible next step is to `import()` only the active locale so the other dictionary becomes a genuine on-demand chunk.
+
 ## Database
 
 Run every migration in `supabase/migrations/` in numeric order. The current applied schema baseline is `001` through `040`; request handlers never create or alter tables. See [supabase/README.md](supabase/README.md).
@@ -99,3 +105,7 @@ Optionally set the repository variable `CLOUDFLARE_PAGES_PROJECT`. It defaults t
 The `Rollback frontend deployment` workflow powers confirmed rollbacks from PR Helper. It accepts the recorded deployment run and immutable URL, verifies that the run was a successful `main` production deployment, then uses the same provider secrets above to restore that version. Preview deployments are intentionally excluded. Keep approval rules enabled on the `production-vercel` and `production-cloudflare-pages` GitHub Environments if production rollback should require an additional GitHub approval.
 
 For GitHub App authentication, Vercel is the canonical secure origin. Set GitHub App secrets in Vercel (never in this repository) and set the GitHub repository variable `VITE_AUTH_ORIGIN` to that Vercel origin so the Cloudflare Pages mirror redirects users to the correct authorization API.
+
+### Workflow context limits
+
+GitHub Actions does not allow the `env` context in `concurrency.group` or `jobs.<job_id>.environment.name`. Commit `eabbc0ec` added `env.DEPLOY_BRANCH` to both positions in `deploy-vercel.yml` and `deploy-cloudflare-pages.yml`; both workflows were then rejected at parse time (failed runs report “This run likely failed because of a workflow file issue”), so pushes to `dev`/`main` produced no deployment. Fixing one position was not enough: `9b57efcd` inlined the expression in `concurrency.group` and the next deploy run still failed; `6230e7b0` inlined it again in `environment.name`, after which a manual dispatch succeeded. In the run history the failures span 2026-11-03 09:40–14:18 (+0800) and the first successful deploy after the second fix is 14:30. Keep `env` out of both parse-time fields and use the inline `github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name` form in each; `env.DEPLOY_BRANCH` remains valid inside steps.
