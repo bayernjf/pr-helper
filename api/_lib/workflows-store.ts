@@ -664,8 +664,8 @@ export async function executeWorkflowAutomationAction(environment: Record<string
 // only reason to read this: without it the newest terminal rows push a week-old paused one past the limit.
 export const AUTOMATION_ACTION_VIEW_LIMIT = 200;
 
-export async function listWorkflowAutomationActions(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId?: string, unfinishedOnly = false) {
-  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+export async function listWorkflowAutomationActions(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId?: string, unfinishedOnly = false, reads?: VisibleWorkflowReads) {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId, reads);
   const sql = query(environment);
   const rows = await sql<{ id: number; run_id: number; workflow_id: string; stage_id: string; stage_index: number; source: string; target: string; kind: WorkflowAutomationAction['kind']; idempotency_key: string; state: WorkflowAutomationAction['state']; attempts: number; failure_reason: string | null; created_at: string; updated_at: string }[]>`SELECT actions.id, actions.run_id, actions.workflow_id, actions.stage_id, runs.stage_index, actions.source, actions.target, actions.kind, actions.idempotency_key, actions.state, actions.attempts, actions.failure_reason, actions.created_at, actions.updated_at FROM workflow_automation_actions actions JOIN workflow_automation_runs runs ON runs.user_id = actions.user_id AND runs.id = actions.run_id WHERE ${visibleWorkflowPredicate(sql, user.id, 'actions.user_id', 'actions.workflow_id')} ${workflowId ? sql`AND actions.workflow_id = ${workflowId}` : sql``} ${unfinishedOnly ? sql`AND actions.state IN ('queued', 'running', 'paused', 'failed')` : sql``} ORDER BY actions.created_at DESC LIMIT ${AUTOMATION_ACTION_VIEW_LIMIT}`;
   return rows.map(row => ({ id: Number(row.id), runId: Number(row.run_id), workflowId: row.workflow_id, stageId: row.stage_id, stageIndex: row.stage_index, source: row.source, target: row.target, kind: row.kind, idempotencyKey: row.idempotency_key, state: row.state, attempts: row.attempts, failureReason: row.failure_reason, createdAt: row.created_at, updatedAt: row.updated_at } satisfies WorkflowAutomationAction));
@@ -1032,10 +1032,23 @@ export async function listOperationAuditLogs(environment: Record<string, string 
   return rows.map(row => ({ id: row.id, action: row.action, outcome: row.outcome, repository: row.repository, workflowId: row.workflow_id, stageId: row.stage_id, source: row.source, target: row.target, pullNumber: row.pull_number, runId: row.run_id === null ? null : Number(row.run_id), metadata: row.metadata || {}, failureReason: row.failure_reason, occurredAt: row.occurred_at }));
 }
 
-async function userForLogin(environment: Record<string, string | undefined>, login: string, githubUserId?: number, installationId?: string) {
-  const sql = query(environment);
-  const rows = await sql<DatabaseUser[]>`INSERT INTO pr_helper_users (github_login, github_user_id, github_installation_id) VALUES (${login}, ${githubUserId || null}, ${installationId || null}) ON CONFLICT (github_login) DO UPDATE SET github_user_id = COALESCE(EXCLUDED.github_user_id, pr_helper_users.github_user_id), github_installation_id = COALESCE(EXCLUDED.github_installation_id, pr_helper_users.github_installation_id), updated_at = now() RETURNING id`;
-  return rows[0];
+/**
+ * Shares one user-row upsert across every read in a request. The upsert stays the same statement, so
+ * idempotency is unchanged: the first caller writes (or updates) and later callers reuse its promise.
+ * Without per-request reads each list call repeats the write, and a concurrent write could hand the
+ * reads different user ids for the same login.
+ */
+export function requestUser(reads: VisibleWorkflowReads | undefined, load: () => Promise<DatabaseUser>): Promise<DatabaseUser> {
+  if (!reads) return load();
+  return reads.user ??= load();
+}
+
+async function userForLogin(environment: Record<string, string | undefined>, login: string, githubUserId?: number, installationId?: string, reads?: VisibleWorkflowReads) {
+  return requestUser(reads, async () => {
+    const sql = query(environment);
+    const rows = await sql<DatabaseUser[]>`INSERT INTO pr_helper_users (github_login, github_user_id, github_installation_id) VALUES (${login}, ${githubUserId || null}, ${installationId || null}) ON CONFLICT (github_login) DO UPDATE SET github_user_id = COALESCE(EXCLUDED.github_user_id, pr_helper_users.github_user_id), github_installation_id = COALESCE(EXCLUDED.github_installation_id, pr_helper_users.github_installation_id), updated_at = now() RETURNING id`;
+    return rows[0];
+  });
 }
 
 export async function hasPushSubscription(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }) {
@@ -1454,10 +1467,11 @@ function visibleWorkflowPredicate(sql: ReturnType<typeof query>, userId: string,
   )`;
 }
 
-/** Per-request memo so one `/api/inbox` reads each visible workflow payload and stage state set once. */
+/** Per-request memo so one `/api/inbox` reads each visible workflow payload, stage state set and user row once. */
 export type VisibleWorkflowReads = {
   workflows?: Promise<VisibleWorkflowRow[]>;
   stageStates?: Promise<StageStateRow[]>;
+  user?: Promise<DatabaseUser>;
 };
 
 function visibleWorkflowRows(sql: ReturnType<typeof query>, userId: string, reads?: VisibleWorkflowReads) {
@@ -2578,15 +2592,15 @@ export async function listWorkflowStageStates(environment: Record<string, string
   }));
 }
 
-export async function listWorkflowStageDeployments(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageDeployment[]> {
-  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+export async function listWorkflowStageDeployments(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, reads?: VisibleWorkflowReads): Promise<WorkflowStageDeployment[]> {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId, reads);
   const sql = query(environment);
   const rows = await sql<StageDeploymentRow[]>`SELECT deployments.workflow_id, deployments.stage_index, deployments.stage_id, deployments.source, deployments.provider, deployments.environment, deployments.run_id, deployments.run_name, deployments.run_url, deployments.deployment_url, deployments.state, deployments.conclusion, deployments.failure_summary, deployments.failure_job_url, deployments.health_state, deployments.health_url, deployments.health_detail, deployments.updated_at FROM workflow_stage_deployments deployments WHERE ${visibleWorkflowPredicate(sql, user.id, 'deployments.user_id', 'deployments.workflow_id')} ORDER BY deployments.workflow_id, deployments.stage_id, deployments.provider`;
   return rows.map(row => ({ workflowId: row.workflow_id, stageIndex: row.stage_index, stageId: row.stage_id, source: row.source, provider: row.provider, environment: row.environment, runId: row.run_id, runName: row.run_name, runUrl: row.run_url, deploymentUrl: row.deployment_url, state: row.state, conclusion: row.conclusion, failureSummary: row.failure_summary, failureJobUrl: row.failure_job_url, healthState: row.health_state, healthUrl: row.health_url, healthDetail: row.health_detail, updatedAt: row.updated_at }));
 }
 
-export async function listWorkflowStageDeploymentRuns(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageDeploymentRun[]> {
-  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+export async function listWorkflowStageDeploymentRuns(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, reads?: VisibleWorkflowReads): Promise<WorkflowStageDeploymentRun[]> {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId, reads);
   const sql = query(environment);
   const rows = await sql<StageDeploymentRunRow[]>`SELECT workflow_id, stage_index, stage_id, source, provider, environment, run_id, run_name, run_url, deployment_url, state, conclusion, NULL::text AS failure_summary, NULL::text AS failure_job_url, health_state, health_url, health_detail, first_seen_at, updated_at FROM (SELECT runs.*, row_number() OVER (PARTITION BY workflow_id, stage_id, source ORDER BY updated_at DESC) AS position FROM workflow_stage_deployment_runs runs WHERE ${visibleWorkflowPredicate(sql, user.id, 'runs.user_id', 'runs.workflow_id')}) recent WHERE position <= 8 ORDER BY workflow_id, stage_id, source, updated_at DESC`;
   return rows.map(row => ({ workflowId: row.workflow_id, stageIndex: row.stage_index, stageId: row.stage_id, source: row.source, provider: row.provider, environment: row.environment, runId: row.run_id, runName: row.run_name, runUrl: row.run_url, deploymentUrl: row.deployment_url, state: row.state, conclusion: row.conclusion, failureSummary: null, failureJobUrl: null, healthState: row.health_state, healthUrl: row.health_url, healthDetail: row.health_detail, firstSeenAt: row.first_seen_at, updatedAt: row.updated_at }));
@@ -2613,8 +2627,8 @@ export async function listWorkflowConfigurationWarnings(environment: Record<stri
   return results.flat();
 }
 
-export async function listRecentWorkflowStageEvents(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowStageEvent[]> {
-  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+export async function listRecentWorkflowStageEvents(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, reads?: VisibleWorkflowReads): Promise<WorkflowStageEvent[]> {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId, reads);
   const sql = query(environment);
   const rows = await sql<{ workflow_id: string; stage_index: number; stage_id: string | null; source: string | null; target: string | null; kind: string; message: string; occurred_at: string }[]>`SELECT events.workflow_id, events.stage_index, events.stage_id, events.source, events.target, events.kind, events.message, events.occurred_at FROM workflow_stage_events events WHERE ${visibleWorkflowPredicate(sql, user.id, 'events.user_id', 'events.workflow_id')} ORDER BY events.occurred_at DESC LIMIT 100`;
   return rows.map(row => ({ workflowId: row.workflow_id, stageIndex: row.stage_index, stageId: row.stage_id, source: row.source, target: row.target, kind: row.kind, message: row.message, occurredAt: row.occurred_at }));
@@ -2708,8 +2722,8 @@ export async function completeWorkflowRun(environment: Record<string, string | u
 
 type WorkflowRunRow = { id: number; workflow_id: string; version: number; stage_index: number; stage_id: string | null; source: string; target: string; pull_number: number | null; state: string; started_at: string; completed_at: string | null };
 
-export async function listWorkflowRuns(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<WorkflowRun[]> {
-  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+export async function listWorkflowRuns(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, reads?: VisibleWorkflowReads): Promise<WorkflowRun[]> {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId, reads);
   const sql = query(environment);
   const rows = await sql<WorkflowRunRow[]>`SELECT runs.id, runs.workflow_id, runs.version, runs.stage_index, runs.stage_id, runs.source, runs.target, runs.pull_number, runs.state, runs.started_at, runs.completed_at FROM workflow_runs runs WHERE ${visibleWorkflowPredicate(sql, user.id, 'runs.user_id', 'runs.workflow_id')} ORDER BY runs.started_at DESC LIMIT 50`;
   return rows.map(row => ({
@@ -2729,8 +2743,8 @@ export async function listWorkflowRuns(environment: Record<string, string | unde
 
 type ReconciliationRunRow = { id: number; trigger: string; state: string; stages_total: number; stages_reconciled: number; stages_failed: number; duration_ms: number | null; error_message: string | null; repository: string | null; started_at: string; finished_at: string | null };
 
-export async function listSyncHealth(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<SyncHealth> {
-  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+export async function listSyncHealth(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, reads?: VisibleWorkflowReads): Promise<SyncHealth> {
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId, reads);
   const sql = query(environment);
   const [runs, triggerRuns, stageStates, webhookCount] = await Promise.all([
     sql<ReconciliationRunRow[]>`SELECT id, trigger, state, stages_total, stages_reconciled, stages_failed, duration_ms, error_message, repository, started_at, finished_at FROM reconciliation_runs WHERE user_id = ${user.id} AND state <> 'skipped' ORDER BY started_at DESC LIMIT 1`,
