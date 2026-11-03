@@ -1,27 +1,39 @@
 #!/usr/bin/env node
-// Local read-only Git WIP overview server.
+// Local Git WIP overview server.
 // - Binds to 127.0.0.1 only, prints a one-time token URL at startup.
-// - Executes read-only git commands (status / diff / log) per registered repo.
-// - Masks sensitive files in /api/diff and truncates very large diffs.
+// - GET endpoints read status / diff / log per registered repo (sensitive files masked).
+// - POST endpoints stage, unstage, commit and discard, each token-guarded, argv-only
+//   and audited to a log outside the scanned repos.
 import http from 'node:http';
 import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  STAGE_ACTIONS,
+  buildCommitArgs,
+  buildDiscardArgs,
+  buildStageArgs,
+  validateCommitMessage,
+} from './wip-actions.mjs';
 
 const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const DIST_DIR = path.join(REPO_ROOT, 'dist');
 const SCAN_ROOT = path.resolve(process.env.WIP_ROOT || '/Users/jiangfeng/000mycodes');
+const AUDIT_LOG = path.resolve(process.env.WIP_AUDIT_LOG || path.join(os.homedir(), '.pr-helper', 'wip-audit.log'));
 const DIFF_LINE_LIMIT = 2000;
 const GIT_TIMEOUT_MS = 15000;
 const CONCURRENCY = 4;
+const MAX_BODY_BYTES = 64 * 1024;
 
 const args = process.argv.slice(2);
 const portArg = args.find((a) => a.startsWith('--port='));
 const PORT = portArg ? Number(portArg.split('=')[1]) : 4789;
-if (!Number.isInteger(PORT) || PORT <= 0 || PORT > 65535) {
+if (!Number.isInteger(PORT) || PORT < 0 || PORT > 65535) {
   console.error(`Invalid --port value: ${portArg}`);
   process.exit(1);
 }
@@ -135,15 +147,70 @@ function findRepo(param) {
   return null;
 }
 
-// ---------- git (read-only) ----------
+// ---------- git ----------
 
-function git(argsArr, cwd) {
+// Fixed argv arrays only: arguments come from execFile, never from a shell string.
+function git(argsArr, cwd, options = {}) {
   return new Promise((resolve, reject) => {
-    execFile('git', argsArr, { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
-      if (err) reject(err);
-      else resolve(stdout);
-    });
+    const child = execFile(
+      'git',
+      argsArr,
+      { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) {
+          err.stderr = String(stderr || '').trim().slice(0, 400);
+          reject(err);
+        } else {
+          resolve(stdout);
+        }
+      },
+    );
+    if (options.input !== undefined) child.stdin.end(options.input);
   });
+}
+
+async function readJsonBody(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) {
+      req.destroy();
+      return { error: 'request body too large' };
+    }
+    chunks.push(chunk);
+  }
+  if (!size) return { error: 'empty request body' };
+  try {
+    return { value: JSON.parse(Buffer.concat(chunks).toString('utf8')) };
+  } catch {
+    return { error: 'invalid JSON body' };
+  }
+}
+
+// Write actions are audited: which repo, which action, which file, when.
+async function audit(entry) {
+  const line = `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`;
+  try {
+    await fsp.mkdir(path.dirname(AUDIT_LOG), { recursive: true });
+    await fsp.appendFile(AUDIT_LOG, line);
+  } catch (err) {
+    console.error(`audit log write failed: ${err.message}`);
+  }
+}
+
+// Resolve and authorize the {repo, file} pair shared by every write action.
+async function authorizeFile(payload) {
+  const repo = findRepo(payload.repo);
+  if (!repo) return { error: { code: 403, body: { error: 'unknown or unregistered repo' } } };
+  const rel = normalizeRepoPath(payload.file);
+  if (!rel) return { error: { code: 400, body: { error: 'invalid file path' } } };
+  const resolved = await resolveInside(repo.root, rel);
+  if (!resolved) return { error: { code: 403, body: { error: 'path escapes repo root' } } };
+  if (isSensitivePath(rel)) {
+    return { error: { code: 403, body: { error: 'sensitive files are read-only in the WIP viewer' } } };
+  }
+  return { repo, rel };
 }
 
 function parsePorcelainV2(output) {
@@ -275,6 +342,91 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 401, { error: 'unauthorized' });
     }
     try {
+      if (req.method === 'POST' && pathname.startsWith('/api/wip/')) {
+        const parsed = await readJsonBody(req);
+        if (parsed.error) return sendJson(res, 400, { error: parsed.error });
+        const payload = parsed.value && typeof parsed.value === 'object' ? parsed.value : {};
+
+        if (pathname === '/api/wip/stage') {
+          if (!STAGE_ACTIONS.has(payload.action)) {
+            return sendJson(res, 400, { error: 'unsupported action: expected "stage" or "unstage"' });
+          }
+          const auth = await authorizeFile(payload);
+          if (auth.error) return sendJson(res, auth.error.code, auth.error.body);
+          let argv;
+          try {
+            argv = buildStageArgs(payload.action, auth.rel);
+          } catch (err) {
+            return sendJson(res, 400, { error: err.message });
+          }
+          try {
+            await git(argv, auth.repo.root);
+          } catch (err) {
+            await audit({ ok: false, action: payload.action, repo: auth.repo.name, file: auth.rel, error: err.stderr || err.message });
+            return sendJson(res, 400, { error: 'git command failed', detail: err.stderr || err.message });
+          }
+          await audit({ ok: true, action: payload.action, repo: auth.repo.name, file: auth.rel });
+          return sendJson(res, 200, { ok: true, action: payload.action, file: auth.rel });
+        }
+
+        if (pathname === '/api/wip/commit') {
+          const check = validateCommitMessage(payload.message);
+          if (!check.ok) return sendJson(res, 400, { error: check.error });
+          const repo = findRepo(payload.repo);
+          if (!repo) return sendJson(res, 403, { error: 'unknown or unregistered repo' });
+          const staged = await git(['diff', '--cached', '--name-only'], repo.root);
+          if (!staged.trim()) {
+            return sendJson(res, 409, { error: 'nothing staged to commit' });
+          }
+          let sha;
+          try {
+            // Message travels over stdin; "--" style option parsing never sees it.
+            await git(buildCommitArgs(), repo.root, { input: `${check.message}\n` });
+            sha = (await git(['rev-parse', 'HEAD'], repo.root)).trim();
+          } catch (err) {
+            await audit({ ok: false, action: 'commit', repo: repo.name, message: check.message, error: err.stderr || err.message });
+            return sendJson(res, 400, { error: 'git commit failed', detail: err.stderr || err.message });
+          }
+          await audit({ ok: true, action: 'commit', repo: repo.name, message: check.message, commit: sha });
+          return sendJson(res, 200, { ok: true, commit: sha, message: check.message });
+        }
+
+        if (pathname === '/api/wip/discard') {
+          if (payload.confirm !== true) {
+            return sendJson(res, 400, { error: 'discard requires an explicit confirm: true' });
+          }
+          const auth = await authorizeFile(payload);
+          if (auth.error) return sendJson(res, auth.error.code, auth.error.body);
+          let argv;
+          try {
+            argv = buildDiscardArgs(auth.rel);
+          } catch (err) {
+            return sendJson(res, 400, { error: err.message });
+          }
+          // Only tracked files with unstaged changes: no clean, no directory sweeps.
+          try {
+            await git(['ls-files', '--error-unmatch', '--', auth.rel], auth.repo.root);
+          } catch {
+            await audit({ ok: false, action: 'discard', repo: auth.repo.name, file: auth.rel, error: 'not tracked' });
+            return sendJson(res, 400, { error: 'refusing to discard an untracked file' });
+          }
+          const changed = await git(['diff', '--name-only', '--', auth.rel], auth.repo.root);
+          if (!changed.trim()) {
+            return sendJson(res, 409, { error: 'nothing to discard for this file' });
+          }
+          try {
+            await git(argv, auth.repo.root);
+          } catch (err) {
+            await audit({ ok: false, action: 'discard', repo: auth.repo.name, file: auth.rel, error: err.stderr || err.message });
+            return sendJson(res, 400, { error: 'git command failed', detail: err.stderr || err.message });
+          }
+          await audit({ ok: true, action: 'discard', repo: auth.repo.name, file: auth.rel });
+          return sendJson(res, 200, { ok: true, action: 'discard', file: auth.rel });
+        }
+
+        return sendJson(res, 404, { error: 'not found' });
+      }
+
       if (pathname === '/api/summary') {
         const items = [...repos.entries()];
         const summaries = await mapLimit(items, CONCURRENCY, ([name, root]) => repoSummary(name, root));
@@ -342,7 +494,8 @@ const server = http.createServer(async (req, res) => {
 
       return sendJson(res, 404, { error: 'not found' });
     } catch (err) {
-      return sendJson(res, 500, { error: 'internal error' });
+      // Explicit failure for the local, token-holding operator; never swallowed.
+      return sendJson(res, 500, { error: 'internal error', detail: String(err.message || err) });
     }
   }
 
@@ -382,8 +535,10 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   startWatchers();
-  console.log(`WIP overview → http://127.0.0.1:${PORT}/?token=${TOKEN}`);
-  console.log(`Watching ${repos.size} repos under ${SCAN_ROOT} (read-only).`);
+  const boundPort = server.address().port;
+  console.log(`WIP overview → http://127.0.0.1:${boundPort}/?token=${TOKEN}`);
+  console.log(`Watching ${repos.size} repos under ${SCAN_ROOT} (read + audited write actions).`);
+  console.log(`Audit log: ${AUDIT_LOG}`);
 });
 
 process.on('SIGINT', () => {
