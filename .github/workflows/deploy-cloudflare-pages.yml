@@ -26,7 +26,8 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment:
-      name: ${{ env.DEPLOY_BRANCH == 'main' && 'production-cloudflare-pages' || 'preview-cloudflare-pages' }}
+      # env context is not available in environment.name either — inline it.
+      name: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name) == 'main' && 'production-cloudflare-pages' || 'preview-cloudflare-pages' }}
       url: ${{ steps.deploy.outputs.deployment-url }}
     steps:
       - uses: actions/checkout@v4
