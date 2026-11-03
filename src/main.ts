@@ -1240,7 +1240,7 @@ async function loadPreflight(workflowId?: string) {
   if (!cloudWorkflowStorage) { preflightResults = []; preflightError = ''; return; }
   preflightLoading = true;
   try {
-    const url = workflowId ? `/api?action=preflight&workflowId=${encodeURIComponent(workflowId)}` : '/api?action=preflight';
+    const url = workflowId ? `/api/preflight?workflowId=${encodeURIComponent(workflowId)}` : '/api/preflight';
     const response = await fetch(githubAppApiUrl(url));
     if (!response.ok) { const payload = await response.json().catch(() => ({})) as { message?: string }; preflightError = payload.message || t('preflight.error'); preflightResults = []; return; }
     const payload = await response.json() as { results?: PreflightResult[] };
