@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { t } from './i18n';
+import zh from './translations/zh';
 import { decryptFromCloud, decryptPayload, encryptForCloud, encryptPayload, getCloudSyncKeyId, getCloudSyncStatus, isCloudSyncUnlocked, lockCloudSync, rotateCloudSyncKey, unlockCloudSync } from './encrypted-sync';
 
 const passphrase = 'test-passphrase-2026';
@@ -42,11 +44,11 @@ describe('encrypted-sync', () => {
     });
 
     it('rejects a blob with an unsupported version prefix', async () => {
-      await expect(decryptPayload(passphrase, 'v3:abc:def:ghi')).rejects.toThrow('加密数据格式无效');
+      await expect(decryptPayload(passphrase, 'v3:abc:def:ghi')).rejects.toThrow(t('error.sync.invalidPayload'));
     });
 
     it('rejects a malformed blob (wrong number of parts)', async () => {
-      await expect(decryptPayload(passphrase, 'v1:only-two')).rejects.toThrow('加密数据格式无效');
+      await expect(decryptPayload(passphrase, 'v1:only-two')).rejects.toThrow(t('error.sync.invalidPayload'));
     });
 
     it('handles empty plaintext', async () => {
@@ -109,8 +111,17 @@ describe('encrypted-sync', () => {
 
     it('throws when cloud sync is not unlocked', async () => {
       lockCloudSync();
-      await expect(encryptForCloud({})).rejects.toThrow('云同步未解锁');
-      await expect(decryptFromCloud({ ciphertext: 'v1:a:b:c', updatedAt: '' })).rejects.toThrow('云同步未解锁');
+      await expect(encryptForCloud({})).rejects.toThrow(t('error.sync.locked'));
+      await expect(decryptFromCloud({ ciphertext: 'v1:a:b:c', updatedAt: '' })).rejects.toThrow(t('error.sync.locked'));
     });
+  });
+});
+
+describe('localized runtime errors', () => {
+  it('keeps the zh wording for the messages this module surfaces', () => {
+    expect(zh['error.sync.invalidKeyId']).toBe('密钥标识无效');
+    expect(zh['error.sync.invalidPayload']).toBe('加密数据格式无效');
+    expect(zh['error.sync.emptyPassphrase']).toBe('云同步口令不能为空');
+    expect(zh['error.sync.locked']).toBe('云同步未解锁');
   });
 });
