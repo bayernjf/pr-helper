@@ -28,4 +28,12 @@ describe('inbox payload', () => {
     expect(inbox).toContain('listWorkflowAutomationActions');
     expect(inbox).toMatch(/response\.status\(200\)\.json\(\{[^}]*automation/);
   });
+
+  // Every projection read joins the same request scope so the user-row upsert happens once, not once
+  // per list call. Losing `reads` on any one of them silently reintroduces the repeated write.
+  it('passes the request scope to all eleven projection reads', () => {
+    const start = inbox.indexOf('Promise.all([');
+    const calls = inbox.slice(start, inbox.indexOf(']);', start));
+    expect(calls.match(/, reads\)/g)).toHaveLength(11);
+  });
 });
