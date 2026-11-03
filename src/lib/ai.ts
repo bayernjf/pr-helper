@@ -9,7 +9,8 @@ export function shouldAutoGeneratePrMessage(enabled: boolean | undefined, descri
 }
 
 export async function testAiConnection(config: AiConfig, signal?: AbortSignal) {
-  const response = await fetch(aiChatCompletionsUrl(config.baseUrl), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` }, body: JSON.stringify({ model: config.model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, temperature: 0 }), signal: signal || AbortSignal.timeout(15_000) });
+  // redirect: 'error' — a 302 must not be followed with the user's Authorization key in tow.
+  const response = await fetch(aiChatCompletionsUrl(config.baseUrl), { method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` }, body: JSON.stringify({ model: config.model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, temperature: 0 }), signal: signal || AbortSignal.timeout(15_000) });
   if (!response.ok) throw new Error(`连接失败 (${response.status})`);
 }
 
