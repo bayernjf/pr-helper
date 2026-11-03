@@ -8,6 +8,15 @@ export default defineConfig({
         main: resolve(__dirname, 'index.html'),
         wip: resolve(__dirname, 'wip.html'),
       },
+      output: {
+        // Two stable boundaries: the translation dictionaries change on their own cadence and every
+        // browser-facing library is shared by the entry; app-specific screens stay in the entry chunk.
+        manualChunks(id) {
+          if (id.includes('/src/lib/translations/')) return 'i18n-dicts';
+          if (id.includes('/src/lib/') && !id.includes('/src/lib/wip/')) return 'app-lib';
+          return undefined;
+        },
+      },
     },
   },
   server: {
