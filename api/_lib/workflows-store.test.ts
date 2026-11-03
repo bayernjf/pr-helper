@@ -2722,3 +2722,19 @@ describe('payload column drop, step A: single-row reads', () => {
     expect(() => trackedWorkflowFromSingleRow([{ ...base, stages: [] }])).toThrow(/镜像缺失/);
   });
 });
+
+describe('account deletion transaction', () => {
+  const source = readFileSync(STORE_SOURCE, 'utf8');
+  const deletion = source.slice(source.indexOf('export async function deleteAccount'));
+
+  it('clears the RESTRICT references inside one transaction before deleting the user row', () => {
+    expect(deletion).toContain('sql.begin');
+    const shares = deletion.indexOf('DELETE FROM pr_helper_team_workflows WHERE shared_by');
+    const teams = deletion.indexOf('DELETE FROM pr_helper_teams WHERE created_by');
+    const user = deletion.indexOf('DELETE FROM pr_helper_users WHERE id');
+    expect(shares).toBeGreaterThan(-1);
+    expect(teams).toBeGreaterThan(shares);
+    expect(user).toBeGreaterThan(teams);
+  });
+});
+

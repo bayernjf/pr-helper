@@ -2988,6 +2988,13 @@ export async function shareWorkflowWithTeam(environment: Record<string, string |
 export async function deleteAccount(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }): Promise<{ deleted: boolean }> {
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
-  await sql`DELETE FROM pr_helper_users WHERE id = ${user.id}`;
+  // 023's FKs (teams.created_by, team_workflows.shared_by) are ON DELETE RESTRICT, so the user row
+  // cannot go until those references are cleared. All three statements must commit together or the
+  // account is half-deleted.
+  await sql.begin(async (transaction: any) => {
+    await transaction`DELETE FROM pr_helper_team_workflows WHERE shared_by = ${user.id}`;
+    await transaction`DELETE FROM pr_helper_teams WHERE created_by = ${user.id}`;
+    await transaction`DELETE FROM pr_helper_users WHERE id = ${user.id}`;
+  });
   return { deleted: true };
 }
