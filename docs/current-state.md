@@ -430,6 +430,13 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 **停写 payload 列方案 E 步（DROP COLUMN）：迁移 `044` 已于 2026-11-10 在生产执行（用户，SQL Editor），AI 只读复核通过**——payload 列消失、`pr_helper_workflows` 终态 15 列（044 删一列、045 `muted` 加一列）、DDL 时间窗 66 次 run 零失败；此前已核实代码零读零写、无索引/视图/函数依赖，47 行 payload 为冗余历史副本；本地备份（47 行 `(id, payload)`）按纪律在验证后删除，**关系表自此为唯一真相**。
 
+**2026-11-10 批次（已执行并只读验证）：**
+
+| 顺序 | 文件 | 内容 | 说明 |
+|---|---|---|---|
+| 17 | `supabase/migrations/044_drop_workflow_payload.sql` | DROP `pr_helper_workflows.payload` | 停写 payload 列方案 E 步收口；关系表自此为唯一真相 |
+| 18 | `supabase/migrations/045_mute_column.sql` | `pr_helper_workflows.muted` 列 | 流程静音（PR #397）：静音流程校准/自动化照常、仅停 Web Push |
+
 ### 二、代码部署状态
 
 - [x] 当前验收批次已部署至 Vercel Production，并以 Production 浏览器回归为准。

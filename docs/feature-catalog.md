@@ -31,6 +31,7 @@
 | 阶段稳定身份 `stage_id`（主键/外键演进，状态不再按数组位置错配） | ✅ | 迁移 `018`/`019` |
 | 流程版本并发控制（`version` 乐观锁） | ✅ | 迁移 `038`、store 层冲突检测 |
 | 流程归档 / 恢复（可逆，停校准、取消动作） | ✔ | `handoff.md:168-184`(2026-08-17 验收) |
+| 流程静音 / 取消静音（可逆，只关 Web Push；校准/自动化照常，lane 徽标） | ✔ | [PR #397]（`045` 已于 2026-11-10 执行）、设计 `docs/superpowers/plans/2026-10-31-workflow-mute.md` |
 | 当前步骤「第 N/总计 步」动态渲染 | ✅ | `main.ts` `laneRunSummary` → `overview.run.current` |
 | PR 引用一键复制（hover 显示完整地址 + tooltip 内跳转，点击复制到剪贴板） | ✅ | `src/lib/pr-reference.ts`、`main.ts` 5 处接入（看板摘要 / 失败中心 / 发布历史 / 时间线 / 步骤抽屉）、E2E `e2e/pr-helper.spec.ts` |
 | 名称 / 仓库搜索 | ✅ | `main.ts:1474-1475`、`lane-search` |
