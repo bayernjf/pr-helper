@@ -1,6 +1,6 @@
 # PR Helper Handoff
 
-> 最后更新：2026-10-10（修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」：GitHub 5xx 被误判为已有结论的暂停而永久 parked，且取代机制看不到系统外完成的合并。两处修复见《2026-10-10 已暂停自动化动作永不消失》）（本地新落地一批「刷新慢」优化，尚未部署：详情页首屏由服务端投影直出 + 后台 live 校正 + 自动刷新 30s TTL，首页 `inbox_refresh` 内联对账预算收紧到 6s / 天花板 +5s，提交 `d077ff58` / `4394df2e` / `f3e29251` / `4bb5c3b0`，详见下方《2026-09-15 刷新慢优化（本地已落地，待部署与浏览器手测）》。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
+> 最后更新：2026-11-10（Supabase 迁移状态实测核对：041 `gate_sha`、042 `payload` nullable、043 `version` NOT NULL、045 `muted` 列均已执行；044 DROP `payload` 列未执行——payload 列仍在但代码已不读写，不影响功能，要删需先备份。2026-11-10 生产曾报 `column workflows.muted does not exist`，根因是 PR #397（流程静音）代码上线但 045 迁移未跑，用户在 SQL Editor 执行 `ALTER TABLE pr_helper_workflows ADD COLUMN IF NOT EXISTS muted boolean NOT NULL DEFAULT false` 后恢复）。此前：2026-10-10 修复生产失败中心一条永不消失的「自动合并 PR · 已暂停」。Supabase Egress 八月账单最终结论已于 2026-08-31 收口：总降幅 −94%、月投影约 2.1 GB / 5 GB，宽限期 2026-09-20 前唯一保留项是 9 月账单精确复核，完整记录见 [`docs/supabase-egress-optimization.md`](docs/supabase-egress-optimization.md)）
 > 当前事实来源：[`docs/current-state.md`](docs/current-state.md)。历史设计和计划不应作为当前需求或上线状态的依据。
 > **待办的唯一索引在下方《待处理事项（2026-08-22 汇总）》一节**，其余小节只记已完成的事实与理由。
 > 自动创建 PR 链路的诊断与修复方案见 [`docs/auto-create-pr-remediation.md`](docs/auto-create-pr-remediation.md)。
