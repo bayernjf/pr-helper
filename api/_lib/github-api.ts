@@ -12,6 +12,33 @@ type CachedInstallationToken = { token: string; expiresAt: number };
 const installationTokenCache = new Map<string, CachedInstallationToken>();
 const installationTokenRequests = new Map<string, Promise<string>>();
 
+// Review 2026-11-02 (P2-11): the cache was unbounded and expired entries were
+// never dropped, so tokens outlived their lifetime as memory residue on
+// long-lived warm instances. Cap the cache and evict expired entries first.
+const MAX_INSTALLATION_TOKEN_CACHE_ENTRIES = 500;
+
+function cacheInstallationToken(key: string, entry: CachedInstallationToken) {
+  // A token already inside the refresh buffer is unusable; never store it.
+  if (entry.expiresAt <= Date.now() + INSTALLATION_TOKEN_REFRESH_BUFFER_MS) return;
+  installationTokenCache.delete(key); // refresh recency
+  installationTokenCache.set(key, entry);
+  if (installationTokenCache.size <= MAX_INSTALLATION_TOKEN_CACHE_ENTRIES) return;
+  const cutoff = Date.now() + INSTALLATION_TOKEN_REFRESH_BUFFER_MS;
+  for (const [k, v] of installationTokenCache) {
+    if (v.expiresAt <= cutoff) installationTokenCache.delete(k);
+  }
+  while (installationTokenCache.size > MAX_INSTALLATION_TOKEN_CACHE_ENTRIES) {
+    const oldest = installationTokenCache.keys().next().value;
+    if (oldest === undefined) break;
+    installationTokenCache.delete(oldest);
+  }
+}
+
+/** Test hook: observe cache occupancy (mirrors resetRateLimitsForTests). */
+export function installationTokenCacheSizeForTests() {
+  return installationTokenCache.size;
+}
+
 export type GitHubCallStats = { calls: number; totalMs: number; slowest: { path: string; ms: number } | null; etagStable: number; etagChanged: number; etagFirstSeen: number };
 
 const callStats = new AsyncLocalStorage<GitHubCallStats>();
@@ -107,6 +134,7 @@ export async function installationAccessToken(config: GitHubAppConfig, installat
   const key = `${config.appId}:${installationId}`;
   const cached = installationTokenCache.get(key);
   if (cached && cached.expiresAt > Date.now() + INSTALLATION_TOKEN_REFRESH_BUFFER_MS) return cached.token;
+  if (cached) installationTokenCache.delete(key); // expired entries are useless residue
 
   const inFlight = installationTokenRequests.get(key);
   if (inFlight) return inFlight;
@@ -114,7 +142,7 @@ export async function installationAccessToken(config: GitHubAppConfig, installat
   const request = githubAppRequest<InstallationToken>(config, `/app/installations/${encodeURIComponent(installationId)}/access_tokens`, { method: 'POST' })
     .then(result => {
       const expiresAt = Date.parse(result.expires_at || '') || Date.now() + 55 * 60_000;
-      installationTokenCache.set(key, { token: result.token, expiresAt });
+      cacheInstallationToken(key, { token: result.token, expiresAt });
       return result.token;
     })
     .finally(() => installationTokenRequests.delete(key));

@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parseFinalPrMessage, parsePartialPrMessage, streamPrMessage } from './ai-stream';
 import type { AiConfig } from './ai';
+import { t } from './i18n';
+import en from './translations/en';
+import zh from './translations/zh';
 
 describe('parsePartialPrMessage', () => {
   it('returns growing title and body prefixes from incomplete JSON', () => {
@@ -67,18 +70,18 @@ describe('parseFinalPrMessage', () => {
   });
 
   it('rejects malformed JSON', () => {
-    expect(() => parseFinalPrMessage('{"title":')).toThrow('AI 响应不是有效的 PR JSON');
+    expect(() => parseFinalPrMessage('{"title":')).toThrow(t('error.ai.invalidJson'));
   });
 
   it('rejects a non-object or a non-string body', () => {
-    expect(() => parseFinalPrMessage('[]')).toThrow('AI 响应不是有效的 PR JSON');
-    expect(() => parseFinalPrMessage('{"title":"Fix","body":false}')).toThrow('AI 响应不是有效的 PR JSON');
+    expect(() => parseFinalPrMessage('[]')).toThrow(t('error.ai.invalidJson'));
+    expect(() => parseFinalPrMessage('{"title":"Fix","body":false}')).toThrow(t('error.ai.invalidJson'));
   });
 
   it('rejects a missing, blank, or non-string title', () => {
-    expect(() => parseFinalPrMessage('{"body":"Details"}')).toThrow('AI 未返回标题');
-    expect(() => parseFinalPrMessage('{"title":" \\n\\t "}')).toThrow('AI 未返回标题');
-    expect(() => parseFinalPrMessage('{"title":42}')).toThrow('AI 未返回标题');
+    expect(() => parseFinalPrMessage('{"body":"Details"}')).toThrow(t('error.ai.missingTitle'));
+    expect(() => parseFinalPrMessage('{"title":" \\n\\t "}')).toThrow(t('error.ai.missingTitle'));
+    expect(() => parseFinalPrMessage('{"title":42}')).toThrow(t('error.ai.missingTitle'));
   });
 });
 
@@ -182,22 +185,22 @@ describe('streamPrMessage', () => {
   it('rejects HTTP failures, non-streaming content types, and missing stream bodies', async () => {
     await expect(streamPrMessage(config, 'prompt', {
       fetcher: async () => new Response('', { status: 429 }), onUpdate: vi.fn(),
-    })).rejects.toThrow('AI 请求失败 (429)');
+    })).rejects.toThrow(t('error.ai.requestFailed', { status: 429 }));
     await expect(streamPrMessage(config, 'prompt', {
       fetcher: async () => new Response('{}', { headers: { 'content-type': 'Application/JSON; charset=utf-8' } }), onUpdate: vi.fn(),
-    })).rejects.toThrow('当前模型服务不支持流式生成');
+    })).rejects.toThrow(t('error.ai.streamUnsupported'));
     await expect(streamPrMessage(config, 'prompt', {
       fetcher: async () => new Response('{}', { headers: { 'Content-Type': 'text/event-streaming; charset=utf-8' } }), onUpdate: vi.fn(),
-    })).rejects.toThrow('当前模型服务不支持流式生成');
+    })).rejects.toThrow(t('error.ai.streamUnsupported'));
     await expect(streamPrMessage(config, 'prompt', {
       fetcher: async () => new Response(null, { headers: { 'Content-Type': 'TEXT/EVENT-STREAM' } }), onUpdate: vi.fn(),
-    })).rejects.toThrow('AI 流式响应没有内容');
+    })).rejects.toThrow(t('error.ai.emptyStream'));
   });
 
   it('rejects malformed event JSON and ignores no-content deltas before the final parse', async () => {
     await expect(streamPrMessage(config, 'prompt', {
       fetcher: async () => sseResponse([encoder.encode('data: nope\n\n')]), onUpdate: vi.fn(),
-    })).rejects.toThrow('AI 流式响应格式错误');
+    })).rejects.toThrow(t('error.ai.malformedStream'));
 
     const updates = vi.fn();
     await expect(streamPrMessage(config, 'prompt', {
@@ -223,7 +226,7 @@ describe('streamPrMessage', () => {
         'data: {"choices":[{"delta":{"content":"{}"}}]}\n\ndata: [DONE]\n\n',
       )]),
       onUpdate: vi.fn(),
-    })).rejects.toThrow('AI 未返回标题');
+    })).rejects.toThrow(t('error.ai.missingTitle'));
   });
 
   it('rejects a completed message when the stream ends without DONE', async () => {
@@ -233,7 +236,7 @@ describe('streamPrMessage', () => {
         'data: {"choices":[{"delta":{"content":"{\\"title\\":\\"未完成\\"}"}}]}\n\n',
       )]),
       onUpdate: updates,
-    })).rejects.toThrow('AI 流式响应意外中断');
+    })).rejects.toThrow(t('error.ai.interrupted'));
     expect(updates).toHaveBeenCalledWith({ title: '未完成', body: '' });
   });
 
@@ -245,7 +248,7 @@ describe('streamPrMessage', () => {
         + 'data: {"choices":[{"delta":{"content":"不应派发\\"}"}}]}',
       )]),
       onUpdate: updates,
-    })).rejects.toThrow('AI 流式响应意外中断');
+    })).rejects.toThrow(t('error.ai.interrupted'));
     expect(updates).toHaveBeenCalledTimes(1);
     expect(updates).toHaveBeenLastCalledWith({ title: '保留', body: '' });
   });
@@ -278,14 +281,14 @@ describe('streamPrMessage', () => {
     const httpBody = new ReadableStream<Uint8Array>({ cancel: () => { httpCancelled = true; } });
     await expect(streamPrMessage(config, 'prompt', {
       fetcher: async () => new Response(httpBody, { status: 429 }), onUpdate: vi.fn(),
-    })).rejects.toThrow('AI 请求失败 (429)');
+    })).rejects.toThrow(t('error.ai.requestFailed', { status: 429 }));
     expect(httpCancelled).toBe(true);
 
     let typeCancelled = false;
     const typeBody = new ReadableStream<Uint8Array>({ cancel: () => { typeCancelled = true; } });
     await expect(streamPrMessage(config, 'prompt', {
       fetcher: async () => new Response(typeBody, { headers: { 'Content-Type': 'application/json' } }), onUpdate: vi.fn(),
-    })).rejects.toThrow('当前模型服务不支持流式生成');
+    })).rejects.toThrow(t('error.ai.streamUnsupported'));
     expect(typeCancelled).toBe(true);
   });
 
@@ -320,5 +323,32 @@ describe('streamPrMessage', () => {
 
     await expect(streamPrMessage(config, 'prompt', { fetcher, signal: controller.signal, onUpdate: vi.fn() }))
       .rejects.toBe(abortError);
+  });
+});
+
+describe('localized runtime errors', () => {
+  it('keeps both dictionaries populated for the messages this module surfaces', () => {
+    const messages = [
+      'error.ai.invalidJson',
+      'error.ai.missingTitle',
+      'error.ai.requestFailed',
+      'error.ai.streamUnsupported',
+      'error.ai.emptyStream',
+      'error.ai.malformedStream',
+      'error.ai.interrupted',
+    ];
+    for (const key of messages) {
+      expect(en[key]).toBeTruthy();
+      expect(zh[key]).toBeTruthy();
+      expect(en[key]).not.toBe(key);
+      expect(zh[key]).not.toBe(key);
+    }
+    expect(zh['error.ai.invalidJson']).toBe('AI 响应不是有效的 PR JSON');
+    expect(zh['error.ai.missingTitle']).toBe('AI 未返回标题');
+    expect(zh['error.ai.requestFailed']).toBe('AI 请求失败 ({status})');
+    expect(zh['error.ai.streamUnsupported']).toBe('当前模型服务不支持流式生成');
+    expect(zh['error.ai.emptyStream']).toBe('AI 流式响应没有内容');
+    expect(zh['error.ai.malformedStream']).toBe('AI 流式响应格式错误');
+    expect(zh['error.ai.interrupted']).toBe('AI 流式响应意外中断');
   });
 });

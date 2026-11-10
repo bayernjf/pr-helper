@@ -14,6 +14,8 @@
  * resolution are fully hardened.
  */
 
+import { t } from './i18n';
+
 export const PBKDF2_ITERATIONS = 600_000;
 const SALT_LENGTH = 16;
 const IV_LENGTH = 12;
@@ -72,7 +74,7 @@ export async function encryptPayload(passphrase: string, plaintext: string, opti
   const encodedCiphertext = toBase64(ciphertext);
   if (version === LEGACY_VERSION) return `${LEGACY_VERSION}:${encodedSalt}:${encodedIv}:${encodedCiphertext}`;
   const keyId = options.keyId || 'unlabeled';
-  if (!/^[a-zA-Z0-9_-]{1,80}$/.test(keyId)) throw new Error('密钥标识无效');
+  if (!/^[a-zA-Z0-9_-]{1,80}$/.test(keyId)) throw new Error(t('error.sync.invalidKeyId'));
   return `${VERSION}:${keyId}:${encodedSalt}:${encodedIv}:${encodedCiphertext}`;
 }
 
@@ -80,7 +82,7 @@ export async function decryptPayload(passphrase: string, blob: string, options: 
   const parts = blob.split(':');
   const legacy = parts.length === 4 && parts[0] === LEGACY_VERSION;
   const current = parts.length === 5 && parts[0] === VERSION && /^[a-zA-Z0-9_-]{1,80}$/.test(parts[1]);
-  if (!legacy && !current) throw new Error('加密数据格式无效');
+  if (!legacy && !current) throw new Error(t('error.sync.invalidPayload'));
   const offset = legacy ? 1 : 2;
   const salt = fromBase64(parts[offset]);
   const iv = fromBase64(parts[offset + 1]);
@@ -136,8 +138,8 @@ export function getCloudSyncStatus(): CloudSyncStatus {
 }
 
 export function unlockCloudSync(passphrase: string, keyId = createKeyId()) {
-  if (!passphrase) throw new Error('云同步口令不能为空');
-  if (!/^[a-zA-Z0-9_-]{1,80}$/.test(keyId)) throw new Error('密钥标识无效');
+  if (!passphrase) throw new Error(t('error.sync.emptyPassphrase'));
+  if (!/^[a-zA-Z0-9_-]{1,80}$/.test(keyId)) throw new Error(t('error.sync.invalidKeyId'));
   syncPassphrase = passphrase;
   syncKeyId = keyId;
   syncStatus = { ...syncStatus, state: 'unlocked', error: null };
@@ -162,13 +164,13 @@ export async function rotateCloudSyncKey(passphrase: string, keyId = createKeyId
 }
 
 export async function encryptForCloud(data: SyncableData, options: EncryptionOptions = {}): Promise<EncryptedSyncBlob> {
-  if (!syncPassphrase || !syncKeyId) throw new Error('云同步未解锁');
+  if (!syncPassphrase || !syncKeyId) throw new Error(t('error.sync.locked'));
   const ciphertext = await encryptPayload(syncPassphrase, JSON.stringify(data), { ...options, keyId: options.keyId || syncKeyId });
   return { ciphertext, keyId: options.keyId || syncKeyId, updatedAt: new Date().toISOString() };
 }
 
 export async function decryptFromCloud(blob: EncryptedSyncBlob, options: EncryptionOptions = {}): Promise<SyncableData> {
-  if (!syncPassphrase) throw new Error('云同步未解锁');
+  if (!syncPassphrase) throw new Error(t('error.sync.locked'));
   const plaintext = await decryptPayload(syncPassphrase, blob.ciphertext, options);
   return JSON.parse(plaintext) as SyncableData;
 }

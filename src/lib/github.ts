@@ -1,3 +1,5 @@
+import { t } from './i18n';
+
 const apiBase = 'https://api.github.com';
 const appApiBase = (import.meta.env.VITE_AUTH_ORIGIN || '').replace(/\/$/, '');
 export const GITHUB_REQUEST_TIMEOUT_MS = 20_000;
@@ -15,7 +17,7 @@ export function githubAppApiUrl(path: string) {
 
 export function parseRepository(repository: string) {
   const [owner, name] = repository.split('/');
-  if (!owner || !name || repository.split('/').length !== 2) throw new Error('请选择有效的 owner/repository。');
+  if (!owner || !name || repository.split('/').length !== 2) throw new Error(t('error.repo.invalid'));
   return { owner, name };
 }
 
@@ -49,12 +51,12 @@ export async function githubFetch<T>(token: string, path: string, init?: Request
         : { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', ...init?.headers },
     });
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'TimeoutError') throw new GitHubRequestError(504, 'GitHub 请求超时，请稍后重试。');
+    if (error instanceof DOMException && error.name === 'TimeoutError') throw new GitHubRequestError(504, t('error.github.timeout'));
     throw error;
   }
   if (!response.ok) {
     const detail = await response.json().catch(() => ({ message: response.statusText }));
-    throw new GitHubRequestError(response.status, detail.message || `GitHub 请求失败 (${response.status})`);
+    throw new GitHubRequestError(response.status, detail.message || t('error.github.requestFailed', { status: response.status }));
   }
   return response.json() as Promise<T>;
 }

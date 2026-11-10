@@ -17,44 +17,23 @@ import { canPerformTeamOperation, teamRoleLabel } from './lib/team-permissions';
 import { t, getLocale, setLocale, detectLocale, registerTranslations, type Locale } from './lib/i18n';
 import en from './lib/translations/en';
 import zh from './lib/translations/zh';
+import { app, escape } from './app/dom';
+import { currentTheme, applyTheme, toggleTheme } from './app/ui/theme';
+import { showToast } from './app/ui/toast';
+import { showOperationAuditDialog } from './app/ui/audit';
+import { stageRunText, stageRunPresentationText, relativeAgeText, deploymentProviderName, deploymentStateText, configurationWarningText, timelineEntryIcon, gateDisclosure, actionRunDetails, mergeErrorMessage, drawerStatusText } from './app/ui/format';
+import { bindLaneSorting } from './app/ui/lane-sorting';
+import { positionMergeMenu, confirmDialog, confirmAutoCreateExecution, confirmRepositorySwitch } from './app/ui/confirm';
+import { showNativeOnlyTooltip, moveNativeOnlyTooltip, hideNativeOnlyTooltip } from './app/ui/tooltip';
+import type { Repo, Pull, CheckRun, CommitStatus, GitHubWorkflowRunSummary, Review, BranchProtection, GitHubActionsWorkflow, StepStatus, MergeResult, ActionQueueItem, WorkflowStageState, WorkflowStageEvent, WorkflowStageDeployment, WorkflowStageDeploymentRun, WorkflowConfigurationWarning, ReconciliationRun, StageSyncHealth, SyncHealth, WorkflowRun, TimelineEntry, OperationAuditEntry, Team, TeamMember, PreflightCheck, PreflightResult, AutomationAction, RecoveryStatus } from './app/types';
 
 registerTranslations('en', en);
 registerTranslations('zh', zh);
 
-type Repo = { full_name: string; private: boolean };
-type Pull = { number: number; state: string; merged_at: string | null; merge_commit_sha?: string | null; mergeable?: boolean | null; mergeable_state?: string; html_url: string; head: { sha: string; ref?: string } };
-type CheckRun = { name?: string; app?: { slug?: string | null } | null; status: string; conclusion: string | null; html_url?: string | null; details_url?: string | null; output?: { title?: string | null; summary?: string | null } | null };
-type CommitStatus = { context?: string; state: string; target_url?: string | null };
-type GitHubWorkflowRunSummary = { name?: string; status: string; conclusion: string | null; html_url?: string | null };
-type Review = { state: string };
-type BranchProtection = { required_pull_request_reviews?: { required_approving_review_count?: number } | null };
-type GitHubActionsWorkflow = { name: string; state: string; path: string };
-type StepStatus = { kind: 'not-created' | 'open' | 'merged' | 'closed' | 'error'; projected?: boolean; pr?: Pull; checks?: ReturnType<typeof summarizeGitHubChecks>; checkDetails?: GitHubCheckDetail[]; actions?: ReturnType<typeof summarizeChecks>; actionDetails?: GitHubCheckDetail[]; approvals?: number; requiredApprovals?: number; mergeable?: boolean | null; mergeableState?: string; aheadBy?: number; message?: string; sourceBranchMissing?: boolean };
-type MergeResult = { merged: boolean; message?: string; sha?: string };
-type ActionQueueItem = { workflowId: string; workflowName: string; repository: string; stageIndex: number; source: string; target: string; pullNumber: number | null; kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create'; message: string };
-type WorkflowStageState = WorkflowStageRunState & { workflowId: string; stageIndex: number; stageId: string | null; repository: string; source: string; target: string; mergedAt: string | null; headSha: string | null; checksPassed: number; checksTotal: number; approvals: number; requiredApprovals: number; mergeable: boolean | null; mergeableState: string | null; aheadBy: number; lastEvent: string | null; updatedAt: string; decision?: { kind: string; actionable: boolean; canCreateNext?: boolean; message: string } };
-type WorkflowStageEvent = { workflowId: string; stageIndex: number; stageId: string | null; source: string | null; target: string | null; kind: string; message: string; occurredAt: string };
-type WorkflowStageDeployment = { workflowId: string; stageIndex: number; stageId: string | null; source: string; provider: 'vercel' | 'cloudflare'; environment: 'preview' | 'production'; runId: number | null; runName: string; runUrl: string | null; deploymentUrl: string | null; state: 'pending' | 'success' | 'failure'; conclusion: string | null; failureSummary: string | null; failureJobUrl: string | null; healthState: 'pending' | 'success' | 'failure' | null; healthUrl: string | null; healthDetail: string | null; updatedAt: string };
-type WorkflowStageDeploymentRun = WorkflowStageDeployment & { firstSeenAt: string };
-type WorkflowConfigurationWarning = { workflowId: string; code: 'no-deployments' | 'actions-unavailable' | 'workflow-not-found' | 'environment-missing' | 'environment-not-found' | 'rollback-workflow-not-found' | 'deployment-not-seen' | 'deployment-stuck'; target?: string; provider?: WorkflowStageDeployment['provider']; value?: string; stageIndex?: number; source?: string };
-type ReconciliationRun = { id: number; trigger: string; state: 'running' | 'success' | 'degraded' | 'failure' | 'skipped'; stagesTotal: number; stagesReconciled: number; stagesFailed: number; durationMs: number | null; errorMessage: string | null; repository: string | null; startedAt: string; finishedAt: string | null; interrupted: boolean };
-type StageSyncHealth = { workflowId: string; stageIndex: number; stageId: string | null; source: string; target: string; updatedAt: string; ageSeconds: number; stale: boolean };
-type SyncHealth = { lastReconciliation: ReconciliationRun | null; triggerHealth: ReconciliationRun[]; stages: StageSyncHealth[]; webhookDeliveriesLast24h: number };
-type WorkflowRun = { id: number; workflowId: string; version: number; stageIndex: number; stageId: string | null; source: string; target: string; pullNumber: number | null; state: 'active' | 'completed' | 'failed'; startedAt: string; completedAt: string | null };
-type TimelineEntry = { workflowId: string; stageIndex: number; stageId: string | null; source: string; target: string; kind: string; message: string; occurredAt: string; pullNumber: number | null; runId: number | null };
-type OperationAuditEntry = { id: number; action: string; outcome: 'success' | 'failure'; repository: string | null; workflowId: string | null; stageId: string | null; source: string | null; target: string | null; pullNumber: number | null; runId: number | null; metadata: Record<string, unknown>; failureReason: string | null; occurredAt: string };
-type Team = { id: string; name: string; role: 'owner' | 'editor' | 'operator' | 'viewer'; createdAt: string };
-type TeamMember = { githubLogin: string; role: Team['role'] };
-type PreflightCheck = { code: string; severity: 'error' | 'warning' | 'info'; title: string; detail: string; workflowId: string; stageIndex: number | null; source: string | null; fix?: string };
-type PreflightResult = { workflowId: string; workflowName: string; repository: string; checks: PreflightCheck[]; summary: { errors: number; warnings: number; info: number }; ok: boolean };
-type AutomationAction = { id: number; workflowId: string; stageId: string | null; stageIndex: number; source: string; target: string; kind: 'create-pr' | 'merge-pr' | 'advance-stage'; state: AutomationActionState; attempts: number; failureReason: string | null; createdAt: string; updatedAt: string };
-type RecoveryStatus = { workflowId: string; stageIndex: number; source: string; retryCount: number; maxRetries: number; lastRetryAt: string | null; cooldownRemainingSeconds: number; exhausted: boolean; escalationNeeded: boolean };
 const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
 const CLOUD_SYNC_DEVICE_ID_KEY = 'pr-helper-cloud-sync-device-id';
-const THEME_KEY = 'pr-helper-theme';
 const localViteWithoutApi = import.meta.env.DEV && !import.meta.env.VITE_AUTH_ORIGIN;
-type Theme = 'light' | 'dark';
 let token = sessionStorage.getItem('github-token') || '';
 let repos: Repo[] = [];
 let workflows = loadWorkflows();
@@ -134,11 +113,8 @@ let automationCredentialConfigured = false;
 let generationRules = loadGenerationRules(() => localStorage.getItem(GENERATION_RULES_KEY));
 let pullRequestDrafts = loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), Date.now());
 let draftStorageSynchronized = true;
-let currentTheme: Theme = (localStorage.getItem(THEME_KEY) as Theme) || 'light';
 let cloudSyncStatus: CloudSyncStatus = getCloudSyncStatus();
 
-const app = () => document.querySelector<HTMLDivElement>('#app')!;
-const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 function canOperateWorkflow(workflow: Workflow, operation: 'workflow-edit' | 'workflow-delete' | 'pr-create' | 'actions-rerun' | 'pull-merge' | 'deployment-rollback') {
   return !workflow.team || canPerformTeamOperation(workflow.team.role, operation);
 }
@@ -154,24 +130,6 @@ function loadWorkflows(): Workflow[] {
     localStorage.setItem('pr-helper-workflows', JSON.stringify(normalized));
     return normalized;
   } catch { return []; }
-}
-function applyTheme(theme: Theme) {
-  currentTheme = theme;
-  localStorage.setItem(THEME_KEY, theme);
-  document.documentElement.setAttribute('data-theme', theme);
-  updateThemeToggleButton();
-}
-function toggleTheme() {
-  applyTheme(currentTheme === 'light' ? 'dark' : 'light');
-}
-function updateThemeToggleButton() {
-  const button = document.querySelector<HTMLButtonElement>('#theme-toggle');
-  if (!button) return;
-  const sunIcon = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
-  const moonIcon = '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3a6 6 0 0 0 12 0V9a6 6 0 0 0-6-6z"/></svg>';
-  const isDark = currentTheme === 'dark';
-  button.innerHTML = `${isDark ? sunIcon : moonIcon}<span>${isDark ? t('theme.light') : t('theme.dark')}</span>`;
-  button.setAttribute('aria-label', isDark ? t('theme.toLight') : t('theme.toDark'));
 }
 function persistGenerationRules(next: GenerationRule[]) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(next)); generationRules = next; }
 function cloudSyncDeviceId() {
@@ -616,47 +574,6 @@ function showTeamsDialog() {
   dialog.addEventListener('close', () => dialog.remove());
 }
 
-function auditActionLabel(action: string) { return t(`audit.action.${action}`); }
-function auditTimestamp(value: string) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(getLocale() === 'zh' ? 'zh-CN' : 'en-US', { dateStyle: 'medium', timeStyle: 'medium' }).format(date);
-}
-function csvValue(value: unknown) {
-  const text = value === null || value === undefined ? '' : typeof value === 'string' ? value : String(value);
-  return `"${text.replaceAll('"', '""')}"`;
-}
-function downloadAuditCsv(entries: readonly OperationAuditEntry[]) {
-  const header = ['id', 'occurred_at', 'action', 'outcome', 'repository', 'workflow_id', 'stage_id', 'source', 'target', 'pull_number', 'run_id', 'failure_reason'];
-  const rows = entries.map(entry => [entry.id, entry.occurredAt, entry.action, entry.outcome, entry.repository, entry.workflowId, entry.stageId, entry.source, entry.target, entry.pullNumber, entry.runId, entry.failureReason]);
-  const blob = new Blob([[header, ...rows].map(row => row.map(csvValue).join(',')).join('\n')], { type: 'text/csv;charset=utf-8' });
-  const link = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `pr-helper-operation-audit-${new Date().toISOString().slice(0, 10)}.csv` });
-  link.click();
-  window.setTimeout(() => URL.revokeObjectURL(link.href), 0);
-}
-function showOperationAuditDialog() {
-  const dialog = document.createElement('dialog');
-  dialog.className = 'create-dialog operation-audit-dialog';
-  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('audit.eyebrow')}</p><h2>${t('audit.title')}</h2><p class="meta">${t('audit.desc')}</p><div id="operation-audit-content" class="operation-audit-content"><p class="meta">${t('audit.loading')}</p></div><div class="dialog-actions"><button id="operation-audit-export" type="button" class="ghost" disabled>${t('audit.export')}</button><button value="cancel" class="ghost">${t('audit.close')}</button></div></form>`;
-  document.body.append(dialog);
-  dialog.showModal();
-  const content = dialog.querySelector<HTMLElement>('#operation-audit-content')!;
-  const exportButton = dialog.querySelector<HTMLButtonElement>('#operation-audit-export')!;
-  void (async () => {
-    try {
-      const response = await fetch(githubAppApiUrl('/api/inbox?resource=operation-audit&limit=200'));
-      const payload = await response.json().catch(() => ({})) as { entries?: OperationAuditEntry[]; message?: string };
-      if (!response.ok) throw new Error(payload.message || t('audit.error'));
-      const entries = Array.isArray(payload.entries) ? payload.entries : [];
-      if (!entries.length) { content.innerHTML = `<p class="meta">${t('audit.empty')}</p>`; return; }
-      content.innerHTML = `<ol class="operation-audit-list">${entries.map(entry => `<li class="${escape(entry.outcome)}"><div><b>${escape(auditActionLabel(entry.action))}</b><small>${escape(entry.repository || t('audit.unknown'))}${entry.source && entry.target ? ` · ${escape(entry.source)} → ${escape(entry.target)}` : ''}${entry.pullNumber ? ` · PR #${entry.pullNumber}` : ''}${entry.runId ? ` · #${entry.runId}` : ''}</small>${entry.failureReason ? `<p class="error">${escape(entry.failureReason)}</p>` : ''}</div><span><b>${escape(t(`audit.outcome.${entry.outcome}`))}</b><time>${escape(auditTimestamp(entry.occurredAt))}</time></span></li>`).join('')}</ol>`;
-      exportButton.disabled = false;
-      exportButton.addEventListener('click', () => downloadAuditCsv(entries), { once: true });
-    } catch (error) {
-      content.innerHTML = `<p class="error">${escape(error instanceof Error ? error.message : t('audit.error'))}</p>`;
-    }
-  })();
-  dialog.addEventListener('close', () => dialog.remove());
-}
 
 function showDeleteWorkflowDialog(workflow: Workflow) {
   const dialog = document.createElement('dialog');
@@ -695,53 +612,6 @@ async function syncLocalWorkflows() {
     }
     pendingLocalWorkflowSync = false; render(); showToast(t('sync.success'));
   } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : t('sync.fail.short'); render(); showToast(t('sync.fail', { error: cloudWorkflowSyncError })); }
-}
-function showToast(message: string, undo?: { label: string; onUndo: () => void }) {
-  const previous = document.querySelector<HTMLElement>('.toast');
-  previous?.hidePopover?.();
-  previous?.remove();
-  const toast = document.createElement('div');
-  toast.className = 'toast';
-  toast.setAttribute('role', 'status');
-  toast.setAttribute('popover', 'manual');
-  const content = document.createElement('span');
-  content.className = 'toast-message';
-  content.textContent = message;
-  const copy = document.createElement('button');
-  copy.className = 'toast-action';
-  copy.type = 'button';
-  copy.textContent = t('toastAction.copy');
-  copy.setAttribute('aria-label', t('toastAction.copyLabel'));
-  const close = document.createElement('button');
-  close.className = 'toast-close';
-  close.type = 'button';
-  close.textContent = t('toastAction.close');
-  close.setAttribute('aria-label', t('toastAction.closeLabel'));
-  const undoButton = undo ? document.createElement('button') : null;
-  if (undoButton && undo) { undoButton.className = 'toast-action toast-undo'; undoButton.type = 'button'; undoButton.textContent = undo.label; }
-  toast.append(content, ...(undoButton ? [undoButton] : []), copy, close);
-  document.body.append(toast);
-  toast.showPopover?.();
-  // An undo affordance the reader cannot reach in time is worse than none, so it gets a longer window.
-  let remaining = undo ? 7_000 : 3_200;
-  let deadline = Date.now() + remaining;
-  let timer: number | undefined;
-  let hovering = false;
-  let focused = false;
-  const dismiss = () => { if (timer !== undefined) window.clearTimeout(timer); toast.hidePopover?.(); toast.remove(); };
-  const resume = () => { if (!toast.isConnected || hovering || focused || timer !== undefined) return; deadline = Date.now() + remaining; timer = window.setTimeout(dismiss, remaining); };
-  const pause = () => { if (timer === undefined) return; window.clearTimeout(timer); timer = undefined; remaining = Math.max(0, deadline - Date.now()); };
-  toast.addEventListener('pointerenter', () => { hovering = true; pause(); });
-  toast.addEventListener('pointerleave', () => { hovering = false; resume(); });
-  toast.addEventListener('focusin', () => { focused = true; pause(); });
-  toast.addEventListener('focusout', event => { if (!toast.contains(event.relatedTarget as Node | null)) { focused = false; resume(); } });
-  copy.addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(message); copy.textContent = t('toastAction.copied'); }
-    catch { copy.textContent = t('toastAction.copyFailed'); }
-  });
-  close.addEventListener('click', dismiss);
-  undoButton?.addEventListener('click', () => { dismiss(); undo?.onUndo(); });
-  resume();
 }
 function persistPullRequestDrafts(next: typeof pullRequestDrafts) { pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); draftStorageSynchronized = true; } catch { draftStorageSynchronized = false; showToast(t('connect.draft.saveError')); } }
 persistPullRequestDrafts(pullRequestDrafts);
@@ -1105,32 +975,6 @@ function stageState(workflowId: string, stageIndex: number, source?: string, tar
 function statesForStage(flow: Workflow, stageIndex: number) {
   return matchingStageProjections(flow, stageIndex, workflowStageStates);
 }
-function stageRunPresentationText(run: ReturnType<typeof stageRunPresentation>) {
-  const status = t(`overview.run.${run.status}`);
-  return run.pullNumber ? t('overview.run.prStatus', { number: run.pullNumber, status }) : status;
-}
-function stageRunText(state?: WorkflowStageRunState) { return stageRunPresentationText(stageRunPresentation(state)); }
-function drawerStatusText(state?: WorkflowStageState, detailStatus?: StepStatus) {
-  if (!detailStatus) {
-    if (state?.checksState === 'failure') return state.pullState === 'merged' ? t('state.postMerge.failed') : t('state.actionsFailed');
-    if (state?.pullState === 'open' && (state.mergeable === false || ['dirty', 'behind', 'blocked'].includes(state.mergeableState || ''))) return t('state.mergeBlocked');
-    if (state?.pullState === 'open' && (state.mergeable !== true || state.mergeableState !== 'clean')) return t('state.mergeChecking');
-    return stageRunText(state);
-  }
-  if (detailStatus.kind === 'error') return detailStatus.message || t('toast.unknownError');
-  if (detailStatus.kind === 'not-created') return `${t('status.waitingPr')} · ${t('status.noPr')}`;
-  if (detailStatus.kind === 'closed') return t('state.closed');
-  if (detailStatus.kind === 'merged') {
-    const verification = detailStatus.checks?.state === 'success' ? t('state.postMerge.passed') : detailStatus.checks?.state === 'failure' ? t('state.postMerge.failed') : detailStatus.checks ? t('state.postMerge.running') : t('state.merged');
-    return detailStatus.aheadBy ? `${verification} · ${t('status.newCommits', { count: detailStatus.aheadBy })}` : verification;
-  }
-  if (detailStatus.checks?.state === 'failure') return t('state.actionsFailed');
-  if (detailStatus.checks?.state === 'pending') return t('state.waitingActions');
-  if (detailStatus.requiredApprovals && (detailStatus.approvals || 0) < detailStatus.requiredApprovals) return t('state.waitingApprovals');
-  if (detailStatus.mergeable === false || ['dirty', 'behind', 'blocked'].includes(detailStatus.mergeableState || '')) return t('state.mergeBlocked');
-  if (detailStatus.mergeable !== true || detailStatus.mergeableState !== 'clean') return t('state.mergeChecking');
-  return t('state.waitingMerge');
-}
 function stageUpdatedAt(state?: WorkflowStageState) {
   if (!state?.updatedAt) return '';
   const date = new Date(state.updatedAt);
@@ -1158,10 +1002,6 @@ function brokenTriggerNote(): string {
   return ` · ${t('syncHealth.triggerBroken', { triggers: broken.map(run => t(`syncHealth.trigger.${run.trigger}`)).join('、') })}`;
 }
 
-function relativeAgeText(ageSeconds: number | null) {
-  if (ageSeconds === null) return '';
-  return ageSeconds < 60 ? t('syncHealth.secondsAgo', { seconds: ageSeconds }) : ageSeconds < 3600 ? t('syncHealth.minutesAgo', { minutes: Math.floor(ageSeconds / 60) }) : t('syncHealth.hoursAgo', { hours: Math.floor(ageSeconds / 3600) });
-}
 function syncHealthBanner(): string {
   if (!syncHealth) return '';
   const last = syncHealth.lastReconciliation;
@@ -1180,8 +1020,6 @@ function syncHealthBanner(): string {
 }
 function stageEvents(workflowId: string, stageIndex: number, source?: string) { const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId; return workflowStageEvents.filter(event => event.workflowId === workflowId && (stageId ? event.stageId === stageId : event.stageIndex === stageIndex) && (source === undefined || event.source === null || event.source === source)).slice(0, 4); }
 function stageDeployments(workflowId: string, stageIndex: number, source?: string) { const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId; return workflowStageDeployments.filter(deployment => deployment.workflowId === workflowId && (stageId ? deployment.stageId === stageId : deployment.stageIndex === stageIndex) && (source === undefined || deployment.source === source)); }
-function deploymentProviderName(provider: WorkflowStageDeployment['provider']) { return provider === 'vercel' ? 'Vercel' : 'Cloudflare Pages'; }
-function deploymentStateText(state: WorkflowStageDeployment['state']) { return t(`overview.deployment.${state}`); }
 function deploymentCards(workflowId: string, stageIndex: number, source?: string) {
   const deployments = stageDeployments(workflowId, stageIndex, source);
   const flow = workflows.find(workflow => workflow.id === workflowId);
@@ -1226,9 +1064,6 @@ function deploymentRuntimeWarnings(flow: Workflow): WorkflowConfigurationWarning
   });
   return warnings;
 }
-function configurationWarningText(warning: WorkflowConfigurationWarning) {
-  return t(`overview.configWarning.${warning.code}`, { provider: warning.provider ? deploymentProviderName(warning.provider) : '', target: warning.target || '', value: warning.value || '' });
-}
 function laneConfigurationWarnings(flow: Workflow) { return [...workflowConfigurationWarnings.filter(warning => warning.workflowId === flow.id), ...deploymentRuntimeWarnings(flow)]; }
 function drawerConfigurationWarnings(flow: Workflow, stageIndex: number, source: string) {
   const target = flow.stages[stageIndex]?.target;
@@ -1249,7 +1084,7 @@ async function loadPreflight(workflowId?: string) {
   if (!cloudWorkflowStorage) { preflightResults = []; preflightError = ''; return; }
   preflightLoading = true;
   try {
-    const url = workflowId ? `/api?action=preflight&workflowId=${encodeURIComponent(workflowId)}` : '/api?action=preflight';
+    const url = workflowId ? `/api/preflight?workflowId=${encodeURIComponent(workflowId)}` : '/api/preflight';
     const response = await fetch(githubAppApiUrl(url));
     if (!response.ok) { const payload = await response.json().catch(() => ({})) as { message?: string }; preflightError = payload.message || t('preflight.error'); preflightResults = []; return; }
     const payload = await response.json() as { results?: PreflightResult[] };
@@ -1562,7 +1397,7 @@ function overview() {
     // Muting only silences push notifications and has no other side effect: no confirmation, like restoring.
     if (flow && canOperateWorkflow(flow, 'workflow-edit')) void persistWorkflowMute(flow, !isWorkflowMuted(flow));
   }));
-  bindLaneSorting();
+  bindLaneSorting({ getWorkflows: () => workflows, persistOrder: persistWorkflowOrder });
   bindFlowCards();
   bindFailureCenter();
   bindOverviewScrollControls();
@@ -1624,19 +1459,6 @@ function laneRunHistory(flow: Workflow): string {
     const time = finishedAt ? stageUpdatedAt({ updatedAt: finishedAt.toISOString() } as WorkflowStageState) : stageUpdatedAt({ updatedAt: run.startedAt } as WorkflowStageState);
     return `<li class="${stateClass}"><div><b>${escape(run.source)} → ${escape(run.target)}</b><small>v${run.version} · ${stateLabel}</small></div><time>${escape(time)}</time><span>${prLink}</span></li>`;
   }).join('')}</ol></details>`;
-}
-function timelineEntryIcon(kind: string): string {
-  if (kind.startsWith('run-')) return '🚀';
-  if (kind === 'pull-merged') return '✅';
-  if (kind === 'pull-detected') return '📝';
-  if (kind === 'checks-success') return '✓';
-  if (kind === 'checks-failure') return '✗';
-  if (kind === 'deployment-success') return '🟢';
-  if (kind === 'deployment-failure') return '🔴';
-  if (kind === 'deployment-rollback') return '↩️';
-  if (kind === 'actions-rerun') return '🔄';
-  if (kind === 'pull-cleared') return '🔁';
-  return '•';
 }
 function dynamicBranchStatusText(state: WorkflowStageState) {
   const status = drawerStatusText(state);
@@ -1707,79 +1529,6 @@ function projectLane(flow: Workflow) {
     ? `<label class="lane-order-input"><input type="text" inputmode="numeric" pattern="[0-9]*" value="${orderIndex + 1}" data-lane-position="${escape(flow.id)}" aria-label="${escape(t('overview.board.orderFor', { name: flow.name }))}" ${sortingDisabled ? 'disabled' : ''} /></label>`
     : '';
   return `<article class="project-lane${expanded ? ' is-expanded' : ''}${archived ? ' is-archived' : ''}${returnHighlight === flow.id ? ' is-return-highlight' : ''}" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div>${orderInput}</div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${flowName}</h2>${archived ? `<span class="lane-archived-badge">${t('overview.board.archivedBadge')}</span>` : ''}${!archived && isWorkflowMuted(flow) ? `<span class="lane-muted-badge">${t('overview.board.mutedBadge')}</span>` : ''}${sharedWorkflowBadge(flow)}<p class="lane-run-summary ${runSummary.tone}">${runSummary.text}</p></div></div><button type="button" class="lane-collapse-toggle" data-lane-collapse="${escape(flow.id)}" aria-expanded="${expanded}" aria-label="${escape(collapseLabel)}" title="${escape(collapseLabel)}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.75" y="2.75" width="10.5" height="10.5" rx="1.5"/><path d="m5.25 8 2.75-2.75L10.75 8"/></svg></button><div class="lane-actions">${archived ? `<button data-restore-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.restore')}</button>` : `<button data-edit-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.edit')}</button><button data-archive-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.archive')}</button><button data-mute-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t(isWorkflowMuted(flow) ? 'overview.board.unmute' : 'overview.board.mute')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button>`}</div></header><div class="lane-body"${expanded ? '' : ' hidden'}>${warning}<div class="lane-track${hasFanIn ? ' has-fan-in' : ''}">${steps}</div>${timelineSection}${runHistory}</div></article>`;
-}
-function bindLaneSorting() {
-  const lanes = [...document.querySelectorAll<HTMLElement>('[data-project-lane]')];
-  let draggedWorkflowId = '';
-  const clearLaneClasses = () => lanes.forEach(lane => lane.classList.remove('is-dragging', 'is-drop-before', 'is-drop-after', 'is-drag-shift-up', 'is-drag-shift-down'));
-  const clearDragState = () => { clearLaneClasses(); draggedWorkflowId = ''; };
-  document.querySelectorAll<HTMLButtonElement>('[data-lane-drag]').forEach(handle => {
-    handle.addEventListener('dragstart', event => {
-      const workflowId = handle.dataset.laneDrag;
-      const lane = handle.closest<HTMLElement>('[data-project-lane]');
-      if (!workflowId || !lane || !event.dataTransfer) { event.preventDefault(); return; }
-      clearLaneClasses();
-      draggedWorkflowId = workflowId;
-      lane.classList.add('is-dragging');
-      event.dataTransfer.effectAllowed = 'move';
-      event.dataTransfer.setData('text/plain', workflowId);
-      // 原生拖拽默认用手柄按钮做预览图，改为整个 Lane 卡片，并让鼠标停在抓取位置
-      const laneRect = lane.getBoundingClientRect();
-      event.dataTransfer.setDragImage(lane, event.clientX - laneRect.left, event.clientY - laneRect.top);
-    });
-    handle.addEventListener('dragend', clearDragState);
-  });
-  lanes.forEach(lane => {
-    lane.addEventListener('dragover', event => {
-      const draggedId = draggedWorkflowId || event.dataTransfer?.getData('text/plain');
-      const targetId = lane.dataset.projectLane;
-      if (!draggedId || !targetId || draggedId === targetId) return;
-      event.preventDefault();
-      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-      lanes.forEach(item => item.classList.remove('is-drop-before', 'is-drop-after', 'is-drag-shift-up', 'is-drag-shift-down'));
-      const bounds = lane.getBoundingClientRect();
-      const placement = event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after';
-      lane.classList.add(placement === 'before' ? 'is-drop-before' : 'is-drop-after');
-      const draggedIndex = lanes.findIndex(item => item.dataset.projectLane === draggedId);
-      const targetIndex = lanes.indexOf(lane);
-      if (draggedIndex >= 0 && targetIndex >= 0 && draggedIndex < targetIndex) {
-        lanes.slice(draggedIndex + 1, targetIndex + 1).forEach(item => item.classList.add('is-drag-shift-up'));
-      } else if (draggedIndex >= 0 && targetIndex >= 0 && draggedIndex > targetIndex) {
-        lanes.slice(targetIndex, draggedIndex).forEach(item => item.classList.add('is-drag-shift-down'));
-      }
-    });
-    lane.addEventListener('drop', event => {
-      event.preventDefault();
-      const draggedId = draggedWorkflowId || event.dataTransfer?.getData('text/plain');
-      const targetId = lane.dataset.projectLane;
-      const placement = lane.classList.contains('is-drop-after') ? 'after' : 'before';
-      clearDragState();
-      if (!draggedId || !targetId || draggedId === targetId) return;
-      void persistWorkflowOrder(reorderWorkflows(workflows, draggedId, targetId, placement));
-    });
-  });
-  document.querySelectorAll<HTMLButtonElement>('[data-lane-move]').forEach(button => button.addEventListener('click', () => {
-    const workflowId = button.dataset.workflowId;
-    const direction = button.dataset.laneMove;
-    const currentIndex = workflows.findIndex(workflow => workflow.id === workflowId);
-    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
-    const target = workflows[targetIndex];
-    if (!workflowId || !target || currentIndex < 0) return;
-    void persistWorkflowOrder(reorderWorkflows(workflows, workflowId, target.id, direction === 'up' ? 'before' : 'after'));
-  }));
-  document.querySelectorAll<HTMLInputElement>('[data-lane-position]').forEach(input => {
-    const restore = () => {
-      const index = workflows.findIndex(workflow => workflow.id === input.dataset.lanePosition);
-      if (index >= 0) input.value = String(index + 1);
-    };
-    input.addEventListener('change', () => {
-      const position = Number(input.value);
-      const workflowId = input.dataset.lanePosition;
-      if (!workflowId || !Number.isInteger(position) || position < 1 || position > workflows.length) { restore(); return; }
-      void persistWorkflowOrder(moveWorkflowToPosition(workflows, workflowId, position));
-    });
-    input.addEventListener('keydown', event => { if (event.key === 'Escape') { restore(); input.blur(); } });
-  });
 }
 function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: string) {
   const flow = workflows.find(item => item.id === workflowId), stage = flow?.stages[stageIndex];
@@ -2333,43 +2082,8 @@ function detail() {
   if (refreshOnNextDetail) { refreshOnNextDetail = false; void refreshStatuses(); }
 }
 
-function positionMergeMenu(menu: HTMLElement, control: HTMLElement) {
-  menu.classList.remove('opens-upward');
-  menu.style.maxHeight = '';
-  const controlRect = control.getBoundingClientRect();
-  const menuHeight = menu.getBoundingClientRect().height;
-  const spaceBelow = window.innerHeight - controlRect.bottom - 8;
-  const spaceAbove = controlRect.top - 8;
-  const opensUpward = menuHeight > spaceBelow && spaceAbove > spaceBelow;
-  menu.classList.toggle('opens-upward', opensUpward);
-  const availableSpace = opensUpward ? spaceAbove : spaceBelow;
-  if (menuHeight > availableSpace) menu.style.maxHeight = `${Math.max(96, Math.floor(availableSpace))}px`;
-}
 
-function checkDetailsMarkup(details: readonly GitHubCheckDetail[] | undefined, target?: string) {
-  if (!details?.length) return '';
-  const groups = [...new Set(details.map(detail => detail.source))];
-  return `<div class="check-detail-groups">${groups.map(source => {
-    const entries = details.filter(detail => detail.source === source);
-    return `<section class="check-source"><strong>${escape(source)}</strong>${entries.map(detail => { const summary = deploymentSummaryForTarget(detail.summary, detail.source, target || ''); return `<a class="check-detail ${detail.state}" href="${escape(detail.url || '#')}"${detail.url ? ' target="_blank" rel="noreferrer"' : ''}><span class="check-detail-icon" aria-hidden="true">${detail.state === 'success' ? '✓' : detail.state === 'failure' ? '×' : '…'}</span><span><b>${escape(detail.name)}</b>${summary ? `<small class="check-detail-summary">${escape(summary)}</small>` : ''}</span><small>${detail.state === 'success' ? t('status.checks.passed') : detail.state === 'failure' ? t('status.checks.failed') : t('status.checks.running')}</small></a>`; }).join('')}</section>`;
-  }).join('')}</div>`;
-}
 
-function gateDisclosure(summary: string, details: readonly GitHubCheckDetail[] | undefined, kind: 'checks' | 'actions', target?: string) {
-  if (!details?.length) return `<span>${summary}</span>`;
-  return `<details class="gate-disclosure" data-${kind}-details><summary>${summary}</summary>${checkDetailsMarkup(details, target)}</details>`;
-}
-
-function actionRunDetails(runs: readonly GitHubWorkflowRunSummary[]): GitHubCheckDetail[] {
-  return runs.map(run => ({
-    name: run.name || 'Workflow run',
-    source: 'GitHub Actions',
-    state: ['failure', 'cancelled', 'timed_out', 'action_required'].includes(run.conclusion || '') ? 'failure' : run.status === 'completed' ? 'success' : 'pending',
-    conclusion: run.conclusion,
-    url: run.html_url || null,
-    summary: null,
-  }));
-}
 
 function lockedStageText(index: number) {
   if (!active || !statuses || index === 0) return t('status.locked');
@@ -2417,23 +2131,6 @@ async function confirmImmediateAutomation(toggle: 'create' | 'merge', stageIndex
   return await confirmDialog(t('automation.tick.eyebrow'), t('automation.tick.title'), description, t('automation.tick.cancel'), t('automation.tick.confirm'));
 }
 
-function confirmDialog(eyebrow: string, title: string, description: string, cancelLabel: string, confirmLabel: string) {
-  return new Promise<boolean>(resolve => {
-    const dialog = document.createElement('dialog');
-    dialog.className = 'create-dialog confirm-dialog';
-    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${eyebrow}</p><h2>${title}</h2><p>${description}</p><div class="dialog-actions"><button value="cancel" class="ghost">${cancelLabel}</button><button value="confirm" class="primary">${confirmLabel}</button></div></form>`;
-    document.body.append(dialog); dialog.showModal();
-    dialog.addEventListener('close', () => { resolve(dialog.returnValue === 'confirm'); dialog.remove(); }, { once: true });
-  });
-}
-
-function confirmAutoCreateExecution(source: string, target: string, ruleName: string) {
-  return confirmDialog(t('automation.confirm.eyebrow'), t('automation.confirm.title'), t('automation.confirm.desc', { source: escape(source), target: escape(target), rule: escape(ruleName) }), t('automation.confirm.cancel'), t('automation.confirm.confirm'));
-}
-
-function confirmRepositorySwitch(name: string, repository: string) {
-  return confirmDialog(t('editor.repoSwitch.eyebrow'), t('editor.repoSwitch.title', { repository: escape(repository) }), t('editor.repoSwitch.desc', { repository: escape(repository), name: escape(name) }), t('editor.repoSwitch.cancel'), t('editor.repoSwitch.confirm'));
-}
 
 function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const autoEnabled = stage.automation?.autoCreatePullRequest === true;
@@ -2626,28 +2323,6 @@ function projectedDetailStatuses(flow: Workflow): StepStatus[] {
 function laneMergeStatus(state?: WorkflowStageState): StepStatus | undefined {
   const status = projectedStageStatus(state);
   return status?.kind === 'open' ? status as StepStatus : undefined;
-}
-let nativeOnlyTooltip: HTMLElement | null = null;
-function positionNativeOnlyTooltip(event: MouseEvent) {
-  if (!nativeOnlyTooltip) return;
-  nativeOnlyTooltip.style.left = '0px'; nativeOnlyTooltip.style.top = '0px';
-  const rect = nativeOnlyTooltip.getBoundingClientRect();
-  nativeOnlyTooltip.style.left = `${Math.max(8, event.clientX - rect.width)}px`;
-  nativeOnlyTooltip.style.top = `${Math.max(8, event.clientY - rect.height)}px`;
-}
-function showNativeOnlyTooltip(event: MouseEvent) {
-  nativeOnlyTooltip ||= Object.assign(document.createElement('div'), { className: 'native-only-tooltip', role: 'tooltip', textContent: t('nativeOnly.tooltip') });
-  if (!nativeOnlyTooltip.isConnected) document.body.append(nativeOnlyTooltip);
-  nativeOnlyTooltip.hidden = false;
-  positionNativeOnlyTooltip(event);
-}
-function moveNativeOnlyTooltip(event: MouseEvent) { positionNativeOnlyTooltip(event); }
-function hideNativeOnlyTooltip() { if (nativeOnlyTooltip) nativeOnlyTooltip.hidden = true; }
-function mergeErrorMessage(error: unknown) {
-  const message = error instanceof Error ? error.message : t('merge.error.generic');
-  return message.includes('Resource not accessible by integration')
-    ? t('merge.error.permission')
-    : message;
 }
 function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: () => void, sourceOverride?: string) {
   const status = statusOverride || statuses?.[index];

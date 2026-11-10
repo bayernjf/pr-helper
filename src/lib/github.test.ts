@@ -1,10 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { GITHUB_REQUEST_TIMEOUT_MS, GitHubRequestError, githubApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './github';
+import { t } from './i18n';
+import zh from './translations/zh';
 
 describe('GitHub repository helpers', () => {
   it('parses the repository selected from GitHub', () => {
     expect(parseRepository('octocat/Hello-World')).toEqual({ owner: 'octocat', name: 'Hello-World' });
+  });
+
+  it('rejects malformed repository selections with a localized message', () => {
+    expect(() => parseRepository('octocat')).toThrow(t('error.repo.invalid'));
+    expect(() => parseRepository('octocat/Hello-World/extra')).toThrow(t('error.repo.invalid'));
+    expect(zh['error.repo.invalid']).toBe('请选择有效的 owner/repository。');
   });
 
   it('builds an encoded branch endpoint', () => {

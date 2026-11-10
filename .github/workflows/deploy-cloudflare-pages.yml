@@ -1,25 +1,38 @@
 name: Deploy frontend to Cloudflare Pages
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [dev, main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  DEPLOY_BRANCH: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name }}
+  DEPLOY_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
 concurrency:
-  group: cloudflare-pages-${{ github.ref_name }}
+  # env context is not available in concurrency.group — inline the branch expression.
+  group: cloudflare-pages-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   deploy:
+    # Deploys only after CI has passed on the same commit; workflow_dispatch stays available as the
+    # deliberate manual escape hatch.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment:
-      name: ${{ github.ref_name == 'main' && 'production-cloudflare-pages' || 'preview-cloudflare-pages' }}
+      # env context is not available in environment.name either — inline it.
+      name: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name) == 'main' && 'production-cloudflare-pages' || 'preview-cloudflare-pages' }}
       url: ${{ steps.deploy.outputs.deployment-url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -34,4 +47,4 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=${{ vars.CLOUDFLARE_PAGES_PROJECT || 'pr-helper' }} --branch=${{ github.ref_name }}
+          command: pages deploy dist --project-name=${{ vars.CLOUDFLARE_PAGES_PROJECT || 'pr-helper' }} --branch=${{ env.DEPLOY_BRANCH }}

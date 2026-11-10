@@ -36,15 +36,25 @@ function teamOperationForGithubMutation(operation: OperationAuditAction): TeamOp
   return null;
 }
 
-function pullRequestBranches(request: ApiRequest) {
+export function pullRequestBranches(request: ApiRequest) {
   const payload = typeof request.body === 'string' ? (() => { try { return JSON.parse(request.body) as unknown; } catch { return null; } })() : request.body;
-  if (!payload || typeof payload !== 'object') return {};
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('PR 创建请求必须携带字符串形式的 head 和 base 分支');
+  }
   const value = payload as { head?: unknown; base?: unknown };
-  return { source: typeof value.head === 'string' ? value.head : undefined, target: typeof value.base === 'string' ? value.base : undefined };
+  // GitHub requires both head and base on POST /pulls. Anything missing or non-string must fail
+  // closed here: silently dropping them would skip the workflow route check in authorizeWorkflowOperation.
+  if (typeof value.head !== 'string' || !value.head || typeof value.base !== 'string' || !value.base) {
+    throw new Error('PR 创建请求必须携带字符串形式的 head 和 base 分支');
+  }
+  return { source: value.head, target: value.base };
 }
 
 export function isAllowedGithubRequest(path: string, method = 'GET') {
   const normalizedMethod = method.toUpperCase();
+  // Dot segments would let the path escape its prefix when fetch normalises the URL
+  // (git refs themselves can never contain "..").
+  if (path.split('?')[0].split('/').includes('..')) return false;
   if (path.startsWith('/user/repos')) return normalizedMethod === 'GET';
   const repository = '/repos/[^/?]+/[^/?]+';
   if (new RegExp(`^${repository}/branches/[^/?]+/protection(?:\\?.*)?$`).test(path)) return normalizedMethod === 'GET';
@@ -114,6 +124,7 @@ async function requestHandler(request: ApiRequest, response: ApiResponse) {
     const message = error instanceof Error ? error.message : 'GitHub 请求失败';
     const status = error instanceof GitHubApiError
       ? error.status
+      : message.includes('head 和 base') ? 400
       : message.includes('团队角色') || message.includes('共享流程') || message.includes('流程与 GitHub') || message.includes('Source 和 Target') ? 403 : 401;
     response.status(status).json({ message });
   }

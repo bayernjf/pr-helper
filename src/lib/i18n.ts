@@ -1,9 +1,16 @@
-export type Locale = 'en' | 'zh';
+import en from './translations/en';
+import zh from './translations/zh';
 
+export type Locale = 'en' | 'zh';
 const LOCALE_KEY = 'pr-helper-locale';
 const DEFAULT_LOCALE: Locale = 'en';
 
-let currentLocale: Locale = (localStorage.getItem(LOCALE_KEY) as Locale) || DEFAULT_LOCALE;
+function applyDocumentLanguage(locale: Locale): void {
+  if (typeof document !== 'undefined') document.documentElement.lang = locale;
+}
+
+let currentLocale: Locale = (typeof localStorage !== 'undefined' && (localStorage.getItem(LOCALE_KEY) as Locale)) || DEFAULT_LOCALE;
+applyDocumentLanguage(currentLocale);
 
 export function getLocale(): Locale {
   return currentLocale;
@@ -11,7 +18,8 @@ export function getLocale(): Locale {
 
 export function setLocale(locale: Locale): void {
   currentLocale = locale;
-  localStorage.setItem(LOCALE_KEY, locale);
+  if (typeof localStorage !== 'undefined') localStorage.setItem(LOCALE_KEY, locale);
+  applyDocumentLanguage(locale);
 }
 
 export function detectLocale(): Locale {
@@ -22,10 +30,7 @@ export function detectLocale(): Locale {
 
 export type TranslationDict = Record<string, string>;
 
-const translations: Record<Locale, TranslationDict> = {
-  en: {},
-  zh: {},
-};
+const translations: Record<Locale, TranslationDict> = { en, zh };
 
 export function registerTranslations(locale: Locale, dict: TranslationDict): void {
   translations[locale] = dict;

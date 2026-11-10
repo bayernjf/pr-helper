@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { isAllowedGithubRequest, operationForGithubMutation } from './[action]';
+import { isAllowedGithubRequest, operationForGithubMutation, pullRequestBranches } from './[action]';
 
 describe('GitHub proxy request policy', () => {
   it('allows the read and write operations used by the browser', () => {
@@ -29,5 +29,28 @@ describe('GitHub proxy request policy', () => {
     expect(operationForGithubMutation('/repos/octo/app/pulls/42/merge', 'PUT')).toBe('pull-merged');
     expect(operationForGithubMutation('/repos/octo/app/actions/runs/99/rerun', 'POST')).toBe('deployment-rerun');
     expect(operationForGithubMutation('/repos/octo/app/pulls/42', 'GET')).toBeNull();
+  });
+});
+
+describe('pull request branch validation', () => {
+  const request = (body: unknown) => ({ body }) as never;
+
+  it('accepts string head and base branches', () => {
+    expect(pullRequestBranches(request({ head: 'feature/x', base: 'main' }))).toEqual({ source: 'feature/x', target: 'main' });
+  });
+
+  it('rejects non-string branches that would skip the workflow route check', () => {
+    expect(() => pullRequestBranches(request({ head: { ref: 'feature/x' }, base: 'main' }))).toThrow('head 和 base');
+    expect(() => pullRequestBranches(request({ head: 'feature/x' }))).toThrow('head 和 base');
+    expect(() => pullRequestBranches(request(null))).toThrow('head 和 base');
+    expect(() => pullRequestBranches(request('{"head":"a","base":"b"}'))).not.toThrow();
+  });
+});
+
+describe('proxy path traversal guard', () => {
+  it('rejects dot segments that would escape the matched prefix after URL normalisation', () => {
+    expect(isAllowedGithubRequest('/repos/octo/app/branches/../../user', 'GET')).toBe(false);
+    expect(isAllowedGithubRequest('/user/repos/../user', 'GET')).toBe(false);
+    expect(isAllowedGithubRequest('/repos/octo/app/branches/feature/20260707', 'GET')).toBe(true);
   });
 });

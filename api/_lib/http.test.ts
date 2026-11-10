@@ -15,4 +15,12 @@ describe('request safety helpers', () => {
     expect(requestOriginAllowed({ origin: 'https://evil.example.com' }, { APP_ORIGIN: 'https://app.example.com' })).toBe(false);
     expect(requestOriginAllowed({}, { APP_ORIGIN: 'https://app.example.com' })).toBe(true);
   });
+
+  it('requires an Origin header when the mutation carries the session cookie', () => {
+    // Cookie-bearing mutations without Origin are refused (a browser cross-site POST always sends
+    // one); cookie-less calls keep working for curl / server-to-server use.
+    expect(requestOriginAllowed({}, { APP_ORIGIN: 'https://app.example.com' }, true)).toBe(false);
+    expect(requestOriginAllowed({}, { APP_ORIGIN: 'https://app.example.com' }, false)).toBe(true);
+    expect(requestOriginAllowed({ origin: 'https://app.example.com' }, { APP_ORIGIN: 'https://app.example.com' }, true)).toBe(true);
+  });
 });

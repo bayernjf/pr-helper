@@ -826,6 +826,22 @@ const en: TranslationDict = {
   'preflight.pass': 'All clear',
   'preflight.fail': '{errors} errors',
   'preflight.error': 'Preflight request failed',
+
+  // Runtime errors surfaced by browser modules
+  'error.repo.invalid': 'Select a valid owner/repository.',
+  'error.github.timeout': 'GitHub request timed out, try again later.',
+  'error.github.requestFailed': 'GitHub request failed ({status})',
+  'error.ai.invalidJson': 'The AI response is not valid PR JSON',
+  'error.ai.missingTitle': 'The AI response did not include a title',
+  'error.ai.requestFailed': 'AI request failed ({status})',
+  'error.ai.streamUnsupported': 'This model service does not support streaming',
+  'error.ai.emptyStream': 'The AI stream returned no content',
+  'error.ai.malformedStream': 'The AI stream response is malformed',
+  'error.ai.interrupted': 'The AI stream ended unexpectedly',
+  'error.sync.invalidKeyId': 'Invalid key id',
+  'error.sync.invalidPayload': 'Encrypted payload is malformed',
+  'error.sync.emptyPassphrase': 'Cloud sync passphrase cannot be empty',
+  'error.sync.locked': 'Cloud sync is locked',
 };
 
 export default en;

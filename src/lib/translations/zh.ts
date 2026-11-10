@@ -826,6 +826,22 @@ const zh: TranslationDict = {
   'preflight.pass': '全部通过',
   'preflight.fail': '{errors} 项错误',
   'preflight.error': '预检请求失败',
+
+  // 浏览器模块抛出的运行时错误
+  'error.repo.invalid': '请选择有效的 owner/repository。',
+  'error.github.timeout': 'GitHub 请求超时，请稍后重试。',
+  'error.github.requestFailed': 'GitHub 请求失败 ({status})',
+  'error.ai.invalidJson': 'AI 响应不是有效的 PR JSON',
+  'error.ai.missingTitle': 'AI 未返回标题',
+  'error.ai.requestFailed': 'AI 请求失败 ({status})',
+  'error.ai.streamUnsupported': '当前模型服务不支持流式生成',
+  'error.ai.emptyStream': 'AI 流式响应没有内容',
+  'error.ai.malformedStream': 'AI 流式响应格式错误',
+  'error.ai.interrupted': 'AI 流式响应意外中断',
+  'error.sync.invalidKeyId': '密钥标识无效',
+  'error.sync.invalidPayload': '加密数据格式无效',
+  'error.sync.emptyPassphrase': '云同步口令不能为空',
+  'error.sync.locked': '云同步未解锁',
 };
 
 export default zh;
