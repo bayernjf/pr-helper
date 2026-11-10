@@ -5,6 +5,7 @@ export type WorkflowStageAutomation = {
   triggerMinCommits?: number;
   // 内容存在 pr_helper_generation_rules，payload 只留 hash。035 之前保存的仍然带 content，两种都要读。
   generationRule: { name: string; capturedAt: string; content?: string; contentHash?: string };
+  autoAdvanceNext?: true;
 } | {
   // Legacy browser-only policies are intentionally not promoted automatically.
   autoCreatePullRequest: true;
@@ -19,12 +20,13 @@ export type WorkflowStageAutomation = {
   executionMode: 'server';
   triggerMinCommits?: undefined;
   generationRule?: undefined;
+  autoAdvanceNext?: true;
 };
 export type WorkflowStage = { source: string; target: string; independent?: boolean; waitFor?: number[]; stageId?: string; automation?: WorkflowStageAutomation };
 export type DeploymentProvider = 'vercel' | 'cloudflare';
 export type DeploymentConfig = { target: string; provider: DeploymentProvider; workflowName: string; environment: 'preview' | 'production'; githubEnvironment?: string; healthCheckPath?: string; rollbackWorkflowName?: string };
 export type RecoveryPolicy = { maxRetries: number; cooldownSeconds: number };
-export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; createdAt?: string; deployments?: DeploymentConfig[]; position?: number; recoveryPolicy?: RecoveryPolicy; version?: number; archived?: true; team?: { id: string; name: string; role: 'owner' | 'editor' | 'operator' | 'viewer' } };
+export type Workflow = { id: string; name: string; repository: string; stages: WorkflowStage[]; createdAt?: string; deployments?: DeploymentConfig[]; position?: number; recoveryPolicy?: RecoveryPolicy; version?: number; archived?: true; muted?: true; team?: { id: string; name: string; role: 'owner' | 'editor' | 'operator' | 'viewer' } };
 export type WorkflowStageProjection = { workflowId: string; stageIndex: number; stageId?: string | null; source: string; target: string };
 
 export function sourceRuleMatches(rule: string, source: string) {
@@ -266,6 +268,26 @@ export function setStageAutoMerge(workflow: Workflow, stageIndex: number, enable
   return { ...workflow, stages: workflow.stages.map((current, index) => index === stageIndex ? { ...current, automation } : current) };
 }
 
+// Phase 6 switch "advance after merge". Advancing is a server-side action, so it requires an existing
+// server automation on the stage; toggling it on against a browser-session policy (or a bare stage)
+// is refused (returns the workflow unchanged), same as auto-merge. Turning it off keeps create/merge
+// switches intact and only clears the advancement intent; if nothing else is left on the stage, the
+// automation is removed.
+export function setStageAutoAdvance(workflow: Workflow, stageIndex: number, enabled: boolean): Workflow {
+  const stage = Number.isInteger(stageIndex) ? workflow.stages[stageIndex] : undefined;
+  if (!stage) return workflow;
+  if (!stage.automation || stage.automation.executionMode !== 'server') return workflow;
+  if (!enabled) {
+    const automation = { ...stage.automation } as WorkflowStageAutomation & { autoAdvanceNext?: true };
+    delete automation.autoAdvanceNext;
+    if (automation.autoCreatePullRequest !== true && automation.autoMergePullRequest !== true) {
+      return { ...workflow, stages: workflow.stages.map((current, index) => index === stageIndex ? { ...current, automation: undefined } : current) };
+    }
+    return { ...workflow, stages: workflow.stages.map((current, index) => index === stageIndex ? { ...current, automation } : current) };
+  }
+  return { ...workflow, stages: workflow.stages.map((current, index) => index === stageIndex ? { ...current, automation: { ...stage.automation!, autoAdvanceNext: true as const } } : current) };
+}
+
 export type StageRouteMode =
   | { kind: 'sequential' }
   | { kind: 'independent' }
@@ -345,6 +367,21 @@ export function activeWorkflows(workflows: readonly Workflow[]): Workflow[] {
 
 export function archivedWorkflows(workflows: readonly Workflow[]): Workflow[] {
   return workflows.filter(isWorkflowArchived);
+}
+
+export function isWorkflowMuted(workflow: Pick<Workflow, 'muted'>) {
+  return workflow.muted === true;
+}
+
+export function muteWorkflow(workflow: Workflow): Workflow {
+  return { ...workflow, muted: true };
+}
+
+// Same delete-don't-write-false convention as restoreWorkflow: the flag rides audit metadata and
+// version history, and a falsy leftover would outlive the decision that produced it.
+export function unmuteWorkflow(workflow: Workflow): Workflow {
+  const { muted: _muted, ...rest } = workflow;
+  return rest;
 }
 
 export function sortWorkflows(workflows: readonly Workflow[]): Workflow[] {

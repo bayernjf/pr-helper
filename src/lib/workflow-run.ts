@@ -99,3 +99,19 @@ export function workflowProgress(statuses: readonly StageProgressStatus[]): Work
     nodes: statuses.map((status, index) => currentIndex !== null && index > currentIndex && status === 'succeeded' ? 'idle' : status),
   };
 }
+
+// The bar's "next" line: the first unfinished step plus the unlock condition copied verbatim from the
+// server decision, so the browser never re-derives a gate it is only displaying.
+export function nextStepSummary(statuses: readonly StageProgressStatus[], reasons: readonly (string | undefined)[]): { index: number; reason?: string } | null {
+  const index = statuses.findIndex(status => status !== 'succeeded');
+  if (index === -1) return null;
+  const reason = reasons[index]?.trim();
+  return reason ? { index, reason } : { index };
+}
+
+// A node may say what the automation is currently doing, but only when a server action actually
+// exists: with auto-merge off (or a browser-session policy) there is no action row and the bar must
+// not speak of automation that is not running.
+export function progressActionKey(kind: string | undefined): string | null {
+  return kind === 'create-pr' || kind === 'merge-pr' || kind === 'advance-stage' ? `detail.progress.action.${kind}` : null;
+}

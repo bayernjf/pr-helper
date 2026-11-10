@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { workflowFromRows, workflowToRows } from './workflow-rows.js';
-import type { Workflow } from '../../src/lib/workflow.js';
+import { muteWorkflow, type Workflow } from '../../src/lib/workflow.js';
 
 const MIGRATIONS_DIR = new URL('../../supabase/migrations/', import.meta.url);
 const STORE_SOURCE = new URL('./workflows-store.ts', import.meta.url);
@@ -89,6 +89,11 @@ describe('a workflow survives the trip through relational rows', () => {
   // backfill's consistency check has to normalize the payload side the same way.
   it('collapses an empty deployment list to an absent key', () => {
     expect(workflowFromRows(workflowToRows('u-1', { ...MINIMAL, deployments: [] }))).toStrictEqual(MINIMAL);
+  });
+
+  it('round-trips the mute flag and leaves no key on unmuted workflows', () => {
+    expect(workflowFromRows(workflowToRows('u-1', muteWorkflow(MINIMAL)))).toStrictEqual(muteWorkflow(MINIMAL));
+    expect('muted' in workflowFromRows(workflowToRows('u-1', MINIMAL))).toBe(false);
   });
 });
 

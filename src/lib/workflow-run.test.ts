@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { automationActionPresentation, latestAutomationAction, stageProgressNode, stageRunPresentation, workflowProgress, workflowRunSummary, worstStageProgress } from './workflow-run';
+import { automationActionPresentation, latestAutomationAction, nextStepSummary, progressActionKey, stageProgressNode, stageRunPresentation, workflowProgress, workflowRunSummary, worstStageProgress } from './workflow-run';
 
 describe('workflow run presentation', () => {
   it('prioritizes a failed Actions gate over other stage information', () => {
@@ -154,5 +154,35 @@ describe('workflowProgress', () => {
 
   it('handles a flow with no steps', () => {
     expect(workflowProgress([])).toEqual({ completed: 0, total: 0, currentIndex: null, nodes: [] });
+  });
+});
+
+// 「下一步」行：指向第一个未完成步骤，解锁条件读服务端决策文案，不在浏览器里重算门禁。
+describe('nextStepSummary', () => {
+  it('points at the first unfinished step with its unlock reason', () => {
+    expect(nextStepSummary(['succeeded', 'locked', 'idle'], [undefined, '等待前序步骤合并且门禁绿。', undefined])).toEqual({ index: 1, reason: '等待前序步骤合并且门禁绿。' });
+  });
+
+  it('omits the reason when the server decision has no message', () => {
+    expect(nextStepSummary(['running'], [undefined])).toEqual({ index: 0 });
+  });
+
+  it('returns null once every step is done', () => {
+    expect(nextStepSummary(['succeeded', 'succeeded'], [undefined, undefined])).toBeNull();
+  });
+});
+
+// 动作名只认真实存在过的服务端动作种类：没有动作行（自动合并关闭、浏览器会话策略）时
+// 进度条不得出现任何「自动合并中」之类的措辞。
+describe('progressActionKey', () => {
+  it('maps every server action kind to its label key', () => {
+    expect(progressActionKey('create-pr')).toBe('detail.progress.action.create-pr');
+    expect(progressActionKey('merge-pr')).toBe('detail.progress.action.merge-pr');
+    expect(progressActionKey('advance-stage')).toBe('detail.progress.action.advance-stage');
+  });
+
+  it('yields nothing without an action or with an unknown kind', () => {
+    expect(progressActionKey(undefined)).toBeNull();
+    expect(progressActionKey('')).toBeNull();
   });
 });

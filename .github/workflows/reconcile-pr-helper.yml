@@ -96,3 +96,21 @@ jobs:
             echo "::error title=Stages not converging::/api/cron/health returned $status."
             exit 1
           fi
+
+      # Mobile monitoring (2026-10-29 plan, layer 1): the scheduled monitoring itself is exactly
+      # what a phone needs to hear about. No-op unless FEISHU_WEBHOOK is set.
+      - name: Notify failure (Feishu)
+        if: failure()
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          WORKFLOW: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ -z "$FEISHU_WEBHOOK" ]]; then
+            echo "::warning title=Notify skipped::Missing repository secret FEISHU_WEBHOOK."
+            exit 0
+          fi
+          curl -fsS -m 10 -X POST "$FEISHU_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg t "[pr-helper] $WORKFLOW 失败" --arg m "监控工作流 $WORKFLOW 失败：$RUN_URL" '{msg_type:"text", content:{text:($t + "\n" + $m)}}')" \
+            || echo "::warning title=Notify::Feishu webhook 调用失败"

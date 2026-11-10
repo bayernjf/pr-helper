@@ -19,8 +19,8 @@ export type StoredWorkflowStage = {
   waitFor?: number[];
   stageId?: string;
   automation?: { autoCreatePullRequest: true; autoMergePullRequest?: undefined; executionMode: 'browser-session'; triggerMinCommits?: number; generationRule?: undefined }
-    | { autoCreatePullRequest: true; autoMergePullRequest?: true; executionMode: 'server'; triggerMinCommits?: number; generationRule: { name: string; capturedAt: string; content?: string; contentHash?: string } }
-    | { autoCreatePullRequest?: undefined; autoMergePullRequest: true; executionMode: 'server'; triggerMinCommits?: undefined; generationRule?: undefined };
+    | { autoCreatePullRequest: true; autoMergePullRequest?: true; executionMode: 'server'; triggerMinCommits?: number; generationRule: { name: string; capturedAt: string; content?: string; contentHash?: string }; autoAdvanceNext?: true }
+    | { autoCreatePullRequest?: undefined; autoMergePullRequest: true; executionMode: 'server'; triggerMinCommits?: undefined; generationRule?: undefined; autoAdvanceNext?: true };
 };
 
 export type StoredWorkflow = {
@@ -34,6 +34,7 @@ export type StoredWorkflow = {
   recoveryPolicy?: RecoveryPolicy;
   version?: number;
   archived?: true;
+  muted?: true;
   team?: { id: string; name: string; role: TeamRole };
 };
 
@@ -227,6 +228,81 @@ async function scheduleServerAutoMerge(sql: ReturnType<typeof query>, row: Track
   // gate nothing is behind any more. Clearing it lets the next tick execute instead of waiting out a delay
   // that has grown to as much as half an hour for a merge that is ready now.
   await sql`UPDATE workflow_automation_actions SET failure_reason = NULL, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${actionId} AND state = 'queued' AND failure_reason IS NOT NULL`.catch(() => undefined);
+}
+
+// The advance intent is one per route, not one per commit: the workflow only ever advances a step
+// once its merged gate turns green. The stable key therefore carries no head sha, so repeated
+// reconciliation converges on the same row instead of piling up actions.
+export function automationAdvanceIdempotencyKey(route: { workflowId: string; stageId: string; source: string; target: string }) {
+  return `${route.workflowId}:${route.stageId}:${route.source}:${route.target}:advance`;
+}
+
+// Phase 6 "advance on merge" is a step-level conclusion, not a route-level one: a route that turned
+// green only finished its own path, and a converging stage must wait until every non-abandoned route
+// is merged with a green gate. Closed unmerged routes are abandoned, matching the convergence gate.
+export function stageRoutesComplete(routes: readonly { pull_state: string; checks_state: string }[]) {
+  return routes.length > 0 && routes.every(route => route.pull_state === 'merged' && route.checks_state === 'success');
+}
+
+export type AdvanceDeploymentGateRow = { state: string; health_state: string | null; health_detail: string | null; failure_summary: string | null };
+export type AutomationAdvanceVerdict = { kind: 'succeeded' } | { kind: 'waiting'; reason: string } | { kind: 'paused'; reason: string };
+
+// Deployments and the health probe are explicit gates here even though reconciliation folds them into
+// checks_state: reading the rows lets a parked action name the probe or deploy step that is holding,
+// instead of a bare checks=pending that hides which of the two is stuck.
+export function automationAdvanceVerdict(input: { route: { pull_state: string; checks_state: string } | undefined; siblingRoutes: readonly { pull_state: string; checks_state: string }[]; deployments: readonly AdvanceDeploymentGateRow[] }): AutomationAdvanceVerdict {
+  const route = input.route;
+  if (!route) return { kind: 'paused', reason: '步骤状态缺失，无法确认自动推进' };
+  if (route.pull_state !== 'merged') return { kind: 'paused', reason: '该步骤尚未合并，不能推进下一步' };
+  // The route's own gate speaks first: a single-route stage (the common case) gets the precise
+  // checks reason, and only a green route falls through to the convergence and deployment gates.
+  if (route.checks_state !== 'success') return { kind: 'waiting', reason: `门禁尚未全绿（checks=${route.checks_state}），等待合并后验证完成` };
+  // Closed unmerged routes are abandoned and must not hold the step, so the verdict filters them
+  // itself instead of trusting every caller to pre-filter.
+  const liveRoutes = input.siblingRoutes.filter(item => item.pull_state !== 'closed');
+  if (!stageRoutesComplete(liveRoutes)) {
+    const done = liveRoutes.filter(item => item.pull_state === 'merged' && item.checks_state === 'success').length;
+    return { kind: 'waiting', reason: `该步骤共 ${liveRoutes.length} 条路径，仅 ${done} 条合并且门禁绿，等待多路径汇聚完成` };
+  }
+  if (input.deployments.some(deployment => deployment.state === 'pending')) return { kind: 'waiting', reason: '部署尚未完成，等待部署门禁出结果' };
+  const failed = input.deployments.filter(deployment => deployment.state === 'failure');
+  if (failed.length) {
+    const reasons = failed.map(deployment => deployment.failure_summary?.trim() || (deployment.health_state === 'failure' ? `健康检查失败${deployment.health_detail ? `（${deployment.health_detail}）` : ''}` : '部署失败')).filter(Boolean);
+    return { kind: 'paused', reason: reasons.length ? `部署或健康检查失败，需要处理：${reasons.join('；')}` : '部署或健康检查失败，需要处理' };
+  }
+  return { kind: 'succeeded' };
+}
+
+async function scheduleServerAdvance(sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string) {
+  const stage = workflow.stages[stageIndex];
+  const automation = stage?.automation;
+  // Advancing is a server-side action; a browser-session policy has no executor on the server.
+  if (!stage || !stage.stageId || automation?.executionMode !== 'server' || (automation as { autoAdvanceNext?: true } | undefined)?.autoAdvanceNext !== true) return;
+  // A route that just turned green must not record the step's advance while a sibling route of the
+  // same stage is still open — multi-path convergence advances once, when the last route lands.
+  // Deployments need no check here: a red or pending deployment already folds into checks_state.
+  const routes = await sql<{ pull_state: string; checks_state: string }[]>`SELECT pull_state, checks_state FROM workflow_stage_states WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stage.stageId} AND pull_state <> 'closed'`;
+  if (!stageRoutesComplete(routes)) {
+    console.info(automationSkipLine({ kind: 'advance-stage', repository: workflow.repository, route: `${source} → ${stage.target}`, reason: 'routes-incomplete', routes: routes.length, merged: routes.filter(item => item.pull_state === 'merged' && item.checks_state === 'success').length }));
+    return;
+  }
+  const idempotencyKey = automationAdvanceIdempotencyKey({ workflowId: workflow.id, stageId: stage.stageId, source, target: stage.target });
+  const existing = await sql<{ id: number; state: WorkflowAutomationAction['state']; attempts: number; updated_at: string }[]>`SELECT id, state, attempts, updated_at FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
+  if (existing[0]) {
+    if (existing[0].state === 'queued') return automationActionId(existing[0].id);
+    const stale = ['running', 'paused'].includes(existing[0].state) && Date.now() - Date.parse(existing[0].updated_at) > 120_000;
+    if (!stale || automationRetryIsExhausted(existing[0].attempts, workflow.recoveryPolicy)) return null;
+    const reset = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'queued', failure_reason = NULL, updated_at = now() WHERE user_id = ${row.user_id} AND id = ${existing[0].id} AND state IN ('running', 'paused') RETURNING id`;
+    return automationActionId(reset[0]?.id);
+  }
+  const version = (await sql<{ version: number }[]>`SELECT COALESCE(MAX(version), 0)::int AS version FROM workflow_versions WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id}`)[0]?.version || workflow.version || 1;
+  const snapshot = { ...workflow, stages: workflow.stages.map(item => ({ ...item })) };
+  const run = await sql<{ id: number }[]>`INSERT INTO workflow_automation_runs (user_id, workflow_id, workflow_version, stage_index, stage_id, source, target, workflow_snapshot) VALUES (${row.user_id}, ${workflow.id}, ${version}, ${stageIndex}, ${stage.stageId}, ${source}, ${stage.target}, ${sql.json(snapshot)}) RETURNING id`;
+  const actions = await sql<{ id: number }[]>`INSERT INTO workflow_automation_actions (user_id, run_id, workflow_id, stage_id, source, target, kind, idempotency_key, payload) VALUES (${row.user_id}, ${run[0].id}, ${workflow.id}, ${stage.stageId}, ${source}, ${stage.target}, 'advance-stage', ${idempotencyKey}, ${sql.json({})}) ON CONFLICT (user_id, idempotency_key) DO NOTHING RETURNING id`;
+  if (actions[0]) return automationActionId(actions[0].id);
+  await sql`DELETE FROM workflow_automation_runs WHERE user_id = ${row.user_id} AND id = ${run[0].id}`;
+  const concurrent = await sql<{ id: number; state: WorkflowAutomationAction['state'] }[]>`SELECT id, state FROM workflow_automation_actions WHERE user_id = ${row.user_id} AND idempotency_key = ${idempotencyKey} LIMIT 1`;
+  return concurrent[0]?.state === 'queued' ? automationActionId(concurrent[0].id) : null;
 }
 
 async function scheduleServerAutoCreate(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, headSha: string) {
@@ -591,6 +667,41 @@ async function runAutomationMergeAction(environment: Record<string, string | und
   return { state: 'succeeded' as const, pullNumber };
 }
 
+// Phase 6 "advance on merge": a purely confirmatory action. The gate was already checked by the
+// reconciliation that enqueued it (merged + post-merge checks green, deployments folded in), so the
+// executor re-verifies from the persisted stage state rather than calling GitHub, then records the
+// advancement and its audit trail. A gate that no longer holds pauses with the reason, same as merge;
+// a gate still in flight — checks, a sibling converging route, a deployment — stays queued.
+async function runAutomationAdvanceAction(environment: Record<string, string | undefined>, sql: ReturnType<typeof query>, userId: string, installationId: string, actionId: number, action: AutomationActionRow, workflow: StoredWorkflow, stage: StoredWorkflowStage) {
+  if (stage.automation?.executionMode !== 'server' || (stage.automation as { autoAdvanceNext?: true } | undefined)?.autoAdvanceNext !== true) throw new Error('流程步骤自动推进策略已失效');
+  const states = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
+  const current = states.find(state => state.stage_id === action.stage_id && state.source === action.source);
+  if (!current) throw new Error('步骤状态缺失，无法确认自动推进');
+  // The re-verification mirrors the enqueue: every non-abandoned route of the step merged and green,
+  // this route's deployments (health probe folded in) finished. The verdict names what still holds.
+  const siblingRoutes = states.filter(state => state.stage_id === action.stage_id && state.pull_state !== 'closed');
+  const deployments = await sql<AdvanceDeploymentGateRow[]>`SELECT state, health_state, health_detail, failure_summary FROM workflow_stage_deployments WHERE user_id = ${userId} AND workflow_id = ${workflow.id} AND stage_id = ${action.stage_id} AND source = ${action.source}`;
+  const verdict = automationAdvanceVerdict({ route: current, siblingRoutes, deployments });
+  if (verdict.kind === 'paused') throw new Error(verdict.reason);
+  if (verdict.kind === 'waiting') {
+    // The merge may still be running Actions, a deployment may still be in flight, or a sibling path
+    // of a converging stage has not landed. Keep the action queued so the next reconciliation (or the
+    // check-completion event) executes it when the hold clears; the reason doubles as the drain's
+    // backoff marker.
+    await sql`UPDATE workflow_automation_actions SET failure_reason = ${verdict.reason.slice(0, 800)}, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId} AND state = 'queued'`;
+    await sql`UPDATE workflow_automation_runs SET state = 'waiting-gates', updated_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
+    return { state: 'queued' as const };
+  }
+  await sql`UPDATE workflow_automation_actions SET state = 'succeeded', failure_reason = NULL, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId}`;
+  await sql`UPDATE workflow_automation_runs SET state = 'succeeded', updated_at = now(), completed_at = now() WHERE user_id = ${userId} AND id = ${action.run_id}`;
+  await recordOperationAuditForUser(sql, userId, installationId, {
+    action: 'stage-advanced', outcome: 'success', repository: workflow.repository, workflowId: workflow.id,
+    stageId: action.stage_id, source: action.source, target: action.target, pullNumber: current.pull_number, runId: action.run_id,
+    metadata: { via: 'workflow-automation', mergedAt: current.merged_at }, failureReason: null,
+  });
+  return { state: 'succeeded' as const, pullNumber: current.pull_number };
+}
+
 async function executeWorkflowAutomationActionForUser(environment: Record<string, string | undefined>, userId: string, installationId: string, actionId: number) {
   if (!Number.isInteger(actionId) || actionId <= 0 || !installationId) throw new Error('无效的自动化执行请求');
   const sql = query(environment);
@@ -599,7 +710,7 @@ async function executeWorkflowAutomationActionForUser(environment: Record<string
   if (!action) throw new Error('未找到自动化动作');
   if (action.state === 'succeeded') return { state: action.state, pullNumber: null };
   if (action.state !== 'queued') throw new Error(`当前动作状态为 ${action.state}，不能执行`);
-  if (action.kind !== 'create-pr' && action.kind !== 'merge-pr') throw new Error('当前仅支持执行自动创建和自动合并 PR 动作');
+  if (action.kind !== 'create-pr' && action.kind !== 'merge-pr' && action.kind !== 'advance-stage') throw new Error('当前仅支持执行自动创建、自动合并和自动推进动作');
   const claimed = await sql<{ id: number }[]>`UPDATE workflow_automation_actions SET state = 'running', attempts = attempts + 1, updated_at = now() WHERE user_id = ${userId} AND id = ${actionId} AND state = 'queued' RETURNING id`;
   if (!claimed.length) throw new Error('动作已被其他执行请求领取');
   try {
@@ -608,6 +719,7 @@ async function executeWorkflowAutomationActionForUser(environment: Record<string
     const stage = workflow ? stageForIndex(workflow, action.stage_index) : undefined;
     if (!workflow || !stage || stage.stageId !== action.stage_id) throw new Error('流程步骤自动化策略已失效');
     if (action.kind === 'merge-pr') return await runAutomationMergeAction(environment, sql, userId, installationId, actionId, action, workflow, stage);
+    if (action.kind === 'advance-stage') return await runAutomationAdvanceAction(environment, sql, userId, installationId, actionId, action, workflow, stage);
     if (stage.automation?.autoCreatePullRequest !== true || stage.automation.executionMode !== 'server') throw new Error('流程步骤自动创建策略已失效');
     if (!action.payload?.generationRule?.trim()) throw new Error('自动化动作缺少生成规则快照');
     const currentStates = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${userId} AND workflow_id = ${workflow.id}`;
@@ -660,6 +772,81 @@ export async function executeWorkflowAutomationAction(environment: Record<string
   return executeWorkflowAutomationActionForUser(environment, user.id, identity.installationId, actionId);
 }
 
+// The takeover path (automated-workflow-plan "AI 失败处理"): an AI generation failure leaves the
+// action `paused`, and the user either regenerates with the stored server-side credential and the
+// action's own rule snapshot, or writes the title/description by hand, then confirms. Confirmation
+// re-runs the same pre-flight the unattended path uses (no open pull on the route, source ahead,
+// gate canCreateNext, idempotency against an already-created pull) so a takeover can never create a
+// duplicate, and completes under the original action's identity so the queue stays consistent.
+async function resolveAutomationActionForTakeover(environment: Record<string, string | undefined>, userId: string, installationId: string, actionId: number, expectedState: 'paused') {
+  if (!Number.isInteger(actionId) || actionId <= 0 || !installationId) throw new Error('无效的接管请求');
+  const sql = query(environment);
+  const rows = await sql<AutomationActionRow[]>`SELECT actions.id, actions.run_id, actions.workflow_id, actions.stage_id, runs.stage_index, actions.source, actions.target, actions.kind, actions.state, actions.attempts, actions.payload FROM workflow_automation_actions actions JOIN workflow_automation_runs runs ON runs.user_id = actions.user_id AND runs.id = actions.run_id WHERE actions.user_id = ${userId} AND actions.id = ${actionId} LIMIT 1`;
+  const action = rows[0];
+  if (!action) throw new Error('未找到自动化动作');
+  if (action.state !== expectedState) throw new Error(`当前动作状态为 ${action.state}，不能接管`);
+  if (action.kind !== 'create-pr') throw new Error('当前仅支持接管自动创建 PR 动作');
+  if (!action.payload?.generationRule?.trim()) throw new Error('自动化动作缺少生成规则快照');
+  const workflowRows = await sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)} FROM pr_helper_workflows workflows WHERE workflows.user_id = ${userId} AND workflows.id = ${action.workflow_id}`;
+  const workflow = trackedWorkflowFromSingleRow(workflowRows);
+  const stage = workflow ? stageForIndex(workflow, action.stage_index) : undefined;
+  if (!workflow || !stage || stage.stageId !== action.stage_id) throw new Error('流程步骤自动化策略已失效');
+  if (stage.automation?.autoCreatePullRequest !== true || stage.automation.executionMode !== 'server') throw new Error('流程步骤自动创建策略已失效');
+  const credential = await readAiAutomationCredentialForUser(environment, userId);
+  const { owner, name } = ownerAndName(workflow.repository);
+  const config = parseGithubAppConfig(environment);
+  const openPulls = await installationRequest<Pull[]>(config, installationId, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(`${owner}:${action.source}`)}&base=${encodeURIComponent(action.target)}&per_page=10`);
+  const comparison = openPulls[0] ? { commits: [] as { commit: { message: string } }[] } : await installationRequest<{ commits: { commit: { message: string } }[] }>(config, installationId, `/repos/${owner}/${name}/compare/${encodeURIComponent(action.target)}...${encodeURIComponent(action.source)}`);
+  return { sql, action, workflow, stage, credential, config, installationId, owner, name, openPulls, comparison };
+}
+
+export async function regenerateAutomationMessage(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, actionId: number) {
+  if (!identity.installationId) throw new Error('无效的接管请求');
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const { action, stage, credential, comparison, workflow } = await resolveAutomationActionForTakeover(environment, user.id, identity.installationId, actionId, 'paused');
+  if (!credential || !credential.autoGeneratePrMessage) throw new Error('服务端 AI 自动生成设置未开启');
+  const message = await generateAutomationMessage(credential.baseUrl, credential.apiKey, credential.model, action.source, action.target, comparison.commits.map(item => item.commit.message), action.payload?.generationRule || '');
+  return { message, workflow: { repository: workflow.repository }, stage: { source: action.source, target: stage.target } };
+}
+
+export async function takeoverAutomationAction(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, actionId: number, title: string, body: string) {
+  if (!identity.installationId) throw new Error('无效的接管请求');
+  const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
+  const { sql, action, workflow, stage, owner, name, comparison, openPulls, config, installationId } = await resolveAutomationActionForTakeover(environment, user.id, identity.installationId, actionId, 'paused');
+  const trimmedTitle = title.trim();
+  const trimmedBody = body.trim();
+  if (!trimmedTitle) throw new Error('PR 标题不能为空');
+  const currentStates = await sql<StageStateRow[]>`SELECT workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event, updated_at FROM workflow_stage_states WHERE user_id = ${user.id} AND workflow_id = ${workflow.id}`;
+  const current = currentStates.find(state => state.stage_id === action.stage_id && state.source === action.source);
+  if (!current || !deriveStageDecision(workflow, action.stage_index, current, currentStates).canCreateNext) throw new Error('当前步骤尚未满足自动创建 PR 的门禁');
+  if (!autoCreateReachedThreshold(stage.automation, current.ahead_by)) throw new Error(`新提交数未达到自动创建阈值（需要 ${autoCreateCommitThreshold(stage.automation)} 个）`);
+  const outcome = automationCreateOutcome(openPulls, comparison.commits.length);
+  if (outcome.kind === 'idempotent') {
+    await sql`UPDATE workflow_automation_actions SET state = 'succeeded', failure_reason = NULL, updated_at = now(), payload = ${sql.json({ ...(action.payload || {}), pullNumber: outcome.pullNumber })} WHERE user_id = ${user.id} AND id = ${actionId}`;
+    await sql`UPDATE workflow_automation_runs SET state = 'succeeded', updated_at = now(), completed_at = now() WHERE user_id = ${user.id} AND id = ${action.run_id}`;
+    await recordOperationAuditForUser(sql, user.id, installationId, {
+      action: 'pull-created', outcome: 'success', repository: workflow.repository, workflowId: workflow.id,
+      stageId: action.stage_id, source: action.source, target: action.target, pullNumber: outcome.pullNumber, runId: action.run_id,
+      metadata: { via: 'user-takeover', idempotent: true }, failureReason: null,
+    });
+    return { state: 'succeeded' as const, pullNumber: outcome.pullNumber, pullUrl: outcome.pullUrl };
+  }
+  if (outcome.kind === 'cancelled') {
+    await sql`UPDATE workflow_automation_actions SET state = 'cancelled', failure_reason = ${outcome.reason}, updated_at = now() WHERE user_id = ${user.id} AND id = ${actionId}`;
+    await sql`UPDATE workflow_automation_runs SET state = 'cancelled', updated_at = now(), completed_at = now() WHERE user_id = ${user.id} AND id = ${action.run_id}`;
+    return { state: 'cancelled' as const, pullNumber: null };
+  }
+  const created = await installationRequest<Pull>(config, installationId, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify({ title: trimmedTitle, head: action.source, base: action.target, body: trimmedBody }) });
+  await sql`UPDATE workflow_automation_actions SET state = 'succeeded', updated_at = now(), payload = ${sql.json({ ...(action.payload || {}), pullNumber: created.number })} WHERE user_id = ${user.id} AND id = ${actionId}`;
+  await sql`UPDATE workflow_automation_runs SET state = 'succeeded', updated_at = now(), completed_at = now() WHERE user_id = ${user.id} AND id = ${action.run_id}`;
+  await recordOperationAuditForUser(sql, user.id, installationId, {
+    action: 'pull-created', outcome: 'success', repository: workflow.repository, workflowId: workflow.id,
+    stageId: action.stage_id, source: action.source, target: action.target, pullNumber: created.number, runId: action.run_id,
+    metadata: { via: 'user-takeover' }, failureReason: null,
+  });
+  return { state: 'succeeded' as const, pullNumber: created.number, pullUrl: created.html_url };
+}
+
 // Bounded because the board polls it, and the unfinished filter exists because a blocked action is the
 // only reason to read this: without it the newest terminal rows push a week-old paused one past the limit.
 export const AUTOMATION_ACTION_VIEW_LIMIT = 200;
@@ -672,8 +859,6 @@ export async function listWorkflowAutomationActions(environment: Record<string, 
 }
 
 type DatabaseUser = { id: string };
-type WorkflowRow = { payload: unknown; version?: number };
-type VisibleWorkflowRow = WorkflowRow & { id: string };
 // The columns the sweep and the webhook projection rebuild a workflow from, plus the two child arrays
 // carried as raw column objects. `to_jsonb(row)` is transport, not a second encoding: the shapes are
 // exactly WorkflowStageColumns and WorkflowDeploymentColumns, so workflowFromRows stays the only place
@@ -691,7 +876,7 @@ type TrackedWorkflowRow = Omit<WorkflowColumns, 'user_id' | 'id'> & {
 // `TransactionSql` and `Sql` are distinct types in postgres.js, so the column list accepts either —
 // writeWorkflowRows already uses the same pragmatic typing for its transaction parameter.
 function trackedWorkflowColumns(sql: any) {
-  return sql`workflows.user_id, workflows.id, workflows.name, workflows.repository, workflows.archived, workflows.version, workflows.position, workflows.declared_created_at, workflows.recovery_max_retries, workflows.recovery_cooldown_seconds,
+  return sql`workflows.user_id, workflows.id, workflows.name, workflows.repository, workflows.archived, workflows.muted, workflows.version, workflows.position, workflows.declared_created_at, workflows.recovery_max_retries, workflows.recovery_cooldown_seconds,
     (SELECT coalesce(jsonb_agg(to_jsonb(stages) ORDER BY stages.stage_index), '[]'::jsonb) FROM workflow_stages stages WHERE stages.user_id = workflows.user_id AND stages.workflow_id = workflows.id) AS stages,
     (SELECT coalesce(jsonb_agg(to_jsonb(deployments) ORDER BY deployments.position), '[]'::jsonb) FROM workflow_deployment_configs deployments WHERE deployments.user_id = workflows.user_id AND deployments.workflow_id = workflows.id) AS deployments`;
 }
@@ -887,7 +1072,7 @@ export type ActionableStage = {
   kind: 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create';
   message: string;
 };
-export type StageDecisionKind = 'none' | 'locked' | 'waiting' | 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create' | 'merged';
+export type StageDecisionKind = 'none' | 'locked' | 'waiting' | 'checks-failed' | 'needs-approval' | 'ready-to-merge' | 'ready-to-create' | 'merged' | 'superseded';
 export type StageDecision = { kind: StageDecisionKind; actionable: boolean; canCreateNext: boolean; message: string };
 export type ReconciliationTrigger = 'cron' | 'webhook' | 'inbox_refresh' | 'manual';
 export type ReconciliationRun = { id: number; trigger: ReconciliationTrigger; state: 'running' | 'success' | 'degraded' | 'failure' | 'skipped'; stagesTotal: number; stagesReconciled: number; stagesFailed: number; durationMs: number | null; errorMessage: string | null; repository: string | null; startedAt: string; finishedAt: string | null; interrupted: boolean };
@@ -972,7 +1157,7 @@ export type WorkflowStageDeployment = {
 };
 export type WorkflowStageDeploymentRun = WorkflowStageDeployment & { firstSeenAt: string };
 export type CodexRepairContext = { markdown: string; pullNumber: number; pullUrl: string };
-export type OperationAuditAction = 'workflow-created' | 'workflow-updated' | 'workflow-deleted' | 'pull-created' | 'pull-merged' | 'actions-rerun' | 'deployment-rerun' | 'deployment-rollback';
+export type OperationAuditAction = 'workflow-created' | 'workflow-updated' | 'workflow-deleted' | 'pull-created' | 'pull-merged' | 'stage-advanced' | 'actions-rerun' | 'deployment-rerun' | 'deployment-rollback';
 export type OperationAuditOutcome = 'success' | 'failure';
 export type OperationAuditEntry = {
   id: number;
@@ -1469,13 +1654,13 @@ function visibleWorkflowPredicate(sql: ReturnType<typeof query>, userId: string,
 
 /** Per-request memo so one `/api/inbox` reads each visible workflow payload, stage state set and user row once. */
 export type VisibleWorkflowReads = {
-  workflows?: Promise<VisibleWorkflowRow[]>;
+  workflows?: Promise<TrackedWorkflowRow[]>;
   stageStates?: Promise<StageStateRow[]>;
   user?: Promise<DatabaseUser>;
 };
 
 function visibleWorkflowRows(sql: ReturnType<typeof query>, userId: string, reads?: VisibleWorkflowReads) {
-  const read = () => sql<VisibleWorkflowRow[]>`SELECT workflows.id, workflows.payload FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, userId, 'workflows.user_id', 'workflows.id')}`;
+  const read = () => sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)} FROM pr_helper_workflows workflows WHERE ${visibleWorkflowPredicate(sql, userId, 'workflows.user_id', 'workflows.id')}`;
   if (!reads) return read();
   return reads.workflows ??= read();
 }
@@ -1565,8 +1750,18 @@ export function deriveStageDecision(workflow: StoredWorkflow, stageIndex: number
   const comparableStates = allStates.filter(candidate => Boolean(candidate.stage_id)).map(candidate => ({ ...candidate, stage_id: candidate.stage_id! }));
   const unlocked = stageIsUnlocked(workflow, stageIndex, comparableStates);
   // `kind` is the display state and cannot also carry the affordance: a merged route with new
-  // commits is both. A red post-merge gate withholds it so nothing is pushed downstream unattended.
+  // commits is both. A red gate on a merged commit does not withhold creation — the next PR is
+  // gated by its own checks — so the superseded branch above re-opens it; a red gate on a route
+  // that has no newer commits still withholds it until the branch recovers.
   const canCreateNext = unlocked && state.ahead_by > 0 && state.checks_state !== 'failure' && (state.pull_state === 'none' || state.pull_state === 'merged');
+  // A merged step whose gate is red while newer source commits wait is superseded, not failed:
+  // the red belongs to the commit that already merged (or to a target head that later delivery
+  // replaced), and the next PR's gate is that PR's own checks, so a stale red must not hold
+  // creation hostage. actionable stays false: nothing here needs the human action queue, which
+  // is why `kind` is a display state and not the affordance.
+  if (state.pull_state === 'merged' && state.checks_state === 'failure' && state.ahead_by > 0) {
+    return { kind: 'superseded', actionable: false, canCreateNext: true, message: '上一步已合并，其门禁失败属于已合并的提交；新提交可以创建 PR' };
+  }
   if (state.checks_state === 'failure') return { kind: 'checks-failed', actionable: true, canCreateNext, message: `第 ${stageIndex + 1} 步 Actions 失败` };
   if (state.pull_state === 'open' && state.approvals < state.required_approvals) return { kind: 'needs-approval', actionable: true, canCreateNext, message: `PR 还需要 ${state.required_approvals - state.approvals} 个 Approval` };
   if (state.pull_state === 'open' && state.checks_state === 'success' && state.approvals >= state.required_approvals && state.mergeable === true && state.mergeable_state === 'clean') return { kind: 'ready-to-merge', actionable: true, canCreateNext, message: 'PR 已满足合并条件' };
@@ -1583,6 +1778,7 @@ export function deriveStageDecision(workflow: StoredWorkflow, stageIndex: number
 
 export function actionableStageEntry(decision: StageDecision): { kind: ActionableStage['kind']; message: string } | null {
   if (decision.kind === 'merged') return decision.canCreateNext ? { kind: 'ready-to-create', message: decision.message } : null;
+  if (decision.kind === 'superseded') return null;
   if (!decision.actionable || decision.kind === 'none' || decision.kind === 'locked' || decision.kind === 'waiting') return null;
   return { kind: decision.kind, message: decision.message };
 }
@@ -1595,9 +1791,9 @@ export async function listWorkflows(environment: Record<string, string | undefin
   const user = await userForLogin(environment, identity.login, identity.githubUserId, identity.installationId);
   const sql = query(environment);
   const [ownedRows, sharedRows] = await Promise.all([
-    sql<(WorkflowRow & { version: number })[]>`SELECT workflows.payload, COALESCE(workflows.version, 0)::int AS version FROM pr_helper_workflows workflows WHERE workflows.user_id = ${user.id} ORDER BY workflows.updated_at DESC`,
-    sql<(WorkflowRow & { owner_user_id: string; version: number; team_id: string; team_name: string; role: TeamRole })[]>`
-      SELECT workflows.payload, shared.owner_user_id, COALESCE(workflows.version, 0)::int AS version, teams.id AS team_id, teams.name AS team_name, members.role
+    sql<TrackedWorkflowRow[]>`SELECT ${trackedWorkflowColumns(sql)} FROM pr_helper_workflows workflows WHERE workflows.user_id = ${user.id} ORDER BY workflows.updated_at DESC`,
+    sql<(TrackedWorkflowRow & { owner_user_id: string; team_id: string; team_name: string; role: TeamRole })[]>`
+      SELECT ${trackedWorkflowColumns(sql)}, shared.owner_user_id, teams.id AS team_id, teams.name AS team_name, members.role
       FROM pr_helper_team_workflows shared
       JOIN pr_helper_team_members members ON members.team_id = shared.team_id
       JOIN pr_helper_teams teams ON teams.id = shared.team_id
@@ -1606,20 +1802,20 @@ export async function listWorkflows(environment: Record<string, string | undefin
       ORDER BY workflows.updated_at DESC`,
   ]);
   const owned = ownedRows.map(row => {
-    const workflow = storedWorkflowFromPayload(row.payload);
+    const workflow = trackedWorkflowFromRow(row);
     if (!workflow) return undefined;
     const normalized = ensureStageIds(workflow);
-    return row.version > 0 ? { ...normalized, version: row.version } : normalized;
+    return row.version && row.version > 0 ? { ...normalized, version: row.version } : normalized;
   }).filter((workflow): workflow is StoredWorkflow => Boolean(workflow)).map(workflow => ({ userId: user.id, workflow }));
   const sharedByWorkflow = new Map<string, { userId: string; workflow: StoredWorkflow }>();
   for (const row of sharedRows) {
-    const workflow = storedWorkflowFromPayload(row.payload);
+    const workflow = trackedWorkflowFromRow(row);
     if (!workflow || sharedByWorkflow.has(workflow.id)) continue;
     const normalized = ensureStageIds(workflow);
     sharedByWorkflow.set(workflow.id, {
       userId: row.owner_user_id,
       workflow: {
-        ...(row.version > 0 ? { ...normalized, version: row.version } : normalized),
+        ...(row.version && row.version > 0 ? { ...normalized, version: row.version } : normalized),
         team: { id: row.team_id, name: row.team_name, role: row.role },
       },
     });
@@ -1704,7 +1900,10 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
     // name and repository are supplied even though writeWorkflowRows below sets them in this same
     // transaction: 038 promoted both to NOT NULL, and Postgres checks the proposed tuple before it
     // resolves ON CONFLICT, so leaving them out fails every save — including one that only updates.
-    await transaction`INSERT INTO pr_helper_workflows (id, user_id, name, repository, payload) VALUES (${savedWorkflow.id}, ${ownerUserId}, ${savedWorkflow.name}, ${savedWorkflow.repository}, ${transaction.json(savedWorkflow)}) ON CONFLICT (user_id, id) DO UPDATE SET name = EXCLUDED.name, repository = EXCLUDED.repository, payload = EXCLUDED.payload, updated_at = now()`;
+    // Step D of the payload-column drop: payload is no longer written here, and this is the first
+    // place that hand-writes the full column list, so version must be spelled out — the 043
+    // NOT NULL would reject a save that forgot it instead of silently storing NULL.
+    await transaction`INSERT INTO pr_helper_workflows (id, user_id, name, repository, archived, muted, version, position, declared_created_at, recovery_max_retries, recovery_cooldown_seconds) VALUES (${savedWorkflow.id}, ${ownerUserId}, ${savedWorkflow.name}, ${savedWorkflow.repository}, ${savedWorkflow.archived === true}, ${savedWorkflow.muted === true}, ${savedWorkflow.version ?? null}, ${savedWorkflow.position ?? null}, ${savedWorkflow.createdAt ?? null}, ${savedWorkflow.recoveryPolicy?.maxRetries ?? null}, ${savedWorkflow.recoveryPolicy?.cooldownSeconds ?? null}) ON CONFLICT (user_id, id) DO UPDATE SET name = EXCLUDED.name, repository = EXCLUDED.repository, archived = EXCLUDED.archived, muted = EXCLUDED.muted, version = EXCLUDED.version, position = EXCLUDED.position, declared_created_at = EXCLUDED.declared_created_at, recovery_max_retries = EXCLUDED.recovery_max_retries, recovery_cooldown_seconds = EXCLUDED.recovery_cooldown_seconds, updated_at = now()`;
     await writeWorkflowRows(transaction, ownerUserId, savedWorkflow);
     if (previous) {
       const changedStageIds = previous.stages.flatMap((stage, index) => {
@@ -1718,7 +1917,7 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
     await recordOperationAuditForUser(transaction, ownerUserId, identity.installationId, {
       action: previous ? 'workflow-updated' : 'workflow-created', outcome: 'success', repository: savedWorkflow.repository,
       workflowId: savedWorkflow.id, stageId: null, source: null, target: null, pullNumber: null, runId: null,
-      metadata: { version: savedWorkflow.version, stageCount: savedWorkflow.stages.length, archived: savedWorkflow.archived === true }, failureReason: null,
+      metadata: { version: savedWorkflow.version, stageCount: savedWorkflow.stages.length, archived: savedWorkflow.archived === true, muted: savedWorkflow.muted === true }, failureReason: null,
     });
   });
   const archiveTransition = workflowArchiveTransition(previous ?? null, savedWorkflow);
@@ -1760,7 +1959,9 @@ export async function removeWorkflowStage(environment: Record<string, string | u
       .filter((stage, index) => index !== removalIndex && stage.stageId !== stageId)
       .map(stage => !stage.waitFor ? stage : { ...stage, waitFor: stage.waitFor.filter(dependency => dependency !== removalIndex).map(dependency => dependency > removalIndex ? dependency - 1 : dependency) });
     savedWorkflow = { ...ensureStageIds({ ...previous, stages }), version: (versionRows[0]?.version || 0) + 1 };
-    await transaction`UPDATE pr_helper_workflows SET payload = ${transaction.json(savedWorkflow)}, updated_at = now() WHERE user_id = ${access.ownerUserId} AND id = ${workflowId}`;
+    // Step D of the payload-column drop: the payload write is gone; the relational mirror
+    // below (writeWorkflowRows) carries every column that still has to change.
+    await transaction`UPDATE pr_helper_workflows SET updated_at = now() WHERE user_id = ${access.ownerUserId} AND id = ${workflowId}`;
     await writeWorkflowRows(transaction, access.ownerUserId, savedWorkflow);
     await transaction`DELETE FROM workflow_stage_events WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId} AND stage_id = ${stageId}`;
     await pruneStaleWorkflowStageData(transaction, access.ownerUserId, savedWorkflow);
@@ -1981,7 +2182,7 @@ async function reconcileStageDeployments(environment: Record<string, string | un
     if (['success', 'failure'].includes(state) && (previous?.state !== state || previous.run_id !== run.id)) {
       const notification = deploymentNotification(provider, configuration.environment, state);
       await phase('deployWrite', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:deployment:${provider}:${run.id}:${state}`, notification.kind, notification.title, stageId, target));
-      await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:deployment:${provider}:${run.id}:${state}`, kind: notification.kind, title: notification.title, body: `${workflow.repository} · ${source} → ${target} · ${notification.message}`, url: run.html_url || '/' }));
+      await phase('notify', () => stagePush(workflow, environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:deployment:${provider}:${run.id}:${state}`, kind: notification.kind, title: notification.title, body: `${workflow.repository} · ${source} → ${target} · ${notification.message}`, url: run.html_url || '/' }));
     }
   }));
   const placeholders = configurations
@@ -1996,6 +2197,12 @@ async function reconcileStageDeployments(environment: Record<string, string | un
 // truncation better than a nested object.
 export function reconcileTimingLine(fields: Record<string, string | number | undefined>) {
   return `[reconcile-timing] ${logFields(fields)}`;
+}
+
+// ETag telemetry shares the one-greppable-line convention; emitted once per sweep scope, only when at
+// least one GET was observed with an ETag, so silent scopes add no log noise.
+export function etagTelemetryLine(fields: Record<string, string | number | undefined>) {
+  return `[reconcile-etag] ${logFields(fields)}`;
 }
 
 function logFields(fields: Record<string, string | number | boolean | undefined>) {
@@ -2043,7 +2250,7 @@ export function createPhaseRecorder(tracker?: StagePhaseTracker) {
   return { phases, phase };
 }
 
-type ReconcileBudget = { calls: number; ms: number; phases: Record<string, number>; pending: Set<StagePhaseTracker> };
+type ReconcileBudget = { calls: number; ms: number; etagStable: number; etagChanged: number; etagFirstSeen: number; phases: Record<string, number>; pending: Set<StagePhaseTracker> };
 
 async function reconcileOneStage(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string, budget?: ReconcileBudget) {
   const startedAt = performance.now();
@@ -2053,6 +2260,9 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
   if (budget) {
     budget.calls += tracked.stats.calls;
     budget.ms += tracked.stats.totalMs;
+    budget.etagStable += tracked.stats.etagStable;
+    budget.etagChanged += tracked.stats.etagChanged;
+    budget.etagFirstSeen += tracked.stats.etagFirstSeen;
     addPhaseTotals(budget.phases, tracked.value.phases);
   }
   console.log(reconcileTimingLine({
@@ -2067,6 +2277,12 @@ async function reconcileOneStage(environment: Record<string, string | undefined>
     total: Math.round(performance.now() - startedAt),
   }));
   return { reconciled: tracked.value.reconciled, advanced: tracked.value.advanced === true };
+}
+
+// A muted workflow keeps reconciling, projecting and automating; only the push channel goes quiet
+// (mute v1 — the phase('notify') sites below are the sole Web Push triggers in reconciliation).
+function stagePush(workflow: { muted?: true }, environment: Record<string, string | undefined>, sql: Parameters<typeof sendPushNotifications>[1], userId: string, event: Parameters<typeof sendPushNotifications>[3]) {
+  return workflow.muted === true ? Promise.resolve(0) : sendPushNotifications(environment, sql, userId, event);
 }
 
 async function reconcileStageWork(environment: Record<string, string | undefined>, row: TrackedWorkflowRow, workflow: StoredWorkflow, stageIndex: number, source: string, eventName?: string, tracker?: StagePhaseTracker): Promise<{ reconciled: boolean; phases: Record<string, number>; advanced?: boolean }> {
@@ -2101,28 +2317,37 @@ async function reconcileStageWork(environment: Record<string, string | undefined
     if (previous[0]?.pull_state && previous[0].pull_state !== 'none') await phase('write', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:pull-cleared:${Date.now()}`, 'pull-cleared', 'PR 状态已清除，等待新提交', stageId, stage.target));
     const unlocked = stageIsUnlocked(workflow, stageIndex, preceding);
     if (unlocked && comparison.ahead_by > 0 && (previous[0]?.ahead_by || 0) === 0) {
-      await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:none`, kind: 'new-pr-ready', title: '可以创建下一步 PR', body: `${workflow.repository} · ${stage.source} → ${stage.target}`, url: '/' }));
+      await phase('notify', () => stagePush(workflow, environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:none`, kind: 'new-pr-ready', title: '可以创建下一步 PR', body: `${workflow.repository} · ${stage.source} → ${stage.target}`, url: '/' }));
     }
     if (comparison.ahead_by > 0 && comparisonHeadSha) await phase('queue', () => scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha));
     return { reconciled: true, phases };
   }
+  // A: a merged step's gate is evaluated against the target branch head, not the merge commit.
+  // A check that went red on the merge commit stays red forever even after the branch recovered,
+  // and parking the verdict on it permanently blocks auto-create (rich-sim stalled ≥ 44 minutes
+  // on exactly that). gateSha is what this verdict is pinned to; `sha` keeps its old meaning —
+  // the merged commit — for the retry and deployment-parent readers that consume head_sha.
+  const branchHead = pull.merged_at
+    ? await phase('targetHead', () => installationRequest<{ commit?: { sha?: string } }>(config, installationId, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}`).catch(() => null))
+    : null;
   const sha = pull.merged_at ? pull.merge_commit_sha : pull.head.sha;
+  const gateSha = pull.merged_at ? (branchHead?.commit?.sha || pull.merge_commit_sha) : pull.head.sha;
   if (!pull.merged_at) await phase('write', () => sql`DELETE FROM workflow_stage_deployments WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND stage_id = ${stageId} AND source = ${source}`);
   const [runs, statuses, reviews, protection, rules] = await phase('checks', () => Promise.all([
-    sha ? installationRequest<{ check_runs: CheckRun[] }>(config, installationId, `/repos/${owner}/${name}/commits/${sha}/check-runs?per_page=100`).catch(() => ({ check_runs: [] })) : Promise.resolve({ check_runs: [] }),
-    sha ? installationRequest<{ statuses: CommitStatus[] }>(config, installationId, `/repos/${owner}/${name}/commits/${sha}/status`).catch(() => ({ statuses: [] })) : Promise.resolve({ statuses: [] }),
+    gateSha ? installationRequest<{ check_runs: CheckRun[] }>(config, installationId, `/repos/${owner}/${name}/commits/${gateSha}/check-runs?per_page=100`).catch(() => ({ check_runs: [] })) : Promise.resolve({ check_runs: [] }),
+    gateSha ? installationRequest<{ statuses: CommitStatus[] }>(config, installationId, `/repos/${owner}/${name}/commits/${gateSha}/status`).catch(() => ({ statuses: [] })) : Promise.resolve({ statuses: [] }),
     pull.merged_at ? Promise.resolve([] as Review[]) : installationRequest<Review[]>(config, installationId, `/repos/${owner}/${name}/pulls/${pull.number}/reviews?per_page=100`).catch(() => []),
     pull.merged_at ? Promise.resolve(null as BranchProtection | null) : installationRequest<BranchProtection>(config, installationId, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}/protection`).catch(() => null),
     pull.merged_at ? Promise.resolve([] as BranchRule[]) : installationRequest<BranchRule[]>(config, installationId, `/repos/${owner}/${name}/rules/branches/${encodeURIComponent(stage.target)}`).catch(() => []),
   ]));
-  const deploymentStates = pull.merged_at && sha ? await phase('deploy', () => reconcileStageDeployments(environment, sql, row, workflow, stageIndex, source, stage.target, sha, phase)) : [];
+  const deploymentStates = pull.merged_at && gateSha ? await phase('deploy', () => reconcileStageDeployments(environment, sql, row, workflow, stageIndex, source, stage.target, gateSha, phase)) : [];
   const observedChecks = runs.check_runs.length || statuses.statuses.length
     ? summarizeGitHubChecks(runs.check_runs, statuses.statuses)
     : { state: 'success' as const, passed: 0, total: 0 };
   const checks = mergeChecksWithDeployments(observedChecks, deploymentStates);
   const requiredApprovals = requiredApprovalsFromProtection(protection, rules);
   const approvals = reviews.filter(review => review.state === 'APPROVED').length;
-  await phase('write', () => sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${workflow.repository}, ${stage.source}, ${stage.target}, ${pull.number}, ${pull.merged_at ? 'merged' : pull.state}, ${pull.merged_at || null}, ${sha || null}, ${checks.state}, ${checks.passed}, ${checks.total}, ${approvals}, ${requiredApprovals}, ${pull.mergeable ?? null}, ${pull.mergeable_state || null}, ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, head_sha = EXCLUDED.head_sha, checks_state = EXCLUDED.checks_state, checks_passed = EXCLUDED.checks_passed, checks_total = EXCLUDED.checks_total, approvals = EXCLUDED.approvals, required_approvals = EXCLUDED.required_approvals, mergeable = EXCLUDED.mergeable, mergeable_state = EXCLUDED.mergeable_state, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`);
+  await phase('write', () => sql`INSERT INTO workflow_stage_states (user_id, workflow_id, stage_index, stage_id, repository, source, target, pull_number, pull_state, merged_at, head_sha, gate_sha, checks_state, checks_passed, checks_total, approvals, required_approvals, mergeable, mergeable_state, ahead_by, last_event) VALUES (${row.user_id}, ${workflow.id}, ${stageIndex}, ${stageId}, ${workflow.repository}, ${stage.source}, ${stage.target}, ${pull.number}, ${pull.merged_at ? 'merged' : pull.state}, ${pull.merged_at || null}, ${sha || null}, ${gateSha || null}, ${checks.state}, ${checks.passed}, ${checks.total}, ${approvals}, ${requiredApprovals}, ${pull.mergeable ?? null}, ${pull.mergeable_state || null}, ${comparison.ahead_by}, ${eventName || null}) ON CONFLICT (user_id, workflow_id, stage_id, source) DO UPDATE SET stage_index = EXCLUDED.stage_index, pull_number = EXCLUDED.pull_number, pull_state = EXCLUDED.pull_state, merged_at = EXCLUDED.merged_at, head_sha = EXCLUDED.head_sha, gate_sha = EXCLUDED.gate_sha, checks_state = EXCLUDED.checks_state, checks_passed = EXCLUDED.checks_passed, checks_total = EXCLUDED.checks_total, approvals = EXCLUDED.approvals, required_approvals = EXCLUDED.required_approvals, mergeable = EXCLUDED.mergeable, mergeable_state = EXCLUDED.mergeable_state, ahead_by = EXCLUDED.ahead_by, last_event = EXCLUDED.last_event, updated_at = now()`);
   const before = previous[0];
   if (!before || before.pull_number !== pull.number) await phase('write', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:pull:${pull.number}`, 'pull-detected', `已发现 PR #${pull.number}`, stageId, stage.target));
   if (before?.pull_state !== (pull.merged_at ? 'merged' : pull.state) && pull.merged_at) {
@@ -2131,21 +2356,25 @@ async function reconcileStageWork(environment: Record<string, string | undefined
     const stageSnapshot = { source: stage.source, target: stage.target, stageId };
     await phase('write', () => sql`INSERT INTO workflow_runs (user_id, workflow_id, version, stage_index, stage_id, source, target, stage_snapshot, pull_number) VALUES (${row.user_id}, ${workflow.id}, ${versionRow[0]?.version || 1}, ${stageIndex}, ${stageId}, ${source}, ${stage.target}, ${sql.json(stageSnapshot)}, ${pull.number})`);
   }
-  if (before?.checks_state !== checks.state && ['success', 'failure'].includes(checks.state)) await phase('write', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:checks:${sha}:${checks.state}`, `checks-${checks.state}`, checks.state === 'success' ? 'Actions 已全绿' : 'Actions 失败，需要处理', stageId, stage.target));
+  if (before?.checks_state !== checks.state && ['success', 'failure'].includes(checks.state)) await phase('write', () => recordWorkflowStageEvent(sql, row.user_id, workflow.id, stageIndex, source, `${workflow.id}:${stageId}:${source}:checks:${gateSha}:${checks.state}`, `checks-${checks.state}`, checks.state === 'success' ? 'Actions 已全绿' : 'Actions 失败，需要处理', stageId, stage.target));
   const route = `${stage.source} → ${stage.target}`;
   if (before?.checks_state !== checks.state && ['success', 'failure'].includes(checks.state)) {
-    await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:checks:${sha}:${checks.state}`, kind: `checks-${checks.state}`, title: checks.state === 'failure' ? 'Actions 失败，需要处理' : 'Actions 已全绿', body: `${workflow.repository} · ${route}`, url: `/` }));
+    await phase('notify', () => stagePush(workflow, environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:checks:${gateSha}:${checks.state}`, kind: `checks-${checks.state}`, title: checks.state === 'failure' ? 'Actions 失败，需要处理' : 'Actions 已全绿', body: `${workflow.repository} · ${route}`, url: `/` }));
   }
   const runState = workflowRunCompletionState(Boolean(pull.merged_at), checks.state);
   if (runState) await phase('write', () => sql`UPDATE workflow_runs SET state = ${runState}, completed_at = now() WHERE user_id = ${row.user_id} AND workflow_id = ${workflow.id} AND pull_number = ${pull.number} AND state = 'active'`);
   if (!pull.merged_at && requiredApprovals > 0 && approvals >= requiredApprovals && (!before || before.approvals < before.required_approvals)) {
-    await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:merge-ready:${pull.number}:${pull.head.sha}`, kind: 'merge-ready', title: 'PR 已满足合并条件', body: `${workflow.repository} · ${route} · PR #${pull.number}`, url: `/` }));
+    await phase('notify', () => stagePush(workflow, environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:merge-ready:${pull.number}:${pull.head.sha}`, kind: 'merge-ready', title: 'PR 已满足合并条件', body: `${workflow.repository} · ${route} · PR #${pull.number}`, url: `/` }));
   }
   const unlocked = stageIsUnlocked(workflow, stageIndex, preceding);
   if (pull.merged_at && unlocked && comparison.ahead_by > 0 && (before?.ahead_by || 0) === 0) {
-    await phase('notify', () => sendPushNotifications(environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:${pull.number}`, kind: 'new-pr-ready', title: '有新提交，可以创建新 PR', body: `${workflow.repository} · ${route}`, url: '/' }));
+    await phase('notify', () => stagePush(workflow, environment, sql, row.user_id, { eventKey: `${workflow.id}:${stageIndex}:${source}:new-pr:${pull.number}`, kind: 'new-pr-ready', title: '有新提交，可以创建新 PR', body: `${workflow.repository} · ${route}`, url: '/' }));
   }
   if (comparison.ahead_by > 0 && comparisonHeadSha) await phase('queue', () => scheduleServerAutoCreate(environment, sql, row, workflow, stageIndex, source, comparisonHeadSha));
+  // Phase 6 "advance on merge": once this step is merged and its post-merge gate (deployments are
+  // folded into checks.state) is green, record the advancement. The next step's own automation
+  // switches decide what happens there; this action only confirms and audits the advance.
+  if (pull.merged_at && checks.state === 'success') await phase('queue', () => scheduleServerAdvance(sql, row, workflow, stageIndex, source));
   // Only an open pull request can be merged, and the gate verdict is pinned to the head sha just stored.
   // The gate goes in already computed, so a wait that only a later event can end costs no second read.
   if (!pull.merged_at && pull.state === 'open' && pull.head.sha) await phase('queue', () => scheduleServerAutoMerge(sql, row, workflow, stageIndex, source, pull.number, pull.head.sha, { checksState: checks.state, approvals, requiredApprovals, mergeable: pull.mergeable ?? null, mergeableState: pull.mergeable_state || '' }));
@@ -2228,7 +2457,7 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
   try {
     // The installation quota is flat and shared by every sweep, so the only way to attribute a burn
     // afterwards is to store what each sweep spent alongside the stages it settled.
-    const githubBudget = { calls: 0, ms: 0, phases: {} as Record<string, number>, pending: new Set<StagePhaseTracker>() };
+    const githubBudget = { calls: 0, ms: 0, etagStable: 0, etagChanged: 0, etagFirstSeen: 0, phases: {} as Record<string, number>, pending: new Set<StagePhaseTracker>() };
     const pruneAt = performance.now();
     for (const item of workflowsToReconcile) await pruneStaleWorkflowStageData(sql, item.row.user_id, item.workflow);
     githubBudget.phases.prune = Math.round(performance.now() - pruneAt);
@@ -2250,12 +2479,15 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
     })));
     githubBudget.calls += routes.stats.calls;
     githubBudget.ms += routes.stats.totalMs;
+    githubBudget.etagStable += routes.stats.etagStable;
+    githubBudget.etagChanged += routes.stats.etagChanged;
+    githubBudget.etagFirstSeen += routes.stats.etagFirstSeen;
     const flatTasks = routes.value.flat();
     const routesMs = Math.round(performance.now() - routesAt);
     githubBudget.phases.routes = routesMs;
     // Recording the intent before the work means a sweep that is killed mid-flight still shows how
     // much it meant to do, instead of looking like a sweep that found nothing.
-    await sql`UPDATE reconciliation_runs SET stages_total = ${flatTasks.length} WHERE id = ${runId}`;
+    await sql`UPDATE reconciliation_runs SET stages_total = ${flatTasks.length} WHERE id = ${runId} AND state = 'running'`;
     let reconciled = 0;
     let failed = 0;
     let firstFailure: unknown;
@@ -2298,6 +2530,17 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
       outcome: raced.outcome,
       total: durationMs,
     }));
+    if (githubBudget.etagStable + githubBudget.etagChanged + githubBudget.etagFirstSeen > 0) {
+      console.log(etagTelemetryLine({
+        scope: 'sweep',
+        trigger,
+        repository: repository || '*',
+        calls: githubBudget.calls,
+        stable: githubBudget.etagStable,
+        changed: githubBudget.etagChanged,
+        firstSeen: githubBudget.etagFirstSeen,
+      }));
+    }
     const errorMessage = firstFailure ? String(firstFailure instanceof Error ? firstFailure.message : firstFailure).slice(0, 800) : null;
     if (raced.outcome === 'deferred') {
       // The stages the deadline abandoned are the ones whose time is missing, so the phase they are
@@ -2306,19 +2549,19 @@ async function reconcileWorkflowScope(environment: Record<string, string | undef
       const breakdown = Object.keys(pending).length ? { ...githubBudget.phases, pending } : githubBudget.phases;
       // Closing the row here is the whole point: a deferred sweep used to stay 'running' until the
       // scheduled sweep reaped it, which read as in flight for minutes and hid the deferral.
-      await sql`UPDATE reconciliation_runs SET state = ${deferredRunState(reconciled, failed, flatTasks.length)}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, github_calls = ${githubBudget.calls}, github_ms = ${Math.round(githubBudget.ms)}, phase_ms = ${sql.json(breakdown)}, error_message = ${errorMessage || RECONCILIATION_DEFERRED_MESSAGE}, finished_at = now() WHERE id = ${runId}`;
+      await sql`UPDATE reconciliation_runs SET state = ${deferredRunState(reconciled, failed, flatTasks.length)}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, github_calls = ${githubBudget.calls}, github_ms = ${Math.round(githubBudget.ms)}, phase_ms = ${sql.json(breakdown)}, error_message = ${errorMessage || RECONCILIATION_DEFERRED_MESSAGE}, finished_at = now() WHERE id = ${runId} AND state = 'running'`;
       await markPending(true);
       return { reconciled, outcome: 'deferred' as const };
     }
     const finalState = reconciliationState(failed, reconciled);
-    await sql`UPDATE reconciliation_runs SET state = ${finalState}, stages_total = ${flatTasks.length}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, github_calls = ${githubBudget.calls}, github_ms = ${Math.round(githubBudget.ms)}, phase_ms = ${sql.json(githubBudget.phases)}, error_message = ${errorMessage}, finished_at = now() WHERE id = ${runId}`;
+    await sql`UPDATE reconciliation_runs SET state = ${finalState}, stages_total = ${flatTasks.length}, stages_reconciled = ${reconciled}, stages_failed = ${failed}, duration_ms = ${durationMs}, github_calls = ${githubBudget.calls}, github_ms = ${Math.round(githubBudget.ms)}, phase_ms = ${sql.json(githubBudget.phases)}, error_message = ${errorMessage}, finished_at = now() WHERE id = ${runId} AND state = 'running'`;
     await markPending(failed > 0);
     if (failed > 0 && reconciled === 0) throw firstFailure || new Error('Reconciliation failed');
     return { reconciled, outcome: 'completed' as const };
   } catch (error) {
     const durationMs = Date.now() - startedAt;
     await markPending(true);
-    await sql`UPDATE reconciliation_runs SET state = 'failure', duration_ms = ${durationMs}, error_message = ${String(error instanceof Error ? error.message : error).slice(0, 800)}, finished_at = now() WHERE id = ${runId}`.catch(() => undefined);
+    await sql`UPDATE reconciliation_runs SET state = 'failure', duration_ms = ${durationMs}, error_message = ${String(error instanceof Error ? error.message : error).slice(0, 800)}, finished_at = now() WHERE id = ${runId} AND state = 'running'`.catch(() => undefined);
     throw error;
   } finally {
     clearInterval(renewal);
@@ -2562,7 +2805,7 @@ export async function listWorkflowStageStates(environment: Record<string, string
     visibleWorkflowRows(sql, user.id, reads),
   ]);
   const workflowById = new Map(workflowRows.flatMap(row => {
-    const workflow = storedWorkflowFromPayload(row.payload);
+    const workflow = trackedWorkflowFromRow(row);
     return workflow ? [[workflow.id, ensureStageIds(workflow)] as const] : [];
   }));
   return rows.map(row => ({
@@ -2612,7 +2855,7 @@ export async function listWorkflowConfigurationWarnings(environment: Record<stri
   const rows = await visibleWorkflowRows(sql, user.id, reads);
   // An archived workflow is not being shipped, so a gate it never reaches is not a warning worth
   // showing — and checking it would spend two GitHub calls per workflow to say so.
-  const stored = rows.map(row => storedWorkflowFromPayload(row.payload)).filter((workflow): workflow is StoredWorkflow => Boolean(workflow) && !workflow!.archived);
+  const stored = rows.map(row => trackedWorkflowFromRow(row)).filter((workflow): workflow is StoredWorkflow => Boolean(workflow) && !workflow!.archived);
   if (!identity.installationId) return stored.flatMap(workflow => workflowConfigurationWarnings(workflow, { actionsAvailable: false, workflows: [], environmentsAvailable: false, environments: [] }));
   const config = parseGithubAppConfig(environment);
   const results = await Promise.all(stored.map(async workflow => {
@@ -2640,7 +2883,7 @@ export async function listActionableStages(environment: Record<string, string | 
   const workflows = await visibleWorkflowRows(sql, user.id, reads);
   const states = await visibleStageStateRows(sql, user.id, reads);
   return workflows.flatMap(row => {
-    const stored = storedWorkflowFromPayload(row.payload);
+    const stored = trackedWorkflowFromRow(row);
     const workflow = stored && !stored.archived ? ensureStageIds(stored) : undefined;
     if (!workflow) return [];
     return workflow.stages.reduce<ActionableStage[]>((items, stage, stageIndex) => {
@@ -2663,7 +2906,7 @@ export async function listRecoveryStatuses(environment: Record<string, string | 
   const policyByWorkflow = new Map<string, RecoveryPolicy>();
   const stageIndexByIdentity = new Map<string, number>();
   for (const row of workflowRows) {
-    const wf = storedWorkflowFromPayload(row.payload);
+    const wf = trackedWorkflowFromRow(row);
     if (!wf || wf.archived) continue;
     const normalized = ensureStageIds(wf);
     if (normalized.recoveryPolicy) policyByWorkflow.set(normalized.id, normalized.recoveryPolicy);
@@ -2696,8 +2939,10 @@ export async function listRecoveryStatuses(environment: Record<string, string | 
 // Deriving it a second time from `MAX(workflow_versions.version)` would be a second authority that can
 // disagree with the one the optimistic lock reads, and history that numbers a save differently from the
 // row it snapshots is worse than no history.
+// `snapshot` has no reader anywhere in the codebase (migration 040 audit), and it copies the whole
+// workflow on every save, so new rows stop carrying it; existing rows keep their data for history.
 async function saveWorkflowVersion(sql: any, userId: string, workflow: StoredWorkflow) {
-  await sql`INSERT INTO workflow_versions (user_id, workflow_id, version, snapshot) VALUES (${userId}, ${workflow.id}, ${workflow.version}, ${sql.json(workflow)})`;
+  await sql`INSERT INTO workflow_versions (user_id, workflow_id, version) VALUES (${userId}, ${workflow.id}, ${workflow.version})`;
 }
 
 export async function recordWorkflowRun(environment: Record<string, string | undefined>, identity: { login: string; githubUserId?: number; installationId?: string }, workflowId: string, stageIndex: number, source: string, pullNumber: number) {
@@ -2812,7 +3057,7 @@ export async function listWorkflowTimeline(environment: Record<string, string | 
   ]);
   const workflows = await visibleWorkflowRows(sql, user.id, reads);
   const workflowMap = new Map(workflows.map(row => {
-    const wf = storedWorkflowFromPayload(row.payload);
+    const wf = trackedWorkflowFromRow(row);
     return [row.id, wf] as const;
   }));
   const timeline: TimelineEntry[] = [];

@@ -59,7 +59,7 @@ export function projectedStageStatus(state?: ProjectedStageState | null): Projec
       mergeableState: state.mergeableState || undefined,
     };
   }
-  if (state.pullState === 'merged') return { kind: 'merged', projected: true, pr: pull, checks };
+  if (state.pullState === 'merged') return { kind: 'merged', projected: true, pr: pull, checks, aheadBy: state.aheadBy || 0 };
   if (state.pullState === 'closed') return { kind: 'closed', projected: true, pr: pull };
   return { kind: 'not-created', projected: true, aheadBy: state.aheadBy || 0 };
 }
