@@ -1,0 +1,21 @@
+# Migration convention baseline — known violations that predate the CI gate.
+#
+# Format: <file>:<check-id>   # reason
+#
+# Every entry below is a historical exception frozen on 2026-11-12, when
+# tools/check-migrations.sh was wired into CI. They are NOT permission to keep
+# violating the convention: MIGRATION_CONVENTION.md §3 says `-- Date:` is set
+# once at file creation and is never edited afterwards, and AGENTS.md rule 7
+# forbids editing an already-applied migration. Fixing these would mean editing
+# applied migrations, so they stay exempted instead.
+#
+# New migrations must be clean. Removing an entry requires fixing the file it
+# points to; an entry that matches nothing is reported as a stale warning.
+
+041_stage_gate_sha.sql:numbering   # number 041 is claimed twice: this file (2026-10-30) and 041_account_deletion_fk_indexes.sql (2026-11-03). Both are already applied; renaming an applied migration is out of bounds, so the duplicate is recorded instead of resolved.
+041_stage_gate_sha.sql:header-date # header carries only a date (2026-10-30), no HH:mm.
+042_payload_nullable.sql:header-date
+043_version_not_null.sql:header-date
+044_drop_workflow_payload.sql:header-date
+045_mute_column.sql:header-date
+046_workflow_versions_snapshot_nullable.sql:header-date

@@ -23,6 +23,12 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+
+      # Migration naming/numbering/header gate (tools/check-migrations.sh). Historical
+      # violations are frozen in tools/migration-baseline.txt; new migrations must be clean.
+      - name: Check migration conventions
+        run: npm run check:migrations
+
       - run: npm run lint
       - run: npm test
       - run: npm run build

@@ -253,10 +253,11 @@ Agent Card + JSON-RPC（`tasks/send`、`sendSubscribe`、`get`、`cancel`）+ SS
 
 - `ci.yml`：PR + push(dev/main)，步骤 `npm run lint` → `npm test` → `npm run build`，`cancel-in-progress` ✅。
 - **P0 级门禁缺失（本版新增）**：
-  - **CI 不做任何类型检查** ✅：无 `vite.config.*`，`lint` 即 `vite build`（esbuild 剥类型），`build` 入口只有 `index.html → src/main.ts`，**`api/` 全部不进构建**，CI 无 `tsc --noEmit`（而 `AGENTS.md:25`、`README.md:32` 把它写成人工动作）→ `api/` 约 5.2k 行的类型错误 CI 永不发现（当前恰好干净）。
-  - **部署不被测试门禁** ✅：`ci.yml` 与两个 deploy workflow 都在 `push: dev/main` 独立触发，无 `needs:` / `workflow_run:` → 单测红的提交照样直上 production。
-  - CI 把 vite build 跑两遍（`lint` + `build`），纯浪费。
-  - **e2e 完全不进 CI**：`ci.yml` 无 Playwright 步骤，30 个浏览器用例只在本地。
+  - ~~**CI 不做任何类型检查**~~ **已于 2026-11-12 核实为过时结论**：`package.json` 的 `lint` 现在是 `tsc --noEmit`（不再是 `vite build`），`ci.yml` 第 5 步 `Run npm run lint` 实测 success，`api/` 的类型错误 CI 现在能发现。原始论断「无 `vite.config.*`，`lint` 即 `vite build`」描述的是更早的 `package.json`，当时成立、现已失效。
+  - **部署不被测试门禁** ✅（仍成立）：`ci.yml` 与两个 deploy workflow 都在 `push: dev/main` 独立触发，无 `needs:` / `workflow_run:` → 单测红的提交照样直上 production。
+  - ~~CI 把 vite build 跑两遍（`lint` + `build`），纯浪费。~~ **已随 `lint` 改为 `tsc --noEmit` 消失**；现在是 `tsc` + `build` 各一遍，无重复。
+  - **e2e 完全不进 CI**（仍成立）：`ci.yml` 无 Playwright 步骤，浏览器用例只在本地。
+  - 迁移规范检查器**已于 2026-11-12 接入 CI**（`npm run check:migrations`，`ci.yml` 第 6 步）；历史 7 条违规冻结在 `tools/migration-baseline.txt`，新迁移零违规才通过。
 - **P1 双平台不同构（本版新增）**：`deploy-cloudflare-pages.yml:29-30` 注入 `vars.VITE_AUTH_ORIGIN` 且**无存在性校验**，`src/lib/github.ts:2` 缺失时回落空串 → 镜像把 `/api` 打到 Pages 自身（无 API），静默产出坏站；`deploy-vercel.yml` 根本不传该变量，两平台构建产物来源不同构。
 - `reconcile-pr-helper.yml`：缺 `PR_HELPER_CRON_SECRET` 时 `exit 0` + warning（`:36`）→ **绿灯但零对账**（fail-open）；该 workflow 无 `concurrency:` 块（另 4 个都有）；三个 URL 硬编码 `pr-helper-ten.vercel.app`，`workflow_dispatch` 从任意分支都会打生产端点；`*/10` 兜底已被自陈实测中位数拖到 46 分钟（与 030 头部一致），现 `SWEEPS=1` 单扫，重入靠 DB 租约。
 - `rollback-frontend-deployment.yml`：**确认可执行且有真门禁** ✅（本版复核）——仅 `workflow_dispatch`、三输入 required、job 绑定 `environment:`、脚本校验 run 为 `success` + `name` 匹配 + `head_branch==main` + `https` + `*.vercel.app`/`*.pages.dev` 后缀 + 仅 production。人工确认只依赖 Environment 审批规则（不可静态确认）。
