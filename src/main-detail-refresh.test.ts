@@ -23,8 +23,8 @@ describe('background refresh', () => {
   // Returning to the tab is what replaces the clock, so losing either listener would leave the board
   // showing whatever it had when the user last looked at it.
   it('refreshes each screen when the tab becomes visible again', () => {
-    expect(source).toContain("window.addEventListener('focus', () => { if (screen === 'overview') void refreshOverviewSnapshot(); })");
-    expect(source).toContain("if (screen === 'detail' && !detailStatusRefreshing) void refreshStatuses();");
+    expect(source).toContain("window.addEventListener('focus', () => { if (uiState.screen === 'overview') void refreshOverviewSnapshot(); })");
+    expect(source).toContain("if (uiState.screen === 'detail' && !uiState.detailStatusRefreshing) void refreshStatuses();");
     expect(source.match(/document\.addEventListener\('visibilitychange'/g) || []).toHaveLength(2);
   });
 
@@ -34,20 +34,20 @@ describe('background refresh', () => {
   // in the listeners so a refresh the user asked for is never the one that gets dropped.
   it('drops a return-to-tab refresh that duplicates one already in flight', () => {
     const poll = body('refreshStatuses');
-    expect(poll).toContain('detailStatusRefreshing = true;');
-    expect(poll).toMatch(/finally \{ detailStatusRefreshing = false;/);
+    expect(poll).toContain('uiState.detailStatusRefreshing = true;');
+    expect(poll).toMatch(/finally \{ uiState.detailStatusRefreshing = false;/);
     // Only the two return-to-tab listeners are guarded. A repository sync also refreshes the detail
     // screen, and that one the user asked for.
     const listeners = source.match(/(?:window|document)\.addEventListener\('(?:focus|visibilitychange)'[^\n]*refreshStatuses[^\n]*/g) || [];
     expect(listeners).toHaveLength(2);
-    expect(listeners.filter(listener => !listener.includes('!detailStatusRefreshing'))).toEqual([]);
+    expect(listeners.filter(listener => !listener.includes('!uiState.detailStatusRefreshing'))).toEqual([]);
   });
 
   // Entering the overview must still load once, but `overview()` runs on every render, so the guard is
   // what keeps a re-render from issuing a second read.
   it('loads the overview once per visit rather than once per render', () => {
-    expect(source).toContain('if (!overviewSnapshotRefreshed) {');
-    expect(source).toContain('overviewSnapshotRefreshed = false;');
+    expect(source).toContain('if (!uiState.overviewSnapshotRefreshed) {');
+    expect(source).toContain('uiState.overviewSnapshotRefreshed = false;');
   });
 });
 
@@ -75,7 +75,7 @@ describe('detail staleness while revalidating', () => {
   // Entering the page used to blank every row until several GitHub round trips per stage completed.
   // The server projection already loaded for the board paints the page first.
   it('prefills statuses from the server projection when entering the detail screen', () => {
-    expect(source).toContain('statuses = workflowState.active ? projectedDetailStatuses(workflowState.active) : null');
+    expect(source).toContain('uiState.statuses = workflowState.active ? projectedDetailStatuses(workflowState.active) : null');
     expect(source).toMatch(/function projectedDetailStatuses[\s\S]{0,400}projectedStageStatus/);
   });
 
@@ -83,7 +83,7 @@ describe('detail staleness while revalidating', () => {
   // the explicit button bypasses it through the force argument.
   it('skips an automatic live read inside the TTL but lets a forced one through', () => {
     const refresh = body('refreshStatuses');
-    expect(refresh).toContain('if (!force && workflowState.active && !detailRefreshDueAt(lastDetailLiveRead.get(workflowState.active.id), Date.now())) return;');
+    expect(refresh).toContain('if (!force && workflowState.active && !detailRefreshDueAt(uiState.lastDetailLiveRead.get(workflowState.active.id), Date.now())) return;');
     const explicit = body('refreshDetailStatuses');
     expect(explicit).toContain('refreshStatuses(false, false, true)');
   });
