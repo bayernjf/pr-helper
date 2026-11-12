@@ -19,6 +19,7 @@ import en from './lib/translations/en';
 import zh from './lib/translations/zh';
 import { app, escape } from './app/dom';
 import { actionQueueRequestQueue, projection } from './app/state/projection';
+import { sessionState } from './app/state/session';
 import { currentTheme, applyTheme, toggleTheme } from './app/ui/theme';
 import { showToast } from './app/ui/toast';
 import { showOperationAuditDialog } from './app/ui/audit';
@@ -35,8 +36,6 @@ const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
 const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
 const CLOUD_SYNC_DEVICE_ID_KEY = 'pr-helper-cloud-sync-device-id';
 const localViteWithoutApi = import.meta.env.DEV && !import.meta.env.VITE_AUTH_ORIGIN;
-let token = sessionStorage.getItem('github-token') || '';
-let repos: Repo[] = [];
 let workflows = loadWorkflows();
 let active: Workflow | null = workflows[0] || null;
 let editorDraft: { repository: string; name: string; source: string; target: string } = { repository: '', name: '', source: '', target: '' };
@@ -50,11 +49,6 @@ let stepFormOpen = false;
 let returnHighlight: string | null = null;
 let workflowMutationRevision = 0;
 let screen: Screen = 'overview';
-let branches: string[] = [];
-let repositoryActionWorkflows: GitHubActionsWorkflow[] = [];
-let repositoryEnvironments: string[] = [];
-let repositoryActionsLoaded = false;
-let repositoryEnvironmentsLoaded = false;
 let statuses: StepStatus[] | null = null;
 let refreshOnNextDetail = false;
 let overviewSnapshotRefreshed = false;
@@ -64,8 +58,6 @@ const lastDetailLiveRead = new Map<string, number>();
 let overviewRefreshOnFocusBound = false;
 let overviewScrollControlsBound = false;
 let refreshOnFocusBound = false;
-let githubInstallationSettingsUrl = '';
-let githubLogin = '';
 let cloudWorkflowStorage = false;
 let pendingLocalWorkflowSync = false;
 let cloudWorkflowSyncError = '';
@@ -443,7 +435,7 @@ function showDisconnectDialog() {
     const confirmed = dialog.returnValue === 'confirm';
     dialog.remove();
     if (!confirmed) return;
-    sessionStorage.removeItem('github-token'); token = ''; githubInstallationSettingsUrl = ''; githubLogin = ''; cloudWorkflowStorage = false;
+    sessionStorage.removeItem('github-token'); sessionState.token = ''; sessionState.githubInstallationSettingsUrl = ''; sessionState.githubLogin = ''; cloudWorkflowStorage = false;
     if (!localViteWithoutApi) await fetch(githubAppApiUrl('/api/auth/github/logout'), { method: 'POST' }).catch(() => undefined);
     connect();
   }, { once: true });
@@ -465,7 +457,7 @@ function showDeleteAccountDialog() {
     try {
       const response = await fetch(githubAppApiUrl('/api/account'), { method: 'DELETE' });
       if (!response.ok) throw new Error(await response.text());
-      sessionStorage.removeItem('github-token'); token = ''; githubInstallationSettingsUrl = ''; githubLogin = ''; cloudWorkflowStorage = false;
+      sessionStorage.removeItem('github-token'); sessionState.token = ''; sessionState.githubInstallationSettingsUrl = ''; sessionState.githubLogin = ''; cloudWorkflowStorage = false;
       localStorage.removeItem('pr-helper-workflows'); localStorage.removeItem(GENERATION_RULES_KEY); localStorage.removeItem(PULL_REQUEST_DRAFTS_KEY);
       dialog.close();
       connect();
@@ -481,7 +473,7 @@ function showDeleteAccountDialog() {
 function showPermissionsDialog() {
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog permissions-dialog';
-  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('permissions.eyebrow')}</p><h2>${t('permissions.title')}</h2><dl class="permissions-list"><dt>${t('permissions.actions.label')}</dt><dd>${t('permissions.actions.desc')}</dd><dt>${t('permissions.contents.label')}</dt><dd>${t('permissions.contents.desc')}</dd><dt>${t('permissions.pullRequests.label')}</dt><dd>${t('permissions.pullRequests.desc')}</dd></dl><p class="meta">${t('permissions.revoke')}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('rollback.cancel')}</button>${githubInstallationSettingsUrl ? `<a href="${githubInstallationSettingsUrl}" target="_blank" class="primary">${t('permissions.manage')}</a>` : ''}</div></form>`;
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('permissions.eyebrow')}</p><h2>${t('permissions.title')}</h2><dl class="permissions-list"><dt>${t('permissions.actions.label')}</dt><dd>${t('permissions.actions.desc')}</dd><dt>${t('permissions.contents.label')}</dt><dd>${t('permissions.contents.desc')}</dd><dt>${t('permissions.pullRequests.label')}</dt><dd>${t('permissions.pullRequests.desc')}</dd></dl><p class="meta">${t('permissions.revoke')}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('rollback.cancel')}</button>${sessionState.githubInstallationSettingsUrl ? `<a href="${sessionState.githubInstallationSettingsUrl}" target="_blank" class="primary">${t('permissions.manage')}</a>` : ''}</div></form>`;
   document.body.append(dialog); dialog.showModal();
   dialog.addEventListener('close', () => dialog.remove());
 }
@@ -534,16 +526,16 @@ function showTeamsDialog() {
     });
     dialog.querySelector<HTMLSelectElement>('#team-select')?.addEventListener('change', event => { void refresh((event.target as HTMLSelectElement).value); });
     dialog.querySelector<HTMLButtonElement>('#team-member-save')?.addEventListener('click', async () => {
-      const githubLogin = dialog.querySelector<HTMLInputElement>('#team-member-login')!.value.trim();
+      const memberLogin = dialog.querySelector<HTMLInputElement>('#team-member-login')!.value.trim();
       const role = dialog.querySelector<HTMLSelectElement>('#team-member-role')!.value;
-      if (!githubLogin || !selectedTeamId) return;
-      try { await teamApi('', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'member', teamId: selectedTeamId, githubLogin, role }) }); await refresh(); }
+      if (!memberLogin || !selectedTeamId) return;
+      try { await teamApi('', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'member', teamId: selectedTeamId, githubLogin: memberLogin, role }) }); await refresh(); }
       catch (reason) { error = reason instanceof Error ? reason.message : t('toast.cloudFail.generic'); draw(); }
     });
     dialog.querySelectorAll<HTMLButtonElement>('[data-remove-member]').forEach(button => button.addEventListener('click', async () => {
-      const githubLogin = button.dataset.removeMember;
-      if (!githubLogin || !selectedTeamId) return;
-      try { await teamApi('', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'remove-member', teamId: selectedTeamId, githubLogin }) }); await refresh(); }
+      const memberLogin = button.dataset.removeMember;
+      if (!memberLogin || !selectedTeamId) return;
+      try { await teamApi('', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'remove-member', teamId: selectedTeamId, githubLogin: memberLogin }) }); await refresh(); }
       catch (reason) { error = reason instanceof Error ? reason.message : t('toast.cloudFail.generic'); draw(); }
     }));
     dialog.querySelector<HTMLButtonElement>('#team-share-workflow')?.addEventListener('click', async () => {
@@ -776,19 +768,19 @@ function connect(error = '') {
   themeToggle?.addEventListener('click', toggleTheme);
   document.querySelector('#connect-lang-toggle')?.addEventListener('click', () => { setLocale(getLocale() === 'zh' ? 'en' : 'zh'); connect(error); });
   if (requiresRemoteAuthOrigin) document.querySelector('#github-app-connect')!.addEventListener('click', event => { event.preventDefault(); const hint = document.querySelector<HTMLElement>('#github-app-hint')!; hint.hidden = false; hint.textContent = t('connect.hint.local'); });
-  document.querySelector('#connect')!.addEventListener('click', async () => { const value = document.querySelector<HTMLInputElement>('#token')!.value.trim(); try { await githubFetch(value, '/user'); token = value; sessionStorage.setItem('github-token', value); await init(); } catch (err) { connect(err instanceof Error ? err.message : t('connect.error.generic')); } });
+  document.querySelector('#connect')!.addEventListener('click', async () => { const value = document.querySelector<HTMLInputElement>('#token')!.value.trim(); try { await githubFetch(value, '/user'); sessionState.token = value; sessionStorage.setItem('github-token', value); await init(); } catch (err) { connect(err instanceof Error ? err.message : t('connect.error.generic')); } });
   document.querySelector('#connect-permissions')?.addEventListener('click', showPermissionsDialog);
 }
 
 async function restoreConnection() {
-  if (token) return init();
+  if (sessionState.token) return init();
   if (localViteWithoutApi) { connect(); return; }
   try {
     const response = await fetch(githubAppApiUrl('/api/github/session'));
     const session = await response.json() as { connected?: boolean; login?: string; installationSettingsUrl?: string };
     if (session.connected) {
-      githubInstallationSettingsUrl = session.installationSettingsUrl || '';
-      githubLogin = session.login || '';
+      sessionState.githubInstallationSettingsUrl = session.installationSettingsUrl || '';
+      sessionState.githubLogin = session.login || '';
       return init();
     }
   } catch { /* Local Vite development has no serverless API; show the development fallback. */ }
@@ -798,7 +790,7 @@ async function restoreConnection() {
 async function init() {
   app().innerHTML = `<main class="connect"><p class="eyebrow">${t('connect.eyebrow.github')}</p><h1>${t('connect.loading')}</h1></main>`;
   try {
-    repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated');
+    sessionState.repos = await githubFetch<Repo[]>(sessionState.token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated');
     cloudWorkspaceLoading = !localViteWithoutApi;
     render();
     if (cloudWorkspaceLoading) void hydrateCloudWorkspace();
@@ -816,20 +808,20 @@ async function hydrateCloudWorkspace() {
 
 async function refreshAuthorizedRepositories() {
   try {
-    repos = await githubFetch<Repo[]>(token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated');
-    const activeRepositoryRevoked = Boolean(active && !repos.some(repo => repo.full_name === active!.repository));
+    sessionState.repos = await githubFetch<Repo[]>(sessionState.token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated');
+    const activeRepositoryRevoked = Boolean(active && !sessionState.repos.some(repo => repo.full_name === active!.repository));
     render();
     if (screen === 'detail') void refreshStatuses();
-    showToast(activeRepositoryRevoked ? t('toast.repos.synced') : t('toast.repos.syncedCount', { count: repos.length }));
+    showToast(activeRepositoryRevoked ? t('toast.repos.synced') : t('toast.repos.syncedCount', { count: sessionState.repos.length }));
   } catch (err) { showToast(err instanceof Error ? err.message : t('toast.repos.error')); }
 }
 
 function openRepositoryManagement() {
-  if (!githubInstallationSettingsUrl) return;
+  if (!sessionState.githubInstallationSettingsUrl) return;
   repositoryManagementWindow?.close();
-  repositoryManagementWindow = window.open(githubInstallationSettingsUrl, 'pr-helper-github-installation', 'popup,width=960,height=780');
+  repositoryManagementWindow = window.open(sessionState.githubInstallationSettingsUrl, 'pr-helper-github-installation', 'popup,width=960,height=780');
   if (!repositoryManagementWindow) {
-    window.location.assign(githubInstallationSettingsUrl);
+    window.location.assign(sessionState.githubInstallationSettingsUrl);
     return;
   }
   showToast(t('toast.repos.hint'));
@@ -844,9 +836,9 @@ function openRepositoryManagement() {
 }
 
 function render() {
-  const manageRepositories = githubInstallationSettingsUrl ? `<button id="manage-repositories" class="account-menu-item">${t('account.manageRepos')}</button>` : '';
+  const manageRepositories = sessionState.githubInstallationSettingsUrl ? `<button id="manage-repositories" class="account-menu-item">${t('account.manageRepos')}</button>` : '';
   const operationAudit = `<button id="operation-audit" class="account-menu-item" ${cloudWorkflowStorage ? '' : 'disabled'}>${t('account.operationAudit')}</button>`;
-  const account = githubLogin ? `GitHub · @${escape(githubLogin)}` : t('account.label');
+  const account = sessionState.githubLogin ? `GitHub · @${escape(sessionState.githubLogin)}` : t('account.label');
   const push = pushConfigured ? `<button id="push-settings" class="account-menu-item" ${pushSubscribed ? `disabled title="${t('account.push.title')}"` : ''}>${pushSubscribed ? t('account.push.on') : t('account.push.off')}</button>` : '';
   const themeIcon = currentTheme === 'dark' ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3a6 6 0 0 0 12 0V9a6 6 0 0 0-6-6z"/></svg>';
   app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#"><img class="brand-mark" src="/favicon.svg" alt="" width="28" height="28" />${t('brand.name')}<span>${t('brand.suffix')}</span></a><nav aria-label="${t('nav.label')}"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">${t('nav.overview')}</button></nav><div class="topbar-actions"><button id="theme-toggle" class="theme-toggle" aria-label="${currentTheme === 'dark' ? t('theme.toLight') : t('theme.toDark')}">${themeIcon}<span>${currentTheme === 'dark' ? t('theme.light') : t('theme.dark')}</span></button><button id="lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}${operationAudit}<button id="team-settings-top" class="account-menu-item" ${cloudWorkflowStorage ? '' : 'disabled'}>${t('account.teams')}</button><button id="ai-settings-top" class="account-menu-item">${t('account.aiSettings')}</button><button id="cloud-sync-top" class="account-menu-item">${cloudSyncStatus.state === 'disabled' ? t('cloudSync.enable') : t('cloudSync.status.' + cloudSyncStatus.state)}</button><button id="disconnect" class="account-menu-item danger">${t('account.disconnect')}</button><button id="delete-account-top" class="account-menu-item danger">${t('account.deleteAccount')}</button><button id="permissions-top" class="account-menu-item">${t('account.permissions')}</button><a href="/privacy.html" class="account-menu-item" target="_blank">${t('account.privacy')}</a></div></div></div></header><section id="content"></section></main>`;
@@ -1287,7 +1279,7 @@ function overview() {
   const cloudWorkspaceNotice = cloudWorkspaceLoading ? `<section class="local-sync-notice"><div><b>${t('sync.loading.title')}</b><p>${t('sync.loading.desc')}</p></div></section>` : '';
   const storageWarning = cloudWorkflowSyncError ? `<details class="compact-notice is-error"><summary><span><b>${t('sync.warning.title')}</b><span>${t('sync.warning.desc')}</span></span><small>${t('sync.warning.detail')}</small></summary><p>${escape(cloudWorkflowSyncError)}</p></details>` : '';
   const queueWarning = projection.actionQueueError ? `<details class="compact-notice is-error"><summary><span><b>${t('overview.queue.error.title')}</b></span><small>${t('sync.warning.detail')}</small></summary><p>${escape(projection.actionQueueError)}</p></details>` : '';
-  const syncPrompt = pendingLocalWorkflowSync ? `<section class="local-sync-notice"><div><b>${t('sync.prompt.title', { count: workflows.length })}</b><p>${t('sync.prompt.desc', { login: githubLogin || '' })}</p></div><button id="sync-local-workflows" class="ghost">${t('sync.prompt.button')}</button></section>` : '';
+  const syncPrompt = pendingLocalWorkflowSync ? `<section class="local-sync-notice"><div><b>${t('sync.prompt.title', { count: workflows.length })}</b><p>${t('sync.prompt.desc', { login: sessionState.githubLogin || '' })}</p></div><button id="sync-local-workflows" class="ghost">${t('sync.prompt.button')}</button></section>` : '';
   const syncBanner = cloudWorkflowStorage ? syncHealthBanner() : '';
   const failurePanel = failureCenterPanel();
   const preflight = preflightPanel();
@@ -1690,8 +1682,8 @@ function editor() {
   const selected = active?.repository || editorDraft.repository;
   const editorName = active?.name || editorDraft.name;
   const occupiedRepositories = new Set(workflows.filter(workflow => workflow.id !== active?.id).map(workflow => workflow.repository));
-  const repositoryManagementAction = githubInstallationSettingsUrl ? `<button id="editor-manage-repositories" type="button" class="text-link editor-manage-repositories">${t('account.manageRepos')}</button>` : '';
-  content.innerHTML = `<section class="page-head"><button id="back-from-editor" class="ghost">${active ? t('editor.back.detail') : t('editor.back.overview')}</button><p class="eyebrow">${t('editor.eyebrow')}</p><h1>${active ? t('editor.title.edit') : t('editor.title.new')}</h1><p>${t('editor.subtitle')}</p></section><section class="editor-layout"><section class="panel editor-panel"><label>${t('editor.label.name')}<input id="flow-name" value="${escape(editorName)}" placeholder="${t('editor.placeholder.name')}" /></label><label>${t('editor.label.repo')}<select id="repo"><option value="">${t('editor.repo.placeholder')}</option>${repos.map(repo => { const occupied = occupiedRepositories.has(repo.full_name); return `<option value="${repo.full_name}" ${repo.full_name === selected ? 'selected' : ''} ${occupied ? 'disabled' : ''}>${repo.full_name}${repo.private ? t('editor.repo.private') : ''}${occupied ? t('editor.repo.used') : ''}</option>`; }).join('')}</select></label><div id="step-form">${selected ? `<p class="meta">${t('editor.branch.loading')}</p>` : `<div class="editor-repository-help"><p class="meta">${t('editor.branch.hint')}</p>${repositoryManagementAction}</div>`}</div></section><aside id="draft" class="panel draft">${renderDraft()}</aside></section>`;
+  const repositoryManagementAction = sessionState.githubInstallationSettingsUrl ? `<button id="editor-manage-repositories" type="button" class="text-link editor-manage-repositories">${t('account.manageRepos')}</button>` : '';
+  content.innerHTML = `<section class="page-head"><button id="back-from-editor" class="ghost">${active ? t('editor.back.detail') : t('editor.back.overview')}</button><p class="eyebrow">${t('editor.eyebrow')}</p><h1>${active ? t('editor.title.edit') : t('editor.title.new')}</h1><p>${t('editor.subtitle')}</p></section><section class="editor-layout"><section class="panel editor-panel"><label>${t('editor.label.name')}<input id="flow-name" value="${escape(editorName)}" placeholder="${t('editor.placeholder.name')}" /></label><label>${t('editor.label.repo')}<select id="repo"><option value="">${t('editor.repo.placeholder')}</option>${sessionState.repos.map(repo => { const occupied = occupiedRepositories.has(repo.full_name); return `<option value="${repo.full_name}" ${repo.full_name === selected ? 'selected' : ''} ${occupied ? 'disabled' : ''}>${repo.full_name}${repo.private ? t('editor.repo.private') : ''}${occupied ? t('editor.repo.used') : ''}</option>`; }).join('')}</select></label><div id="step-form">${selected ? `<p class="meta">${t('editor.branch.loading')}</p>` : `<div class="editor-repository-help"><p class="meta">${t('editor.branch.hint')}</p>${repositoryManagementAction}</div>`}</div></section><aside id="draft" class="panel draft">${renderDraft()}</aside></section>`;
   document.querySelector('#back-from-editor')!.addEventListener('click', () => { if (!active) editorDraft = { repository: '', name: '', source: '', target: '' }; goTo('back'); });
   document.querySelector<HTMLInputElement>('#flow-name')!.addEventListener('input', event => { if (!active) editorDraft.name = (event.target as HTMLInputElement).value; });
   document.querySelector('#editor-manage-repositories')?.addEventListener('click', openRepositoryManagement);
@@ -1720,15 +1712,15 @@ async function loadBranches(repository: string) {
   try {
     const { owner, name } = parseRepository(repository);
     const [branchData, actions, environments] = await Promise.all([
-      githubFetch<{ name: string }[]>(token, `/repos/${owner}/${name}/branches?per_page=100`),
-      githubFetch<{ workflows: GitHubActionsWorkflow[] }>(token, `/repos/${owner}/${name}/actions/workflows?per_page=100`).then(data => ({ loaded: true, data })).catch(() => ({ loaded: false, data: { workflows: [] as GitHubActionsWorkflow[] } })),
-      githubFetch<{ environments: { name: string }[] }>(token, `/repos/${owner}/${name}/environments?per_page=100`).then(data => ({ loaded: true, data })).catch(() => ({ loaded: false, data: { environments: [] as { name: string }[] } })),
+      githubFetch<{ name: string }[]>(sessionState.token, `/repos/${owner}/${name}/branches?per_page=100`),
+      githubFetch<{ workflows: GitHubActionsWorkflow[] }>(sessionState.token, `/repos/${owner}/${name}/actions/workflows?per_page=100`).then(data => ({ loaded: true, data })).catch(() => ({ loaded: false, data: { workflows: [] as GitHubActionsWorkflow[] } })),
+      githubFetch<{ environments: { name: string }[] }>(sessionState.token, `/repos/${owner}/${name}/environments?per_page=100`).then(data => ({ loaded: true, data })).catch(() => ({ loaded: false, data: { environments: [] as { name: string }[] } })),
     ]);
-    branches = branchData.map(item => item.name);
-    repositoryActionWorkflows = actions.data.workflows.filter(workflow => workflow.state === 'active');
-    repositoryActionsLoaded = actions.loaded;
-    repositoryEnvironments = environments.data.environments.map(environment => environment.name);
-    repositoryEnvironmentsLoaded = environments.loaded;
+    sessionState.branches = branchData.map(item => item.name);
+    sessionState.repositoryActionWorkflows = actions.data.workflows.filter(workflow => workflow.state === 'active');
+    sessionState.repositoryActionsLoaded = actions.loaded;
+    sessionState.repositoryEnvironments = environments.data.environments.map(environment => environment.name);
+    sessionState.repositoryEnvironmentsLoaded = environments.loaded;
     renderStepForm(repository);
   } catch (err) { form.innerHTML = `<p class="error">${escape(err instanceof Error ? err.message : t('editor.error.branches'))}</p>`; }
 }
@@ -1737,14 +1729,14 @@ function renderStepForm(repository: string) {
   stageRouteEditIndex = null;
   const last = active?.repository === repository ? active.stages.at(-1) : undefined;
   const isNewDraft = !active && editorDraft.repository === repository;
-  const source = (isNewDraft && editorDraft.source) || branches.find(branch => /^(feature|fix)\//.test(branch) && !active?.stages.some(stage => stage.source === branch)) || last?.target || branches.find(branch => branch.startsWith('feature/')) || branches[0] || '';
-  const target = (isNewDraft && editorDraft.target) || branches.find(branch => branch === 'dev') || branches.find(branch => branch === 'main') || branches.find(branch => branch !== source) || '';
+  const source = (isNewDraft && editorDraft.source) || sessionState.branches.find(branch => /^(feature|fix)\//.test(branch) && !active?.stages.some(stage => stage.source === branch)) || last?.target || sessionState.branches.find(branch => branch.startsWith('feature/')) || sessionState.branches[0] || '';
+  const target = (isNewDraft && editorDraft.target) || sessionState.branches.find(branch => branch === 'dev') || sessionState.branches.find(branch => branch === 'main') || sessionState.branches.find(branch => branch !== source) || '';
   const dependencyOptions = active?.repository === repository && active.stages.length
     ? `<fieldset class="route-dependencies"><legend>${t('editor.dependencies.label')}</legend><small>${t('editor.dependencies.desc')}</small><div>${active.stages.map((stage, index) => `<label><input type="checkbox" name="wait-for-route" value="${index}" /><span>${escape(stage.source)} → ${escape(stage.target)}</span></label>`).join('')}</div></fieldset>`
     : '';
   const deploymentSettings = active?.repository === repository ? renderDeploymentSettings() : '';
   const recoveryPolicySection = active?.repository === repository ? renderRecoveryPolicySettings() : '';
-  const sourceBranches = branches.map(branch => `<button type="button" role="option" data-source-branch="${escape(branch)}">${escape(branch)}</button>`).join('');
+  const sourceBranches = sessionState.branches.map(branch => `<button type="button" role="option" data-source-branch="${escape(branch)}">${escape(branch)}</button>`).join('');
   // 编辑既有流程时先只留一个「添加步骤」入口：进来通常是为了看或改已有步骤，默认展开的空表单会把流程本身挤下去。
   const editingExisting = active?.repository === repository && active.stages.length > 0;
   const collapsed = editingExisting && !stepFormOpen;
@@ -1772,7 +1764,7 @@ function renderStepForm(repository: string) {
   sourceBranchToggle.addEventListener('click', () => { if (sourceBranchOptions.hidden) { sourceInput.focus(); openSourceBranches(); } else closeSourceBranches(); });
   sourceBranchOptions.querySelectorAll<HTMLButtonElement>('[data-source-branch]').forEach(button => button.addEventListener('click', () => { sourceInput.value = button.dataset.sourceBranch || ''; sync(); closeSourceBranches(); sourceInput.focus(); }));
   document.querySelector('#target')!.addEventListener('change', event => { if (!active) editorDraft.target = (event.target as HTMLSelectElement).value; sync(); }); sync();
-    document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } const isNew = active?.repository !== repository; if (isNew && workflows.some(workflow => workflow.repository === repository)) { showToast(t('editor.error.repoUsed')); return; } if (active?.repository === repository && active.stages.some(stage => stage.source === source && stage.target === target)) { showToast(t('editor.error.duplicateRoute')); return; } const name = value('flow-name') || repository; const independent = document.querySelector<HTMLInputElement>('#independent-route')!.checked; const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="wait-for-route"]:checked')].map(input => Number(input.value)); const next = active?.repository === repository ? { ...addStage(active, source, target, independent, waitFor), name } : createWorkflow(repository, source, target, name, deploymentsForRepository(repositoryActionWorkflows, repositoryEnvironments, repositoryActionsLoaded)); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); bindDraftActions(); bindDraftStepSorting(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.routeSaved', { source, target })); stepFormOpen = false; renderStepForm(repository); });
+    document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } const isNew = active?.repository !== repository; if (isNew && workflows.some(workflow => workflow.repository === repository)) { showToast(t('editor.error.repoUsed')); return; } if (active?.repository === repository && active.stages.some(stage => stage.source === source && stage.target === target)) { showToast(t('editor.error.duplicateRoute')); return; } const name = value('flow-name') || repository; const independent = document.querySelector<HTMLInputElement>('#independent-route')!.checked; const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="wait-for-route"]:checked')].map(input => Number(input.value)); const next = active?.repository === repository ? { ...addStage(active, source, target, independent, waitFor), name } : createWorkflow(repository, source, target, name, deploymentsForRepository(sessionState.repositoryActionWorkflows, sessionState.repositoryEnvironments, sessionState.repositoryActionsLoaded)); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); bindDraftActions(); bindDraftStepSorting(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.routeSaved', { source, target })); stepFormOpen = false; renderStepForm(repository); });
   }
   document.querySelector<HTMLButtonElement>('#toggle-deployment-form')?.addEventListener('click', () => {
     deploymentFormOpen = !deploymentFormOpen;
@@ -1808,7 +1800,7 @@ function renderStepForm(repository: string) {
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-apply-suggestion]').forEach(button => button.addEventListener('click', () => {
     if (!active) return;
-    deploymentDraft = deploymentSuggestions(active, repositoryActionWorkflows, repositoryEnvironments)[Number(button.dataset.applySuggestion)] || null;
+    deploymentDraft = deploymentSuggestions(active, sessionState.repositoryActionWorkflows, sessionState.repositoryEnvironments)[Number(button.dataset.applySuggestion)] || null;
     if (!deploymentDraft) return;
     deploymentEditIndex = null;
     deploymentFormOpen = true;
@@ -1833,7 +1825,7 @@ function renderStepForm(repository: string) {
     if (!active) return;
     const restored = active;
     const before = deploymentConfigs(restored);
-    const synced = syncedDeployments(restored, repositoryActionWorkflows, repositoryEnvironments, repositoryActionsLoaded);
+    const synced = syncedDeployments(restored, sessionState.repositoryActionWorkflows, sessionState.repositoryEnvironments, sessionState.repositoryActionsLoaded);
     const kept = synced.filter(deployment => before.some(candidate => deploymentKey(candidate) === deploymentKey(deployment) && candidate.workflowName === deployment.workflowName));
     const removed = before.length - kept.length;
     const added = synced.length - kept.length;
@@ -1857,7 +1849,7 @@ function renderStepForm(repository: string) {
   });
 }
 function deploymentKey(deployment: DeploymentConfig) { return `${deployment.target}|${deployment.provider}`; }
-// Source and target stay read-only here: changing them would change which branches the persisted stage state
+// Source and target stay read-only here: changing them would change which sessionState.branches the persisted stage state
 // belongs to, so the first version only edits the gate, which is what a mis-set route mode actually needs.
 function renderStageRouteForm(repository: string, flow: Workflow, stageIndex: number) {
   const stage = flow.stages[stageIndex];
@@ -1896,7 +1888,7 @@ function rerenderStepForm(repository: string) {
 function renderDeploymentSettings() {
   if (!active) return '';
   const configured = deploymentConfigs(active);
-  const configurationWarnings = deploymentConfigurationWarnings(active, { actionsLoaded: repositoryActionsLoaded, actionWorkflows: repositoryActionWorkflows, environmentsLoaded: repositoryEnvironmentsLoaded, environments: repositoryEnvironments });
+  const configurationWarnings = deploymentConfigurationWarnings(active, { actionsLoaded: sessionState.repositoryActionsLoaded, actionWorkflows: sessionState.repositoryActionWorkflows, environmentsLoaded: sessionState.repositoryEnvironmentsLoaded, environments: sessionState.repositoryEnvironments });
   const warningText = (warning: DeploymentConfigurationWarning) => escape(t(`editor.deployments.warning.${warning.code}`, { value: warning.value || '' }));
   const rowWarnings = (index: number) => configurationWarnings.filter(warning => warning.deploymentIndex === index);
   const generalWarnings = configurationWarnings.filter(warning => warning.deploymentIndex === undefined);
@@ -1912,32 +1904,32 @@ function renderDeploymentSettings() {
       return `<div class="${[warnings.length ? 'has-warning' : '', deploymentEditIndex === index ? 'is-editing' : '', deploymentHighlight === deploymentKey(deployment) ? 'is-new' : ''].filter(Boolean).join(' ')}"><b>${escape(deployment.target)}</b>${chips}${detail}${inline}<button class="ghost" type="button" data-edit-deployment="${index}">${t('editor.deployments.edit')}</button><button class="ghost" type="button" data-remove-deployment="${index}">${t('editor.deployments.remove')}</button></div>`;
     }).join('')
     : `<p class="meta">${t('editor.deployments.empty')}</p>`;
-  const suggestions = repositoryActionsLoaded ? deploymentSuggestions(active, repositoryActionWorkflows, repositoryEnvironments) : [];
+  const suggestions = sessionState.repositoryActionsLoaded ? deploymentSuggestions(active, sessionState.repositoryActionWorkflows, sessionState.repositoryEnvironments) : [];
   const suggested = suggestions.length
     ? `<div class="deployment-suggestions"><b>${t('editor.deployments.suggestLabel')}</b><small>${t('editor.deployments.suggestHint')}</small>${suggestions.map((suggestion, index) => `<div><b>${escape(suggestion.target)}</b><small>${escape(suggestion.workflowName)} · ${t(`editor.deployments.${suggestion.environment}`)}</small><button class="ghost" type="button" data-apply-suggestion="${index}">${t('editor.deployments.suggestApply')}</button></div>`).join('')}</div>`
     : '';
   const toggle = `<button id="toggle-deployment-form" type="button" class="ghost deployment-add-toggle" aria-expanded="${deploymentFormOpen}">${deploymentFormOpen ? t('editor.deployments.cancel') : t('editor.deployments.add')}</button>`;
-  const sync = `<button id="sync-deployments" type="button" class="ghost deployment-sync" ${repositoryActionsLoaded ? '' : 'disabled'} title="${repositoryActionsLoaded ? t('editor.deployments.syncHint') : t('editor.deployments.syncUnavailable')}">${t('editor.deployments.sync')}</button>`;
+  const sync = `<button id="sync-deployments" type="button" class="ghost deployment-sync" ${sessionState.repositoryActionsLoaded ? '' : 'disabled'} title="${sessionState.repositoryActionsLoaded ? t('editor.deployments.syncHint') : t('editor.deployments.syncUnavailable')}">${t('editor.deployments.sync')}</button>`;
   return `<fieldset class="deployment-settings"><legend>${t('editor.deployments.label')}</legend><small>${t('editor.deployments.desc')}</small>${summary}<div class="deployment-config-list">${rows}</div>${suggested}<div class="deployment-actions">${toggle}${sync}</div>${deploymentFormOpen ? renderDeploymentForm() : ''}</fieldset>`;
 }
 function renderDeploymentForm() {
   const editing = deploymentEditIndex === null || !active ? null : deploymentConfigs(active)[deploymentEditIndex] || null;
   const prefill = editing || deploymentDraft;
-  const target = prefill?.target || branches.find(branch => branch === 'dev') || branches.find(branch => branch === 'main') || branches[0] || '';
-  const workflows = repositoryActionWorkflows.map(workflow => `<option value="${escape(workflow.name)}">${escape(workflow.path)}</option>`).join('');
-  const workflowHint = repositoryActionWorkflows.length ? t('editor.deployments.workflowHint') : t('editor.deployments.workflowUnavailable');
+  const target = prefill?.target || sessionState.branches.find(branch => branch === 'dev') || sessionState.branches.find(branch => branch === 'main') || sessionState.branches[0] || '';
+  const workflows = sessionState.repositoryActionWorkflows.map(workflow => `<option value="${escape(workflow.name)}">${escape(workflow.path)}</option>`).join('');
+  const workflowHint = sessionState.repositoryActionWorkflows.length ? t('editor.deployments.workflowHint') : t('editor.deployments.workflowUnavailable');
   const pick = (candidate: string, current: string | undefined) => candidate === current ? 'selected' : '';
-  const environments = repositoryEnvironments.map(environment => `<option value="${escape(environment)}"></option>`).join('');
+  const environments = sessionState.repositoryEnvironments.map(environment => `<option value="${escape(environment)}"></option>`).join('');
   // Blank is a valid answer here — reconciliation derives the conventional name from the provider and the
   // environment. A repository with no Environment at all therefore gets an empty dropdown, which reads as a
   // loading failure unless the hint says outright that nothing needs to be typed.
-  const environmentHint = !repositoryEnvironmentsLoaded ? t('editor.deployments.githubEnvironmentUnavailable')
-    : repositoryEnvironments.length ? t('editor.deployments.githubEnvironmentHint')
+  const environmentHint = !sessionState.repositoryEnvironmentsLoaded ? t('editor.deployments.githubEnvironmentUnavailable')
+    : sessionState.repositoryEnvironments.length ? t('editor.deployments.githubEnvironmentHint')
       : t('editor.deployments.githubEnvironmentNone');
   // A hardcoded example named an Environment the repository need not have, and typing it back is exactly
   // what the not-found warning then rejected. Only the repository's own list can be shown as an example.
-  const environmentPlaceholder = !repositoryEnvironmentsLoaded ? 'preview-vercel'
-    : repositoryEnvironments[0] || t('editor.deployments.githubEnvironmentBlank');
+  const environmentPlaceholder = !sessionState.repositoryEnvironmentsLoaded ? 'preview-vercel'
+    : sessionState.repositoryEnvironments[0] || t('editor.deployments.githubEnvironmentBlank');
   const advanced = `<details class="deployment-advanced" ${deploymentAdvancedOpen || prefill ? 'open' : ''}><summary>${t('editor.deployments.advanced')}</summary><label>${t('editor.deployments.githubEnvironment')}<input id="deployment-github-environment" list="deployment-environments" placeholder="${escape(environmentPlaceholder)}" value="${escape(prefill?.githubEnvironment || '')}" /><datalist id="deployment-environments">${environments}</datalist><small>${environmentHint}</small></label><label>${t('editor.deployments.healthPath')}<input id="deployment-health-path" placeholder="/health" value="${escape(prefill?.healthCheckPath || '')}" /><small>${t('editor.deployments.healthPathHint')}</small></label><label>${t('editor.deployments.rollbackWorkflow')}<input id="deployment-rollback-workflow" list="deployment-workflows" placeholder="Rollback production" value="${escape(prefill?.rollbackWorkflowName || '')}" /><small>${t('editor.deployments.rollbackWorkflowHint')}</small></label></details>`;
   const banner = editing ? `<p class="deployment-editing-banner">${t('editor.deployments.editing', { workflow: escape(editing.workflowName), target: escape(editing.target) })}</p>` : '';
   return `<div class="deployment-add-form">${banner}<label>${t('editor.deployments.workflow')}<input id="deployment-workflow" list="deployment-workflows" placeholder="Deploy frontend to Vercel" value="${escape(prefill?.workflowName || '')}" /><datalist id="deployment-workflows">${workflows}</datalist><small>${workflowHint}</small></label><div class="two"><label>${t('editor.deployments.target')}<select id="deployment-target">${options(target)}</select></label><label>${t('editor.deployments.provider')}<select id="deployment-provider"><option value="vercel" ${pick('vercel', prefill?.provider)}>Vercel</option><option value="cloudflare" ${pick('cloudflare', prefill?.provider)}>Cloudflare Pages</option></select></label></div><label>${t('editor.deployments.environment')}<select id="deployment-environment"><option value="preview" ${pick('preview', prefill?.environment)}>${t('editor.deployments.preview')}</option><option value="production" ${pick('production', prefill?.environment)}>${t('editor.deployments.production')}</option></select></label>${advanced}<button id="add-deployment" type="button" class="primary">${editing ? t('editor.deployments.update') : t('editor.deployments.submit')}</button></div>`;
@@ -1949,7 +1941,7 @@ function renderRecoveryPolicySettings() {
   const cooldownSeconds = policy?.cooldownSeconds ?? 300;
   return `<fieldset class="recovery-policy-settings"><legend>${t('editor.recoveryPolicy.label')}</legend><small>${t('editor.recoveryPolicy.desc')}</small><div class="two"><label>${t('editor.recoveryPolicy.maxRetries')}<input id="recovery-max-retries" type="number" min="0" max="20" value="${maxRetries}" /></label><label>${t('editor.recoveryPolicy.cooldownSeconds')}<input id="recovery-cooldown-seconds" type="number" min="0" max="86400" value="${cooldownSeconds}" /></label></div><button id="save-recovery-policy" type="button" class="ghost">${t('editor.recoveryPolicy.save')}</button></fieldset>`;
 }
-function options(selected: string) { return branches.map(branch => `<option ${branch === selected ? 'selected' : ''}>${escape(branch)}</option>`).join(''); }
+function options(selected: string) { return sessionState.branches.map(branch => `<option ${branch === selected ? 'selected' : ''}>${escape(branch)}</option>`).join(''); }
 function value(id: string) { return document.querySelector<HTMLSelectElement | HTMLInputElement>(`#${id}`)!.value; }
 function renderDraft() {
   if (!active) return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${t('draft.empty.title')}</h2><p class="meta">${t('draft.empty.desc')}</p>`;
@@ -2252,7 +2244,7 @@ async function retryDeployment(flow: Workflow, state: WorkflowStageState, runId:
   button.disabled = true; button.textContent = t('overview.deployment.retrying');
   try {
     const { owner, name } = parseRepository(flow.repository);
-    await githubFetch<Record<string, never>>(token, `/repos/${owner}/${name}/actions/runs/${runId}/rerun`, { method: 'POST' }, flow.id);
+    await githubFetch<Record<string, never>>(sessionState.token, `/repos/${owner}/${name}/actions/runs/${runId}/rerun`, { method: 'POST' }, flow.id);
     await fetch(githubAppApiUrl('/api/recovery-event'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: flow.id, stageIndex: state.stageIndex, source: state.source }) }).catch(() => undefined);
     showToast(t('overview.deployment.retryStarted', { provider: deploymentProviderName(provider as WorkflowStageDeployment['provider']) }));
     void loadActionQueue(true, flow.repository).finally(render);
@@ -2326,7 +2318,7 @@ function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: 
     if (!onMerged && screen === 'detail') detail();
     try {
       const { owner, name } = parseRepository(active!.repository);
-      const result = await githubFetch<MergeResult>(token, `/repos/${owner}/${name}/pulls/${pull.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) }, active!.id);
+      const result = await githubFetch<MergeResult>(sessionState.token, `/repos/${owner}/${name}/pulls/${pull.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) }, active!.id);
       if (!result.merged) throw new Error(result.message || t('merge.error.incomplete'));
       const pendingChecks = { state: 'pending' as const, passed: 0, total: 0 };
       statuses = statuses?.map((item, statusIndex) => statusIndex === index ? { ...item, kind: 'merged', pr: { ...pull, state: 'closed', merged_at: new Date().toISOString(), merge_commit_sha: result.sha }, checks: pendingChecks } : item) || null;
@@ -2358,15 +2350,15 @@ function nextActionTitle() {
   return t('nextAction.synced');
 }
 async function readBranchProtection(owner: string, name: string, branch: string) {
-  try { return await githubFetch<BranchProtection>(token, `/repos/${owner}/${name}/branches/${encodeURIComponent(branch)}/protection`); } catch { return null; }
+  try { return await githubFetch<BranchProtection>(sessionState.token, `/repos/${owner}/${name}/branches/${encodeURIComponent(branch)}/protection`); } catch { return null; }
 }
 async function resolveDetailSource(owner: string, name: string, sourceRule: string, target: string): Promise<string | null> {
   if (!sourceRule.includes('*')) return sourceRule;
-  const branches = await githubFetch<{ name: string }[]>(token, `/repos/${owner}/${name}/branches?per_page=100`);
-  const matches = branches.map(branch => branch.name).filter(source => sourceRuleMatches(sourceRule, source));
+  const repoBranches = await githubFetch<{ name: string }[]>(sessionState.token, `/repos/${owner}/${name}/branches?per_page=100`);
+  const matches = repoBranches.map(branch => branch.name).filter(source => sourceRuleMatches(sourceRule, source));
   if (!matches.length) return null;
   const openPulls = await Promise.all(matches.map(async source => {
-    const pulls = await githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + source)}&base=${encodeURIComponent(target)}&per_page=1`).catch(() => []);
+    const pulls = await githubFetch<Pull[]>(sessionState.token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + source)}&base=${encodeURIComponent(target)}&per_page=1`).catch(() => []);
     return { source, pull: pulls[0] };
   }));
   return openPulls.find(candidate => candidate.pull)?.source || matches[0];
@@ -2401,19 +2393,19 @@ async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = 
       const recentlyMergedNumber = recentlyMergedPullNumbers.get(index);
       const recentlyChangedNumber = recentlyCreatedNumber || recentlyMergedNumber;
       const [openPulls, closedPulls, comparison, recentlyChangedPull] = await Promise.all([
-        githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + source)}&base=${encodeURIComponent(stage.target)}&per_page=1`).catch(error => {
+        githubFetch<Pull[]>(sessionState.token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + source)}&base=${encodeURIComponent(stage.target)}&per_page=1`).catch(error => {
           if (error instanceof GitHubRequestError && error.status === 404) return [];
           throw error;
         }),
-        githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&head=${encodeURIComponent(owner + ':' + source)}&base=${encodeURIComponent(stage.target)}&per_page=1`).catch(error => {
+        githubFetch<Pull[]>(sessionState.token, `/repos/${owner}/${name}/pulls?state=closed&head=${encodeURIComponent(owner + ':' + source)}&base=${encodeURIComponent(stage.target)}&per_page=1`).catch(error => {
           if (error instanceof GitHubRequestError && error.status === 404) return [];
           throw error;
         }),
-        githubFetch<{ ahead_by: number }>(token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(source)}`).then(value => ({ ...value, notFound: false })).catch(error => {
+        githubFetch<{ ahead_by: number }>(sessionState.token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(source)}`).then(value => ({ ...value, notFound: false })).catch(error => {
           if (error instanceof GitHubRequestError && error.status === 404) return { ahead_by: 0, notFound: true };
           throw error;
         }),
-        recentlyChangedNumber ? githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls/${recentlyChangedNumber}`).catch(() => null) : Promise.resolve(null),
+        recentlyChangedNumber ? githubFetch<Pull>(sessionState.token, `/repos/${owner}/${name}/pulls/${recentlyChangedNumber}`).catch(() => null) : Promise.resolve(null),
       ]);
       if (recentlyCreatedNumber && openPulls.some(pull => pull.number === recentlyCreatedNumber)) recentlyCreatedPullNumbers.delete(index);
       if (recentlyCreatedNumber && recentlyChangedPull?.state !== 'open') recentlyCreatedPullNumbers.delete(index);
@@ -2426,13 +2418,13 @@ async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = 
           : selectCurrentPull([...openPulls, ...closedPulls]);
       let sourceBranchMissing = false;
       if (comparison.notFound) {
-        const targetBranchExists = await githubFetch<unknown>(token, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}`)
+        const targetBranchExists = await githubFetch<unknown>(sessionState.token, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}`)
           .then(() => true)
           .catch(error => error instanceof GitHubRequestError && error.status === 404 ? false : true);
         if (!targetBranchExists) return { kind: 'error', message: t('status.targetBranchMissing') } as StepStatus;
         sourceBranchMissing = true;
         if (!pr) {
-          const historicalPulls = await githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=closed&base=${encodeURIComponent(stage.target)}&per_page=100`).catch(() => []);
+          const historicalPulls = await githubFetch<Pull[]>(sessionState.token, `/repos/${owner}/${name}/pulls?state=closed&base=${encodeURIComponent(stage.target)}&per_page=100`).catch(() => []);
           pr = historicalPulls.find(candidate => candidate.head.ref === source) || null;
         }
       }
@@ -2442,9 +2434,9 @@ async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = 
         if (pr.merge_commit_sha) {
           try {
             const [runs, statuses, actionRuns] = await Promise.all([
-              githubFetch<{ check_runs: CheckRun[] }>(token, `/repos/${owner}/${name}/commits/${pr.merge_commit_sha}/check-runs?per_page=100`),
-              githubFetch<{ statuses: CommitStatus[] }>(token, `/repos/${owner}/${name}/commits/${pr.merge_commit_sha}/status`),
-              githubFetch<{ workflow_runs: GitHubWorkflowRunSummary[] }>(token, `/repos/${owner}/${name}/actions/runs?head_sha=${encodeURIComponent(pr.merge_commit_sha)}&per_page=100`).catch(() => ({ workflow_runs: [] })),
+              githubFetch<{ check_runs: CheckRun[] }>(sessionState.token, `/repos/${owner}/${name}/commits/${pr.merge_commit_sha}/check-runs?per_page=100`),
+              githubFetch<{ statuses: CommitStatus[] }>(sessionState.token, `/repos/${owner}/${name}/commits/${pr.merge_commit_sha}/status`),
+              githubFetch<{ workflow_runs: GitHubWorkflowRunSummary[] }>(sessionState.token, `/repos/${owner}/${name}/actions/runs?head_sha=${encodeURIComponent(pr.merge_commit_sha)}&per_page=100`).catch(() => ({ workflow_runs: [] })),
             ]);
             checks = runs.check_runs.length || statuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, statuses.statuses) : undefined;
             const checkDetails = runs.check_runs.length || statuses.statuses.length ? summarizeGitHubCheckDetails(runs.check_runs, statuses.statuses) : undefined;
@@ -2457,12 +2449,12 @@ async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = 
       }
       if (pr.state === 'closed') return { kind: 'closed', pr, approvals: 0, sourceBranchMissing } as StepStatus;
       const [details, runs, commitStatuses, reviews, protection, actionRuns] = await Promise.all([
-        githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls/${pr.number}`),
-        githubFetch<{ check_runs: CheckRun[] }>(token, `/repos/${owner}/${name}/commits/${pr.head.sha}/check-runs?per_page=100`),
-        githubFetch<{ statuses: CommitStatus[] }>(token, `/repos/${owner}/${name}/commits/${pr.head.sha}/status`),
-        githubFetch<Review[]>(token, `/repos/${owner}/${name}/pulls/${pr.number}/reviews?per_page=100`),
+        githubFetch<Pull>(sessionState.token, `/repos/${owner}/${name}/pulls/${pr.number}`),
+        githubFetch<{ check_runs: CheckRun[] }>(sessionState.token, `/repos/${owner}/${name}/commits/${pr.head.sha}/check-runs?per_page=100`),
+        githubFetch<{ statuses: CommitStatus[] }>(sessionState.token, `/repos/${owner}/${name}/commits/${pr.head.sha}/status`),
+        githubFetch<Review[]>(sessionState.token, `/repos/${owner}/${name}/pulls/${pr.number}/reviews?per_page=100`),
         readBranchProtection(owner, name, stage.target),
-        githubFetch<{ workflow_runs: GitHubWorkflowRunSummary[] }>(token, `/repos/${owner}/${name}/actions/runs?head_sha=${encodeURIComponent(pr.head.sha)}&per_page=100`).catch(() => ({ workflow_runs: [] })),
+        githubFetch<{ workflow_runs: GitHubWorkflowRunSummary[] }>(sessionState.token, `/repos/${owner}/${name}/actions/runs?head_sha=${encodeURIComponent(pr.head.sha)}&per_page=100`).catch(() => ({ workflow_runs: [] })),
       ]);
       const requiredApprovals = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
       const checks = runs.check_runs.length || commitStatuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, commitStatuses.statuses) : undefined;
@@ -2805,7 +2797,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
 
     try {
       const { owner, name } = parseRepository(identity.repository);
-      const comparison = await githubFetch<{ commits: { commit: { message: string } }[] }>(token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(source)}`, { signal: controller.signal });
+      const comparison = await githubFetch<{ commits: { commit: { message: string } }[] }>(sessionState.token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(source)}`, { signal: controller.signal });
       if (!isDialogOpen()) return;
       await streamPrMessage(config, buildPrPrompt(source, stage.target, comparison.commits.map(item => item.commit.message), generationRuleContent), {
         signal: controller.signal,
@@ -2851,9 +2843,9 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
     confirmButton.textContent = t('createPr.creatingShort');
     try {
       const { owner, name } = parseRepository(identity.repository);
-      const existingPulls = await githubFetch<Pull[]>(token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(`${owner}:${source}`)}&base=${encodeURIComponent(stage.target)}&per_page=10`, { signal: controller.signal });
+      const existingPulls = await githubFetch<Pull[]>(sessionState.token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(`${owner}:${source}`)}&base=${encodeURIComponent(stage.target)}&per_page=10`, { signal: controller.signal });
       if (existingPulls[0]) throw new Error(`该分支已存在 PR #${existingPulls[0].number}，请先处理现有 PR。`);
-      const createdPull = await githubFetch<Pull>(token, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify(pullRequestPayload(title, source, stage.target, body)), signal: controller.signal }, active!.id);
+      const createdPull = await githubFetch<Pull>(sessionState.token, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify(pullRequestPayload(title, source, stage.target, body)), signal: controller.signal }, active!.id);
       if (!isDialogOpen() || controller.signal.aborted) return;
       if (draftSaveTimer !== undefined) { window.clearTimeout(draftSaveTimer); draftSaveTimer = undefined; }
       draftDirty = false;
