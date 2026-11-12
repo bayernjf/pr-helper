@@ -27,7 +27,9 @@ npx tsc --noEmit # TypeScript check for browser and api/ code
 
 ## Code layout
 
-- `src/main.ts`: browser UI, Lane board, dialogs, API orchestration, AI generation, and local persistence integration.
+- `src/main.ts`: init/render/goTo orchestration and event wiring (~1790 lines after the 2026-11-13 split; the rest of the former monolith lives in the modules below).
+- `src/app/state/*.ts`: the mutable-state modules the split extracted (projection, session, workflows, ui, filters, ai, library, persist, runtime, status-refresh) — one exported object each; `runtime.ts` carries the render/goTo/init hooks main.ts binds.
+- `src/app/render/{overview,lane,detail,editor}.ts`: the four screens. `src/app/dialogs/*.ts`: all dialogs. `src/app/ui/derive.ts`: shared projection-derived helpers. `src/app/ui/permissions.ts`: the team-role operation gate.
 - `src/style.css`: application styles.
 - `src/lib/domain.ts`: PR gate decisions and native GitHub URL builders.
 - `src/lib/workflow.ts` / `workflow-run.ts`: workflow configuration, Lane ordering, deployment configuration, and run presentation.

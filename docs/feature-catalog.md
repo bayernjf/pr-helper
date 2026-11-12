@@ -4,6 +4,7 @@
 > 方法：结合 `handoff.md`、`docs/current-state.md`、各子代理审计素材，对代码（`src/`、`api/`、`supabase/migrations/`）逐项核对；以 `src/lib/translations/{en,zh}.ts` 的 717 个键名前缀作为功能地图，再回到代码确认实现。
 > 状态图例：✅ 已上线 · ✔ 已验收（生产真实数据）· 🟡 部分/后置 · ⏳ 待外部验收 · 🔧 设计中/待实施 · ❌ 存在已确认缺陷
 > 每个功能点附代码证据（`文件:行号` 或迁移号）。风险与缺陷详情见 [`code-audit-report.md`](code-audit-report.md)。
+> ⚠️ **行号基线**：下表 `main.ts:行号` 形式的证据以 **2026-11-12 拆分前**的单体 `src/main.ts`（2968 行）为基线；2026-11-13 拆分后（见 `docs/superpowers/plans/2026-11-12-split-main-ts-handoff.md`），对应实现已迁至 `src/app/render/*`、`src/app/dialogs/*`、`src/app/ui/*` 与 `src/app/state/*`，行号需按新文件重新定位。
 
 ---
 
