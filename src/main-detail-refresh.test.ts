@@ -57,7 +57,7 @@ describe('refreshDetailStatuses', () => {
   // left every static-branch workflow with no way to reconcile on demand at all.
   it('reconciles on the server for every workflow, not only wildcard sources', () => {
     const refresh = body('refreshDetailStatuses');
-    expect(refresh).toContain('loadActionQueue(true, active.repository)');
+    expect(refresh).toContain('loadActionQueue(true, workflowState.active.repository)');
     expect(refresh).not.toContain("includes('*')");
   });
 
@@ -75,7 +75,7 @@ describe('detail staleness while revalidating', () => {
   // Entering the page used to blank every row until several GitHub round trips per stage completed.
   // The server projection already loaded for the board paints the page first.
   it('prefills statuses from the server projection when entering the detail screen', () => {
-    expect(source).toContain('statuses = active ? projectedDetailStatuses(active) : null');
+    expect(source).toContain('statuses = workflowState.active ? projectedDetailStatuses(workflowState.active) : null');
     expect(source).toMatch(/function projectedDetailStatuses[\s\S]{0,400}projectedStageStatus/);
   });
 
@@ -83,7 +83,7 @@ describe('detail staleness while revalidating', () => {
   // the explicit button bypasses it through the force argument.
   it('skips an automatic live read inside the TTL but lets a forced one through', () => {
     const refresh = body('refreshStatuses');
-    expect(refresh).toContain('if (!force && active && !detailRefreshDueAt(lastDetailLiveRead.get(active.id), Date.now())) return;');
+    expect(refresh).toContain('if (!force && workflowState.active && !detailRefreshDueAt(lastDetailLiveRead.get(workflowState.active.id), Date.now())) return;');
     const explicit = body('refreshDetailStatuses');
     expect(explicit).toContain('refreshStatuses(false, false, true)');
   });

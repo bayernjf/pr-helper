@@ -20,6 +20,7 @@ import zh from './lib/translations/zh';
 import { app, escape } from './app/dom';
 import { actionQueueRequestQueue, projection } from './app/state/projection';
 import { sessionState } from './app/state/session';
+import { workflowState } from './app/state/workflows';
 import { filters } from './app/state/filters';
 import { aiState } from './app/state/ai';
 import { GENERATION_RULES_KEY, PULL_REQUEST_DRAFTS_KEY, library } from './app/state/library';
@@ -37,8 +38,6 @@ registerTranslations('zh', zh);
 
 const CLOUD_SYNC_DEVICE_ID_KEY = 'pr-helper-cloud-sync-device-id';
 const localViteWithoutApi = import.meta.env.DEV && !import.meta.env.VITE_AUTH_ORIGIN;
-let workflows = loadWorkflows();
-let active: Workflow | null = workflows[0] || null;
 let editorDraft: { repository: string; name: string; source: string; target: string } = { repository: '', name: '', source: '', target: '' };
 let deploymentFormOpen = false;
 let deploymentAdvancedOpen = false;
@@ -48,7 +47,6 @@ let deploymentDraft: DeploymentConfig | null = null;
 let stageRouteEditIndex: number | null = null;
 let stepFormOpen = false;
 let returnHighlight: string | null = null;
-let workflowMutationRevision = 0;
 let screen: Screen = 'overview';
 let statuses: StepStatus[] | null = null;
 let refreshOnNextDetail = false;
@@ -59,10 +57,6 @@ const lastDetailLiveRead = new Map<string, number>();
 let overviewRefreshOnFocusBound = false;
 let overviewScrollControlsBound = false;
 let refreshOnFocusBound = false;
-let cloudWorkflowStorage = false;
-let pendingLocalWorkflowSync = false;
-let cloudWorkflowSyncError = '';
-let cloudWorkspaceLoading = false;
 // GitHub accepts a person's create/merge/retry immediately, but the server projection only catches up
 // when reconciliation next runs. These notes record what a person just handled so the board can drop
 // the row at once and let the server catch up in the background, instead of putting work that is
@@ -78,15 +72,6 @@ function sharedWorkflowBadge(workflow: Workflow) {
   if (!workflow.team) return '';
   return `<small class="team-workflow-badge">${escape(t('teams.sharedBadge', { team: workflow.team.name, role: teamRoleLabel(workflow.team.role) }))}</small>`;
 }
-function loadWorkflows(): Workflow[] {
-  try {
-    const stored = JSON.parse(localStorage.getItem('pr-helper-workflows') || '[]') as unknown;
-    if (!Array.isArray(stored)) return [];
-    const normalized = sortWorkflows(stored as Workflow[]).map(ensureStageIds);
-    localStorage.setItem('pr-helper-workflows', JSON.stringify(normalized));
-    return normalized;
-  } catch { return []; }
-}
 function persistGenerationRules(next: GenerationRule[]) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(next)); library.generationRules = next; }
 function cloudSyncDeviceId() {
   const existing = localStorage.getItem(CLOUD_SYNC_DEVICE_ID_KEY);
@@ -95,40 +80,40 @@ function cloudSyncDeviceId() {
   localStorage.setItem(CLOUD_SYNC_DEVICE_ID_KEY, next);
   return next;
 }
-function persistWorkflowsLocally() { localStorage.setItem('pr-helper-workflows', JSON.stringify(workflows)); }
+function persistWorkflowsLocally() { localStorage.setItem('pr-helper-workflows', JSON.stringify(workflowState.workflows)); }
 async function saveWorkflowToCloud(workflow: Workflow): Promise<Workflow> {
-  if (!cloudWorkflowStorage) return workflow;
+  if (!workflowState.cloudWorkflowStorage) return workflow;
   const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflow }), keepalive: true });
   if (!response.ok) throw new Error(await workflowApiError(response));
   const payload = await response.json().catch(() => ({})) as { workflow?: Workflow };
   return payload.workflow && payload.workflow.id === workflow.id ? ensureStageIds(payload.workflow) : workflow;
 }
 function applySavedWorkflow(saved: Workflow, authoritative = false) {
-  const latest = workflows.find(workflow => workflow.id === saved.id);
+  const latest = workflowState.workflows.find(workflow => workflow.id === saved.id);
   const applied = authoritative ? applyAuthoritativeWorkflow(latest, saved) : applyQueuedWorkflowSave(latest, saved);
   const normalized = ensureStageIds(applied);
-  workflows = saveWorkflow(workflows, normalized);
-  if (active?.id === normalized.id) active = normalized;
+  workflowState.workflows = saveWorkflow(workflowState.workflows, normalized);
+  if (workflowState.active?.id === normalized.id) workflowState.active = normalized;
   persistWorkflowsLocally();
-  cloudWorkflowSyncError = '';
+  workflowState.cloudWorkflowSyncError = '';
 }
 function reportWorkflowSaveError(error: unknown, workflowId: string) {
-  cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail');
-  showToast(t('toast.saved.local', { error: cloudWorkflowSyncError }));
+  workflowState.cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail');
+  showToast(t('toast.saved.local', { error: workflowState.cloudWorkflowSyncError }));
   render();
   // The toggle was already applied to memory and localStorage, so a failed save leaves the switch
   // drawn as enabled — and a reload keeps showing it, because boot reads the local copy first.
   // Read the stored state back so the checkbox can only show what the server accepted.
   void loadCloudWorkflows().then(() => {
-    if (!workflows.some(workflow => workflow.id === workflowId)) return;
+    if (!workflowState.workflows.some(workflow => workflow.id === workflowId)) return;
     // The read-back succeeds on its own terms and would otherwise clear the banner for a save that
     // did not land, hiding the very mismatch it just corrected.
-    cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail');
+    workflowState.cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail');
     render();
   });
 }
 const workflowSaveQueue = new WorkflowSaveQueue<Workflow>({
-  current: workflowId => workflows.find(workflow => workflow.id === workflowId),
+  current: workflowId => workflowState.workflows.find(workflow => workflow.id === workflowId),
   persist: saveWorkflowToCloud,
   onSaved: applySavedWorkflow,
   onError: reportWorkflowSaveError,
@@ -144,13 +129,13 @@ async function persistWorkflowRemotely(workflow: Workflow): Promise<Workflow | n
   }
 }
 async function persistWorkflowOrder(next: Workflow[]) {
-  workflowMutationRevision += 1;
+  workflowState.workflowMutationRevision += 1;
   const previousPositions = new Map<string, DOMRect>();
   document.querySelectorAll<HTMLElement>('[data-project-lane]').forEach(lane => {
     const workflowId = lane.dataset.projectLane;
     if (workflowId) previousPositions.set(workflowId, lane.getBoundingClientRect());
   });
-  workflows = applyWorkflowOrder(workflows, next);
+  workflowState.workflows = applyWorkflowOrder(workflowState.workflows, next);
   persistWorkflowsLocally();
   render();
   requestAnimationFrame(() => {
@@ -168,40 +153,40 @@ async function persistWorkflowOrder(next: Workflow[]) {
       );
     });
   });
-  if (!cloudWorkflowStorage) { showToast(t('toast.order.saved')); return; }
+  if (!workflowState.cloudWorkflowStorage) { showToast(t('toast.order.saved')); return; }
   try {
     // Each save carries its own version, so firing the whole board at once lets one response land
     // after the next request has already read the version it replaces. Ordering only moves lanes, so
     // a few extra seconds is cheaper than a rejected save that drops the new order.
     const saved: boolean[] = [];
     for (const workflow of next) saved.push(await workflowSaveQueue.enqueue(workflow.id));
-    if (saved.some(result => !result)) throw new Error(cloudWorkflowSyncError || t('toast.saved.cloudFail'));
-    cloudWorkflowSyncError = '';
+    if (saved.some(result => !result)) throw new Error(workflowState.cloudWorkflowSyncError || t('toast.saved.cloudFail'));
+    workflowState.cloudWorkflowSyncError = '';
     showToast(t('toast.order.saved'));
   } catch (error) {
-    cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail');
+    workflowState.cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail');
     await loadAutomationCredentialStatus();
     render();
-    showToast(t('toast.order.local', { error: cloudWorkflowSyncError }));
+    showToast(t('toast.order.local', { error: workflowState.cloudWorkflowSyncError }));
   }
 }
 function save(next: Workflow) {
-  workflowMutationRevision += 1;
+  workflowState.workflowMutationRevision += 1;
   const normalized = ensureStageIds(next);
-  active = normalized;
+  workflowState.active = normalized;
   editorDraft = { repository: '', name: '', source: '', target: '' };
-  workflows = saveWorkflow(workflows, normalized);
+  workflowState.workflows = saveWorkflow(workflowState.workflows, normalized);
   persistWorkflowsLocally();
-  return cloudWorkflowStorage ? workflowSaveQueue.enqueue(normalized.id) : Promise.resolve(true);
+  return workflowState.cloudWorkflowStorage ? workflowSaveQueue.enqueue(normalized.id) : Promise.resolve(true);
 }
 
 async function removeStageAndPersist(workflow: Workflow, stageIndex: number) {
   const normalizedWorkflow = ensureStageIds(workflow);
   const removedStage = normalizedWorkflow.stages[stageIndex];
   if (!removedStage?.stageId) return false;
-  if (!cloudWorkflowStorage) return save(removeStage(normalizedWorkflow, stageIndex));
+  if (!workflowState.cloudWorkflowStorage) return save(removeStage(normalizedWorkflow, stageIndex));
 
-  workflowMutationRevision += 1;
+  workflowState.workflowMutationRevision += 1;
   try {
     const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: workflow.id, stageId: removedStage.stageId, stageIndex, source: removedStage.source, target: removedStage.target }) });
     if (!response.ok) throw new Error(await workflowApiError(response));
@@ -216,12 +201,12 @@ async function removeStageAndPersist(workflow: Workflow, stageIndex: number) {
   }
 }
 async function persistWorkflowArchive(workflow: Workflow, archive: boolean) {
-  workflowMutationRevision += 1;
+  workflowState.workflowMutationRevision += 1;
   const next = archive ? archiveWorkflow(workflow) : restoreWorkflow(workflow);
-  workflows = saveWorkflow(workflows, next);
+  workflowState.workflows = saveWorkflow(workflowState.workflows, next);
   persistWorkflowsLocally();
   render();
-  if (cloudWorkflowStorage && !await workflowSaveQueue.enqueue(next.id)) { render(); return; }
+  if (workflowState.cloudWorkflowStorage && !await workflowSaveQueue.enqueue(next.id)) { render(); return; }
   // The queue is server-derived, and archiving cancels what was waiting on it, so the board would keep
   // showing the old items until something else refreshed it.
   await loadActionQueue(true, next.repository);
@@ -229,23 +214,23 @@ async function persistWorkflowArchive(workflow: Workflow, archive: boolean) {
   showToast(t(archive ? 'workflowArchive.archived' : 'workflowArchive.restored', { name: next.name }));
 }
 async function persistWorkflowMute(workflow: Workflow, mute: boolean) {
-  workflowMutationRevision += 1;
+  workflowState.workflowMutationRevision += 1;
   const next = mute ? muteWorkflow(workflow) : unmuteWorkflow(workflow);
-  workflows = saveWorkflow(workflows, next);
+  workflowState.workflows = saveWorkflow(workflowState.workflows, next);
   persistWorkflowsLocally();
   render();
-  if (cloudWorkflowStorage && !await workflowSaveQueue.enqueue(next.id)) { render(); return; }
+  if (workflowState.cloudWorkflowStorage && !await workflowSaveQueue.enqueue(next.id)) { render(); return; }
   showToast(t(mute ? 'workflowMute.muted' : 'workflowMute.unmuted', { name: next.name }));
 }
 async function removeWorkflowFromStorage(workflowId: string) {
-  workflowMutationRevision += 1;
-  workflows = deleteWorkflow(workflows, workflowId); persistWorkflowsLocally();
-  if (!cloudWorkflowStorage) return;
+  workflowState.workflowMutationRevision += 1;
+  workflowState.workflows = deleteWorkflow(workflowState.workflows, workflowId); persistWorkflowsLocally();
+  if (!workflowState.cloudWorkflowStorage) return;
   try {
     const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: workflowId }) });
     if (!response.ok) throw new Error(await workflowApiError(response));
-    cloudWorkflowSyncError = '';
-  } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.removed.cloudFail'); showToast(t('toast.removed.local', { error: cloudWorkflowSyncError })); render(); }
+    workflowState.cloudWorkflowSyncError = '';
+  } catch (error) { workflowState.cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.removed.cloudFail'); showToast(t('toast.removed.local', { error: workflowState.cloudWorkflowSyncError })); render(); }
 }
 async function workflowApiError(response: Response) {
   const payload = await response.json().catch(() => ({})) as { message?: string };
@@ -253,34 +238,34 @@ async function workflowApiError(response: Response) {
 }
 async function loadCloudWorkflows() {
   if (localViteWithoutApi) {
-    cloudWorkflowStorage = false;
-    cloudWorkflowSyncError = '';
-    pendingLocalWorkflowSync = false;
+    workflowState.cloudWorkflowStorage = false;
+    workflowState.cloudWorkflowSyncError = '';
+    workflowState.pendingLocalWorkflowSync = false;
     return;
   }
-  const requestRevision = workflowMutationRevision;
+  const requestRevision = workflowState.workflowMutationRevision;
   try {
     const response = await fetch(githubAppApiUrl('/api/workflows'), { cache: 'no-store' });
     if (response.status === 401) return;
     if (!response.ok) throw new Error(await workflowApiError(response));
     const payload = await response.json() as { workflows?: Workflow[] };
     if (!Array.isArray(payload.workflows)) return;
-    cloudWorkflowStorage = true;
-    cloudWorkflowSyncError = '';
+    workflowState.cloudWorkflowStorage = true;
+    workflowState.cloudWorkflowSyncError = '';
     // A slow bootstrap response may describe the workflow before an in-page edit.
     // Never let it overwrite a newer local mutation while its save is in flight.
-    if (requestRevision !== workflowMutationRevision) return;
+    if (requestRevision !== workflowState.workflowMutationRevision) return;
     if (payload.workflows.length) {
       const loadedWorkflows = sortWorkflows(payload.workflows);
-      active = selectWorkflowAfterCloudLoad(active, loadedWorkflows, screen);
-      workflows = loadedWorkflows;
+      workflowState.active = selectWorkflowAfterCloudLoad(workflowState.active, loadedWorkflows, screen);
+      workflowState.workflows = loadedWorkflows;
       persistWorkflowsLocally();
     }
-    else pendingLocalWorkflowSync = workflows.length > 0;
-  } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
+    else workflowState.pendingLocalWorkflowSync = workflowState.workflows.length > 0;
+  } catch (error) { workflowState.cloudWorkflowStorage = false; workflowState.cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
 }
 async function loadActionQueue(reconcile = true, repository?: string) {
-  if (!cloudWorkflowStorage) { projection.actionQueue = []; projection.workflowStageStates = []; projection.workflowStageEvents = []; projection.workflowStageDeployments = []; projection.workflowStageDeploymentRuns = []; projection.workflowConfigurationWarnings = []; projection.syncHealth = null; projection.workflowRuns = []; projection.timeline = []; projection.recoveryStatuses = []; projection.automationActions = []; projection.actionQueueError = ''; return false; }
+  if (!workflowState.cloudWorkflowStorage) { projection.actionQueue = []; projection.workflowStageStates = []; projection.workflowStageEvents = []; projection.workflowStageDeployments = []; projection.workflowStageDeploymentRuns = []; projection.workflowConfigurationWarnings = []; projection.syncHealth = null; projection.workflowRuns = []; projection.timeline = []; projection.recoveryStatuses = []; projection.automationActions = []; projection.actionQueueError = ''; return false; }
   return actionQueueRequestQueue.run(reconcile, currentReconcile => loadActionQueueOnce(currentReconcile, repository));
 }
 async function loadActionQueueOnce(reconcile: boolean, repository?: string) {
@@ -327,12 +312,12 @@ async function refreshActionQueue() {
   if (loaded) {
     showToast(projection.actionQueueReconciliationScheduled ? t('toast.queue.syncStarted') : t('toast.queue.refreshed', { count: projection.actionQueue.length }));
   } else {
-    showToast(cloudWorkflowStorage ? projection.actionQueueError || t('toast.queue.failed') : t('toast.queue.unavailable'));
+    showToast(workflowState.cloudWorkflowStorage ? projection.actionQueueError || t('toast.queue.failed') : t('toast.queue.unavailable'));
   }
   render();
 }
 async function refreshOverviewSnapshot() {
-  if (overviewSnapshotRefreshing || projection.actionQueueRefreshing || !cloudWorkflowStorage || screen !== 'overview' || document.visibilityState !== 'visible') return;
+  if (overviewSnapshotRefreshing || projection.actionQueueRefreshing || !workflowState.cloudWorkflowStorage || screen !== 'overview' || document.visibilityState !== 'visible') return;
   overviewSnapshotRefreshing = true;
   const loaded = await loadActionQueue(false);
   overviewSnapshotRefreshing = false;
@@ -369,7 +354,7 @@ function bindOverviewSnapshotRefresh() {
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && screen === 'overview') void refreshOverviewSnapshot(); });
 }
 async function loadPushState() {
-  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !cloudWorkflowStorage) return;
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !workflowState.cloudWorkflowStorage) return;
   try {
     const response = await fetch(githubAppApiUrl('/api/notifications/subscription'));
     if (!response.ok) return;
@@ -416,7 +401,7 @@ function showDisconnectDialog() {
     const confirmed = dialog.returnValue === 'confirm';
     dialog.remove();
     if (!confirmed) return;
-    sessionStorage.removeItem('github-token'); sessionState.token = ''; sessionState.githubInstallationSettingsUrl = ''; sessionState.githubLogin = ''; cloudWorkflowStorage = false;
+    sessionStorage.removeItem('github-token'); sessionState.token = ''; sessionState.githubInstallationSettingsUrl = ''; sessionState.githubLogin = ''; workflowState.cloudWorkflowStorage = false;
     if (!localViteWithoutApi) await fetch(githubAppApiUrl('/api/auth/github/logout'), { method: 'POST' }).catch(() => undefined);
     connect();
   }, { once: true });
@@ -438,7 +423,7 @@ function showDeleteAccountDialog() {
     try {
       const response = await fetch(githubAppApiUrl('/api/account'), { method: 'DELETE' });
       if (!response.ok) throw new Error(await response.text());
-      sessionStorage.removeItem('github-token'); sessionState.token = ''; sessionState.githubInstallationSettingsUrl = ''; sessionState.githubLogin = ''; cloudWorkflowStorage = false;
+      sessionStorage.removeItem('github-token'); sessionState.token = ''; sessionState.githubInstallationSettingsUrl = ''; sessionState.githubLogin = ''; workflowState.cloudWorkflowStorage = false;
       localStorage.removeItem('pr-helper-workflows'); localStorage.removeItem(GENERATION_RULES_KEY); localStorage.removeItem(PULL_REQUEST_DRAFTS_KEY);
       dialog.close();
       connect();
@@ -467,7 +452,7 @@ async function teamApi<T>(path = '', init?: RequestInit): Promise<T> {
 }
 
 function showTeamsDialog() {
-  if (!cloudWorkflowStorage || localViteWithoutApi) { showToast(t('localMode.apiUnavailable')); return; }
+  if (!workflowState.cloudWorkflowStorage || localViteWithoutApi) { showToast(t('localMode.apiUnavailable')); return; }
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog teams-dialog';
   document.body.append(dialog);
@@ -495,7 +480,7 @@ function showTeamsDialog() {
   const draw = () => {
     const team = selectedTeam();
     const canManage = team?.role === 'owner';
-    const personalFlows = workflows.filter(flow => !flow.team);
+    const personalFlows = workflowState.workflows.filter(flow => !flow.team);
     dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('teams.eyebrow')}</p><h2>${t('teams.title')}</h2><p class="meta">${t('teams.desc')}</p>${error ? `<p class="error">${escape(error)}</p>` : ''}<section class="teams-create"><label>${t('teams.create.label')}<input id="team-name" maxlength="120" placeholder="${t('teams.create.placeholder')}" /></label><button id="team-create" type="button" class="ghost">${t('teams.create.button')}</button></section>${teams.length ? `<div class="teams-layout"><label class="teams-selector">${t('teams.title')}<select id="team-select">${teams.map(item => `<option value="${escape(item.id)}" ${item.id === selectedTeamId ? 'selected' : ''}>${escape(item.name)} · ${escape(t(`teams.role.${item.role}`))}</option>`).join('')}</select></label><section class="teams-members"><h3>${t('teams.members.title')}</h3>${members.length ? `<ul>${members.map(member => `<li><span>@${escape(member.githubLogin)} <small>${escape(t(`teams.role.${member.role}`))}</small></span>${canManage ? `<button type="button" class="text-link" data-remove-member="${escape(member.githubLogin)}">${t('teams.members.remove')}</button>` : ''}</li>`).join('')}</ul>` : `<p class="meta">${t('teams.members.empty')}</p>`}${canManage ? `<div class="teams-member-form"><label>${t('teams.members.login')}<input id="team-member-login" autocomplete="off" placeholder="octocat" /></label><label>${t('teams.members.role')}<select id="team-member-role">${roleOptions()}</select></label><button id="team-member-save" type="button" class="ghost">${t('teams.members.add')}</button></div>` : `<p class="meta">${t('teams.ownerOnly')}</p>`}</section><section class="teams-share"><h3>${t('teams.share.title')}</h3>${personalFlows.length && canManage ? `<label>${t('teams.share.select')}<select id="team-workflow">${personalFlows.map(flow => `<option value="${escape(flow.id)}">${escape(flow.name)} · ${escape(flow.repository)}</option>`).join('')}</select></label><button id="team-share-workflow" type="button" class="ghost">${t('teams.share.button')}</button>` : `<p class="meta">${canManage ? t('teams.share.empty') : t('teams.ownerOnly')}</p>`}</section></div>` : `<p class="meta">${t('teams.empty')}</p>`}<div class="dialog-actions"><button value="cancel" class="ghost">${t('teams.close')}</button></div></form>`;
     dialog.querySelector<HTMLButtonElement>('#team-create')?.addEventListener('click', async () => {
       const name = dialog.querySelector<HTMLInputElement>('#team-name')!.value.trim();
@@ -540,7 +525,7 @@ function showDeleteWorkflowDialog(workflow: Workflow) {
     const confirmed = dialog.returnValue === 'confirm';
     dialog.remove();
     if (!confirmed) return;
-    active = null;
+    workflowState.active = null;
     screen = 'overview';
     await removeWorkflowFromStorage(workflow.id);
     await loadActionQueue(true, workflow.repository);
@@ -560,14 +545,14 @@ function showArchiveWorkflowDialog(workflow: Workflow) {
   }, { once: true });
 }
 async function syncLocalWorkflows() {
-  if (!cloudWorkflowStorage || !workflows.length) return;
+  if (!workflowState.cloudWorkflowStorage || !workflowState.workflows.length) return;
   try {
-    for (const workflow of workflows) {
+    for (const workflow of workflowState.workflows) {
       const normalized = await persistWorkflowRemotely(workflow);
       if (!normalized) throw new Error(t('sync.fail.short'));
     }
-    pendingLocalWorkflowSync = false; render(); showToast(t('sync.success'));
-  } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : t('sync.fail.short'); render(); showToast(t('sync.fail', { error: cloudWorkflowSyncError })); }
+    workflowState.pendingLocalWorkflowSync = false; render(); showToast(t('sync.success'));
+  } catch (error) { workflowState.cloudWorkflowSyncError = error instanceof Error ? error.message : t('sync.fail.short'); render(); showToast(t('sync.fail', { error: workflowState.cloudWorkflowSyncError })); }
 }
 function persistPullRequestDrafts(next: typeof library.pullRequestDrafts) { library.pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); library.draftStorageSynchronized = true; } catch { library.draftStorageSynchronized = false; showToast(t('connect.draft.saveError')); } }
 persistPullRequestDrafts(library.pullRequestDrafts);
@@ -769,17 +754,17 @@ async function init() {
   app().innerHTML = `<main class="connect"><p class="eyebrow">${t('connect.eyebrow.github')}</p><h1>${t('connect.loading')}</h1></main>`;
   try {
     sessionState.repos = await githubFetch<Repo[]>(sessionState.token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated');
-    cloudWorkspaceLoading = !localViteWithoutApi;
+    workflowState.cloudWorkspaceLoading = !localViteWithoutApi;
     render();
-    if (cloudWorkspaceLoading) void hydrateCloudWorkspace();
+    if (workflowState.cloudWorkspaceLoading) void hydrateCloudWorkspace();
   } catch (err) { connect(err instanceof Error ? err.message : t('connect.error.repos')); }
 }
 async function hydrateCloudWorkspace() {
   try {
     await loadCloudWorkflows();
-    if (cloudWorkflowStorage) await Promise.all([loadActionQueue(false), loadPushState(), loadAutomationCredentialStatus()]);
+    if (workflowState.cloudWorkflowStorage) await Promise.all([loadActionQueue(false), loadPushState(), loadAutomationCredentialStatus()]);
   } finally {
-    cloudWorkspaceLoading = false;
+    workflowState.cloudWorkspaceLoading = false;
     render();
   }
 }
@@ -787,7 +772,7 @@ async function hydrateCloudWorkspace() {
 async function refreshAuthorizedRepositories() {
   try {
     sessionState.repos = await githubFetch<Repo[]>(sessionState.token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated');
-    const activeRepositoryRevoked = Boolean(active && !sessionState.repos.some(repo => repo.full_name === active!.repository));
+    const activeRepositoryRevoked = Boolean(workflowState.active && !sessionState.repos.some(repo => repo.full_name === workflowState.active!.repository));
     render();
     if (screen === 'detail') void refreshStatuses();
     showToast(activeRepositoryRevoked ? t('toast.repos.synced') : t('toast.repos.syncedCount', { count: sessionState.repos.length }));
@@ -815,11 +800,11 @@ function openRepositoryManagement() {
 
 function render() {
   const manageRepositories = sessionState.githubInstallationSettingsUrl ? `<button id="manage-repositories" class="account-menu-item">${t('account.manageRepos')}</button>` : '';
-  const operationAudit = `<button id="operation-audit" class="account-menu-item" ${cloudWorkflowStorage ? '' : 'disabled'}>${t('account.operationAudit')}</button>`;
+  const operationAudit = `<button id="operation-audit" class="account-menu-item" ${workflowState.cloudWorkflowStorage ? '' : 'disabled'}>${t('account.operationAudit')}</button>`;
   const account = sessionState.githubLogin ? `GitHub · @${escape(sessionState.githubLogin)}` : t('account.label');
   const push = filters.pushConfigured ? `<button id="push-settings" class="account-menu-item" ${filters.pushSubscribed ? `disabled title="${t('account.push.title')}"` : ''}>${filters.pushSubscribed ? t('account.push.on') : t('account.push.off')}</button>` : '';
   const themeIcon = currentTheme === 'dark' ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3a6 6 0 0 0 12 0V9a6 6 0 0 0-6-6z"/></svg>';
-  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#"><img class="brand-mark" src="/favicon.svg" alt="" width="28" height="28" />${t('brand.name')}<span>${t('brand.suffix')}</span></a><nav aria-label="${t('nav.label')}"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">${t('nav.overview')}</button></nav><div class="topbar-actions"><button id="theme-toggle" class="theme-toggle" aria-label="${currentTheme === 'dark' ? t('theme.toLight') : t('theme.toDark')}">${themeIcon}<span>${currentTheme === 'dark' ? t('theme.light') : t('theme.dark')}</span></button><button id="lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}${operationAudit}<button id="team-settings-top" class="account-menu-item" ${cloudWorkflowStorage ? '' : 'disabled'}>${t('account.teams')}</button><button id="ai-settings-top" class="account-menu-item">${t('account.aiSettings')}</button><button id="cloud-sync-top" class="account-menu-item">${library.cloudSyncStatus.state === 'disabled' ? t('cloudSync.enable') : t('cloudSync.status.' + library.cloudSyncStatus.state)}</button><button id="disconnect" class="account-menu-item danger">${t('account.disconnect')}</button><button id="delete-account-top" class="account-menu-item danger">${t('account.deleteAccount')}</button><button id="permissions-top" class="account-menu-item">${t('account.permissions')}</button><a href="/privacy.html" class="account-menu-item" target="_blank">${t('account.privacy')}</a></div></div></div></header><section id="content"></section></main>`;
+  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#"><img class="brand-mark" src="/favicon.svg" alt="" width="28" height="28" />${t('brand.name')}<span>${t('brand.suffix')}</span></a><nav aria-label="${t('nav.label')}"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">${t('nav.overview')}</button></nav><div class="topbar-actions"><button id="theme-toggle" class="theme-toggle" aria-label="${currentTheme === 'dark' ? t('theme.toLight') : t('theme.toDark')}">${themeIcon}<span>${currentTheme === 'dark' ? t('theme.light') : t('theme.dark')}</span></button><button id="lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}${operationAudit}<button id="team-settings-top" class="account-menu-item" ${workflowState.cloudWorkflowStorage ? '' : 'disabled'}>${t('account.teams')}</button><button id="ai-settings-top" class="account-menu-item">${t('account.aiSettings')}</button><button id="cloud-sync-top" class="account-menu-item">${library.cloudSyncStatus.state === 'disabled' ? t('cloudSync.enable') : t('cloudSync.status.' + library.cloudSyncStatus.state)}</button><button id="disconnect" class="account-menu-item danger">${t('account.disconnect')}</button><button id="delete-account-top" class="account-menu-item danger">${t('account.deleteAccount')}</button><button id="permissions-top" class="account-menu-item">${t('account.permissions')}</button><a href="/privacy.html" class="account-menu-item" target="_blank">${t('account.privacy')}</a></div></div></div></header><section id="content"></section></main>`;
   const accountMenuToggle = document.querySelector<HTMLButtonElement>('#account-menu-toggle')!, accountMenuPanel = document.querySelector<HTMLElement>('#account-menu-panel')!;
   const accountMenu = accountMenuToggle.closest<HTMLElement>('.account-menu')!;
   const closeAccountMenu = () => { accountMenuPanel.hidden = true; accountMenuToggle.setAttribute('aria-expanded', 'false'); };
@@ -832,7 +817,7 @@ function render() {
   });
   accountMenuPanel.addEventListener('click', closeAccountMenu);
   document.querySelector<HTMLAnchorElement>('.brand')!.addEventListener('click', event => { event.preventDefault(); goTo('overview'); });
-  document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) { active = null; editorDraft = { repository: '', name: '', source: '', target: '' }; } goTo(target); }));
+  document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) { workflowState.active = null; editorDraft = { repository: '', name: '', source: '', target: '' }; } goTo(target); }));
   document.querySelector('#theme-toggle')!.addEventListener('click', toggleTheme);
   document.querySelector('#lang-toggle')!.addEventListener('click', () => { setLocale(getLocale() === 'zh' ? 'en' : 'zh'); render(); });
   document.querySelector('#ai-settings-top')!.addEventListener('click', () => showAiSettings());
@@ -849,8 +834,8 @@ function render() {
 
 function goTo(target: Screen | 'back') {
   const previous = screen;
-  screen = navigationTarget(screen, target, Boolean(active));
-  if (shouldRefreshWorkflowDetail(previous, screen)) { statuses = active ? projectedDetailStatuses(active) : null; refreshOnNextDetail = true; }
+  screen = navigationTarget(screen, target, Boolean(workflowState.active));
+  if (shouldRefreshWorkflowDetail(previous, screen)) { statuses = workflowState.active ? projectedDetailStatuses(workflowState.active) : null; refreshOnNextDetail = true; }
   render();
 }
 
@@ -922,7 +907,7 @@ function renderContent() {
 }
 
 function stageState(workflowId: string, stageIndex: number, source?: string, target?: string) {
-  const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
+  const stageId = workflowState.workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
   return projection.workflowStageStates.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source) && (target === undefined || state.target === target));
 }
 function statesForStage(flow: Workflow, stageIndex: number) {
@@ -935,14 +920,14 @@ function stageUpdatedAt(state?: WorkflowStageState) {
   return t('overview.run.updated', { time: new Intl.DateTimeFormat(getLocale() === 'zh' ? 'zh-CN' : 'en-US', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date) });
 }
 function stageAgeSeconds(workflowId: string, stageIndex: number, source?: string): number | null {
-  const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
+  const stageId = workflowState.workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
   const health = projection.syncHealth?.stages.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source));
   return health ? health.ageSeconds : null;
 }
 function stageStaleBadge(workflowId: string, stageIndex: number, source?: string): string {
   const age = stageAgeSeconds(workflowId, stageIndex, source);
   if (age === null) return '';
-  const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
+  const stageId = workflowState.workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
   const stale = projection.syncHealth?.stages.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source))?.stale;
   if (!stale) return '';
   const minutes = Math.floor(age / 60);
@@ -971,11 +956,11 @@ function syncHealthBanner(): string {
   if (last.state === 'degraded') return `<div class="sync-health-banner degraded"><span class="sync-health-icon">⚠️</span><span>${t('syncHealth.degraded', { reconciled: last.stagesReconciled, failed: last.stagesFailed })} · ${timeAgo}${duration}${staleWarning}</span></div>`;
   return `<div class="sync-health-banner success"><span class="sync-health-icon">✓</span><span>${t('syncHealth.lastSync', { time: timeAgo, stages: last.stagesReconciled })}${duration}${staleWarning}</span></div>`;
 }
-function stageEvents(workflowId: string, stageIndex: number, source?: string) { const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId; return projection.workflowStageEvents.filter(event => event.workflowId === workflowId && (stageId ? event.stageId === stageId : event.stageIndex === stageIndex) && (source === undefined || event.source === null || event.source === source)).slice(0, 4); }
-function stageDeployments(workflowId: string, stageIndex: number, source?: string) { const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId; return projection.workflowStageDeployments.filter(deployment => deployment.workflowId === workflowId && (stageId ? deployment.stageId === stageId : deployment.stageIndex === stageIndex) && (source === undefined || deployment.source === source)); }
+function stageEvents(workflowId: string, stageIndex: number, source?: string) { const stageId = workflowState.workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId; return projection.workflowStageEvents.filter(event => event.workflowId === workflowId && (stageId ? event.stageId === stageId : event.stageIndex === stageIndex) && (source === undefined || event.source === null || event.source === source)).slice(0, 4); }
+function stageDeployments(workflowId: string, stageIndex: number, source?: string) { const stageId = workflowState.workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId; return projection.workflowStageDeployments.filter(deployment => deployment.workflowId === workflowId && (stageId ? deployment.stageId === stageId : deployment.stageIndex === stageIndex) && (source === undefined || deployment.source === source)); }
 function deploymentCards(workflowId: string, stageIndex: number, source?: string) {
   const deployments = stageDeployments(workflowId, stageIndex, source);
-  const flow = workflows.find(workflow => workflow.id === workflowId);
+  const flow = workflowState.workflows.find(workflow => workflow.id === workflowId);
   if (!deployments.length) return '';
   return `<section class="drawer-deployments"><p class="eyebrow">${t('overview.deployment.title')}</p><div>${deployments.map(deployment => {
     const primaryUrl = deployment.deploymentUrl || deployment.runUrl;
@@ -1034,7 +1019,7 @@ function laneRunSummary(flow: Workflow) {
   return { ...summary, text: updatedLabel ? `${text} · ${updatedLabel}` : text };
 }
 async function loadPreflight(workflowId?: string) {
-  if (!cloudWorkflowStorage) { projection.preflightResults = []; projection.preflightError = ''; return; }
+  if (!workflowState.cloudWorkflowStorage) { projection.preflightResults = []; projection.preflightError = ''; return; }
   projection.preflightLoading = true;
   try {
     const url = workflowId ? `/api/preflight?workflowId=${encodeURIComponent(workflowId)}` : '/api/preflight';
@@ -1055,7 +1040,7 @@ function preflightPanel(): string {
   const badge = projection.preflightLoading ? `<span class="pf-badge pf-loading">${t('preflight.loading')}</span>` : projection.preflightError ? `<span class="pf-badge pf-fail">${escape(projection.preflightError)}</span>` : `<span class="pf-badge ${badgeClass}">${totalErrors ? t('preflight.fail', { errors: totalErrors }) : t('preflight.pass')}</span>`;
   const checksHtml = projection.preflightResults.flatMap(result => result.checks.map(check => {
     const severityIcon = check.severity === 'error' ? '❌' : check.severity === 'warning' ? '⚠️' : 'ℹ️';
-    const flow = workflows.find(w => w.id === result.workflowId);
+    const flow = workflowState.workflows.find(w => w.id === result.workflowId);
     const stageLabel = check.stageIndex !== null && flow ? `${flow.stages[check.stageIndex]?.source || ''} → ${flow.stages[check.stageIndex]?.target || ''}` : '';
     const fixHtml = check.fix ? `<small class="pf-fix">💡 ${escape(check.fix)}</small>` : '';
     return `<li class="pf-${check.severity}"><span class="pf-sev">${severityIcon}</span><div><b>${escape(check.title)}</b><small>${escape(check.detail)}${stageLabel ? ` · ${escape(stageLabel)}` : ''}</small>${fixHtml}</div></li>`;
@@ -1074,7 +1059,7 @@ function recoveryStatusBadge(status: RecoveryStatus | undefined): string {
   return '';
 }
 function automationActionFor(workflowId: string, stageIndex: number, source: string): AutomationAction | undefined {
-  const stage = workflows.find(flow => flow.id === workflowId)?.stages[stageIndex];
+  const stage = workflowState.workflows.find(flow => flow.id === workflowId)?.stages[stageIndex];
   const scoped = projection.automationActions.filter(action => action.workflowId === workflowId);
   // A stage keeps its identity across reorders, so prefer it and fall back to the index only for
   // legacy stages saved before stable ids existed.
@@ -1212,7 +1197,7 @@ function failureCenterPanel(): string {
   const deploymentFailures = projection.workflowStageStates.filter(state => state.checksState === 'failure' && state.pullState === 'merged');
   if (!failures.length && !deploymentFailures.length && !blockedAutomationActions().length) return '';
   const items = failures.map(item => {
-    const flow = workflows.find(w => w.id === item.workflowId);
+    const flow = workflowState.workflows.find(w => w.id === item.workflowId);
     const icon = item.kind === 'checks-failed' ? '✗' : '⏳';
     const tone = item.kind === 'checks-failed' ? 'failed' : 'attention';
     const prLink = item.pullNumber && flow ? prReferenceHtml(githubPullUrl(flow.repository, item.pullNumber), `#${item.pullNumber}`) : '';
@@ -1225,12 +1210,12 @@ function failureCenterPanel(): string {
     return `<li class="${tone}"><span class="fc-icon">${icon}</span><div><b>${escape(item.workflowName)}</b><small>${escape(item.source)} → ${escape(item.target)}${prLink ? ` · ${prLink}` : ''}</small><p>${escape(item.message)}</p>${badge}</div><div class="fc-actions">${actions}<button class="link-button fc-open" data-fc-workflow="${escape(item.workflowId)}" data-fc-stage="${item.stageIndex}" data-fc-source="${escape(item.source)}">${t('overview.board.stepDetail')}</button></div></li>`;
   }).join('');
   const deployItems = deploymentFailures.map(state => {
-    const flow = workflows.find(w => w.id === state.workflowId);
+    const flow = workflowState.workflows.find(w => w.id === state.workflowId);
     if (!flow) return '';
     return `<li class="failed"><span class="fc-icon">🔴</span><div><b>${escape(flow.name)}</b><small>${escape(state.source)} → ${escape(state.target)} · ${t('overview.deployment.failure')}</small></div><div class="fc-actions"><button class="link-button fc-open" data-fc-workflow="${escape(state.workflowId)}" data-fc-stage="${state.stageIndex}" data-fc-source="${escape(state.source)}">${t('overview.board.stepDetail')}</button></div></li>`;
   }).join('');
   const automationItems = blockedAutomationActions().map(action => {
-    const flow = workflows.find(w => w.id === action.workflowId);
+    const flow = workflowState.workflows.find(w => w.id === action.workflowId);
     if (!flow) return '';
     const presentation = automationActionPresentation(action);
     const icon = presentation.tone === 'failed' ? '✗' : '⏸';
@@ -1254,27 +1239,27 @@ function laneSortControls() {
 function overview() {
   const content = document.querySelector('#content')!;
   const localModeNotice = localViteWithoutApi ? `<section class="local-sync-notice local-mode-notice"><div><b>${t('localMode.title')}</b><p>${t('localMode.desc')}</p></div></section>` : '';
-  const cloudWorkspaceNotice = cloudWorkspaceLoading ? `<section class="local-sync-notice"><div><b>${t('sync.loading.title')}</b><p>${t('sync.loading.desc')}</p></div></section>` : '';
-  const storageWarning = cloudWorkflowSyncError ? `<details class="compact-notice is-error"><summary><span><b>${t('sync.warning.title')}</b><span>${t('sync.warning.desc')}</span></span><small>${t('sync.warning.detail')}</small></summary><p>${escape(cloudWorkflowSyncError)}</p></details>` : '';
+  const cloudWorkspaceNotice = workflowState.cloudWorkspaceLoading ? `<section class="local-sync-notice"><div><b>${t('sync.loading.title')}</b><p>${t('sync.loading.desc')}</p></div></section>` : '';
+  const storageWarning = workflowState.cloudWorkflowSyncError ? `<details class="compact-notice is-error"><summary><span><b>${t('sync.warning.title')}</b><span>${t('sync.warning.desc')}</span></span><small>${t('sync.warning.detail')}</small></summary><p>${escape(workflowState.cloudWorkflowSyncError)}</p></details>` : '';
   const queueWarning = projection.actionQueueError ? `<details class="compact-notice is-error"><summary><span><b>${t('overview.queue.error.title')}</b></span><small>${t('sync.warning.detail')}</small></summary><p>${escape(projection.actionQueueError)}</p></details>` : '';
-  const syncPrompt = pendingLocalWorkflowSync ? `<section class="local-sync-notice"><div><b>${t('sync.prompt.title', { count: workflows.length })}</b><p>${t('sync.prompt.desc', { login: sessionState.githubLogin || '' })}</p></div><button id="sync-local-workflows" class="ghost">${t('sync.prompt.button')}</button></section>` : '';
-  const syncBanner = cloudWorkflowStorage ? syncHealthBanner() : '';
+  const syncPrompt = workflowState.pendingLocalWorkflowSync ? `<section class="local-sync-notice"><div><b>${t('sync.prompt.title', { count: workflowState.workflows.length })}</b><p>${t('sync.prompt.desc', { login: sessionState.githubLogin || '' })}</p></div><button id="sync-local-workflows" class="ghost">${t('sync.prompt.button')}</button></section>` : '';
+  const syncBanner = workflowState.cloudWorkflowStorage ? syncHealthBanner() : '';
   const failurePanel = failureCenterPanel();
   const preflight = preflightPanel();
   const failedCount = projection.actionQueue.filter(item => item.kind === 'checks-failed').length;
   const automationBlockedCount = blockedAutomationActions().length;
-  const workflowCount = activeWorkflows(workflows).length;
-  const archivedCount = archivedWorkflows(workflows).length;
+  const workflowCount = activeWorkflows(workflowState.workflows).length;
+  const archivedCount = archivedWorkflows(workflowState.workflows).length;
   // 'Running' includes every active workflow that is actively progressing: either its current stage is in a running
   // tone, or a human has taken over (it is in the attention queue). 'Needs attention' is therefore a subset of 'Running'.
   const attentionWorkflowIds = new Set(projection.actionQueue.map(item => item.workflowId));
   const runningWorkflowIds = new Set<string>();
-  for (const flow of activeWorkflows(workflows)) {
+  for (const flow of activeWorkflows(workflowState.workflows)) {
     if (attentionWorkflowIds.has(flow.id) || laneRunSummary(flow).tone === 'running') runningWorkflowIds.add(flow.id);
   }
   const runningCount = runningWorkflowIds.size;
   // The archived view is the only one that shows them; every other count and lane is about live work.
-  const boardWorkflows = filters.overviewFilter === 'archived' ? archivedWorkflows(workflows) : activeWorkflows(workflows);
+  const boardWorkflows = filters.overviewFilter === 'archived' ? archivedWorkflows(workflowState.workflows) : activeWorkflows(workflowState.workflows);
   const sortedWorkflows = sortWorkflowsForView(boardWorkflows, filters.laneSortMode, filters.laneSortDirection);
   const filterMatchedWorkflows = sortedWorkflows.filter(flow => {
     if (filters.overviewFilter === 'all' || filters.overviewFilter === 'archived') return true;
@@ -1286,7 +1271,7 @@ function overview() {
   const visibleWorkflows = filterMatchedWorkflows.filter(flow => !normalizedSearch || `${flow.name} ${flow.repository}`.toLocaleLowerCase().includes(normalizedSearch));
   const hasSearchMiss = Boolean(normalizedSearch && !visibleWorkflows.length);
   const refreshLabel = projection.actionQueueRefreshing ? t('overview.queue.refreshing') : t('overview.queue.refresh');
-  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div>${laneSortControls()}<button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${filters.overviewFilter === 'attention' ? 'active' : ''}"><span>${projection.actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="running" class="${filters.overviewFilter === 'running' ? 'active' : ''}"><span>${runningCount}</span>${t('overview.board.running')}</button><button data-board-filter="all" class="${filters.overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${filters.overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button data-board-filter="automation" class="${filters.overviewFilter === 'automation' ? 'active' : ''}"><span>${automationBlockedCount}</span>${t('overview.board.automationBlocked')}</button>${archivedCount || filters.overviewFilter === 'archived' ? `<button data-board-filter="archived" class="${filters.overviewFilter === 'archived' ? 'active' : ''}"><span>${archivedCount}</span>${t('overview.board.archived')}</button>` : ''}<button id="refresh-action-queue" class="board-refresh${projection.actionQueueRefreshing ? ' is-loading' : ''}"${projection.actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${projection.actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${filters.overviewFilter === 'archived' ? t('overview.board.archivedEmpty') : t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section><div class="board-scroll-controls" hidden aria-label="${escape(t('overview.board.scrollControls'))}"><button type="button" data-board-scroll="top" aria-label="${escape(t('overview.board.scrollTop'))}" title="${escape(t('overview.board.scrollTop'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 10 5-5 5 5M3 14l5-5 5 5"/></svg></button><button type="button" data-board-scroll="bottom" aria-label="${escape(t('overview.board.scrollBottom'))}" title="${escape(t('overview.board.scrollBottom'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 6 5 5 5-5M3 2l5 5 5-5"/></svg></button></div>`;
+  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div>${laneSortControls()}<button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${filters.overviewFilter === 'attention' ? 'active' : ''}"><span>${projection.actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="running" class="${filters.overviewFilter === 'running' ? 'active' : ''}"><span>${runningCount}</span>${t('overview.board.running')}</button><button data-board-filter="all" class="${filters.overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${filters.overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button data-board-filter="automation" class="${filters.overviewFilter === 'automation' ? 'active' : ''}"><span>${automationBlockedCount}</span>${t('overview.board.automationBlocked')}</button>${archivedCount || filters.overviewFilter === 'archived' ? `<button data-board-filter="archived" class="${filters.overviewFilter === 'archived' ? 'active' : ''}"><span>${archivedCount}</span>${t('overview.board.archived')}</button>` : ''}<button id="refresh-action-queue" class="board-refresh${projection.actionQueueRefreshing ? ' is-loading' : ''}"${projection.actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${projection.actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflowState.workflows.length ? `<article class="board-empty"><h3>${filters.overviewFilter === 'archived' ? t('overview.board.archivedEmpty') : t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section><div class="board-scroll-controls" hidden aria-label="${escape(t('overview.board.scrollControls'))}"><button type="button" data-board-scroll="top" aria-label="${escape(t('overview.board.scrollTop'))}" title="${escape(t('overview.board.scrollTop'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 10 5-5 5 5M3 14l5-5 5 5"/></svg></button><button type="button" data-board-scroll="bottom" aria-label="${escape(t('overview.board.scrollBottom'))}" title="${escape(t('overview.board.scrollBottom'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 6 5 5 5-5M3 2l5 5 5-5"/></svg></button></div>`;
   const emptyResetButton = content.querySelector<HTMLButtonElement>('.board-empty button[data-board-filter="all"]');
   if (hasSearchMiss && emptyResetButton) {
     emptyResetButton.removeAttribute('data-board-filter');
@@ -1304,8 +1289,8 @@ function overview() {
   const searchControl = content.querySelector<HTMLElement>('.lane-search');
   if (searchCount && boardSummary && sortControls) boardSummary.insertBefore(searchCount, sortControls);
   if (searchControl && boardSummary && sortControls) boardSummary.insertBefore(searchControl, sortControls);
-  document.querySelector('#new-flow')!.addEventListener('click', () => { active = null; editorDraft = { repository: '', name: '', source: '', target: '' }; screen = 'editor'; render(); });
-  document.querySelector('#empty-new')?.addEventListener('click', () => { active = null; editorDraft = { repository: '', name: '', source: '', target: '' }; screen = 'editor'; render(); });
+  document.querySelector('#new-flow')!.addEventListener('click', () => { workflowState.active = null; editorDraft = { repository: '', name: '', source: '', target: '' }; screen = 'editor'; render(); });
+  document.querySelector('#empty-new')?.addEventListener('click', () => { workflowState.active = null; editorDraft = { repository: '', name: '', source: '', target: '' }; screen = 'editor'; render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
   document.querySelector('#refresh-action-queue')?.addEventListener('click', () => void refreshActionQueue());
   document.querySelectorAll<HTMLButtonElement>('[data-board-scroll]').forEach(button => button.addEventListener('click', () => {
@@ -1335,22 +1320,22 @@ function overview() {
     render();
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-lane-step]').forEach(button => button.addEventListener('click', () => showProjectStepDrawer(button.dataset.workflowId || '', Number(button.dataset.laneStep), button.dataset.laneSource)));
-  document.querySelectorAll<HTMLButtonElement>('[data-edit-project]').forEach(button => button.addEventListener('click', () => { active = workflows.find(item => item.id === button.dataset.editProject) || null; screen = 'editor'; render(); }));
+  document.querySelectorAll<HTMLButtonElement>('[data-edit-project]').forEach(button => button.addEventListener('click', () => { workflowState.active = workflowState.workflows.find(item => item.id === button.dataset.editProject) || null; screen = 'editor'; render(); }));
   document.querySelectorAll<HTMLButtonElement>('[data-archive-project]').forEach(button => button.addEventListener('click', () => {
-    const flow = workflows.find(item => item.id === button.dataset.archiveProject);
+    const flow = workflowState.workflows.find(item => item.id === button.dataset.archiveProject);
     if (flow && canOperateWorkflow(flow, 'workflow-edit')) showArchiveWorkflowDialog(flow);
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-restore-project]').forEach(button => button.addEventListener('click', () => {
-    const flow = workflows.find(item => item.id === button.dataset.restoreProject);
+    const flow = workflowState.workflows.find(item => item.id === button.dataset.restoreProject);
     // Restoring puts the flow back under reconciliation, which is what it was doing before: no confirmation.
     if (flow && canOperateWorkflow(flow, 'workflow-edit')) void persistWorkflowArchive(flow, false);
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-mute-project]').forEach(button => button.addEventListener('click', () => {
-    const flow = workflows.find(item => item.id === button.dataset.muteProject);
+    const flow = workflowState.workflows.find(item => item.id === button.dataset.muteProject);
     // Muting only silences push notifications and has no other side effect: no confirmation, like restoring.
     if (flow && canOperateWorkflow(flow, 'workflow-edit')) void persistWorkflowMute(flow, !isWorkflowMuted(flow));
   }));
-  bindLaneSorting({ getWorkflows: () => workflows, persistOrder: persistWorkflowOrder });
+  bindLaneSorting({ getWorkflows: () => workflowState.workflows, persistOrder: persistWorkflowOrder });
   bindFlowCards();
   bindFailureCenter();
   bindOverviewScrollControls();
@@ -1368,7 +1353,7 @@ function bindFailureCenter() {
     const stageIndex = Number(button.dataset.fcStage);
     const source = button.dataset.fcSource;
     if (!workflowId || !source) return;
-    const flow = workflows.find(w => w.id === workflowId);
+    const flow = workflowState.workflows.find(w => w.id === workflowId);
     const state = projection.workflowStageStates.find(s => s.workflowId === workflowId && s.stageIndex === stageIndex && s.source === source);
     if (!flow || !state) return;
     const recovery = recoveryStatusFor(workflowId, stageIndex, source);
@@ -1465,8 +1450,8 @@ function projectLane(flow: Workflow) {
   const steps = hasFanIn
     ? [...targets.entries()].map(([target, routes]) => `<section class="lane-merge-group"><p>${t('overview.board.mergeTarget', { target: escape(target) })}</p><div>${routes.map(({ stage, index }) => routeCards(stage, index)).join('')}</div></section>`).join('')
     : flow.stages.map((stage, index) => routeCards(stage, index)).join('<span class="lane-connector" aria-hidden="true">→</span>');
-  const orderIndex = workflows.findIndex(workflow => workflow.id === flow.id);
-  const sortingDisabled = filters.laneSortMode !== 'custom' || filters.overviewFilter !== 'all' || filters.laneSearchQuery.trim() !== '' || workflows.some(workflow => !canOperateWorkflow(workflow, 'workflow-edit'));
+  const orderIndex = workflowState.workflows.findIndex(workflow => workflow.id === flow.id);
+  const sortingDisabled = filters.laneSortMode !== 'custom' || filters.overviewFilter !== 'all' || filters.laneSearchQuery.trim() !== '' || workflowState.workflows.some(workflow => !canOperateWorkflow(workflow, 'workflow-edit'));
   const editable = canOperateWorkflow(flow, 'workflow-edit');
   const archived = flow.archived === true;
   const dragLabel = t('overview.board.dragProject', { name: flow.name });
@@ -1481,15 +1466,15 @@ function projectLane(flow: Workflow) {
   const orderInput = filters.laneSortMode === 'custom'
     ? `<label class="lane-order-input"><input type="text" inputmode="numeric" pattern="[0-9]*" value="${orderIndex + 1}" data-lane-position="${escape(flow.id)}" aria-label="${escape(t('overview.board.orderFor', { name: flow.name }))}" ${sortingDisabled ? 'disabled' : ''} /></label>`
     : '';
-  return `<article class="project-lane${expanded ? ' is-expanded' : ''}${archived ? ' is-archived' : ''}${returnHighlight === flow.id ? ' is-return-highlight' : ''}" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div>${orderInput}</div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${flowName}</h2>${archived ? `<span class="lane-archived-badge">${t('overview.board.archivedBadge')}</span>` : ''}${!archived && isWorkflowMuted(flow) ? `<span class="lane-muted-badge">${t('overview.board.mutedBadge')}</span>` : ''}${sharedWorkflowBadge(flow)}<p class="lane-run-summary ${runSummary.tone}">${runSummary.text}</p></div></div><button type="button" class="lane-collapse-toggle" data-lane-collapse="${escape(flow.id)}" aria-expanded="${expanded}" aria-label="${escape(collapseLabel)}" title="${escape(collapseLabel)}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.75" y="2.75" width="10.5" height="10.5" rx="1.5"/><path d="m5.25 8 2.75-2.75L10.75 8"/></svg></button><div class="lane-actions">${archived ? `<button data-restore-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.restore')}</button>` : `<button data-edit-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.edit')}</button><button data-archive-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.archive')}</button><button data-mute-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t(isWorkflowMuted(flow) ? 'overview.board.unmute' : 'overview.board.mute')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button>`}</div></header><div class="lane-body"${expanded ? '' : ' hidden'}>${warning}<div class="lane-track${hasFanIn ? ' has-fan-in' : ''}">${steps}</div>${timelineSection}${runHistory}</div></article>`;
+  return `<article class="project-lane${expanded ? ' is-expanded' : ''}${archived ? ' is-archived' : ''}${returnHighlight === flow.id ? ' is-return-highlight' : ''}" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflowState.workflows.length - 1 ? 'disabled' : ''}>↓</button></div>${orderInput}</div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${flowName}</h2>${archived ? `<span class="lane-archived-badge">${t('overview.board.archivedBadge')}</span>` : ''}${!archived && isWorkflowMuted(flow) ? `<span class="lane-muted-badge">${t('overview.board.mutedBadge')}</span>` : ''}${sharedWorkflowBadge(flow)}<p class="lane-run-summary ${runSummary.tone}">${runSummary.text}</p></div></div><button type="button" class="lane-collapse-toggle" data-lane-collapse="${escape(flow.id)}" aria-expanded="${expanded}" aria-label="${escape(collapseLabel)}" title="${escape(collapseLabel)}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.75" y="2.75" width="10.5" height="10.5" rx="1.5"/><path d="m5.25 8 2.75-2.75L10.75 8"/></svg></button><div class="lane-actions">${archived ? `<button data-restore-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.restore')}</button>` : `<button data-edit-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.edit')}</button><button data-archive-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.archive')}</button><button data-mute-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t(isWorkflowMuted(flow) ? 'overview.board.unmute' : 'overview.board.mute')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button>`}</div></header><div class="lane-body"${expanded ? '' : ' hidden'}>${warning}<div class="lane-track${hasFanIn ? ' has-fan-in' : ''}">${steps}</div>${timelineSection}${runHistory}</div></article>`;
 }
 function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: string) {
-  const flow = workflows.find(item => item.id === workflowId), stage = flow?.stages[stageIndex];
+  const flow = workflowState.workflows.find(item => item.id === workflowId), stage = flow?.stages[stageIndex];
   if (!flow || !stage) return;
   const queueItem = projection.actionQueue.find(item => item.workflowId === workflowId && item.stageIndex === stageIndex && (!source || item.source === source));
   const state = stageState(workflowId, stageIndex, source, stage.target);
   const routeSource = state?.source || source || stage.source;
-  const detailStatus = active?.id === flow.id && !stage.source.includes('*') ? statuses?.[stageIndex] : undefined;
+  const detailStatus = workflowState.active?.id === flow.id && !stage.source.includes('*') ? statuses?.[stageIndex] : undefined;
   const run = stageRunPresentation(state);
   const tone = queueItem?.kind === 'checks-failed' ? 'failed' : queueItem ? 'attention' : run.tone;
   const pullNumber = detailStatus?.pr?.number || queueItem?.pullNumber || state?.pullNumber || null;
@@ -1530,13 +1515,13 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   const close = () => dialog.close();
   dialog.querySelector('.drawer-close')!.addEventListener('click', close);
   dialog.querySelector<HTMLButtonElement>('.drawer-create-pr')?.addEventListener('click', () => {
-    active = flow;
+    workflowState.active = flow;
     dialog.close();
     showCreateDialog(stageIndex, () => render(), routeSource);
   });
   dialog.querySelector<HTMLButtonElement>('.drawer-merge-pr')?.addEventListener('click', () => {
     if (!mergeStatus) return;
-    active = flow;
+    workflowState.active = flow;
     dialog.close();
     showMergeDialog(stageIndex, mergeStatus, () => {
       // The step is already resolved locally, so show that at once. Reconciliation is slow and
@@ -1548,7 +1533,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
     const button = event.currentTarget as HTMLButtonElement;
     button.disabled = true;
     button.textContent = t('recovery.syncing');
-    active = flow;
+    workflowState.active = flow;
     try {
       await refreshStatuses(false, true, true);
       const queueLoaded = await loadActionQueue(true, flow.repository);
@@ -1561,7 +1546,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
       button.textContent = t('recovery.sync');
     }
   });
-  dialog.querySelector<HTMLButtonElement>('.drawer-repair')?.addEventListener('click', () => { active = flow; dialog.close(); void showCodexRepairDialog(stageIndex, routeSource, detailStatus?.pr?.number || state?.pullNumber || undefined); });
+  dialog.querySelector<HTMLButtonElement>('.drawer-repair')?.addEventListener('click', () => { workflowState.active = flow; dialog.close(); void showCodexRepairDialog(stageIndex, routeSource, detailStatus?.pr?.number || state?.pullNumber || undefined); });
   dialog.querySelector<HTMLButtonElement>('.drawer-retry-actions')?.addEventListener('click', event => { if (state) void retryFailedActions(flow, state, event.currentTarget as HTMLButtonElement); });
   dialog.querySelectorAll<HTMLButtonElement>('.deployment-retry').forEach(button => button.addEventListener('click', () => {
     const runId = Number(button.dataset.deploymentRun);
@@ -1576,23 +1561,23 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
     dialog.close();
     showDeploymentRollbackDialog(flow, stageIndex, routeSource, run);
   }));
-  dialog.querySelector('.drawer-view-flow')!.addEventListener('click', () => { active = flow; dialog.close(); goTo('detail'); });
+  dialog.querySelector('.drawer-view-flow')!.addEventListener('click', () => { workflowState.active = flow; dialog.close(); goTo('detail'); });
   dialog.addEventListener('click', event => { if (event.target === dialog) close(); });
   dialog.addEventListener('close', () => dialog.remove());
 }
-function bindFlowCards() { document.querySelectorAll<HTMLButtonElement>('[data-open]').forEach(button => button.addEventListener('click', () => { active = workflows.find(item => item.id === button.dataset.open) || null; goTo('detail'); })); }
+function bindFlowCards() { document.querySelectorAll<HTMLButtonElement>('[data-open]').forEach(button => button.addEventListener('click', () => { workflowState.active = workflowState.workflows.find(item => item.id === button.dataset.open) || null; goTo('detail'); })); }
 
 function bindDraftStepSorting() {
   const steps = [...document.querySelectorAll<HTMLElement>('[data-draft-step]')];
   let draggedIndex: number | null = null;
   const clearStepClasses = () => steps.forEach(step => step.classList.remove('is-dragging', 'is-drop-before', 'is-drop-after'));
   const moveStage = (fromIndex: number, toIndex: number) => {
-    if (!active || fromIndex === toIndex) return;
-    save(reorderStages(active, fromIndex, toIndex));
+    if (!workflowState.active || fromIndex === toIndex) return;
+    save(reorderStages(workflowState.active, fromIndex, toIndex));
     const draft = document.querySelector('#draft');
     if (draft) draft.innerHTML = renderDraft();
     bindDraftStepSorting();
-    renderStepForm(active.repository);
+    renderStepForm(workflowState.active.repository);
   };
   document.querySelectorAll<HTMLButtonElement>('[data-draft-drag]').forEach(handle => {
     handle.addEventListener('dragstart', event => {
@@ -1641,43 +1626,43 @@ function bindDraftStepSorting() {
 
 function bindDraftActions() {
   document.querySelectorAll<HTMLButtonElement>('[data-edit-route]').forEach(button => button.addEventListener('click', () => {
-    if (!active) return;
+    if (!workflowState.active) return;
     stageRouteEditIndex = Number(button.dataset.editRoute);
-    rerenderStepForm(active.repository);
+    rerenderStepForm(workflowState.active.repository);
   }));
   document.querySelector('#view-flow')?.addEventListener('click', () => goTo('detail'));
-  document.querySelector('#delete-flow')?.addEventListener('click', () => { if (active) showDeleteWorkflowDialog(active); });
+  document.querySelector('#delete-flow')?.addEventListener('click', () => { if (workflowState.active) showDeleteWorkflowDialog(workflowState.active); });
 }
 
 function editor() {
-  if (active?.team && !canOperateWorkflow(active, 'workflow-edit')) {
+  if (workflowState.active?.team && !canOperateWorkflow(workflowState.active, 'workflow-edit')) {
     screen = 'detail';
     detail();
     return;
   }
   const content = document.querySelector('#content')!;
   stepFormOpen = false;
-  const selected = active?.repository || editorDraft.repository;
-  const editorName = active?.name || editorDraft.name;
-  const occupiedRepositories = new Set(workflows.filter(workflow => workflow.id !== active?.id).map(workflow => workflow.repository));
+  const selected = workflowState.active?.repository || editorDraft.repository;
+  const editorName = workflowState.active?.name || editorDraft.name;
+  const occupiedRepositories = new Set(workflowState.workflows.filter(workflow => workflow.id !== workflowState.active?.id).map(workflow => workflow.repository));
   const repositoryManagementAction = sessionState.githubInstallationSettingsUrl ? `<button id="editor-manage-repositories" type="button" class="text-link editor-manage-repositories">${t('account.manageRepos')}</button>` : '';
-  content.innerHTML = `<section class="page-head"><button id="back-from-editor" class="ghost">${active ? t('editor.back.detail') : t('editor.back.overview')}</button><p class="eyebrow">${t('editor.eyebrow')}</p><h1>${active ? t('editor.title.edit') : t('editor.title.new')}</h1><p>${t('editor.subtitle')}</p></section><section class="editor-layout"><section class="panel editor-panel"><label>${t('editor.label.name')}<input id="flow-name" value="${escape(editorName)}" placeholder="${t('editor.placeholder.name')}" /></label><label>${t('editor.label.repo')}<select id="repo"><option value="">${t('editor.repo.placeholder')}</option>${sessionState.repos.map(repo => { const occupied = occupiedRepositories.has(repo.full_name); return `<option value="${repo.full_name}" ${repo.full_name === selected ? 'selected' : ''} ${occupied ? 'disabled' : ''}>${repo.full_name}${repo.private ? t('editor.repo.private') : ''}${occupied ? t('editor.repo.used') : ''}</option>`; }).join('')}</select></label><div id="step-form">${selected ? `<p class="meta">${t('editor.branch.loading')}</p>` : `<div class="editor-repository-help"><p class="meta">${t('editor.branch.hint')}</p>${repositoryManagementAction}</div>`}</div></section><aside id="draft" class="panel draft">${renderDraft()}</aside></section>`;
-  document.querySelector('#back-from-editor')!.addEventListener('click', () => { if (!active) editorDraft = { repository: '', name: '', source: '', target: '' }; goTo('back'); });
-  document.querySelector<HTMLInputElement>('#flow-name')!.addEventListener('input', event => { if (!active) editorDraft.name = (event.target as HTMLInputElement).value; });
+  content.innerHTML = `<section class="page-head"><button id="back-from-editor" class="ghost">${workflowState.active ? t('editor.back.detail') : t('editor.back.overview')}</button><p class="eyebrow">${t('editor.eyebrow')}</p><h1>${workflowState.active ? t('editor.title.edit') : t('editor.title.new')}</h1><p>${t('editor.subtitle')}</p></section><section class="editor-layout"><section class="panel editor-panel"><label>${t('editor.label.name')}<input id="flow-name" value="${escape(editorName)}" placeholder="${t('editor.placeholder.name')}" /></label><label>${t('editor.label.repo')}<select id="repo"><option value="">${t('editor.repo.placeholder')}</option>${sessionState.repos.map(repo => { const occupied = occupiedRepositories.has(repo.full_name); return `<option value="${repo.full_name}" ${repo.full_name === selected ? 'selected' : ''} ${occupied ? 'disabled' : ''}>${repo.full_name}${repo.private ? t('editor.repo.private') : ''}${occupied ? t('editor.repo.used') : ''}</option>`; }).join('')}</select></label><div id="step-form">${selected ? `<p class="meta">${t('editor.branch.loading')}</p>` : `<div class="editor-repository-help"><p class="meta">${t('editor.branch.hint')}</p>${repositoryManagementAction}</div>`}</div></section><aside id="draft" class="panel draft">${renderDraft()}</aside></section>`;
+  document.querySelector('#back-from-editor')!.addEventListener('click', () => { if (!workflowState.active) editorDraft = { repository: '', name: '', source: '', target: '' }; goTo('back'); });
+  document.querySelector<HTMLInputElement>('#flow-name')!.addEventListener('input', event => { if (!workflowState.active) editorDraft.name = (event.target as HTMLInputElement).value; });
   document.querySelector('#editor-manage-repositories')?.addEventListener('click', openRepositoryManagement);
   bindDraftActions();
   document.querySelector<HTMLSelectElement>('#repo')!.addEventListener('change', async event => {
     const select = event.target as HTMLSelectElement;
     const repository = select.value;
     // 一个流程只绑定一个仓库，换仓库其实等于新建，所以先说清楚再走，否则原流程会被静默留在原地。
-    if (active && repository && repository !== active.repository) {
-      if (!await confirmRepositorySwitch(active.name, repository)) { select.value = active.repository; return; }
-      active = null;
+    if (workflowState.active && repository && repository !== workflowState.active.repository) {
+      if (!await confirmRepositorySwitch(workflowState.active.name, repository)) { select.value = workflowState.active.repository; return; }
+      workflowState.active = null;
       editorDraft = { repository, name: '', source: '', target: '' };
       editor();
       return;
     }
-    if (active?.repository !== repository) active = null;
+    if (workflowState.active?.repository !== repository) workflowState.active = null;
     editorDraft = { ...editorDraft, repository, source: '', target: '' };
     await loadBranches(repository);
   });
@@ -1703,24 +1688,24 @@ async function loadBranches(repository: string) {
   } catch (err) { form.innerHTML = `<p class="error">${escape(err instanceof Error ? err.message : t('editor.error.branches'))}</p>`; }
 }
 function renderStepForm(repository: string) {
-  if (stageRouteEditIndex !== null && active?.repository === repository && active.stages[stageRouteEditIndex]) { renderStageRouteForm(repository, active, stageRouteEditIndex); return; }
+  if (stageRouteEditIndex !== null && workflowState.active?.repository === repository && workflowState.active.stages[stageRouteEditIndex]) { renderStageRouteForm(repository, workflowState.active, stageRouteEditIndex); return; }
   stageRouteEditIndex = null;
-  const last = active?.repository === repository ? active.stages.at(-1) : undefined;
-  const isNewDraft = !active && editorDraft.repository === repository;
-  const source = (isNewDraft && editorDraft.source) || sessionState.branches.find(branch => /^(feature|fix)\//.test(branch) && !active?.stages.some(stage => stage.source === branch)) || last?.target || sessionState.branches.find(branch => branch.startsWith('feature/')) || sessionState.branches[0] || '';
+  const last = workflowState.active?.repository === repository ? workflowState.active.stages.at(-1) : undefined;
+  const isNewDraft = !workflowState.active && editorDraft.repository === repository;
+  const source = (isNewDraft && editorDraft.source) || sessionState.branches.find(branch => /^(feature|fix)\//.test(branch) && !workflowState.active?.stages.some(stage => stage.source === branch)) || last?.target || sessionState.branches.find(branch => branch.startsWith('feature/')) || sessionState.branches[0] || '';
   const target = (isNewDraft && editorDraft.target) || sessionState.branches.find(branch => branch === 'dev') || sessionState.branches.find(branch => branch === 'main') || sessionState.branches.find(branch => branch !== source) || '';
-  const dependencyOptions = active?.repository === repository && active.stages.length
-    ? `<fieldset class="route-dependencies"><legend>${t('editor.dependencies.label')}</legend><small>${t('editor.dependencies.desc')}</small><div>${active.stages.map((stage, index) => `<label><input type="checkbox" name="wait-for-route" value="${index}" /><span>${escape(stage.source)} → ${escape(stage.target)}</span></label>`).join('')}</div></fieldset>`
+  const dependencyOptions = workflowState.active?.repository === repository && workflowState.active.stages.length
+    ? `<fieldset class="route-dependencies"><legend>${t('editor.dependencies.label')}</legend><small>${t('editor.dependencies.desc')}</small><div>${workflowState.active.stages.map((stage, index) => `<label><input type="checkbox" name="wait-for-route" value="${index}" /><span>${escape(stage.source)} → ${escape(stage.target)}</span></label>`).join('')}</div></fieldset>`
     : '';
-  const deploymentSettings = active?.repository === repository ? renderDeploymentSettings() : '';
-  const recoveryPolicySection = active?.repository === repository ? renderRecoveryPolicySettings() : '';
+  const deploymentSettings = workflowState.active?.repository === repository ? renderDeploymentSettings() : '';
+  const recoveryPolicySection = workflowState.active?.repository === repository ? renderRecoveryPolicySettings() : '';
   const sourceBranches = sessionState.branches.map(branch => `<button type="button" role="option" data-source-branch="${escape(branch)}">${escape(branch)}</button>`).join('');
   // 编辑既有流程时先只留一个「添加步骤」入口：进来通常是为了看或改已有步骤，默认展开的空表单会把流程本身挤下去。
-  const editingExisting = active?.repository === repository && active.stages.length > 0;
+  const editingExisting = workflowState.active?.repository === repository && workflowState.active.stages.length > 0;
   const collapsed = editingExisting && !stepFormOpen;
   const stepFields = collapsed
     ? `<div class="actions"><button id="toggle-step-form" type="button" class="ghost">${t('editor.addStep')}</button></div>`
-    : `<div class="two"><div class="source-field"><label for="source">${t('editor.label.source')}</label><div class="branch-picker"><input id="source" value="${escape(source)}" placeholder="feature/*" role="combobox" aria-autocomplete="list" aria-controls="source-branches" aria-expanded="false" /><button id="source-branch-toggle" type="button" class="source-branch-toggle" aria-label="${t('editor.label.source')}" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button><div id="source-branches" class="source-branch-options" role="listbox" hidden>${sourceBranches}</div></div><small>${t('editor.sourceRuleHint')}</small></div><label>${t('editor.label.target')}<select id="target">${options(target)}</select></label></div><label class="route-mode"><input id="independent-route" type="checkbox" /><span><b>${t('editor.independent.label')}</b><small>${t('editor.independent.desc')}</small></span></label>${dependencyOptions}<div class="actions"><a id="compare" target="_blank" class="text-link">${t('editor.compare')}</a>${editingExisting ? `<button id="cancel-step-form" type="button" class="ghost">${t('editor.cancelStep')}</button>` : ''}<button id="add-step" class="primary">${active?.repository === repository ? t('editor.addRoute') : t('editor.saveFlow')}</button></div>`;
+    : `<div class="two"><div class="source-field"><label for="source">${t('editor.label.source')}</label><div class="branch-picker"><input id="source" value="${escape(source)}" placeholder="feature/*" role="combobox" aria-autocomplete="list" aria-controls="source-branches" aria-expanded="false" /><button id="source-branch-toggle" type="button" class="source-branch-toggle" aria-label="${t('editor.label.source')}" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button><div id="source-branches" class="source-branch-options" role="listbox" hidden>${sourceBranches}</div></div><small>${t('editor.sourceRuleHint')}</small></div><label>${t('editor.label.target')}<select id="target">${options(target)}</select></label></div><label class="route-mode"><input id="independent-route" type="checkbox" /><span><b>${t('editor.independent.label')}</b><small>${t('editor.independent.desc')}</small></span></label>${dependencyOptions}<div class="actions"><a id="compare" target="_blank" class="text-link">${t('editor.compare')}</a>${editingExisting ? `<button id="cancel-step-form" type="button" class="ghost">${t('editor.cancelStep')}</button>` : ''}<button id="add-step" class="primary">${workflowState.active?.repository === repository ? t('editor.addRoute') : t('editor.saveFlow')}</button></div>`;
   document.querySelector('#step-form')!.innerHTML = `${stepFields}${deploymentSettings}${recoveryPolicySection}`;
   document.querySelector<HTMLButtonElement>('#toggle-step-form')?.addEventListener('click', () => { stepFormOpen = true; rerenderStepForm(repository); document.querySelector<HTMLInputElement>('#source')?.focus(); });
   document.querySelector<HTMLButtonElement>('#cancel-step-form')?.addEventListener('click', () => { stepFormOpen = false; rerenderStepForm(repository); });
@@ -1737,12 +1722,12 @@ function renderStepForm(repository: string) {
   };
   const closeWhenOutside = (event: PointerEvent) => { if (!sourcePicker.contains(event.target as Node)) closeSourceBranches(); };
   const openSourceBranches = () => { filterSourceBranches(); sourceBranchOptions.hidden = false; sourceInput.setAttribute('aria-expanded', 'true'); sourceBranchToggle.setAttribute('aria-expanded', 'true'); document.addEventListener('pointerdown', closeWhenOutside); };
-  sourceInput.addEventListener('focus', openSourceBranches); sourceInput.addEventListener('click', openSourceBranches); sourceInput.addEventListener('input', () => { if (!active) editorDraft.source = sourceInput.value; sync(); openSourceBranches(); });
+  sourceInput.addEventListener('focus', openSourceBranches); sourceInput.addEventListener('click', openSourceBranches); sourceInput.addEventListener('input', () => { if (!workflowState.active) editorDraft.source = sourceInput.value; sync(); openSourceBranches(); });
   sourceInput.addEventListener('keydown', event => { if (event.key === 'ArrowDown') { event.preventDefault(); openSourceBranches(); } if (event.key === 'Escape') closeSourceBranches(); });
   sourceBranchToggle.addEventListener('click', () => { if (sourceBranchOptions.hidden) { sourceInput.focus(); openSourceBranches(); } else closeSourceBranches(); });
   sourceBranchOptions.querySelectorAll<HTMLButtonElement>('[data-source-branch]').forEach(button => button.addEventListener('click', () => { sourceInput.value = button.dataset.sourceBranch || ''; sync(); closeSourceBranches(); sourceInput.focus(); }));
-  document.querySelector('#target')!.addEventListener('change', event => { if (!active) editorDraft.target = (event.target as HTMLSelectElement).value; sync(); }); sync();
-    document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } const isNew = active?.repository !== repository; if (isNew && workflows.some(workflow => workflow.repository === repository)) { showToast(t('editor.error.repoUsed')); return; } if (active?.repository === repository && active.stages.some(stage => stage.source === source && stage.target === target)) { showToast(t('editor.error.duplicateRoute')); return; } const name = value('flow-name') || repository; const independent = document.querySelector<HTMLInputElement>('#independent-route')!.checked; const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="wait-for-route"]:checked')].map(input => Number(input.value)); const next = active?.repository === repository ? { ...addStage(active, source, target, independent, waitFor), name } : createWorkflow(repository, source, target, name, deploymentsForRepository(sessionState.repositoryActionWorkflows, sessionState.repositoryEnvironments, sessionState.repositoryActionsLoaded)); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); bindDraftActions(); bindDraftStepSorting(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.routeSaved', { source, target })); stepFormOpen = false; renderStepForm(repository); });
+  document.querySelector('#target')!.addEventListener('change', event => { if (!workflowState.active) editorDraft.target = (event.target as HTMLSelectElement).value; sync(); }); sync();
+    document.querySelector('#add-step')!.addEventListener('click', () => { const source = value('source'), target = value('target'); if (source === target) { showToast(t('editor.error.sameBranch')); return; } const isNew = workflowState.active?.repository !== repository; if (isNew && workflowState.workflows.some(workflow => workflow.repository === repository)) { showToast(t('editor.error.repoUsed')); return; } if (workflowState.active?.repository === repository && workflowState.active.stages.some(stage => stage.source === source && stage.target === target)) { showToast(t('editor.error.duplicateRoute')); return; } const name = value('flow-name') || repository; const independent = document.querySelector<HTMLInputElement>('#independent-route')!.checked; const waitFor = [...document.querySelectorAll<HTMLInputElement>('input[name="wait-for-route"]:checked')].map(input => Number(input.value)); const next = workflowState.active?.repository === repository ? { ...addStage(workflowState.active, source, target, independent, waitFor), name } : createWorkflow(repository, source, target, name, deploymentsForRepository(sessionState.repositoryActionWorkflows, sessionState.repositoryEnvironments, sessionState.repositoryActionsLoaded)); save(next); document.querySelector('#draft')!.innerHTML = renderDraft(); bindDraftActions(); bindDraftStepSorting(); showToast(isNew ? t('editor.toast.saved', { name: next.name }) : t('editor.toast.routeSaved', { source, target })); stepFormOpen = false; renderStepForm(repository); });
   }
   document.querySelector<HTMLButtonElement>('#toggle-deployment-form')?.addEventListener('click', () => {
     deploymentFormOpen = !deploymentFormOpen;
@@ -1753,14 +1738,14 @@ function renderStepForm(repository: string) {
   });
   document.querySelector<HTMLDetailsElement>('.deployment-advanced')?.addEventListener('toggle', event => { deploymentAdvancedOpen = (event.currentTarget as HTMLDetailsElement).open; });
   document.querySelector<HTMLButtonElement>('#add-deployment')?.addEventListener('click', () => {
-    if (!active) return;
+    if (!workflowState.active) return;
     const healthCheckPath = value('deployment-health-path').trim();
     const deployment: DeploymentConfig = { target: value('deployment-target'), provider: value('deployment-provider') as DeploymentConfig['provider'], workflowName: value('deployment-workflow').trim(), environment: value('deployment-environment') as DeploymentConfig['environment'], ...(value('deployment-github-environment').trim() ? { githubEnvironment: value('deployment-github-environment').trim() } : {}), ...(healthCheckPath ? { healthCheckPath } : {}), ...(value('deployment-rollback-workflow').trim() ? { rollbackWorkflowName: value('deployment-rollback-workflow').trim() } : {}) };
     if (!deployment.workflowName) { showToast(t('editor.deployments.workflowRequired')); return; }
     if (healthCheckPath && !healthCheckPath.startsWith('/')) { showToast(t('editor.deployments.healthPathInvalid')); return; }
-    if (deploymentConfigs(active).some((item, index) => index !== deploymentEditIndex && item.target === deployment.target && item.provider === deployment.provider)) { showToast(t('editor.deployments.duplicate')); return; }
+    if (deploymentConfigs(workflowState.active).some((item, index) => index !== deploymentEditIndex && item.target === deployment.target && item.provider === deployment.provider)) { showToast(t('editor.deployments.duplicate')); return; }
     const editIndex = deploymentEditIndex;
-    save(editIndex === null ? addDeployment(active, deployment) : replaceDeployment(active, editIndex, deployment));
+    save(editIndex === null ? addDeployment(workflowState.active, deployment) : replaceDeployment(workflowState.active, editIndex, deployment));
     deploymentFormOpen = false;
     deploymentEditIndex = null;
     deploymentDraft = null;
@@ -1777,8 +1762,8 @@ function renderStepForm(repository: string) {
     document.querySelector<HTMLInputElement>('#deployment-workflow')?.focus();
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-apply-suggestion]').forEach(button => button.addEventListener('click', () => {
-    if (!active) return;
-    deploymentDraft = deploymentSuggestions(active, sessionState.repositoryActionWorkflows, sessionState.repositoryEnvironments)[Number(button.dataset.applySuggestion)] || null;
+    if (!workflowState.active) return;
+    deploymentDraft = deploymentSuggestions(workflowState.active, sessionState.repositoryActionWorkflows, sessionState.repositoryEnvironments)[Number(button.dataset.applySuggestion)] || null;
     if (!deploymentDraft) return;
     deploymentEditIndex = null;
     deploymentFormOpen = true;
@@ -1786,8 +1771,8 @@ function renderStepForm(repository: string) {
     document.querySelector<HTMLInputElement>('#deployment-workflow')?.focus();
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-remove-deployment]').forEach(button => button.addEventListener('click', () => {
-    if (!active) return;
-    const restored = active;
+    if (!workflowState.active) return;
+    const restored = workflowState.active;
     const removed = deploymentConfigs(restored)[Number(button.dataset.removeDeployment)];
     deploymentEditIndex = null;
     save(removeDeployment(restored, Number(button.dataset.removeDeployment)));
@@ -1800,8 +1785,8 @@ function renderStepForm(repository: string) {
     rerenderStepForm(repository);
   }));
   document.querySelector<HTMLButtonElement>('#sync-deployments')?.addEventListener('click', () => {
-    if (!active) return;
-    const restored = active;
+    if (!workflowState.active) return;
+    const restored = workflowState.active;
     const before = deploymentConfigs(restored);
     const synced = syncedDeployments(restored, sessionState.repositoryActionWorkflows, sessionState.repositoryEnvironments, sessionState.repositoryActionsLoaded);
     const kept = synced.filter(deployment => before.some(candidate => deploymentKey(candidate) === deploymentKey(deployment) && candidate.workflowName === deployment.workflowName));
@@ -1817,11 +1802,11 @@ function renderStepForm(repository: string) {
     rerenderStepForm(repository);
   });
   document.querySelector<HTMLButtonElement>('#save-recovery-policy')?.addEventListener('click', () => {
-    if (!active) return;
+    if (!workflowState.active) return;
     const maxRetries = Math.max(0, Math.min(20, Number(value('recovery-max-retries')) || 0));
     const cooldownSeconds = Math.max(0, Math.min(86400, Number(value('recovery-cooldown-seconds')) || 0));
     const policy: RecoveryPolicy = { maxRetries, cooldownSeconds };
-    save({ ...active, recoveryPolicy: policy });
+    save({ ...workflowState.active, recoveryPolicy: policy });
     showToast(t('editor.recoveryPolicy.saved'));
     rerenderStepForm(repository);
   });
@@ -1864,9 +1849,9 @@ function rerenderStepForm(repository: string) {
   window.scrollTo({ top });
 }
 function renderDeploymentSettings() {
-  if (!active) return '';
-  const configured = deploymentConfigs(active);
-  const configurationWarnings = deploymentConfigurationWarnings(active, { actionsLoaded: sessionState.repositoryActionsLoaded, actionWorkflows: sessionState.repositoryActionWorkflows, environmentsLoaded: sessionState.repositoryEnvironmentsLoaded, environments: sessionState.repositoryEnvironments });
+  if (!workflowState.active) return '';
+  const configured = deploymentConfigs(workflowState.active);
+  const configurationWarnings = deploymentConfigurationWarnings(workflowState.active, { actionsLoaded: sessionState.repositoryActionsLoaded, actionWorkflows: sessionState.repositoryActionWorkflows, environmentsLoaded: sessionState.repositoryEnvironmentsLoaded, environments: sessionState.repositoryEnvironments });
   const warningText = (warning: DeploymentConfigurationWarning) => escape(t(`editor.deployments.warning.${warning.code}`, { value: warning.value || '' }));
   const rowWarnings = (index: number) => configurationWarnings.filter(warning => warning.deploymentIndex === index);
   const generalWarnings = configurationWarnings.filter(warning => warning.deploymentIndex === undefined);
@@ -1882,7 +1867,7 @@ function renderDeploymentSettings() {
       return `<div class="${[warnings.length ? 'has-warning' : '', deploymentEditIndex === index ? 'is-editing' : '', deploymentHighlight === deploymentKey(deployment) ? 'is-new' : ''].filter(Boolean).join(' ')}"><b>${escape(deployment.target)}</b>${chips}${detail}${inline}<button class="ghost" type="button" data-edit-deployment="${index}">${t('editor.deployments.edit')}</button><button class="ghost" type="button" data-remove-deployment="${index}">${t('editor.deployments.remove')}</button></div>`;
     }).join('')
     : `<p class="meta">${t('editor.deployments.empty')}</p>`;
-  const suggestions = sessionState.repositoryActionsLoaded ? deploymentSuggestions(active, sessionState.repositoryActionWorkflows, sessionState.repositoryEnvironments) : [];
+  const suggestions = sessionState.repositoryActionsLoaded ? deploymentSuggestions(workflowState.active, sessionState.repositoryActionWorkflows, sessionState.repositoryEnvironments) : [];
   const suggested = suggestions.length
     ? `<div class="deployment-suggestions"><b>${t('editor.deployments.suggestLabel')}</b><small>${t('editor.deployments.suggestHint')}</small>${suggestions.map((suggestion, index) => `<div><b>${escape(suggestion.target)}</b><small>${escape(suggestion.workflowName)} · ${t(`editor.deployments.${suggestion.environment}`)}</small><button class="ghost" type="button" data-apply-suggestion="${index}">${t('editor.deployments.suggestApply')}</button></div>`).join('')}</div>`
     : '';
@@ -1891,7 +1876,7 @@ function renderDeploymentSettings() {
   return `<fieldset class="deployment-settings"><legend>${t('editor.deployments.label')}</legend><small>${t('editor.deployments.desc')}</small>${summary}<div class="deployment-config-list">${rows}</div>${suggested}<div class="deployment-actions">${toggle}${sync}</div>${deploymentFormOpen ? renderDeploymentForm() : ''}</fieldset>`;
 }
 function renderDeploymentForm() {
-  const editing = deploymentEditIndex === null || !active ? null : deploymentConfigs(active)[deploymentEditIndex] || null;
+  const editing = deploymentEditIndex === null || !workflowState.active ? null : deploymentConfigs(workflowState.active)[deploymentEditIndex] || null;
   const prefill = editing || deploymentDraft;
   const target = prefill?.target || sessionState.branches.find(branch => branch === 'dev') || sessionState.branches.find(branch => branch === 'main') || sessionState.branches[0] || '';
   const workflows = sessionState.repositoryActionWorkflows.map(workflow => `<option value="${escape(workflow.name)}">${escape(workflow.path)}</option>`).join('');
@@ -1913,8 +1898,8 @@ function renderDeploymentForm() {
   return `<div class="deployment-add-form">${banner}<label>${t('editor.deployments.workflow')}<input id="deployment-workflow" list="deployment-workflows" placeholder="Deploy frontend to Vercel" value="${escape(prefill?.workflowName || '')}" /><datalist id="deployment-workflows">${workflows}</datalist><small>${workflowHint}</small></label><div class="two"><label>${t('editor.deployments.target')}<select id="deployment-target">${options(target)}</select></label><label>${t('editor.deployments.provider')}<select id="deployment-provider"><option value="vercel" ${pick('vercel', prefill?.provider)}>Vercel</option><option value="cloudflare" ${pick('cloudflare', prefill?.provider)}>Cloudflare Pages</option></select></label></div><label>${t('editor.deployments.environment')}<select id="deployment-environment"><option value="preview" ${pick('preview', prefill?.environment)}>${t('editor.deployments.preview')}</option><option value="production" ${pick('production', prefill?.environment)}>${t('editor.deployments.production')}</option></select></label>${advanced}<button id="add-deployment" type="button" class="primary">${editing ? t('editor.deployments.update') : t('editor.deployments.submit')}</button></div>`;
 }
 function renderRecoveryPolicySettings() {
-  if (!active) return '';
-  const policy = active.recoveryPolicy;
+  if (!workflowState.active) return '';
+  const policy = workflowState.active.recoveryPolicy;
   const maxRetries = policy?.maxRetries ?? 3;
   const cooldownSeconds = policy?.cooldownSeconds ?? 300;
   return `<fieldset class="recovery-policy-settings"><legend>${t('editor.recoveryPolicy.label')}</legend><small>${t('editor.recoveryPolicy.desc')}</small><div class="two"><label>${t('editor.recoveryPolicy.maxRetries')}<input id="recovery-max-retries" type="number" min="0" max="20" value="${maxRetries}" /></label><label>${t('editor.recoveryPolicy.cooldownSeconds')}<input id="recovery-cooldown-seconds" type="number" min="0" max="86400" value="${cooldownSeconds}" /></label></div><button id="save-recovery-policy" type="button" class="ghost">${t('editor.recoveryPolicy.save')}</button></fieldset>`;
@@ -1922,8 +1907,8 @@ function renderRecoveryPolicySettings() {
 function options(selected: string) { return sessionState.branches.map(branch => `<option ${branch === selected ? 'selected' : ''}>${escape(branch)}</option>`).join(''); }
 function value(id: string) { return document.querySelector<HTMLSelectElement | HTMLInputElement>(`#${id}`)!.value; }
 function renderDraft() {
-  if (!active) return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${t('draft.empty.title')}</h2><p class="meta">${t('draft.empty.desc')}</p>`;
-  const flow = active;
+  if (!workflowState.active) return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${t('draft.empty.title')}</h2><p class="meta">${t('draft.empty.desc')}</p>`;
+  const flow = workflowState.active;
   const editable = canOperateWorkflow(flow, 'workflow-edit');
   const deleteAction = canOperateWorkflow(flow, 'workflow-delete') ? `<button id="delete-flow" class="draft-delete-flow" type="button">${t('workflowDelete.action')}</button>` : '';
   return `<p class="eyebrow">${t('draft.eyebrow')}</p><h2>${escape(flow.name)}</h2><p class="meta">${escape(flow.repository)}</p>${sharedWorkflowBadge(flow)}${flow.stages.map((stage, index) => {
@@ -1935,16 +1920,16 @@ function renderDraft() {
 
 function detail() {
   const content = document.querySelector('#content')!;
-  if (!active) { screen = 'overview'; return overview(); }
-  const summary = workflowSummary(active);
-  const editable = canOperateWorkflow(active, 'workflow-edit');
-  content.innerHTML = `<section class="page-head detail-page-head"><div class="detail-header-row"><div class="detail-page-actions"><button id="back-from-detail" class="ghost">${t('editor.back.overview')}</button><button id="refresh-status" class="ghost detail-refresh">${t('detail.refresh')}</button></div><div class="detail-page-head-main"><p class="eyebrow">${t('detail.eyebrow')}</p><h1>${escape(active.name)}</h1>${sharedWorkflowBadge(active)}</div><span aria-hidden="true"></span></div></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">${t('detail.timeline.eyebrow')}</p>${flowProgressBar(active)}${active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><div class="detail-side-col"><aside class="panel next-action"><p class="eyebrow">${t('detail.nextAction.eyebrow')}</p><h2>${nextActionTitle()}</h2><p>${statuses ? t('detail.desc.withStatuses') : t('detail.desc.noStatuses')}</p><button id="edit-flow" class="primary" ${editable ? '' : 'disabled'}>${t('detail.edit')}</button></aside><p class="detail-route">${escape(active.repository)} · ${escape(summary.route)}</p></div></section>`;
-  document.querySelector('#back-from-detail')!.addEventListener('click', () => returnToSourceLane(active!.id));
+  if (!workflowState.active) { screen = 'overview'; return overview(); }
+  const summary = workflowSummary(workflowState.active);
+  const editable = canOperateWorkflow(workflowState.active, 'workflow-edit');
+  content.innerHTML = `<section class="page-head detail-page-head"><div class="detail-header-row"><div class="detail-page-actions"><button id="back-from-detail" class="ghost">${t('editor.back.overview')}</button><button id="refresh-status" class="ghost detail-refresh">${t('detail.refresh')}</button></div><div class="detail-page-head-main"><p class="eyebrow">${t('detail.eyebrow')}</p><h1>${escape(workflowState.active.name)}</h1>${sharedWorkflowBadge(workflowState.active)}</div><span aria-hidden="true"></span></div></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">${t('detail.timeline.eyebrow')}</p>${flowProgressBar(workflowState.active)}${workflowState.active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><div class="detail-side-col"><aside class="panel next-action"><p class="eyebrow">${t('detail.nextAction.eyebrow')}</p><h2>${nextActionTitle()}</h2><p>${statuses ? t('detail.desc.withStatuses') : t('detail.desc.noStatuses')}</p><button id="edit-flow" class="primary" ${editable ? '' : 'disabled'}>${t('detail.edit')}</button></aside><p class="detail-route">${escape(workflowState.active.repository)} · ${escape(summary.route)}</p></div></section>`;
+  document.querySelector('#back-from-detail')!.addEventListener('click', () => returnToSourceLane(workflowState.active!.id));
   document.querySelector('#edit-flow')!.addEventListener('click', () => { screen = 'editor'; render(); });
   document.querySelector('#refresh-status')!.addEventListener('click', () => { void refreshDetailStatuses(); });
   document.querySelectorAll<HTMLButtonElement>('[data-step-drawer-stage]').forEach(button => button.addEventListener('click', () => {
-    if (!active) return;
-    showProjectStepDrawer(active.id, Number(button.dataset.stepDrawerStage), button.dataset.stepDrawerSource);
+    if (!workflowState.active) return;
+    showProjectStepDrawer(workflowState.active.id, Number(button.dataset.stepDrawerStage), button.dataset.stepDrawerSource);
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-codex-repair]').forEach(button => button.addEventListener('click', () => {
     const index = Number(button.dataset.codexRepair);
@@ -1957,34 +1942,34 @@ function detail() {
   }
   document.querySelectorAll<HTMLButtonElement>('[data-create-pr]').forEach(button => button.addEventListener('click', () => showCreateDialog(Number(button.dataset.createPr))));
   document.querySelectorAll<HTMLInputElement>('[data-detail-auto-create-stage]').forEach(input => input.addEventListener('change', () => {
-    if (!active) return;
+    if (!workflowState.active) return;
     const stageIndex = Number(input.dataset.detailAutoCreateStage);
-    const stage = active.stages[stageIndex];
+    const stage = workflowState.active.stages[stageIndex];
     const rule = stageGenerationRule(stage.automation?.generationRule, library.generationRules) || (stage.automation?.generationRule ? undefined : defaultGenerationRule(library.generationRules));
     if (input.checked && (!autoCreatePrerequisites() || !rule)) { input.checked = false; showToast(t('draft.autoCreatePrerequisites')); return; }
-    const threshold = Number(document.querySelector<HTMLInputElement>(`[data-detail-auto-create-threshold="${stageIndex}"]`)?.value || active.stages[stageIndex]?.automation?.triggerMinCommits || 1);
+    const threshold = Number(document.querySelector<HTMLInputElement>(`[data-detail-auto-create-threshold="${stageIndex}"]`)?.value || workflowState.active.stages[stageIndex]?.automation?.triggerMinCommits || 1);
     void (async () => {
       if (!await confirmImmediateAutomation('create', stageIndex, input.checked, threshold)) { input.checked = !input.checked; return; }
-      save(setStageAutoCreate(active!, stageIndex, input.checked, rule ? { name: rule.name, content: rule.content } : undefined, threshold));
+      save(setStageAutoCreate(workflowState.active!, stageIndex, input.checked, rule ? { name: rule.name, content: rule.content } : undefined, threshold));
       showToast(input.checked ? t('draft.autoCreateEnabled') : t('draft.autoCreateDisabled'));
       render();
     })();
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-detail-rule-sync]').forEach(button => button.addEventListener('click', () => {
-    if (!active) return;
+    if (!workflowState.active) return;
     const stageIndex = Number(button.dataset.detailRuleSync);
-    const stage = active.stages[stageIndex];
+    const stage = workflowState.active.stages[stageIndex];
     const update = stageGenerationRuleUpdate(stage?.automation?.generationRule, library.generationRules);
     if (!update) { render(); return; }
-    save(setStageAutoCreate(active, stageIndex, true, { name: update.name, content: update.content }, stage!.automation!.triggerMinCommits || 1));
+    save(setStageAutoCreate(workflowState.active, stageIndex, true, { name: update.name, content: update.content }, stage!.automation!.triggerMinCommits || 1));
     showToast(t('detail.ruleOutdated.synced', { name: update.name }));
     render();
   }));
   document.querySelectorAll<HTMLInputElement>('[data-detail-auto-merge-stage]').forEach(input => input.addEventListener('change', () => {
-    if (!active) return;
+    if (!workflowState.active) return;
     const stageIndex = Number(input.dataset.detailAutoMergeStage);
-    const updated = setStageAutoMerge(active, stageIndex, input.checked);
-    if (updated === active) { input.checked = !input.checked; showToast(t('detail.autoMergeLegacyPolicy')); return; }
+    const updated = setStageAutoMerge(workflowState.active, stageIndex, input.checked);
+    if (updated === workflowState.active) { input.checked = !input.checked; showToast(t('detail.autoMergeLegacyPolicy')); return; }
     void (async () => {
       if (!await confirmImmediateAutomation('merge', stageIndex, input.checked)) { input.checked = !input.checked; return; }
       save(updated);
@@ -1993,25 +1978,25 @@ function detail() {
     })();
   }));
   document.querySelectorAll<HTMLInputElement>('[data-detail-auto-advance-stage]').forEach(input => input.addEventListener('change', () => {
-    if (!active) return;
+    if (!workflowState.active) return;
     const stageIndex = Number(input.dataset.detailAutoAdvanceStage);
-    const updated = setStageAutoAdvance(active, stageIndex, input.checked);
-    if (updated === active) { input.checked = !input.checked; showToast(t('detail.autoAdvanceLegacyPolicy')); return; }
+    const updated = setStageAutoAdvance(workflowState.active, stageIndex, input.checked);
+    if (updated === workflowState.active) { input.checked = !input.checked; showToast(t('detail.autoAdvanceLegacyPolicy')); return; }
     save(updated);
     showToast(input.checked ? t('draft.autoAdvanceEnabled') : t('draft.autoAdvanceDisabled'));
     render();
   }));
   document.querySelectorAll<HTMLInputElement>('[data-detail-auto-create-threshold]').forEach(input => input.addEventListener('change', () => {
-    if (!active) return;
+    if (!workflowState.active) return;
     const stageIndex = Number(input.dataset.detailAutoCreateThreshold);
-    const stage = active.stages[stageIndex];
+    const stage = workflowState.active.stages[stageIndex];
     const rule = stageGenerationRule(stage.automation?.generationRule, library.generationRules) || (stage.automation?.generationRule ? undefined : defaultGenerationRule(library.generationRules));
     if (!stage?.automation?.autoCreatePullRequest || !rule) return;
     const threshold = Number(input.value);
     if (!Number.isInteger(threshold) || threshold < 1) { input.value = String(stage.automation.triggerMinCommits || 1); showToast(t('draft.autoCreateThresholdInvalid')); return; }
     const boundedThreshold = Math.min(20, threshold);
     input.value = String(boundedThreshold);
-    save(setStageAutoCreate(active, stageIndex, true, rule ? { name: rule.name, content: rule.content } : undefined, boundedThreshold));
+    save(setStageAutoCreate(workflowState.active, stageIndex, true, rule ? { name: rule.name, content: rule.content } : undefined, boundedThreshold));
     showToast(t('draft.autoCreateThresholdSaved', { count: boundedThreshold }));
     render();
   }));
@@ -2039,12 +2024,12 @@ function detail() {
 
 
 function lockedStageText(index: number) {
-  if (!active || !statuses || index === 0) return t('status.locked');
-  const dependencies = active.stages[index]?.waitFor?.length ? active.stages[index].waitFor : [index - 1];
+  if (!workflowState.active || !statuses || index === 0) return t('status.locked');
+  const dependencies = workflowState.active.stages[index]?.waitFor?.length ? workflowState.active.stages[index].waitFor : [index - 1];
   const dependencyStatuses = dependencies.map(dependency => statuses?.[dependency]);
   const blocking = dependencies.flatMap(dependency => missingDeploymentWorkflowNames(
-    projection.workflowStageDeployments.filter(deployment => deployment.workflowId === active!.id),
-    { stageId: active!.stages[dependency]?.stageId, stageIndex: dependency },
+    projection.workflowStageDeployments.filter(deployment => deployment.workflowId === workflowState.active!.id),
+    { stageId: workflowState.active!.stages[dependency]?.stageId, stageIndex: dependency },
   ));
   if (blocking.length) return t('status.locked.deployment', { workflow: blocking[0] });
   const hasChecks = dependencyStatuses.every(status => status?.kind === 'merged') && dependencyStatuses.some(status => Boolean(status?.checks?.total));
@@ -2052,14 +2037,14 @@ function lockedStageText(index: number) {
 }
 
 async function executeAutoCreatePr(stageIndex: number) {
-  if (!active || !canOperateWorkflow(active, 'pr-create')) return;
-  const stage = active.stages[stageIndex];
+  if (!workflowState.active || !canOperateWorkflow(workflowState.active, 'pr-create')) return;
+  const stage = workflowState.active.stages[stageIndex];
   const rule = stage?.automation?.executionMode === 'server' ? stage.automation.generationRule : undefined;
   if (!stage || !rule || !stage.automation?.autoCreatePullRequest || !autoCreatePrerequisites()) { showToast(t('draft.autoCreatePrerequisites')); return; }
   if (!await confirmAutoCreateExecution(stage.source, stage.target, rule.name)) return;
-  const key = `${active.id}:${stage.stageId}:${stage.source}:${stage.target}:create-pr:${Date.now()}`;
+  const key = `${workflowState.active.id}:${stage.stageId}:${stage.source}:${stage.target}:create-pr:${Date.now()}`;
   try {
-    const queueResponse = await fetch(githubAppApiUrl('/api/automation'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: active.id, stageIndex, source: stage.source, kind: 'create-pr', idempotencyKey: key, generationRule: rule.content }) });
+    const queueResponse = await fetch(githubAppApiUrl('/api/automation'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: workflowState.active.id, stageIndex, source: stage.source, kind: 'create-pr', idempotencyKey: key, generationRule: rule.content }) });
     const queued = await queueResponse.json().catch(() => ({})) as { action?: { id?: number }; message?: string };
     if (!queueResponse.ok || !queued.action?.id) throw new Error(queued.message || t('automation.queueFailed'));
     const executeResponse = await fetch(githubAppApiUrl('/api/automation?action=execute'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actionId: queued.action.id }) });
@@ -2072,10 +2057,10 @@ async function executeAutoCreatePr(stageIndex: number) {
 
 // A tick that acts inside the same save request needs the same confirmation an explicit button gets.
 async function confirmImmediateAutomation(toggle: 'create' | 'merge', stageIndex: number, enabling: boolean, triggerMinCommits?: number) {
-  const stage = active?.stages[stageIndex];
+  const stage = workflowState.active?.stages[stageIndex];
   if (!stage) return false;
   const status = statuses?.[stageIndex];
-  const unlocked = Boolean(active && statuses && canCreateWorkflowStage(stageIndex, active.stages, statuses));
+  const unlocked = Boolean(workflowState.active && statuses && canCreateWorkflowStage(stageIndex, workflowState.active.stages, statuses));
   const effect = immediateAutomationEffect({ toggle, enabling, stage, status, unlocked, triggerMinCommits });
   if (effect.kind === 'none') return true;
   const description = effect.kind === 'create-pr'
@@ -2087,14 +2072,14 @@ async function confirmImmediateAutomation(toggle: 'create' | 'merge', stageIndex
 
 function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const autoEnabled = stage.automation?.autoCreatePullRequest === true;
-  const canEditAutomation = Boolean(active && canOperateWorkflow(active, 'workflow-edit'));
+  const canEditAutomation = Boolean(workflowState.active && canOperateWorkflow(workflowState.active, 'workflow-edit'));
   const autoDisabled = !canEditAutomation || !autoCreatePrerequisites();
   const autoHint = !canEditAutomation ? t('detail.autoCreateReadonly') : autoDisabled ? t('draft.autoCreatePrerequisites') : t('detail.autoCreateDesc');
   const threshold = stage.automation?.triggerMinCommits || 1;
   const mergeEnabled = stage.automation?.autoMergePullRequest === true;
   // Merging is a server-side action, so a legacy browser-session policy cannot carry it.
   const mergeLegacyPolicy = stage.automation?.executionMode === 'browser-session';
-  const canMergeAutomation = Boolean(active && canOperateWorkflow(active, 'pull-merge'));
+  const canMergeAutomation = Boolean(workflowState.active && canOperateWorkflow(workflowState.active, 'pull-merge'));
   const mergeDisabled = autoDisabled || !canMergeAutomation || mergeLegacyPolicy;
   const mergeHint = !canEditAutomation ? t('detail.autoCreateReadonly') : !autoCreatePrerequisites() ? t('draft.autoCreatePrerequisites') : !canMergeAutomation ? t('detail.autoMergeReadonly') : mergeLegacyPolicy ? t('detail.autoMergeLegacyPolicy') : t('detail.autoMergeDesc');
   const mergeControl = `<label class="timeline-auto-merge"><input type="checkbox" data-detail-auto-merge-stage="${index}" ${mergeEnabled ? 'checked' : ''} ${mergeDisabled ? 'disabled' : ''} /><span>${t('draft.autoMerge')}</span></label>`;
@@ -2110,23 +2095,23 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const ruleNotice = ruleUpdate
     ? `<p class="timeline-rule-outdated">${escape(ruleUpdate.kind === 'content' ? t('detail.ruleOutdated.content', { name: ruleUpdate.name }) : t('detail.ruleOutdated.rule', { name: ruleUpdate.name, stored: stage.automation!.generationRule!.name }))}<button type="button" class="link-button" data-detail-rule-sync="${index}" ${canEditAutomation ? '' : 'disabled'}>${t('detail.ruleOutdated.sync')}</button></p>`
     : '';
-  const autoControl = `<div class="timeline-automation"><label class="timeline-auto-create"><input type="checkbox" data-detail-auto-create-stage="${index}" ${autoEnabled ? 'checked' : ''} ${autoDisabled ? 'disabled' : ''} /><span>${t('draft.autoCreate')}</span><span>${t('draft.autoCreateThreshold')}</span><input class="auto-create-threshold" type="number" min="1" max="20" step="1" value="${threshold}" data-detail-auto-create-threshold="${index}" aria-label="${escape(t('draft.autoCreateThreshold'))}" title="${escape(t('draft.autoCreateThresholdTooltip'))}" ${autoDisabled ? 'disabled' : ''} /></label>${mergeControl}${advanceControl}<small>${escape(autoHint)}</small>${mergeHint === autoHint ? '' : `<small>${escape(mergeHint)}</small>`}${advanceHint === autoHint || advanceHint === mergeHint ? '' : `<small>${escape(advanceHint)}</small>`}${ruleNotice}${automationDetailBlock(active!.id, index, stage.source, false)}</div>`;
+  const autoControl = `<div class="timeline-automation"><label class="timeline-auto-create"><input type="checkbox" data-detail-auto-create-stage="${index}" ${autoEnabled ? 'checked' : ''} ${autoDisabled ? 'disabled' : ''} /><span>${t('draft.autoCreate')}</span><span>${t('draft.autoCreateThreshold')}</span><input class="auto-create-threshold" type="number" min="1" max="20" step="1" value="${threshold}" data-detail-auto-create-threshold="${index}" aria-label="${escape(t('draft.autoCreateThreshold'))}" title="${escape(t('draft.autoCreateThresholdTooltip'))}" ${autoDisabled ? 'disabled' : ''} /></label>${mergeControl}${advanceControl}<small>${escape(autoHint)}</small>${mergeHint === autoHint ? '' : `<small>${escape(mergeHint)}</small>`}${advanceHint === autoHint || advanceHint === mergeHint ? '' : `<small>${escape(advanceHint)}</small>`}${ruleNotice}${automationDetailBlock(workflowState.active!.id, index, stage.source, false)}</div>`;
   if (stage.source.includes('*')) {
-    const states = active ? statesForStage(active, index) : [];
+    const states = workflowState.active ? statesForStage(workflowState.active, index) : [];
     const runs = states.map(state => `<button type="button" class="timeline-action" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(state.source)}"><b>${escape(state.source)}</b><small>${escape(dynamicBranchStatusText(state))}</small></button>`).join('');
     return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p class="meta">${t('detail.dynamicRoute')}</p>${runs ? `<div class="timeline-actions dynamic-stage-actions">${runs}</div>` : `<p>${t('detail.timeline.placeholder')}</p>`}</div></article>`;
   }
   const status = statuses?.[index];
   if (!status) return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p>${t('detail.timeline.placeholder')}</p></div></article>`;
   if (status.kind === 'not-created') {
-    const unlocked = canCreateWorkflowStage(index, active!.stages, statuses!);
+    const unlocked = canCreateWorkflowStage(index, workflowState.active!.stages, statuses!);
     const hasNewCommits = Boolean(status.aheadBy);
-    const canCreate = unlocked && hasNewCommits && canOperateWorkflow(active!, 'pr-create');
+    const canCreate = unlocked && hasNewCommits && canOperateWorkflow(workflowState.active!, 'pr-create');
     const changeMessage = hasNewCommits
       ? `<p><b class="status neutral">${t('status.newCommits', { count: status.aheadBy || 0 })}</b> · ${unlocked ? t('status.newCommits.canCreate') : t('status.newCommits.waiting')}</p>`
       : unlocked ? `<p class="meta">${t('status.newCommits.waitingChanges')}</p>` : '';
     const autoCreate = '';
-    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${changeMessage}${unlocked ? `<div class="timeline-actions">${autoCreate}${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${lockedStageText(index)}</p>`}</div></article>`;
+    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${changeMessage}${unlocked ? `<div class="timeline-actions">${autoCreate}${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(workflowState.active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${lockedStageText(index)}</p>`}</div></article>`;
   }
   if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status failure">${t('status.fetchFailed')}</b> · ${escape(status.message || '')}</p></div></article>`;
   const checks = status.checks?.total ? gateDisclosure(t('status.checks.summary', { passed: status.checks.passed, total: status.checks.total, state: status.checks.state === 'success' ? t('status.checks.completed') : status.checks.state === 'failure' ? t('status.checks.failed') : t('status.checks.running') }), status.checkDetails, 'checks', stage.target) : '';
@@ -2140,40 +2125,40 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const approvalGate = approvals ? `<span>${approvals}</span>` : '';
   const mergeabilityGate = mergeability ? `<span>${mergeability}</span>` : '';
   const gates = status.kind === 'merged' ? [checks, actions] : [checks, actions, approvalGate, mergeabilityGate];
-  const canCreateNewPull = status.kind === 'merged' && Boolean(status.aheadBy) && canCreateWorkflowStage(index, active!.stages, statuses!);
+  const canCreateNewPull = status.kind === 'merged' && Boolean(status.aheadBy) && canCreateWorkflowStage(index, workflowState.active!.stages, statuses!);
   const newCommits = status.kind === 'merged' && status.aheadBy
     ? `<p><b class="status neutral">${t('status.newCommits', { count: status.aheadBy })}</b> · ${canCreateNewPull ? t('status.newCommits.canCreate') : t('status.newCommits.waiting')}</p>`
     : '';
   const autoNewPullAction = '';
-  const newPullAction = canCreateNewPull && canOperateWorkflow(active!, 'pr-create') ? `${autoNewPullAction}<button class="timeline-action" data-create-pr="${index}">${t('status.createPr.button')}</button>` : '';
+  const newPullAction = canCreateNewPull && canOperateWorkflow(workflowState.active!, 'pr-create') ? `${autoNewPullAction}<button class="timeline-action" data-create-pr="${index}">${t('status.createPr.button')}</button>` : '';
   const stateClass = status.kind === 'merged' ? superseded ? 'neutral' : mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
   // A projected first paint lacks the live pull's head ref and Actions detail, so the merge menu only
   // appears once the live read replaces it.
-  const mergeAction = !status.projected && status.kind === 'open' && !filters.recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(active!, 'pull-merge') ? filters.mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
+  const mergeAction = !status.projected && status.kind === 'open' && !filters.recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(workflowState.active!, 'pull-merge') ? filters.mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
   const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';
   // The drawer owns every per-step operation (rerun, sync, deployment retry). Without an entry point
   // here a static step's recovery actions were reachable only from the board, unlike a dynamic one.
   const drawerAction = `<button type="button" class="timeline-action" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(stage.source)}">${t('overview.board.stepDetail')}</button>`;
   const gateList = gates.filter(Boolean);
   const sourceBranchWarning = status.sourceBranchMissing ? `<p class="meta">${t('status.sourceBranchDeletedHint')}</p>` : '';
-  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${drawerAction}${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
+  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(workflowState.active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${drawerAction}${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
 }
 async function refreshDetailStatuses() {
   await refreshStatuses(false, false, true);
   // The browser reads above only change what is rendered. Reconciling here is what moves the persisted
   // projection the server automation reads, so an explicit refresh has to do it for every workflow:
   // narrowing it to wildcard sources left static-branch workflows with no on-demand path at all.
-  if (active) await loadActionQueue(true, active.repository);
+  if (workflowState.active) await loadActionQueue(true, workflowState.active.repository);
   if (screen === 'detail') detail();
 }
 async function showCodexRepairDialog(index: number, source?: string, pullNumber?: number) {
-  if (!active) return;
+  if (!workflowState.active) return;
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog repair-dialog';
   dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('repair.eyebrow')}</p><h2>${t('repair.collecting')}</h2><p class="meta">${t('repair.collecting.desc')}</p></form>`;
   document.body.append(dialog); dialog.showModal();
   try {
-    const response = await fetch(githubAppApiUrl('/api/repair-context'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: active.id, stageIndex: index, source, pullNumber }) });
+    const response = await fetch(githubAppApiUrl('/api/repair-context'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: workflowState.active.id, stageIndex: index, source, pullNumber }) });
     const payload = await response.json().catch(() => ({})) as { markdown?: string; pullUrl?: string; message?: string };
     if (!response.ok || !payload.markdown) throw new Error(payload.message || t('repair.error.generate'));
     dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('repair.eyebrow')}</p><h2>${t('repair.ready.title')}</h2><p class="meta">${t('repair.ready.desc')}</p><textarea id="repair-context" readonly></textarea><div class="dialog-actions"><a class="ghost" target="_blank" href="${escape(payload.pullUrl || '#')}">${t('repair.openActions')}</a><button id="copy-repair-context" type="button" class="primary">${t('repair.copy')}</button><button value="cancel" class="ghost">${t('repair.close')}</button></div></form>`;
@@ -2279,11 +2264,11 @@ function laneMergeStatus(state?: WorkflowStageState): StepStatus | undefined {
 }
 function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: () => void, sourceOverride?: string) {
   const status = statusOverride || statuses?.[index];
-  if (!active || !status?.pr || !canMergePull(status) || !canOperateWorkflow(active, 'pull-merge')) return;
+  if (!workflowState.active || !status?.pr || !canMergePull(status) || !canOperateWorkflow(workflowState.active, 'pull-merge')) return;
   const pull = status.pr;
   // The head ref is the branch the automation row is keyed by. A stage source may be a wildcard rule,
   // which never matches a persisted row, so prefer the concrete branch whenever GitHub reports one.
-  const source = sourceOverride || pull.head.ref || active.stages[index]?.source || '';
+  const source = sourceOverride || pull.head.ref || workflowState.active.stages[index]?.source || '';
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
   dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('merge.eyebrow')}</p><h2>${t('merge.dialog.title', { number: pull.number })}</h2><p class="meta">${t('merge.dialog.desc')}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('merge.dialog.cancel')}</button><button id="confirm-merge" class="primary">${t('merge.dialog.confirm')}</button></div></form>`;
@@ -2295,14 +2280,14 @@ function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: 
     filters.mergingStages.add(index);
     if (!onMerged && screen === 'detail') detail();
     try {
-      const { owner, name } = parseRepository(active!.repository);
-      const result = await githubFetch<MergeResult>(sessionState.token, `/repos/${owner}/${name}/pulls/${pull.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) }, active!.id);
+      const { owner, name } = parseRepository(workflowState.active!.repository);
+      const result = await githubFetch<MergeResult>(sessionState.token, `/repos/${owner}/${name}/pulls/${pull.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) }, workflowState.active!.id);
       if (!result.merged) throw new Error(result.message || t('merge.error.incomplete'));
       const pendingChecks = { state: 'pending' as const, passed: 0, total: 0 };
       statuses = statuses?.map((item, statusIndex) => statusIndex === index ? { ...item, kind: 'merged', pr: { ...pull, state: 'closed', merged_at: new Date().toISOString(), merge_commit_sha: result.sha }, checks: pendingChecks } : item) || null;
       filters.recentlyMergedPullNumbers.set(index, pull.number);
       filters.mergingStages.delete(index);
-      if (source) markAutomationResolved(active!, index, source);
+      if (source) markAutomationResolved(workflowState.active!, index, source);
       dialog.close();
       if (onMerged) {
         onMerged();
@@ -2322,7 +2307,7 @@ function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: 
 }
 function nextActionTitle() {
   if (!statuses) return t('nextAction.notStarted');
-  const dynamicFailure = Boolean(active?.stages.some((stage, index) => stage.source.includes('*') && statesForStage(active!, index).some(state => state.checksState === 'failure')));
+  const dynamicFailure = Boolean(workflowState.active?.stages.some((stage, index) => stage.source.includes('*') && statesForStage(workflowState.active!, index).some(state => state.checksState === 'failure')));
   if (dynamicFailure || statuses.some(status => status.kind === 'open' && status.checks?.state === 'failure')) return t('nextAction.gateFailed');
   if (statuses.some(status => status.kind === 'not-created')) return t('nextAction.canCheck');
   return t('nextAction.synced');
@@ -2348,22 +2333,22 @@ async function resolveDetailSource(owner: string, name: string, sourceRule: stri
 async function refreshStatuses(renderDetail = true, refreshProjectedStates = true, force = false) {
   // Navigation and focus refreshes share a short per-workflow TTL; an explicit refresh or an action
   // that just changed a PR passes force and always reads live.
-  if (!force && active && !detailRefreshDueAt(lastDetailLiveRead.get(active.id), Date.now())) return;
+  if (!force && workflowState.active && !detailRefreshDueAt(lastDetailLiveRead.get(workflowState.active.id), Date.now())) return;
   detailStatusRefreshing = true;
   try { await loadDetailStatuses(renderDetail, refreshProjectedStates, force); }
   finally { detailStatusRefreshing = false; }
 }
 async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = true, force = false) {
-  if (!active) return;
+  if (!workflowState.active) return;
   // A background revalidation paints over an already populated page, so only an explicit refresh
   // takes over the button.
   if (force) {
     const button = document.querySelector<HTMLButtonElement>('#refresh-status');
     if (button) { button.disabled = true; button.textContent = t('detail.refresh.loading'); }
   }
-  const { owner, name } = parseRepository(active.repository);
+  const { owner, name } = parseRepository(workflowState.active.repository);
   const previous = statuses;
-  statuses = await Promise.all(active.stages.map(async (stage, index) => {
+  statuses = await Promise.all(workflowState.active.stages.map(async (stage, index) => {
     try {
       const source = await resolveDetailSource(owner, name, stage.source, stage.target);
       if (!source) return { kind: 'not-created' } as StepStatus;
@@ -2445,7 +2430,7 @@ async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = 
   statuses.forEach((status, index) => {
     const before = previous?.[index];    const oldCheck = before?.checks?.state;
     const newCheck = status.checks?.state;
-    const newPullReady = status.kind === 'merged' && Boolean(status.aheadBy) && canCreateWorkflowStage(index, active!.stages, statuses!) && !(before?.kind === 'merged' && before.aheadBy);
+    const newPullReady = status.kind === 'merged' && Boolean(status.aheadBy) && canCreateWorkflowStage(index, workflowState.active!.stages, statuses!) && !(before?.kind === 'merged' && before.aheadBy);
     const changed = Boolean(before && statusChanged({ kind: before.kind, checks: oldCheck }, { kind: status.kind, checks: newCheck }));
     if (!changed && !newPullReady) return;
     const detail = newPullReady ? t('notif.newPullReady') : status.kind === 'merged' ? t('notif.merged') : newCheck === 'failure' ? t('notif.actionsFailed') : newCheck === 'success' ? t('notif.actionsPassed') : status.kind;
@@ -2456,7 +2441,7 @@ async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = 
   // The GitHub reads above only feed the step rows. The progress bar and the automation blocks read the
   // server projection, so without this the poll left them frozen until someone pressed refresh. `false`
   // keeps it a plain read: no `?refresh=1`, so the server does not call GitHub for it.
-  lastDetailLiveRead.set(active.id, Date.now());
+  lastDetailLiveRead.set(workflowState.active.id, Date.now());
   if (refreshProjectedStates) await loadActionQueue(false);
   if (renderDetail && screen === 'detail') detail();
 }
@@ -2606,7 +2591,7 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
 }
 
 function showTakeoverDialog(action: AutomationAction) {
-  const flow = workflows.find(w => w.id === action.workflowId);
+  const flow = workflowState.workflows.find(w => w.id === action.workflowId);
   if (!flow || !canOperateWorkflow(flow, 'pr-create')) return;
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog pr-takeover-dialog';
@@ -2662,10 +2647,10 @@ function showTakeoverDialog(action: AutomationAction) {
 }
 
 function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?: string) {
-  if (!active || !canOperateWorkflow(active, 'pr-create')) return;
-  const stage = active.stages[index];
+  if (!workflowState.active || !canOperateWorkflow(workflowState.active, 'pr-create')) return;
+  const stage = workflowState.active.stages[index];
   const source = sourceOverride || stage.source;
-  const identity: PullRequestDraftIdentity = { repository: active.repository, source, target: stage.target };
+  const identity: PullRequestDraftIdentity = { repository: workflowState.active.repository, source, target: stage.target };
   const now = Date.now();
   const nextDrafts = library.draftStorageSynchronized
     ? loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), now)
@@ -2823,7 +2808,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
       const { owner, name } = parseRepository(identity.repository);
       const existingPulls = await githubFetch<Pull[]>(sessionState.token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(`${owner}:${source}`)}&base=${encodeURIComponent(stage.target)}&per_page=10`, { signal: controller.signal });
       if (existingPulls[0]) throw new Error(`该分支已存在 PR #${existingPulls[0].number}，请先处理现有 PR。`);
-      const createdPull = await githubFetch<Pull>(sessionState.token, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify(pullRequestPayload(title, source, stage.target, body)), signal: controller.signal }, active!.id);
+      const createdPull = await githubFetch<Pull>(sessionState.token, `/repos/${owner}/${name}/pulls`, { method: 'POST', body: JSON.stringify(pullRequestPayload(title, source, stage.target, body)), signal: controller.signal }, workflowState.active!.id);
       if (!isDialogOpen() || controller.signal.aborted) return;
       if (draftSaveTimer !== undefined) { window.clearTimeout(draftSaveTimer); draftSaveTimer = undefined; }
       draftDirty = false;
@@ -2834,9 +2819,9 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
       statuses = statuses?.map((status, statusIndex) => statusIndex === index ? { kind: 'open', pr: createdPull, checks: { state: 'pending', passed: 0, total: 0 }, approvals: 0, mergeable: null } : status) || null;
       // The reconciliation queue may still contain the previously merged PR for this route.
       // Do not let that stale record expose a merge action for the new PR before GitHub reports its checks.
-      projection.workflowStageStates = projection.workflowStageStates.filter(state => state.workflowId !== active!.id || state.stageIndex !== index || state.source !== source);
-      projection.actionQueue = projection.actionQueue.filter(item => item.workflowId !== active!.id || item.stageIndex !== index || item.source !== source);
-      markAutomationResolved(active!, index, source);
+      projection.workflowStageStates = projection.workflowStageStates.filter(state => state.workflowId !== workflowState.active!.id || state.stageIndex !== index || state.source !== source);
+      projection.actionQueue = projection.actionQueue.filter(item => item.workflowId !== workflowState.active!.id || item.stageIndex !== index || item.source !== source);
+      markAutomationResolved(workflowState.active!, index, source);
       dialog.close();
       if (onCreated) {
         onCreated();
@@ -2897,13 +2882,13 @@ apiKeyFieldObserver.observe(document.body, { childList: true, subtree: true });
 
 document.addEventListener('click', event => {
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-remove]');
-  if (!button || !active) return;
-  const workflow = active;
+  if (!button || !workflowState.active) return;
+  const workflow = workflowState.active;
   const stageIndex = Number(button.dataset.remove);
   const next = removeStage(workflow, stageIndex);
   if (!next.stages.length) {
-    const workflowId = active.id;
-    active = null;
+    const workflowId = workflowState.active.id;
+    workflowState.active = null;
     void removeWorkflowFromStorage(workflowId);
     return;
   }
