@@ -20,6 +20,9 @@ import zh from './lib/translations/zh';
 import { app, escape } from './app/dom';
 import { actionQueueRequestQueue, projection } from './app/state/projection';
 import { sessionState } from './app/state/session';
+import { filters } from './app/state/filters';
+import { aiState } from './app/state/ai';
+import { GENERATION_RULES_KEY, PULL_REQUEST_DRAFTS_KEY, library } from './app/state/library';
 import { currentTheme, applyTheme, toggleTheme } from './app/ui/theme';
 import { showToast } from './app/ui/toast';
 import { showOperationAuditDialog } from './app/ui/audit';
@@ -32,8 +35,6 @@ import type { Repo, Pull, CheckRun, CommitStatus, GitHubWorkflowRunSummary, Revi
 registerTranslations('en', en);
 registerTranslations('zh', zh);
 
-const GENERATION_RULES_KEY = 'pr-helper-generation-rules';
-const PULL_REQUEST_DRAFTS_KEY = 'pr-helper-pr-drafts';
 const CLOUD_SYNC_DEVICE_ID_KEY = 'pr-helper-cloud-sync-device-id';
 const localViteWithoutApi = import.meta.env.DEV && !import.meta.env.VITE_AUTH_ORIGIN;
 let workflows = loadWorkflows();
@@ -62,18 +63,6 @@ let cloudWorkflowStorage = false;
 let pendingLocalWorkflowSync = false;
 let cloudWorkflowSyncError = '';
 let cloudWorkspaceLoading = false;
-let overviewFilter: 'all' | 'attention' | 'running' | 'failed' | 'automation' | 'archived' = 'all';
-let laneSearchQuery = '';
-const expandedLaneIds = new Set<string>();
-let laneSortMode: WorkflowSortMode = 'custom';
-let laneSortDirection: WorkflowSortDirection = 'desc';
-let pushSubscribed = false;
-let pushConfigured = false;
-let repositoryManagementWindow: Window | null = null;
-let repositoryManagementTimer: number | undefined;
-const mergingStages = new Set<number>();
-const recentlyCreatedPullNumbers = new Map<number, number>();
-const recentlyMergedPullNumbers = new Map<number, number>();
 // GitHub accepts a person's create/merge/retry immediately, but the server projection only catches up
 // when reconciliation next runs. These notes record what a person just handled so the board can drop
 // the row at once and let the server catch up in the background, instead of putting work that is
@@ -81,14 +70,6 @@ const recentlyMergedPullNumbers = new Map<number, number>();
 // new automation event is never hidden behind an old one.
 const RESOLVED_AUTOMATION_TTL_MS = 15 * 60_000;
 const AUTOMATION_RECONCILE_DELAYS_MS = [1_500, 4_000, 9_000];
-type ResolvedAutomationRecord = { resolvedAt: number; source: string; actionId: number | null; updatedAt: string };
-const resolvedAutomation = new Map<string, ResolvedAutomationRecord>();
-let aiConfig: AiConfig | null = loadAiConfig();
-let automationCredentialConfigured = false;
-let generationRules = loadGenerationRules(() => localStorage.getItem(GENERATION_RULES_KEY));
-let pullRequestDrafts = loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), Date.now());
-let draftStorageSynchronized = true;
-let cloudSyncStatus: CloudSyncStatus = getCloudSyncStatus();
 
 function canOperateWorkflow(workflow: Workflow, operation: 'workflow-edit' | 'workflow-delete' | 'pr-create' | 'actions-rerun' | 'pull-merge' | 'deployment-rollback') {
   return !workflow.team || canPerformTeamOperation(workflow.team.role, operation);
@@ -106,7 +87,7 @@ function loadWorkflows(): Workflow[] {
     return normalized;
   } catch { return []; }
 }
-function persistGenerationRules(next: GenerationRule[]) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(next)); generationRules = next; }
+function persistGenerationRules(next: GenerationRule[]) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(next)); library.generationRules = next; }
 function cloudSyncDeviceId() {
   const existing = localStorage.getItem(CLOUD_SYNC_DEVICE_ID_KEY);
   if (existing && /^[a-zA-Z0-9_-]{1,120}$/.test(existing)) return existing;
@@ -393,8 +374,8 @@ async function loadPushState() {
     const response = await fetch(githubAppApiUrl('/api/notifications/subscription'));
     if (!response.ok) return;
     const payload = await response.json() as { subscribed?: boolean };
-    pushConfigured = true;
-    pushSubscribed = Boolean(payload.subscribed);
+    filters.pushConfigured = true;
+    filters.pushSubscribed = Boolean(payload.subscribed);
   } catch { /* Push setup is optional and should not block the PR workspace. */ }
 }
 function vapidKey(value: string) {
@@ -416,7 +397,7 @@ async function enablePushNotifications() {
     const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidKey(publicKey) });
     const response = await fetch(githubAppApiUrl('/api/notifications/subscription'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(subscription.toJSON()) });
     if (!response.ok) throw new Error((await response.json().catch(() => ({})) as { message?: string }).message || t('toast.push.saveError'));
-    pushConfigured = true; pushSubscribed = true; render(); showToast(t('toast.push.enabled'));
+    filters.pushConfigured = true; filters.pushSubscribed = true; render(); showToast(t('toast.push.enabled'));
   } catch (error) { showToast(error instanceof Error ? error.message : t('toast.push.enableError')); }
 }
 function showNotificationPermissionHelp() {
@@ -588,22 +569,19 @@ async function syncLocalWorkflows() {
     pendingLocalWorkflowSync = false; render(); showToast(t('sync.success'));
   } catch (error) { cloudWorkflowSyncError = error instanceof Error ? error.message : t('sync.fail.short'); render(); showToast(t('sync.fail', { error: cloudWorkflowSyncError })); }
 }
-function persistPullRequestDrafts(next: typeof pullRequestDrafts) { pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); draftStorageSynchronized = true; } catch { draftStorageSynchronized = false; showToast(t('connect.draft.saveError')); } }
-persistPullRequestDrafts(pullRequestDrafts);
-function loadAiConfig(): AiConfig | null { try { return JSON.parse(sessionStorage.getItem('pr-helper-ai') || 'null') as AiConfig | null; } catch { return null; } }
-let automationAutoGeneratePrMessage = false;
-let automationAutoConfirmPrCreation = false;
-function autoCreatePrerequisites() { return automationCredentialConfigured && automationAutoGeneratePrMessage && automationAutoConfirmPrCreation && generationRules.length; }
+function persistPullRequestDrafts(next: typeof library.pullRequestDrafts) { library.pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); library.draftStorageSynchronized = true; } catch { library.draftStorageSynchronized = false; showToast(t('connect.draft.saveError')); } }
+persistPullRequestDrafts(library.pullRequestDrafts);
+function autoCreatePrerequisites() { return aiState.automationCredentialConfigured && aiState.automationAutoGeneratePrMessage && aiState.automationAutoConfirmPrCreation && library.generationRules.length; }
 async function loadAutomationCredentialStatus() {
-  try { const response = await fetch(githubAppApiUrl('/api/ai-credentials')); const payload = await response.json().catch(() => ({})) as { credential?: { configured?: boolean; autoGeneratePrMessage?: boolean; autoConfirmPrCreation?: boolean } }; automationCredentialConfigured = Boolean(response.ok && payload.credential?.configured); automationAutoGeneratePrMessage = Boolean(payload.credential?.autoGeneratePrMessage); automationAutoConfirmPrCreation = Boolean(payload.credential?.autoConfirmPrCreation); }
-  catch { automationCredentialConfigured = false; automationAutoGeneratePrMessage = false; automationAutoConfirmPrCreation = false; }
+  try { const response = await fetch(githubAppApiUrl('/api/ai-credentials')); const payload = await response.json().catch(() => ({})) as { credential?: { configured?: boolean; autoGeneratePrMessage?: boolean; autoConfirmPrCreation?: boolean } }; aiState.automationCredentialConfigured = Boolean(response.ok && payload.credential?.configured); aiState.automationAutoGeneratePrMessage = Boolean(payload.credential?.autoGeneratePrMessage); aiState.automationAutoConfirmPrCreation = Boolean(payload.credential?.autoConfirmPrCreation); }
+  catch { aiState.automationCredentialConfigured = false; aiState.automationAutoGeneratePrMessage = false; aiState.automationAutoConfirmPrCreation = false; }
 }
 function showAiSettings(selectedRuleId: string | null = null, onRuleChange?: (id: string) => void) {
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
-  let selectedGenerationRuleId = selectedRuleId || defaultGenerationRule(generationRules)?.id || null;
-  const selectedGenerationRule = () => generationRuleById(generationRules, selectedGenerationRuleId);
-  dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('ai.eyebrow')}</p><h2>${t('ai.title')}</h2><label>${t('ai.label.baseUrl')}<input id="ai-url" autocomplete="off" value="${escape(aiConfig?.baseUrl || '')}" placeholder="${t('ai.placeholder.baseUrl')}" /></label><label>${t('ai.label.model')}<input id="ai-model" autocomplete="off" value="${escape(aiConfig?.model || '')}" placeholder="${t('ai.placeholder.model')}" /></label><label>${t('ai.label.apiKey')}<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiConfig?.apiKey || '')}" /></label><label class="setting-toggle"><input id="ai-auto-generate" type="checkbox" ${aiConfig?.autoGeneratePrMessage ? 'checked' : ''} />${t('ai.toggle.label')}<span>${t('ai.toggle.desc')}</span></label><label class="setting-toggle"><input id="ai-auto-confirm" type="checkbox" ${aiConfig?.autoConfirmPrCreation ? 'checked' : ''} />${t('ai.toggle.autoConfirm.label')}<span>${t('ai.toggle.autoConfirm.desc')}</span></label><p id="ai-test-result" class="ai-connection-result">${t('ai.test.placeholder')}</p><fieldset class="ai-automation-credential"><legend>${t('ai.automation.title')}</legend><small>${t('ai.automation.desc')}</small><p id="ai-automation-status" class="meta">${t('ai.automation.loading')}</p><p id="ai-saved-test-result" class="ai-connection-result">${t('ai.automation.testPlaceholder')}</p><div class="dialog-actions"><button id="save-ai-automation" type="button" class="ghost" title="${escape(t('ai.automation.saveTooltip'))}">${t('ai.automation.save')}</button><button id="test-saved-ai" type="button" class="ghost" disabled>${t('ai.automation.test')}</button><button id="delete-ai-automation" type="button" class="ghost" disabled>${t('ai.automation.delete')}</button></div></fieldset><div class="dialog-actions"><button id="ai-generation-rules" type="button" class="ghost">${escape(generationRuleButtonLabel(selectedGenerationRule()))}</button><button id="test-ai" type="button" class="ghost">${t('ai.test')}</button><button value="cancel" class="ghost">${t('ai.cancel')}</button><button id="save-ai" class="primary">${t('ai.save')}</button></div></form>`;
+  let selectedGenerationRuleId = selectedRuleId || defaultGenerationRule(library.generationRules)?.id || null;
+  const selectedGenerationRule = () => generationRuleById(library.generationRules, selectedGenerationRuleId);
+  dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('ai.eyebrow')}</p><h2>${t('ai.title')}</h2><label>${t('ai.label.baseUrl')}<input id="ai-url" autocomplete="off" value="${escape(aiState.aiConfig?.baseUrl || '')}" placeholder="${t('ai.placeholder.baseUrl')}" /></label><label>${t('ai.label.model')}<input id="ai-model" autocomplete="off" value="${escape(aiState.aiConfig?.model || '')}" placeholder="${t('ai.placeholder.model')}" /></label><label>${t('ai.label.apiKey')}<input id="ai-key" type="text" autocomplete="off" spellcheck="false" value="${escape(aiState.aiConfig?.apiKey || '')}" /></label><label class="setting-toggle"><input id="ai-auto-generate" type="checkbox" ${aiState.aiConfig?.autoGeneratePrMessage ? 'checked' : ''} />${t('ai.toggle.label')}<span>${t('ai.toggle.desc')}</span></label><label class="setting-toggle"><input id="ai-auto-confirm" type="checkbox" ${aiState.aiConfig?.autoConfirmPrCreation ? 'checked' : ''} />${t('ai.toggle.autoConfirm.label')}<span>${t('ai.toggle.autoConfirm.desc')}</span></label><p id="ai-test-result" class="ai-connection-result">${t('ai.test.placeholder')}</p><fieldset class="ai-automation-credential"><legend>${t('ai.automation.title')}</legend><small>${t('ai.automation.desc')}</small><p id="ai-automation-status" class="meta">${t('ai.automation.loading')}</p><p id="ai-saved-test-result" class="ai-connection-result">${t('ai.automation.testPlaceholder')}</p><div class="dialog-actions"><button id="save-ai-automation" type="button" class="ghost" title="${escape(t('ai.automation.saveTooltip'))}">${t('ai.automation.save')}</button><button id="test-saved-ai" type="button" class="ghost" disabled>${t('ai.automation.test')}</button><button id="delete-ai-automation" type="button" class="ghost" disabled>${t('ai.automation.delete')}</button></div></fieldset><div class="dialog-actions"><button id="ai-generation-rules" type="button" class="ghost">${escape(generationRuleButtonLabel(selectedGenerationRule()))}</button><button id="test-ai" type="button" class="ghost">${t('ai.test')}</button><button value="cancel" class="ghost">${t('ai.cancel')}</button><button id="save-ai" class="primary">${t('ai.save')}</button></div></form>`;
   document.body.append(dialog); dialog.showModal();
   const automationStatus = dialog.querySelector<HTMLElement>('#ai-automation-status')!;
   const automationSave = dialog.querySelector<HTMLButtonElement>('#save-ai-automation')!;
@@ -613,7 +591,7 @@ function showAiSettings(selectedRuleId: string | null = null, onRuleChange?: (id
   const syncAutomationSaveLabel = (configured: boolean) => { automationSave.textContent = t(configured ? 'ai.automation.update' : 'ai.automation.save'); };
   const ruleButton = dialog.querySelector<HTMLButtonElement>('#ai-generation-rules')!;
   const syncRuleButton = () => {
-    selectedGenerationRuleId ||= defaultGenerationRule(generationRules)?.id || null;
+    selectedGenerationRuleId ||= defaultGenerationRule(library.generationRules)?.id || null;
     ruleButton.textContent = generationRuleButtonLabel(selectedGenerationRule());
   };
   ruleButton.addEventListener('click', () => {
@@ -643,7 +621,7 @@ function showAiSettings(selectedRuleId: string | null = null, onRuleChange?: (id
   void refreshAutomationStatus();
   automationSave.addEventListener('click', async () => {
     const config = read(); automationSave.disabled = true;
-    try { const payload = await automationApi({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl: config.baseUrl, model: config.model, apiKey: config.apiKey, autoGeneratePrMessage: config.autoGeneratePrMessage, autoConfirmPrCreation: config.autoConfirmPrCreation }) }); automationCredentialConfigured = Boolean(payload.credential?.configured); automationAutoGeneratePrMessage = Boolean(payload.credential?.autoGeneratePrMessage); automationAutoConfirmPrCreation = Boolean(payload.credential?.autoConfirmPrCreation); automationStatus.textContent = `${t('ai.automation.configured')} · ${payload.credential?.keyMask || ''}`; automationDelete.disabled = false; savedAiTest.disabled = false; syncAutomationSaveLabel(true); }
+    try { const payload = await automationApi({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl: config.baseUrl, model: config.model, apiKey: config.apiKey, autoGeneratePrMessage: config.autoGeneratePrMessage, autoConfirmPrCreation: config.autoConfirmPrCreation }) }); aiState.automationCredentialConfigured = Boolean(payload.credential?.configured); aiState.automationAutoGeneratePrMessage = Boolean(payload.credential?.autoGeneratePrMessage); aiState.automationAutoConfirmPrCreation = Boolean(payload.credential?.autoConfirmPrCreation); automationStatus.textContent = `${t('ai.automation.configured')} · ${payload.credential?.keyMask || ''}`; automationDelete.disabled = false; savedAiTest.disabled = false; syncAutomationSaveLabel(true); }
     catch (error) { automationStatus.textContent = error instanceof Error ? error.message : t('ai.automation.error'); }
     finally { automationSave.disabled = false; }
   });
@@ -655,7 +633,7 @@ function showAiSettings(selectedRuleId: string | null = null, onRuleChange?: (id
   });
   automationDelete.addEventListener('click', async () => {
     automationDelete.disabled = true;
-    try { await automationApi({ method: 'DELETE' }); automationCredentialConfigured = false; automationAutoGeneratePrMessage = false; automationAutoConfirmPrCreation = false; automationStatus.textContent = t('ai.automation.notConfigured'); syncAutomationSaveLabel(false); }
+    try { await automationApi({ method: 'DELETE' }); aiState.automationCredentialConfigured = false; aiState.automationAutoGeneratePrMessage = false; aiState.automationAutoConfirmPrCreation = false; automationStatus.textContent = t('ai.automation.notConfigured'); syncAutomationSaveLabel(false); }
     catch (error) { automationStatus.textContent = error instanceof Error ? error.message : t('ai.automation.error'); automationDelete.disabled = false; }
   });
   dialog.querySelector('#test-ai')!.addEventListener('click', async () => {
@@ -667,7 +645,7 @@ function showAiSettings(selectedRuleId: string | null = null, onRuleChange?: (id
     catch (err) { const raw = err instanceof Error ? err.message : ''; result.textContent = raw.includes('non ISO-8859-1') ? t('ai.test.error.chars') : raw || t('ai.test.error.generic'); result.className = 'ai-connection-result is-error'; }
     finally { button.disabled = false; }
   });
-  dialog.querySelector('#save-ai')!.addEventListener('click', event => { event.preventDefault(); aiConfig = read(); sessionStorage.setItem('pr-helper-ai', JSON.stringify(aiConfig)); automationAutoGeneratePrMessage = Boolean(aiConfig.autoGeneratePrMessage); automationAutoConfirmPrCreation = Boolean(aiConfig.autoConfirmPrCreation); dialog.close(); showToast(t('ai.toast.saved')); render(); });
+  dialog.querySelector('#save-ai')!.addEventListener('click', event => { event.preventDefault(); aiState.aiConfig = read(); sessionStorage.setItem('pr-helper-ai', JSON.stringify(aiState.aiConfig)); aiState.automationAutoGeneratePrMessage = Boolean(aiState.aiConfig.autoGeneratePrMessage); aiState.automationAutoConfirmPrCreation = Boolean(aiState.aiConfig.autoConfirmPrCreation); dialog.close(); showToast(t('ai.toast.saved')); render(); });
   dialog.addEventListener('close', () => dialog.remove());
 }
 
@@ -676,7 +654,7 @@ function showCloudSyncDialog() {
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
   const unlocked = isCloudSyncUnlocked();
-  const status = cloudSyncStatus;
+  const status = library.cloudSyncStatus;
   const statusText = status.state === 'disabled' ? t('cloudSync.status.disabled') : status.state === 'syncing' ? t('cloudSync.status.syncing') : status.state === 'error' ? t('cloudSync.status.error') : t('cloudSync.status.unlocked');
   const lastSynced = status.lastSyncedAt ? `<p class="meta">${t('cloudSync.lastSynced')}: ${new Date(status.lastSyncedAt).toLocaleString()}</p>` : '';
   const errorText = status.error ? `<p class="error">${escape(status.error)}</p>` : '';
@@ -686,7 +664,7 @@ function showCloudSyncDialog() {
     dialog.querySelector('#cloud-sync-push')!.addEventListener('click', async () => { await cloudSyncPush(dialog); });
     dialog.querySelector('#cloud-sync-pull')!.addEventListener('click', async () => { await cloudSyncPull(dialog); });
     dialog.querySelector('#cloud-sync-rotate')!.addEventListener('click', () => showCloudSyncRotationDialog(dialog));
-    dialog.querySelector('#cloud-sync-lock')!.addEventListener('click', () => { lockCloudSync(); cloudSyncStatus = getCloudSyncStatus(); dialog.close(); render(); });
+    dialog.querySelector('#cloud-sync-lock')!.addEventListener('click', () => { lockCloudSync(); library.cloudSyncStatus = getCloudSyncStatus(); dialog.close(); render(); });
   } else {
     dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('cloudSync.eyebrow')}</p><h2>${t('cloudSync.title')}</h2><p>${t('cloudSync.unlock.desc')}</p><label>${t('cloudSync.passphrase')}<input id="cloud-passphrase" type="password" autocomplete="off" /></label><p id="cloud-sync-error" class="error" hidden></p><div class="dialog-actions"><button id="cloud-sync-unlock" type="button" class="primary">${t('cloudSync.unlock')}</button><button value="cancel" class="ghost">${t('cloudSync.close')}</button></div></form>`;
     document.body.append(dialog); dialog.showModal();
@@ -694,7 +672,7 @@ function showCloudSyncDialog() {
       const passphrase = dialog.querySelector<HTMLInputElement>('#cloud-passphrase')!.value;
       if (!passphrase) { const errorEl = dialog.querySelector<HTMLElement>('#cloud-sync-error')!; errorEl.hidden = false; errorEl.textContent = t('cloudSync.passphraseRequired'); return; }
       unlockCloudSync(passphrase);
-      cloudSyncStatus = getCloudSyncStatus();
+      library.cloudSyncStatus = getCloudSyncStatus();
       dialog.close();
       showCloudSyncDialog();
       render();
@@ -705,39 +683,39 @@ function showCloudSyncDialog() {
 
 async function cloudSyncPush(dialog: HTMLDialogElement) {
   try {
-    cloudSyncStatus = { ...cloudSyncStatus, state: 'syncing', error: null };
-    const data: SyncableData = { generationRules, prDrafts: pullRequestDrafts };
+    library.cloudSyncStatus = { ...library.cloudSyncStatus, state: 'syncing', error: null };
+    const data: SyncableData = { generationRules: library.generationRules, prDrafts: library.pullRequestDrafts };
     const blob = await encryptForCloud(data);
-    const response = await fetch(githubAppApiUrl('/api/encrypted-sync'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ciphertext: blob.ciphertext, keyId: blob.keyId, deviceId: cloudSyncDeviceId(), expectedRevision: cloudSyncStatus.revision }) });
+    const response = await fetch(githubAppApiUrl('/api/encrypted-sync'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ciphertext: blob.ciphertext, keyId: blob.keyId, deviceId: cloudSyncDeviceId(), expectedRevision: library.cloudSyncStatus.revision }) });
     const payload = await response.json().catch(() => ({})) as { record?: { updatedAt: string; revision: number; deviceId: string | null }; conflict?: boolean; message?: string };
     if (response.status === 409 && payload.conflict) throw new Error(t('cloudSync.conflict'));
     if (!response.ok || !payload.record) throw new Error(payload.message || '推送失败');
-    cloudSyncStatus = { ...cloudSyncStatus, state: 'unlocked', lastSyncedAt: payload.record.updatedAt, revision: payload.record.revision, deviceId: payload.record.deviceId, error: null };
+    library.cloudSyncStatus = { ...library.cloudSyncStatus, state: 'unlocked', lastSyncedAt: payload.record.updatedAt, revision: payload.record.revision, deviceId: payload.record.deviceId, error: null };
     showToast(t('cloudSync.pushSuccess'));
     dialog.close();
     render();
   } catch (error) {
-    cloudSyncStatus = { ...cloudSyncStatus, state: 'error', error: error instanceof Error ? error.message : '推送失败' };
+    library.cloudSyncStatus = { ...library.cloudSyncStatus, state: 'error', error: error instanceof Error ? error.message : '推送失败' };
     showToast(t('cloudSync.pushFailed'));
   }
 }
 
 async function cloudSyncPull(dialog: HTMLDialogElement) {
   try {
-    cloudSyncStatus = { ...cloudSyncStatus, state: 'syncing', error: null };
+    library.cloudSyncStatus = { ...library.cloudSyncStatus, state: 'syncing', error: null };
     const response = await fetch(githubAppApiUrl('/api/encrypted-sync'));
     if (!response.ok) throw new Error('拉取失败');
     const { record } = await response.json() as { record: { ciphertext: string; updatedAt: string; revision: number; keyId?: string; deviceId?: string | null } | null };
     if (!record) { showToast(t('cloudSync.pullEmpty')); return; }
     const data = await decryptFromCloud({ ciphertext: record.ciphertext, updatedAt: record.updatedAt });
-    if (data.generationRules) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(data.generationRules)); generationRules = loadGenerationRules(() => localStorage.getItem(GENERATION_RULES_KEY)); }
-    if (data.prDrafts) { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(data.prDrafts)); pullRequestDrafts = loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), Date.now()); }
-    cloudSyncStatus = { ...cloudSyncStatus, state: 'unlocked', lastSyncedAt: record.updatedAt, revision: record.revision, deviceId: record.deviceId || null, error: null };
+    if (data.generationRules) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(data.generationRules)); library.generationRules = loadGenerationRules(() => localStorage.getItem(GENERATION_RULES_KEY)); }
+    if (data.prDrafts) { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(data.prDrafts)); library.pullRequestDrafts = loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), Date.now()); }
+    library.cloudSyncStatus = { ...library.cloudSyncStatus, state: 'unlocked', lastSyncedAt: record.updatedAt, revision: record.revision, deviceId: record.deviceId || null, error: null };
     showToast(t('cloudSync.pullSuccess'));
     dialog.close();
     render();
   } catch (error) {
-    cloudSyncStatus = { ...cloudSyncStatus, state: 'error', error: error instanceof Error ? error.message : '拉取失败' };
+    library.cloudSyncStatus = { ...library.cloudSyncStatus, state: 'error', error: error instanceof Error ? error.message : '拉取失败' };
     showToast(t('cloudSync.pullFailed'));
   }
 }
@@ -751,7 +729,7 @@ function showCloudSyncRotationDialog(parent: HTMLDialogElement) {
     const passphrase = dialog.querySelector<HTMLInputElement>('#cloud-rotate-passphrase')!.value;
     if (!passphrase) return;
     await rotateCloudSyncKey(passphrase);
-    cloudSyncStatus = { ...cloudSyncStatus, state: 'unlocked', error: null };
+    library.cloudSyncStatus = { ...library.cloudSyncStatus, state: 'unlocked', error: null };
     dialog.close();
     await cloudSyncPush(parent);
   });
@@ -818,18 +796,18 @@ async function refreshAuthorizedRepositories() {
 
 function openRepositoryManagement() {
   if (!sessionState.githubInstallationSettingsUrl) return;
-  repositoryManagementWindow?.close();
-  repositoryManagementWindow = window.open(sessionState.githubInstallationSettingsUrl, 'pr-helper-github-installation', 'popup,width=960,height=780');
-  if (!repositoryManagementWindow) {
+  filters.repositoryManagementWindow?.close();
+  filters.repositoryManagementWindow = window.open(sessionState.githubInstallationSettingsUrl, 'pr-helper-github-installation', 'popup,width=960,height=780');
+  if (!filters.repositoryManagementWindow) {
     window.location.assign(sessionState.githubInstallationSettingsUrl);
     return;
   }
   showToast(t('toast.repos.hint'));
-  if (repositoryManagementTimer !== undefined) window.clearInterval(repositoryManagementTimer);
-  repositoryManagementTimer = window.setInterval(() => {
-    if (!repositoryManagementWindow || repositoryManagementWindow.closed) {
-      repositoryManagementWindow = null;
-      if (repositoryManagementTimer !== undefined) { window.clearInterval(repositoryManagementTimer); repositoryManagementTimer = undefined; }
+  if (filters.repositoryManagementTimer !== undefined) window.clearInterval(filters.repositoryManagementTimer);
+  filters.repositoryManagementTimer = window.setInterval(() => {
+    if (!filters.repositoryManagementWindow || filters.repositoryManagementWindow.closed) {
+      filters.repositoryManagementWindow = null;
+      if (filters.repositoryManagementTimer !== undefined) { window.clearInterval(filters.repositoryManagementTimer); filters.repositoryManagementTimer = undefined; }
       void refreshAuthorizedRepositories();
     }
   }, 500);
@@ -839,9 +817,9 @@ function render() {
   const manageRepositories = sessionState.githubInstallationSettingsUrl ? `<button id="manage-repositories" class="account-menu-item">${t('account.manageRepos')}</button>` : '';
   const operationAudit = `<button id="operation-audit" class="account-menu-item" ${cloudWorkflowStorage ? '' : 'disabled'}>${t('account.operationAudit')}</button>`;
   const account = sessionState.githubLogin ? `GitHub · @${escape(sessionState.githubLogin)}` : t('account.label');
-  const push = pushConfigured ? `<button id="push-settings" class="account-menu-item" ${pushSubscribed ? `disabled title="${t('account.push.title')}"` : ''}>${pushSubscribed ? t('account.push.on') : t('account.push.off')}</button>` : '';
+  const push = filters.pushConfigured ? `<button id="push-settings" class="account-menu-item" ${filters.pushSubscribed ? `disabled title="${t('account.push.title')}"` : ''}>${filters.pushSubscribed ? t('account.push.on') : t('account.push.off')}</button>` : '';
   const themeIcon = currentTheme === 'dark' ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3a6 6 0 0 0 12 0V9a6 6 0 0 0-6-6z"/></svg>';
-  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#"><img class="brand-mark" src="/favicon.svg" alt="" width="28" height="28" />${t('brand.name')}<span>${t('brand.suffix')}</span></a><nav aria-label="${t('nav.label')}"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">${t('nav.overview')}</button></nav><div class="topbar-actions"><button id="theme-toggle" class="theme-toggle" aria-label="${currentTheme === 'dark' ? t('theme.toLight') : t('theme.toDark')}">${themeIcon}<span>${currentTheme === 'dark' ? t('theme.light') : t('theme.dark')}</span></button><button id="lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}${operationAudit}<button id="team-settings-top" class="account-menu-item" ${cloudWorkflowStorage ? '' : 'disabled'}>${t('account.teams')}</button><button id="ai-settings-top" class="account-menu-item">${t('account.aiSettings')}</button><button id="cloud-sync-top" class="account-menu-item">${cloudSyncStatus.state === 'disabled' ? t('cloudSync.enable') : t('cloudSync.status.' + cloudSyncStatus.state)}</button><button id="disconnect" class="account-menu-item danger">${t('account.disconnect')}</button><button id="delete-account-top" class="account-menu-item danger">${t('account.deleteAccount')}</button><button id="permissions-top" class="account-menu-item">${t('account.permissions')}</button><a href="/privacy.html" class="account-menu-item" target="_blank">${t('account.privacy')}</a></div></div></div></header><section id="content"></section></main>`;
+  app().innerHTML = `<main class="product"><header class="topbar"><a class="brand" href="#"><img class="brand-mark" src="/favicon.svg" alt="" width="28" height="28" />${t('brand.name')}<span>${t('brand.suffix')}</span></a><nav aria-label="${t('nav.label')}"><button class="${navigationClass(screen, 'overview')}" data-nav="overview">${t('nav.overview')}</button></nav><div class="topbar-actions"><button id="theme-toggle" class="theme-toggle" aria-label="${currentTheme === 'dark' ? t('theme.toLight') : t('theme.toDark')}">${themeIcon}<span>${currentTheme === 'dark' ? t('theme.light') : t('theme.dark')}</span></button><button id="lang-toggle" class="theme-toggle" aria-label="${t('lang.label')}">${getLocale() === 'zh' ? t('lang.en') : t('lang.zh')}</button><div class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" aria-expanded="false">${account}<span aria-hidden="true">⌄</span></button><div id="account-menu-panel" class="account-menu-panel" hidden>${manageRepositories}${push}${operationAudit}<button id="team-settings-top" class="account-menu-item" ${cloudWorkflowStorage ? '' : 'disabled'}>${t('account.teams')}</button><button id="ai-settings-top" class="account-menu-item">${t('account.aiSettings')}</button><button id="cloud-sync-top" class="account-menu-item">${library.cloudSyncStatus.state === 'disabled' ? t('cloudSync.enable') : t('cloudSync.status.' + library.cloudSyncStatus.state)}</button><button id="disconnect" class="account-menu-item danger">${t('account.disconnect')}</button><button id="delete-account-top" class="account-menu-item danger">${t('account.deleteAccount')}</button><button id="permissions-top" class="account-menu-item">${t('account.permissions')}</button><a href="/privacy.html" class="account-menu-item" target="_blank">${t('account.privacy')}</a></div></div></div></header><section id="content"></section></main>`;
   const accountMenuToggle = document.querySelector<HTMLButtonElement>('#account-menu-toggle')!, accountMenuPanel = document.querySelector<HTMLElement>('#account-menu-panel')!;
   const accountMenu = accountMenuToggle.closest<HTMLElement>('.account-menu')!;
   const closeAccountMenu = () => { accountMenuPanel.hidden = true; accountMenuToggle.setAttribute('aria-expanded', 'false'); };
@@ -1182,12 +1160,12 @@ function resolvedSourceMatches(resolved: string, candidate: string) {
 }
 function isAutomationResolved(workflowId: string, stageIndex: number, source: string) {
   const prefix = `${workflowId}|${stageIndex}|`;
-  for (const [key, record] of resolvedAutomation) {
+  for (const [key, record] of aiState.resolvedAutomation) {
     if (!key.startsWith(prefix) || !resolvedSourceMatches(record.source, source)) continue;
-    if (Date.now() - record.resolvedAt > RESOLVED_AUTOMATION_TTL_MS) { resolvedAutomation.delete(key); continue; }
+    if (Date.now() - record.resolvedAt > RESOLVED_AUTOMATION_TTL_MS) { aiState.resolvedAutomation.delete(key); continue; }
     // A different or newer row is a fresh event rather than the one just handled, so it must surface.
     const current = currentAutomationAction(workflowId, stageIndex, source);
-    if (current && (current.id !== record.actionId || current.updatedAt > record.updatedAt)) { resolvedAutomation.delete(key); continue; }
+    if (current && (current.id !== record.actionId || current.updatedAt > record.updatedAt)) { aiState.resolvedAutomation.delete(key); continue; }
     return true;
   }
   return false;
@@ -1205,7 +1183,7 @@ function isAutomationResolved(workflowId: string, stageIndex: number, source: st
 function markAutomationResolved(flow: Workflow, stageIndex: number, source: string) {
   const key = automationStepKey(flow.id, stageIndex, source);
   const current = currentAutomationAction(flow.id, stageIndex, source);
-  resolvedAutomation.set(key, { resolvedAt: Date.now(), source, actionId: current?.id ?? null, updatedAt: current?.updatedAt ?? '' });
+  aiState.resolvedAutomation.set(key, { resolvedAt: Date.now(), source, actionId: current?.id ?? null, updatedAt: current?.updatedAt ?? '' });
   projection.actionQueue = projection.actionQueue.filter(item => !(item.workflowId === flow.id && item.stageIndex === stageIndex && resolvedSourceMatches(source, item.source)));
   void reconcileAutomationInBackground(flow, stageIndex, source);
 }
@@ -1213,13 +1191,13 @@ async function reconcileAutomationInBackground(flow: Workflow, stageIndex: numbe
   const key = automationStepKey(flow.id, stageIndex, source);
   for (const delay of AUTOMATION_RECONCILE_DELAYS_MS) {
     await new Promise(resolve => window.setTimeout(resolve, delay));
-    if (!resolvedAutomation.has(key)) return;
+    if (!aiState.resolvedAutomation.has(key)) return;
     await loadActionQueue(true, flow.repository).catch(() => undefined);
     // Once the server projection agrees the step is no longer blocked it becomes the source of truth
     // again, and the local note has served its purpose.
     const stillBlocked = projection.automationActions.some(action => action.workflowId === flow.id && action.stageIndex === stageIndex && resolvedSourceMatches(source, action.source) && automationActionPresentation(action).blocked);
     if (!stillBlocked) {
-      resolvedAutomation.delete(key);
+      aiState.resolvedAutomation.delete(key);
       if (screen === 'overview') render();
       return;
     }
@@ -1267,8 +1245,8 @@ function failureCenterPanel(): string {
 }
 function laneSortControls() {
   const button = (mode: WorkflowSortMode, label: string) => {
-    const active = laneSortMode === mode;
-    const direction = active && mode !== 'custom' ? laneSortDirection === 'asc' ? ' ↑' : ' ↓' : '';
+    const active = filters.laneSortMode === mode;
+    const direction = active && mode !== 'custom' ? filters.laneSortDirection === 'asc' ? ' ↑' : ' ↓' : '';
     return `<button type="button" class="lane-sort-option${active ? ' active' : ''}" data-lane-sort="${mode}" aria-pressed="${active}">${label}${direction}</button>`;
   };
   return `<div class="lane-sort-controls" aria-label="${escape(t('overview.board.sortLabel'))}"><span>${t('overview.board.sortLabel')}</span>${button('custom', t('overview.board.sortCustom'))}${button('name', t('overview.board.sortName'))}${button('createdAt', t('overview.board.sortCreated'))}</div>`;
@@ -1296,19 +1274,19 @@ function overview() {
   }
   const runningCount = runningWorkflowIds.size;
   // The archived view is the only one that shows them; every other count and lane is about live work.
-  const boardWorkflows = overviewFilter === 'archived' ? archivedWorkflows(workflows) : activeWorkflows(workflows);
-  const sortedWorkflows = sortWorkflowsForView(boardWorkflows, laneSortMode, laneSortDirection);
+  const boardWorkflows = filters.overviewFilter === 'archived' ? archivedWorkflows(workflows) : activeWorkflows(workflows);
+  const sortedWorkflows = sortWorkflowsForView(boardWorkflows, filters.laneSortMode, filters.laneSortDirection);
   const filterMatchedWorkflows = sortedWorkflows.filter(flow => {
-    if (overviewFilter === 'all' || overviewFilter === 'archived') return true;
-    if (overviewFilter === 'automation') return blockedAutomationActions().some(action => action.workflowId === flow.id);
-    if (overviewFilter === 'running') return runningWorkflowIds.has(flow.id);
-    return projection.actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed'));
+    if (filters.overviewFilter === 'all' || filters.overviewFilter === 'archived') return true;
+    if (filters.overviewFilter === 'automation') return blockedAutomationActions().some(action => action.workflowId === flow.id);
+    if (filters.overviewFilter === 'running') return runningWorkflowIds.has(flow.id);
+    return projection.actionQueue.some(item => item.workflowId === flow.id && (filters.overviewFilter === 'attention' || item.kind === 'checks-failed'));
   });
-  const normalizedSearch = laneSearchQuery.trim().toLocaleLowerCase();
+  const normalizedSearch = filters.laneSearchQuery.trim().toLocaleLowerCase();
   const visibleWorkflows = filterMatchedWorkflows.filter(flow => !normalizedSearch || `${flow.name} ${flow.repository}`.toLocaleLowerCase().includes(normalizedSearch));
   const hasSearchMiss = Boolean(normalizedSearch && !visibleWorkflows.length);
   const refreshLabel = projection.actionQueueRefreshing ? t('overview.queue.refreshing') : t('overview.queue.refresh');
-  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div>${laneSortControls()}<button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${projection.actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="running" class="${overviewFilter === 'running' ? 'active' : ''}"><span>${runningCount}</span>${t('overview.board.running')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button data-board-filter="automation" class="${overviewFilter === 'automation' ? 'active' : ''}"><span>${automationBlockedCount}</span>${t('overview.board.automationBlocked')}</button>${archivedCount || overviewFilter === 'archived' ? `<button data-board-filter="archived" class="${overviewFilter === 'archived' ? 'active' : ''}"><span>${archivedCount}</span>${t('overview.board.archived')}</button>` : ''}<button id="refresh-action-queue" class="board-refresh${projection.actionQueueRefreshing ? ' is-loading' : ''}"${projection.actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${projection.actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${overviewFilter === 'archived' ? t('overview.board.archivedEmpty') : t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section><div class="board-scroll-controls" hidden aria-label="${escape(t('overview.board.scrollControls'))}"><button type="button" data-board-scroll="top" aria-label="${escape(t('overview.board.scrollTop'))}" title="${escape(t('overview.board.scrollTop'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 10 5-5 5 5M3 14l5-5 5 5"/></svg></button><button type="button" data-board-scroll="bottom" aria-label="${escape(t('overview.board.scrollBottom'))}" title="${escape(t('overview.board.scrollBottom'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 6 5 5 5-5M3 2l5 5 5-5"/></svg></button></div>`;
+  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div>${laneSortControls()}<button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${filters.overviewFilter === 'attention' ? 'active' : ''}"><span>${projection.actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="running" class="${filters.overviewFilter === 'running' ? 'active' : ''}"><span>${runningCount}</span>${t('overview.board.running')}</button><button data-board-filter="all" class="${filters.overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${filters.overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button data-board-filter="automation" class="${filters.overviewFilter === 'automation' ? 'active' : ''}"><span>${automationBlockedCount}</span>${t('overview.board.automationBlocked')}</button>${archivedCount || filters.overviewFilter === 'archived' ? `<button data-board-filter="archived" class="${filters.overviewFilter === 'archived' ? 'active' : ''}"><span>${archivedCount}</span>${t('overview.board.archived')}</button>` : ''}<button id="refresh-action-queue" class="board-refresh${projection.actionQueueRefreshing ? ' is-loading' : ''}"${projection.actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${projection.actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${filters.overviewFilter === 'archived' ? t('overview.board.archivedEmpty') : t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section><div class="board-scroll-controls" hidden aria-label="${escape(t('overview.board.scrollControls'))}"><button type="button" data-board-scroll="top" aria-label="${escape(t('overview.board.scrollTop'))}" title="${escape(t('overview.board.scrollTop'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 10 5-5 5 5M3 14l5-5 5 5"/></svg></button><button type="button" data-board-scroll="bottom" aria-label="${escape(t('overview.board.scrollBottom'))}" title="${escape(t('overview.board.scrollBottom'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 6 5 5 5-5M3 2l5 5 5-5"/></svg></button></div>`;
   const emptyResetButton = content.querySelector<HTMLButtonElement>('.board-empty button[data-board-filter="all"]');
   if (hasSearchMiss && emptyResetButton) {
     emptyResetButton.removeAttribute('data-board-filter');
@@ -1317,8 +1295,8 @@ function overview() {
     content.querySelector('.board-empty h3')!.textContent = t('overview.board.searchEmpty');
   }
   const searchCountMarkup = normalizedSearch ? `<div class="lane-search-count" role="status"><span>${visibleWorkflows.length}</span>${t('overview.board.searchCount')}</div>` : '';
-  content.querySelector<HTMLElement>('.board-summary')?.insertAdjacentHTML('afterbegin', `${searchCountMarkup}<label class="lane-search"><span>${t('overview.board.search')}</span><input id="lane-search" type="search" value="${escape(laneSearchQuery)}" placeholder="${escape(t('overview.board.searchPlaceholder'))}" autocomplete="off" /></label>`);
-  content.classList.toggle('lane-sort-not-custom', laneSortMode !== 'custom');
+  content.querySelector<HTMLElement>('.board-summary')?.insertAdjacentHTML('afterbegin', `${searchCountMarkup}<label class="lane-search"><span>${t('overview.board.search')}</span><input id="lane-search" type="search" value="${escape(filters.laneSearchQuery)}" placeholder="${escape(t('overview.board.searchPlaceholder'))}" autocomplete="off" /></label>`);
+  content.classList.toggle('lane-sort-not-custom', filters.laneSortMode !== 'custom');
   const sortControls = content.querySelector<HTMLElement>('.lane-sort-controls');
   const boardSummary = content.querySelector<HTMLElement>('.board-summary');
   if (sortControls && boardSummary) boardSummary.appendChild(sortControls);
@@ -1334,26 +1312,26 @@ function overview() {
     window.scrollTo({ top: button.dataset.boardScroll === 'top' ? 0 : document.documentElement.scrollHeight, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   }));
   document.querySelector<HTMLInputElement>('#lane-search')?.addEventListener('input', event => {
-    laneSearchQuery = (event.target as HTMLInputElement).value;
+    filters.laneSearchQuery = (event.target as HTMLInputElement).value;
     render();
     const search = document.querySelector<HTMLInputElement>('#lane-search');
     search?.focus();
-    search?.setSelectionRange(laneSearchQuery.length, laneSearchQuery.length);
+    search?.setSelectionRange(filters.laneSearchQuery.length, filters.laneSearchQuery.length);
   });
-  document.querySelector<HTMLButtonElement>('#clear-lane-search')?.addEventListener('click', () => { laneSearchQuery = ''; render(); });
+  document.querySelector<HTMLButtonElement>('#clear-lane-search')?.addEventListener('click', () => { filters.laneSearchQuery = ''; render(); });
   document.querySelector('#run-preflight')?.addEventListener('click', async () => { await loadPreflight(); render(); });
   document.querySelectorAll<HTMLButtonElement>('[data-lane-sort]').forEach(button => button.addEventListener('click', () => {
     const mode = button.dataset.laneSort as WorkflowSortMode | undefined;
     if (!mode) return;
-    if (laneSortMode === mode && mode !== 'custom') laneSortDirection = laneSortDirection === 'asc' ? 'desc' : 'asc';
-    else { laneSortMode = mode; laneSortDirection = mode === 'createdAt' ? 'desc' : 'asc'; }
+    if (filters.laneSortMode === mode && mode !== 'custom') filters.laneSortDirection = filters.laneSortDirection === 'asc' ? 'desc' : 'asc';
+    else { filters.laneSortMode = mode; filters.laneSortDirection = mode === 'createdAt' ? 'desc' : 'asc'; }
     render();
   }));
-  document.querySelectorAll<HTMLButtonElement>('[data-board-filter]').forEach(button => button.addEventListener('click', () => { overviewFilter = button.dataset.boardFilter as typeof overviewFilter; render(); }));
+  document.querySelectorAll<HTMLButtonElement>('[data-board-filter]').forEach(button => button.addEventListener('click', () => { filters.overviewFilter = button.dataset.boardFilter as typeof filters.overviewFilter; render(); }));
   document.querySelectorAll<HTMLButtonElement>('[data-lane-collapse]').forEach(button => button.addEventListener('click', () => {
     const workflowId = button.dataset.laneCollapse;
     if (!workflowId) return;
-    if (expandedLaneIds.has(workflowId)) expandedLaneIds.delete(workflowId); else expandedLaneIds.add(workflowId);
+    if (filters.expandedLaneIds.has(workflowId)) filters.expandedLaneIds.delete(workflowId); else filters.expandedLaneIds.add(workflowId);
     render();
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-lane-step]').forEach(button => button.addEventListener('click', () => showProjectStepDrawer(button.dataset.workflowId || '', Number(button.dataset.laneStep), button.dataset.laneSource)));
@@ -1488,7 +1466,7 @@ function projectLane(flow: Workflow) {
     ? [...targets.entries()].map(([target, routes]) => `<section class="lane-merge-group"><p>${t('overview.board.mergeTarget', { target: escape(target) })}</p><div>${routes.map(({ stage, index }) => routeCards(stage, index)).join('')}</div></section>`).join('')
     : flow.stages.map((stage, index) => routeCards(stage, index)).join('<span class="lane-connector" aria-hidden="true">→</span>');
   const orderIndex = workflows.findIndex(workflow => workflow.id === flow.id);
-  const sortingDisabled = laneSortMode !== 'custom' || overviewFilter !== 'all' || laneSearchQuery.trim() !== '' || workflows.some(workflow => !canOperateWorkflow(workflow, 'workflow-edit'));
+  const sortingDisabled = filters.laneSortMode !== 'custom' || filters.overviewFilter !== 'all' || filters.laneSearchQuery.trim() !== '' || workflows.some(workflow => !canOperateWorkflow(workflow, 'workflow-edit'));
   const editable = canOperateWorkflow(flow, 'workflow-edit');
   const archived = flow.archived === true;
   const dragLabel = t('overview.board.dragProject', { name: flow.name });
@@ -1498,9 +1476,9 @@ function projectLane(flow: Workflow) {
   const runHistory = laneRunHistory(flow);
   const timelineSection = workflowTimelineSection(flow);
   const flowName = `<button type="button" class="lane-flow-name" data-open="${escape(flow.id)}" aria-label="${escape(t('overview.flowCard.view'))}: ${escape(flow.name)}">${escape(flow.name)}</button>`;
-  const expanded = expandedLaneIds.has(flow.id);
+  const expanded = filters.expandedLaneIds.has(flow.id);
   const collapseLabel = expanded ? t('overview.board.collapse') : t('overview.board.expand');
-  const orderInput = laneSortMode === 'custom'
+  const orderInput = filters.laneSortMode === 'custom'
     ? `<label class="lane-order-input"><input type="text" inputmode="numeric" pattern="[0-9]*" value="${orderIndex + 1}" data-lane-position="${escape(flow.id)}" aria-label="${escape(t('overview.board.orderFor', { name: flow.name }))}" ${sortingDisabled ? 'disabled' : ''} /></label>`
     : '';
   return `<article class="project-lane${expanded ? ' is-expanded' : ''}${archived ? ' is-archived' : ''}${returnHighlight === flow.id ? ' is-return-highlight' : ''}" data-project-lane="${escape(flow.id)}"><header><div class="lane-heading"><div class="lane-order-controls"><button type="button" class="lane-drag-handle" draggable="${sortingDisabled ? 'false' : 'true'}" data-lane-drag="${escape(flow.id)}" aria-label="${escape(dragLabel)}" title="${escape(sortingDisabled ? t('overview.board.sortAllOnly') : dragLabel)}" ${sortingDisabled ? 'disabled' : ''}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/><circle cx="5" cy="18" r="1.5"/><circle cx="11" cy="18" r="1.5"/></svg></button><div class="lane-move-buttons"><button type="button" data-lane-move="up" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveUp', { name: flow.name }))}" title="${escape(t('overview.board.moveUp', { name: flow.name }))}" ${sortingDisabled || orderIndex <= 0 ? 'disabled' : ''}>↑</button><button type="button" data-lane-move="down" data-workflow-id="${escape(flow.id)}" aria-label="${escape(t('overview.board.moveDown', { name: flow.name }))}" title="${escape(t('overview.board.moveDown', { name: flow.name }))}" ${sortingDisabled || orderIndex === workflows.length - 1 ? 'disabled' : ''}>↓</button></div>${orderInput}</div><div><p class="eyebrow">${escape(flow.repository)}</p><h2>${flowName}</h2>${archived ? `<span class="lane-archived-badge">${t('overview.board.archivedBadge')}</span>` : ''}${!archived && isWorkflowMuted(flow) ? `<span class="lane-muted-badge">${t('overview.board.mutedBadge')}</span>` : ''}${sharedWorkflowBadge(flow)}<p class="lane-run-summary ${runSummary.tone}">${runSummary.text}</p></div></div><button type="button" class="lane-collapse-toggle" data-lane-collapse="${escape(flow.id)}" aria-expanded="${expanded}" aria-label="${escape(collapseLabel)}" title="${escape(collapseLabel)}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.75" y="2.75" width="10.5" height="10.5" rx="1.5"/><path d="m5.25 8 2.75-2.75L10.75 8"/></svg></button><div class="lane-actions">${archived ? `<button data-restore-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.restore')}</button>` : `<button data-edit-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.edit')}</button><button data-archive-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t('overview.board.archive')}</button><button data-mute-project="${escape(flow.id)}" class="link-button" ${editable ? '' : 'disabled'}>${t(isWorkflowMuted(flow) ? 'overview.board.unmute' : 'overview.board.mute')}</button><button data-open="${escape(flow.id)}" class="link-button">${t('overview.flowCard.view')}</button>`}</div></header><div class="lane-body"${expanded ? '' : ' hidden'}>${warning}<div class="lane-track${hasFanIn ? ' has-fan-in' : ''}">${steps}</div>${timelineSection}${runHistory}</div></article>`;
@@ -1542,7 +1520,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   // `detailStatus` is freshly read from GitHub (or optimistically set after creating a PR),
   // so it must win over a possibly delayed reconciliation record.
   const mergeStatus = detailStatus || laneMergeStatus(state);
-  const mergeAction = mergeStatus && !recentlyCreatedPullNumbers.has(stageIndex) && canMergePull(mergeStatus) && canOperateWorkflow(flow, 'pull-merge') ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
+  const mergeAction = mergeStatus && !filters.recentlyCreatedPullNumbers.has(stageIndex) && canMergePull(mergeStatus) && canOperateWorkflow(flow, 'pull-merge') ? `<button class="primary drawer-merge-pr">${t('merge.button')}</button>` : '';
   const recoveryActions = state?.checksState === 'failure' ? `<button class="ghost drawer-repair">${t('repair.codex')}</button>${canOperateWorkflow(flow, 'actions-rerun') ? `<button class="ghost drawer-retry-actions">${t('recovery.retryActions')}</button>` : ''}` : '';
   const actions = `<div class="dialog-actions drawer-actions"><button class="ghost drawer-sync">${t('recovery.sync')}</button>${recoveryActions}${createAction}${mergeAction}<button class="primary drawer-view-flow">${t('overview.board.viewDetail')}</button></div>`;
   const dialog = document.createElement('dialog');
@@ -1982,7 +1960,7 @@ function detail() {
     if (!active) return;
     const stageIndex = Number(input.dataset.detailAutoCreateStage);
     const stage = active.stages[stageIndex];
-    const rule = stageGenerationRule(stage.automation?.generationRule, generationRules) || (stage.automation?.generationRule ? undefined : defaultGenerationRule(generationRules));
+    const rule = stageGenerationRule(stage.automation?.generationRule, library.generationRules) || (stage.automation?.generationRule ? undefined : defaultGenerationRule(library.generationRules));
     if (input.checked && (!autoCreatePrerequisites() || !rule)) { input.checked = false; showToast(t('draft.autoCreatePrerequisites')); return; }
     const threshold = Number(document.querySelector<HTMLInputElement>(`[data-detail-auto-create-threshold="${stageIndex}"]`)?.value || active.stages[stageIndex]?.automation?.triggerMinCommits || 1);
     void (async () => {
@@ -1996,7 +1974,7 @@ function detail() {
     if (!active) return;
     const stageIndex = Number(button.dataset.detailRuleSync);
     const stage = active.stages[stageIndex];
-    const update = stageGenerationRuleUpdate(stage?.automation?.generationRule, generationRules);
+    const update = stageGenerationRuleUpdate(stage?.automation?.generationRule, library.generationRules);
     if (!update) { render(); return; }
     save(setStageAutoCreate(active, stageIndex, true, { name: update.name, content: update.content }, stage!.automation!.triggerMinCommits || 1));
     showToast(t('detail.ruleOutdated.synced', { name: update.name }));
@@ -2027,7 +2005,7 @@ function detail() {
     if (!active) return;
     const stageIndex = Number(input.dataset.detailAutoCreateThreshold);
     const stage = active.stages[stageIndex];
-    const rule = stageGenerationRule(stage.automation?.generationRule, generationRules) || (stage.automation?.generationRule ? undefined : defaultGenerationRule(generationRules));
+    const rule = stageGenerationRule(stage.automation?.generationRule, library.generationRules) || (stage.automation?.generationRule ? undefined : defaultGenerationRule(library.generationRules));
     if (!stage?.automation?.autoCreatePullRequest || !rule) return;
     const threshold = Number(input.value);
     if (!Number.isInteger(threshold) || threshold < 1) { input.value = String(stage.automation.triggerMinCommits || 1); showToast(t('draft.autoCreateThresholdInvalid')); return; }
@@ -2128,7 +2106,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const advanceHint = !canEditAutomation ? t('detail.autoCreateReadonly') : !autoCreatePrerequisites() ? t('draft.autoCreatePrerequisites') : !canMergeAutomation ? t('detail.autoMergeReadonly') : advanceLegacyPolicy ? t('detail.autoAdvanceLegacyPolicy') : t('detail.autoAdvanceDesc');
   const advanceControl = `<label class="timeline-auto-merge"><input type="checkbox" data-detail-auto-advance-stage="${index}" ${advanceEnabled ? 'checked' : ''} ${advanceDisabled ? 'disabled' : ''} /><span>${t('draft.autoAdvance')}</span></label>`;
   // 自动化只认 stage 钉住的那一版提示词，改了默认规则不会自己传过来，所以过期时给一个显式的同步入口。
-  const ruleUpdate = autoEnabled && stage.automation?.executionMode === 'server' ? stageGenerationRuleUpdate(stage.automation.generationRule, generationRules) : undefined;
+  const ruleUpdate = autoEnabled && stage.automation?.executionMode === 'server' ? stageGenerationRuleUpdate(stage.automation.generationRule, library.generationRules) : undefined;
   const ruleNotice = ruleUpdate
     ? `<p class="timeline-rule-outdated">${escape(ruleUpdate.kind === 'content' ? t('detail.ruleOutdated.content', { name: ruleUpdate.name }) : t('detail.ruleOutdated.rule', { name: ruleUpdate.name, stored: stage.automation!.generationRule!.name }))}<button type="button" class="link-button" data-detail-rule-sync="${index}" ${canEditAutomation ? '' : 'disabled'}>${t('detail.ruleOutdated.sync')}</button></p>`
     : '';
@@ -2171,7 +2149,7 @@ function stageTimeline(stage: Workflow['stages'][number], index: number) {
   const stateClass = status.kind === 'merged' ? superseded ? 'neutral' : mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
   // A projected first paint lacks the live pull's head ref and Actions detail, so the merge menu only
   // appears once the live read replaces it.
-  const mergeAction = !status.projected && status.kind === 'open' && !recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(active!, 'pull-merge') ? mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
+  const mergeAction = !status.projected && status.kind === 'open' && !filters.recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(active!, 'pull-merge') ? filters.mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
   const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';
   // The drawer owns every per-step operation (rerun, sync, deployment retry). Without an entry point
   // here a static step's recovery actions were reachable only from the board, unlike a dynamic one.
@@ -2314,7 +2292,7 @@ function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: 
     event.preventDefault();
     const button = event.currentTarget as HTMLButtonElement;
     button.disabled = true; button.textContent = t('merge.merging');
-    mergingStages.add(index);
+    filters.mergingStages.add(index);
     if (!onMerged && screen === 'detail') detail();
     try {
       const { owner, name } = parseRepository(active!.repository);
@@ -2322,8 +2300,8 @@ function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: 
       if (!result.merged) throw new Error(result.message || t('merge.error.incomplete'));
       const pendingChecks = { state: 'pending' as const, passed: 0, total: 0 };
       statuses = statuses?.map((item, statusIndex) => statusIndex === index ? { ...item, kind: 'merged', pr: { ...pull, state: 'closed', merged_at: new Date().toISOString(), merge_commit_sha: result.sha }, checks: pendingChecks } : item) || null;
-      recentlyMergedPullNumbers.set(index, pull.number);
-      mergingStages.delete(index);
+      filters.recentlyMergedPullNumbers.set(index, pull.number);
+      filters.mergingStages.delete(index);
       if (source) markAutomationResolved(active!, index, source);
       dialog.close();
       if (onMerged) {
@@ -2334,7 +2312,7 @@ function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: 
         window.setTimeout(() => { void refreshStatuses(true, true, true); }, 1_000)
       }
     } catch (err) {
-      mergingStages.delete(index);
+      filters.mergingStages.delete(index);
       if (!onMerged && screen === 'detail') detail();
       showToast(mergeErrorMessage(err));
       button.disabled = false; button.textContent = t('merge.dialog.confirm');
@@ -2389,8 +2367,8 @@ async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = 
     try {
       const source = await resolveDetailSource(owner, name, stage.source, stage.target);
       if (!source) return { kind: 'not-created' } as StepStatus;
-      const recentlyCreatedNumber = recentlyCreatedPullNumbers.get(index);
-      const recentlyMergedNumber = recentlyMergedPullNumbers.get(index);
+      const recentlyCreatedNumber = filters.recentlyCreatedPullNumbers.get(index);
+      const recentlyMergedNumber = filters.recentlyMergedPullNumbers.get(index);
       const recentlyChangedNumber = recentlyCreatedNumber || recentlyMergedNumber;
       const [openPulls, closedPulls, comparison, recentlyChangedPull] = await Promise.all([
         githubFetch<Pull[]>(sessionState.token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + source)}&base=${encodeURIComponent(stage.target)}&per_page=1`).catch(error => {
@@ -2407,9 +2385,9 @@ async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = 
         }),
         recentlyChangedNumber ? githubFetch<Pull>(sessionState.token, `/repos/${owner}/${name}/pulls/${recentlyChangedNumber}`).catch(() => null) : Promise.resolve(null),
       ]);
-      if (recentlyCreatedNumber && openPulls.some(pull => pull.number === recentlyCreatedNumber)) recentlyCreatedPullNumbers.delete(index);
-      if (recentlyCreatedNumber && recentlyChangedPull?.state !== 'open') recentlyCreatedPullNumbers.delete(index);
-      if (recentlyMergedNumber && !openPulls.some(pull => pull.number === recentlyMergedNumber) && closedPulls.some(pull => pull.number === recentlyMergedNumber)) recentlyMergedPullNumbers.delete(index);
+      if (recentlyCreatedNumber && openPulls.some(pull => pull.number === recentlyCreatedNumber)) filters.recentlyCreatedPullNumbers.delete(index);
+      if (recentlyCreatedNumber && recentlyChangedPull?.state !== 'open') filters.recentlyCreatedPullNumbers.delete(index);
+      if (recentlyMergedNumber && !openPulls.some(pull => pull.number === recentlyMergedNumber) && closedPulls.some(pull => pull.number === recentlyMergedNumber)) filters.recentlyMergedPullNumbers.delete(index);
       if (recentlyMergedNumber && !recentlyChangedPull?.merged_at && previous?.[index]?.kind === 'merged') return previous[index];
       let pr: Pull | null = recentlyMergedNumber && recentlyChangedPull?.merged_at
         ? recentlyChangedPull
@@ -2487,7 +2465,7 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog rules-dialog';
   dialog.setAttribute('aria-labelledby', 'generation-rules-title');
-  let editingId = selectedId || defaultGenerationRule(generationRules)?.id || null;
+  let editingId = selectedId || defaultGenerationRule(library.generationRules)?.id || null;
   let renderGeneration = 0;
   let importRequest = 0;
   const newRuleKey = Symbol('new-generation-rule');
@@ -2500,7 +2478,7 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
   };
   const hasUnsavedDrafts = () => [...drafts].some(([key, draft]) => {
     if (key === newRuleKey) return Boolean(draft.name || draft.content);
-    const rule = generationRuleById(generationRules, key as string);
+    const rule = generationRuleById(library.generationRules, key as string);
     return !rule || draft.name !== rule.name || draft.content !== rule.content;
   });
   const requestClose = () => {
@@ -2510,7 +2488,7 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
 
   const renderRuleManager = () => {
     const generation = ++renderGeneration;
-    const editing = generationRuleById(generationRules, editingId);
+    const editing = generationRuleById(library.generationRules, editingId);
     const preservedDraft = drafts.get(draftKey(editingId));
     const editorDraft = preservedDraft || { name: editing?.name || '', content: editing?.content || '' };
     dialog.innerHTML = `<form method="dialog">
@@ -2519,7 +2497,7 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
       <div class="rules-layout">
         <aside class="rules-sidebar">
           <div class="rules-list" role="radiogroup" aria-label="${t('rules.aria.list')}">
-            ${generationRules.length ? generationRules.map(rule => `<label class="rule-option${rule.id === editingId ? ' active' : ''}${rule.isDefault ? ' is-default' : ''}"><input type="radio" name="generation-rule" value="${escape(rule.id)}" ${rule.id === editingId ? 'checked' : ''} /><span class="rule-option-name">${escape(rule.name)}</span>${rule.isDefault ? `<small>${t('rules.badge.default')}</small>` : ''}</label>`).join('') : `<p class="meta">${t('rules.empty')}</p>`}
+            ${library.generationRules.length ? library.generationRules.map(rule => `<label class="rule-option${rule.id === editingId ? ' active' : ''}${rule.isDefault ? ' is-default' : ''}"><input type="radio" name="generation-rule" value="${escape(rule.id)}" ${rule.id === editingId ? 'checked' : ''} /><span class="rule-option-name">${escape(rule.name)}</span>${rule.isDefault ? `<small>${t('rules.badge.default')}</small>` : ''}</label>`).join('') : `<p class="meta">${t('rules.empty')}</p>`}
           </div>
           <button id="new-generation-rule" type="button" class="ghost">${t('rules.addText')}</button>
           <label class="ghost import-rule">${t('rules.import')}<input id="import-generation-rule" type="file" accept=".md,text/markdown" /></label>
@@ -2584,8 +2562,8 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
       try {
         const now = new Date().toISOString();
         const next = editingId
-          ? updateGenerationRule(generationRules, editingId, draft(), now)
-          : createGenerationRule(generationRules, draft(), crypto.randomUUID(), now);
+          ? updateGenerationRule(library.generationRules, editingId, draft(), now)
+          : createGenerationRule(library.generationRules, draft(), crypto.randomUUID(), now);
         persistGenerationRules(next);
         drafts.delete(draftKey(editingId));
         editingId ||= next.at(-1)!.id;
@@ -2600,7 +2578,7 @@ function showGenerationRules(selectedId: string | null, onUse: (id: string) => v
       if (!editing) return;
       drafts.set(draftKey(editingId), draft());
       try {
-        persistGenerationRules(setDefaultGenerationRule(generationRules, editing.id));
+        persistGenerationRules(setDefaultGenerationRule(library.generationRules, editing.id));
         onRulesChanged();
         renderRuleManager();
       } catch (err) {
@@ -2689,14 +2667,14 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
   const source = sourceOverride || stage.source;
   const identity: PullRequestDraftIdentity = { repository: active.repository, source, target: stage.target };
   const now = Date.now();
-  const nextDrafts = draftStorageSynchronized
+  const nextDrafts = library.draftStorageSynchronized
     ? loadPullRequestDrafts(() => localStorage.getItem(PULL_REQUEST_DRAFTS_KEY), now)
-    : loadPullRequestDrafts(() => JSON.stringify(pullRequestDrafts), now);
+    : loadPullRequestDrafts(() => JSON.stringify(library.pullRequestDrafts), now);
   persistPullRequestDrafts(nextDrafts);
-  const restoredDraft = findPullRequestDraft(pullRequestDrafts, identity);
+  const restoredDraft = findPullRequestDraft(library.pullRequestDrafts, identity);
   const defaultTitle = `${source} → ${stage.target}`;
-  let selectedGenerationRuleId = defaultGenerationRule(generationRules)?.id || null;
-  const selectedGenerationRule = () => generationRuleById(generationRules, selectedGenerationRuleId);
+  let selectedGenerationRuleId = defaultGenerationRule(library.generationRules)?.id || null;
+  const selectedGenerationRule = () => generationRuleById(library.generationRules, selectedGenerationRuleId);
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog pr-create-dialog';
   dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('createPr.eyebrow')}</p><h2>${escape(source)} → ${escape(stage.target)}</h2><label>${t('createPr.label.title')}<input id="create-title" value="${escape(restoredDraft ? restoredDraft.title : defaultTitle)}" /></label><label>${t('createPr.label.body')}<textarea id="create-body" placeholder="${t('createPr.placeholder.body')}">${escape(restoredDraft?.body || '')}</textarea></label><p class="meta">${t('createPr.meta')}</p><p id="create-operation-status" class="meta" role="status" aria-live="polite" aria-atomic="true"></p><div class="dialog-actions"><button id="generation-rules" type="button" class="ghost">${escape(generationRuleButtonLabel(selectedGenerationRule()))}</button><button id="ai-settings" type="button" class="ghost">${t('createPr.aiSettings')}</button><button id="generate-ai" type="button" class="ghost">${t('createPr.aiGenerate')}</button><button value="cancel" class="ghost">${t('createPr.cancel')}</button><button id="confirm-create" class="primary">${t('createPr.confirm')}</button></div></form>`;
@@ -2747,7 +2725,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
     if (draftSaveTimer !== undefined) { window.clearTimeout(draftSaveTimer); draftSaveTimer = undefined; }
     if (!draftDirty) return;
     draftDirty = false;
-    persistPullRequestDrafts(upsertPullRequestDraft(pullRequestDrafts, identity, { title: titleInput.value, body: bodyInput.value }, Date.now()));
+    persistPullRequestDrafts(upsertPullRequestDraft(library.pullRequestDrafts, identity, { title: titleInput.value, body: bodyInput.value }, Date.now()));
   };
   const scheduleDraftSave = (delay: number, throttle = false) => {
     draftDirty = true;
@@ -2758,7 +2736,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
   titleInput.addEventListener('input', () => scheduleDraftSave(300));
   bodyInput.addEventListener('input', () => scheduleDraftSave(300));
   const syncRuleButton = () => {
-    selectedGenerationRuleId ||= defaultGenerationRule(generationRules)?.id || null;
+    selectedGenerationRuleId ||= defaultGenerationRule(library.generationRules)?.id || null;
     ruleButton.textContent = generationRuleButtonLabel(selectedGenerationRule());
   };
   ruleButton.addEventListener('click', () => {
@@ -2777,7 +2755,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
   });
   const generatePrMessage = async (confirmOverwrite: boolean, autoConfirm = false) => {
     if (generationController || creationController || !isDialogOpen()) return;
-    const config = aiConfig;
+    const config = aiState.aiConfig;
     if (!config?.baseUrl || !config.apiKey || !config.model) {
       if (confirmOverwrite) showAiSettings();
       return;
@@ -2849,8 +2827,8 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
       if (!isDialogOpen() || controller.signal.aborted) return;
       if (draftSaveTimer !== undefined) { window.clearTimeout(draftSaveTimer); draftSaveTimer = undefined; }
       draftDirty = false;
-      persistPullRequestDrafts(deletePullRequestDraft(pullRequestDrafts, identity));
-      recentlyCreatedPullNumbers.set(index, createdPull.number);
+      persistPullRequestDrafts(deletePullRequestDraft(library.pullRequestDrafts, identity));
+      filters.recentlyCreatedPullNumbers.set(index, createdPull.number);
       // GitHub has accepted the PR, but its mergeability calculation is not available yet.
       // `false` means a confirmed conflict, so keep the optimistic value unknown until refreshStatuses reads GitHub's detail response.
       statuses = statuses?.map((status, statusIndex) => statusIndex === index ? { kind: 'open', pr: createdPull, checks: { state: 'pending', passed: 0, total: 0 }, approvals: 0, mergeable: null } : status) || null;
@@ -2879,7 +2857,7 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
     }
   };
   confirmButton.addEventListener('click', event => { event.preventDefault(); void createPullRequest(); });
-  if (aiConfig?.baseUrl && aiConfig.apiKey && aiConfig.model && shouldAutoGeneratePrMessage(aiConfig.autoGeneratePrMessage, bodyInput.value)) {
+  if (aiState.aiConfig?.baseUrl && aiState.aiConfig.apiKey && aiState.aiConfig.model && shouldAutoGeneratePrMessage(aiState.aiConfig.autoGeneratePrMessage, bodyInput.value)) {
     void generatePrMessage(false, true);
   }
   dialog.addEventListener('close', () => {
