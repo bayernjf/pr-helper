@@ -9,7 +9,6 @@ import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, up
 import { initPrReferenceTooltip, prReferenceHtml } from './lib/pr-reference';
 import { activeWorkflows, archiveWorkflow, archivedWorkflows, isWorkflowMuted, muteWorkflow, unmuteWorkflow, restoreWorkflow, addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoAdvance, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type StageRouteMode, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
-import { ACTION_QUEUE_REFRESH_TIMEOUT_MS } from './lib/action-queue-request-queue';
 import { automationActionPresentation, latestAutomationAction, nextStepSummary, progressActionKey, stageProgressNode, stageRunPresentation, workflowProgress, workflowRunSummary, worstStageProgress, type AutomationActionState, type StageProgressStatus, type WorkflowStageRunState } from './lib/workflow-run';
 import { detailRefreshDueAt, projectedStageStatus } from './lib/projected-stage';
 import { getCloudSyncStatus, unlockCloudSync, lockCloudSync, isCloudSyncUnlocked, encryptForCloud, decryptFromCloud, rotateCloudSyncKey, type CloudSyncStatus, type SyncableData } from './lib/encrypted-sync';
@@ -18,7 +17,8 @@ import { t, getLocale, setLocale, detectLocale, registerTranslations, type Local
 import en from './lib/translations/en';
 import zh from './lib/translations/zh';
 import { app, escape } from './app/dom';
-import { actionQueueRequestQueue, projection } from './app/state/projection';
+import { loadActionQueue, refreshActionQueue, projection } from './app/state/projection';
+import { bindRuntime, runtime } from './app/state/runtime';
 import { sessionState } from './app/state/session';
 import { workflowState } from './app/state/workflows';
 import { uiState } from './app/state/ui';
@@ -245,58 +245,6 @@ async function loadCloudWorkflows() {
     }
     else workflowState.pendingLocalWorkflowSync = workflowState.workflows.length > 0;
   } catch (error) { workflowState.cloudWorkflowStorage = false; workflowState.cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
-}
-async function loadActionQueue(reconcile = true, repository?: string) {
-  if (!workflowState.cloudWorkflowStorage) { projection.actionQueue = []; projection.workflowStageStates = []; projection.workflowStageEvents = []; projection.workflowStageDeployments = []; projection.workflowStageDeploymentRuns = []; projection.workflowConfigurationWarnings = []; projection.syncHealth = null; projection.workflowRuns = []; projection.timeline = []; projection.recoveryStatuses = []; projection.automationActions = []; projection.actionQueueError = ''; return false; }
-  return actionQueueRequestQueue.run(reconcile, currentReconcile => loadActionQueueOnce(currentReconcile, repository));
-}
-async function loadActionQueueOnce(reconcile: boolean, repository?: string) {
-  try {
-    const query = reconcile ? `?refresh=1${repository ? `&repository=${encodeURIComponent(repository)}` : ''}` : '';
-    const response = await fetch(githubAppApiUrl(`/api/inbox${query}`), reconcile ? { signal: AbortSignal.timeout(ACTION_QUEUE_REFRESH_TIMEOUT_MS) } : undefined);
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({})) as { message?: string };
-      projection.actionQueueError = payload.message || t('toast.queue.failed');
-      return false;
-    }
-    const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[]; events?: WorkflowStageEvent[]; deployments?: WorkflowStageDeployment[]; deploymentRuns?: WorkflowStageDeploymentRun[]; configurationWarnings?: WorkflowConfigurationWarning[]; syncHealth?: SyncHealth; runs?: WorkflowRun[]; timeline?: TimelineEntry[]; recoveryStatuses?: RecoveryStatus[]; automation?: AutomationAction[]; reconciliationScheduled?: boolean };
-    projection.actionQueue = Array.isArray(payload.items) ? payload.items : [];
-    projection.workflowStageStates = Array.isArray(payload.states) ? payload.states : [];
-    projection.workflowStageEvents = Array.isArray(payload.events) ? payload.events : [];
-    projection.workflowStageDeployments = Array.isArray(payload.deployments) ? payload.deployments : [];
-    projection.workflowStageDeploymentRuns = Array.isArray(payload.deploymentRuns) ? payload.deploymentRuns : [];
-    projection.workflowConfigurationWarnings = Array.isArray(payload.configurationWarnings) ? payload.configurationWarnings : [];
-    projection.syncHealth = payload.syncHealth || null;
-    projection.workflowRuns = Array.isArray(payload.runs) ? payload.runs : [];
-    projection.timeline = Array.isArray(payload.timeline) ? payload.timeline : [];
-    projection.recoveryStatuses = Array.isArray(payload.recoveryStatuses) ? payload.recoveryStatuses : [];
-    projection.automationActions = Array.isArray(payload.automation) ? payload.automation : [];
-    projection.actionQueueReconciliationScheduled = Boolean(reconcile && payload.reconciliationScheduled);
-    projection.actionQueueError = '';
-    return true;
-  } catch (error) {
-    projection.actionQueueError = error instanceof DOMException && error.name === 'TimeoutError' ? t('toast.queue.timeout') : error instanceof Error ? error.message : t('toast.queue.failed');
-    return false;
-  }
-}
-async function refreshActionQueue() {
-  if (projection.actionQueueRefreshing) return;
-  projection.actionQueueRefreshing = true;
-  render();
-
-  // Give the browser a frame to paint the pressed/loading state before a fast local response completes.
-  const startedAt = Date.now();
-  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-  const loaded = await loadActionQueue(true);
-  const remainingFeedbackTime = 450 - (Date.now() - startedAt);
-  if (remainingFeedbackTime > 0) await new Promise<void>(resolve => window.setTimeout(resolve, remainingFeedbackTime));
-  projection.actionQueueRefreshing = false;
-  if (loaded) {
-    showToast(projection.actionQueueReconciliationScheduled ? t('toast.queue.syncStarted') : t('toast.queue.refreshed', { count: projection.actionQueue.length }));
-  } else {
-    showToast(workflowState.cloudWorkflowStorage ? projection.actionQueueError || t('toast.queue.failed') : t('toast.queue.unavailable'));
-  }
-  render();
 }
 async function refreshOverviewSnapshot() {
   if (uiState.overviewSnapshotRefreshing || projection.actionQueueRefreshing || !workflowState.cloudWorkflowStorage || uiState.screen !== 'overview' || document.visibilityState !== 'visible') return;
@@ -2885,4 +2833,7 @@ document.addEventListener('click', event => {
 if (!localStorage.getItem('pr-helper-locale')) setLocale(detectLocale());
 applyTheme(currentTheme);
 initPrReferenceTooltip(showToast);
+// The orchestration callbacks bind after their declarations hoist; modules
+// deeper in the split invoke them through app/state/runtime.
+Object.assign(runtime, { render, goTo, init });
 void restoreConnection();
