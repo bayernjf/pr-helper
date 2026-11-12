@@ -163,7 +163,8 @@
 |---|---|---|
 | Vitest 单元（33 文件 / 716 项，2026-10-08 实测） | ✅ | `npm test` |
 | Playwright 浏览器 E2E（30 test，端口 4373，全部桩化后端） | ✅ | `e2e/pr-helper.spec.ts` |
-| CI：lint（tsc）+ 单测 + build | ✅ | `ci.yml` —— `npm run lint` 即 `tsc --noEmit`（第 5 步实测 success）；**仍不跑 e2e**。审计报告 §5.1 的「CI 无类型检查」「部署不被其门禁」两条已于 2026-11-12 核实为过时 |
+| CI：lint（tsc）+ 单测 + build | ✅ | `ci.yml` —— `npm run lint` 即 `tsc --noEmit`（第 5 步实测 success）；审计报告 §5.1 的「CI 无类型检查」「部署不被其门禁」两条已于 2026-11-12 核实为过时 |
+| CI 跑浏览器 E2E（34 用例，全部桩化后端） | ✅ | 2026-11-12 接入：`Install Playwright Chromium` + `Browser E2E`（`ci.yml` 第 9–10 步）；实测 run `43242043381` 全绿，CI 内 34 passed / 14.8s |
 | 双平台部署（Vercel + Cloudflare Pages 同步） | 🟡 | `deploy-vercel.yml` / `deploy-cloudflare-pages.yml` —— 两平台构建来源不同构，CF 侧 `VITE_AUTH_ORIGIN` 无存在性校验 |
 | 迁移一致性静态守卫（SELECT 列 ⊆ 迁移声明列，防 P8 类回归） | ✅ | `workflows-store.test.ts:688-728` |
 | 迁移规范检查器 `tools/check-migrations.sh` | ✅ | 2026-11-12 接入 CI（`npm run check:migrations`，`ci.yml` 第 6 步）；历史违规冻结在 `tools/migration-baseline.txt`（7 条），新迁移必须零违规 |
