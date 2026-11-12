@@ -24,3 +24,5 @@ export const workflowState = {
   cloudWorkspaceLoading: false,
 };
 workflowState.active = workflowState.workflows[0] || null;
+
+export function persistWorkflowsLocally() { localStorage.setItem('pr-helper-workflows', JSON.stringify(workflowState.workflows)); }

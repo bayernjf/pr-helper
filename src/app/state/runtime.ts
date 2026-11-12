@@ -9,14 +9,20 @@ export const runtime: {
   render: () => void;
   goTo: (target: Screen | 'back') => void;
   init: () => Promise<void>;
+  returnToSourceLane: (workflowId: string) => void;
+  restoreConnection: () => Promise<void>;
+  connect: (error?: string) => void;
+  openRepositoryManagement: () => void;
 } = {
   render: () => {},
   goTo: () => {},
   init: async () => {},
+  returnToSourceLane: () => {},
+  restoreConnection: async () => {},
+  connect: () => {},
+  openRepositoryManagement: () => {},
 };
 
-export function bindRuntime(impl: { render: () => void; goTo: (target: Screen | 'back') => void; init: () => Promise<void> }) {
-  runtime.render = impl.render;
-  runtime.goTo = impl.goTo;
-  runtime.init = impl.init;
+export function bindRuntime(impl: { render: () => void; goTo: (target: Screen | 'back') => void; init: () => Promise<void>; returnToSourceLane: (workflowId: string) => void; restoreConnection: () => Promise<void>; connect: (error?: string) => void; openRepositoryManagement: () => void }) {
+  Object.assign(runtime, impl);
 }

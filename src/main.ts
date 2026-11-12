@@ -1,3 +1,9 @@
+import { syncLocalWorkflows } from './app/state/persist';
+import { refreshStatuses } from './app/state/status-refresh';
+import { automationActionSummary, automationDetailBlock, automationStageBadge, deploymentCards, deploymentRunHistory, drawerConfigurationWarnings, isAutomationResolved, laneConfigurationWarnings, laneRunSummary, markAutomationResolved, recoveryStatusBadge, recoveryStatusFor, stageEvents, stageStaleBadge, stageState, stageUpdatedAt, statesForStage, syncHealthBanner } from './app/ui/derive';
+import { detail, projectedDetailStatuses, retryDeployment, retryFailedActions, showCodexRepairDialog, showDeploymentRollbackDialog } from './app/render/detail';
+import { loadPreflight, preflightPanel } from './app/render/overview';
+import { canMergePull, laneMergeStatus, showMergeDialog } from './app/dialogs/merge';
 import './style.css';
 import { GitHubRequestError, githubAppApiUrl, githubFetch, mergePullRequestPayload, parseRepository, pullRequestPayload, selectCurrentPull } from './lib/github';
 import { buildPrPrompt, shouldAutoGeneratePrMessage, testAiConnection, type AiConfig } from './lib/ai';
@@ -18,13 +24,18 @@ import en from './lib/translations/en';
 import zh from './lib/translations/zh';
 import { app, escape } from './app/dom';
 import { loadActionQueue, refreshActionQueue, projection } from './app/state/projection';
+import { persistWorkflowRemotely } from './app/state/persist';
 import { bindRuntime, runtime } from './app/state/runtime';
+import { canOperateWorkflow } from './app/ui/permissions';
+import { openRepositoryManagement } from './app/dialogs/account';
+import { localViteWithoutApi, save, removeStageAndPersist, persistWorkflowArchive, persistWorkflowMute, removeWorkflowFromStorage, persistWorkflowOrder, loadCloudWorkflows, applySavedWorkflow } from './app/state/persist';
+import { sharedWorkflowBadge } from './app/ui/format';
 import { sessionState } from './app/state/session';
-import { workflowState } from './app/state/workflows';
+import { workflowState, persistWorkflowsLocally } from './app/state/workflows';
 import { uiState } from './app/state/ui';
 import { filters } from './app/state/filters';
-import { aiState } from './app/state/ai';
-import { GENERATION_RULES_KEY, PULL_REQUEST_DRAFTS_KEY, library } from './app/state/library';
+import { aiState, autoCreatePrerequisites, loadAutomationCredentialStatus } from './app/state/ai';
+import { GENERATION_RULES_KEY, PULL_REQUEST_DRAFTS_KEY, library, persistGenerationRules, cloudSyncDeviceId } from './app/state/library';
 import { currentTheme, applyTheme, toggleTheme } from './app/ui/theme';
 import { showToast } from './app/ui/toast';
 import { showOperationAuditDialog } from './app/ui/audit';
@@ -38,220 +49,20 @@ registerTranslations('en', en);
 registerTranslations('zh', zh);
 
 const CLOUD_SYNC_DEVICE_ID_KEY = 'pr-helper-cloud-sync-device-id';
-const localViteWithoutApi = import.meta.env.DEV && !import.meta.env.VITE_AUTH_ORIGIN;
 // GitHub accepts a person's create/merge/retry immediately, but the server projection only catches up
 // when reconciliation next runs. These notes record what a person just handled so the board can drop
 // the row at once and let the server catch up in the background, instead of putting work that is
 // already done back in front of them. Each note also remembers the row it dismissed, so a genuinely
 // new automation event is never hidden behind an old one.
-const RESOLVED_AUTOMATION_TTL_MS = 15 * 60_000;
-const AUTOMATION_RECONCILE_DELAYS_MS = [1_500, 4_000, 9_000];
 
-function canOperateWorkflow(workflow: Workflow, operation: 'workflow-edit' | 'workflow-delete' | 'pr-create' | 'actions-rerun' | 'pull-merge' | 'deployment-rollback') {
-  return !workflow.team || canPerformTeamOperation(workflow.team.role, operation);
-}
-function sharedWorkflowBadge(workflow: Workflow) {
-  if (!workflow.team) return '';
-  return `<small class="team-workflow-badge">${escape(t('teams.sharedBadge', { team: workflow.team.name, role: teamRoleLabel(workflow.team.role) }))}</small>`;
-}
-function persistGenerationRules(next: GenerationRule[]) { localStorage.setItem(GENERATION_RULES_KEY, JSON.stringify(next)); library.generationRules = next; }
-function cloudSyncDeviceId() {
-  const existing = localStorage.getItem(CLOUD_SYNC_DEVICE_ID_KEY);
-  if (existing && /^[a-zA-Z0-9_-]{1,120}$/.test(existing)) return existing;
-  const next = `device-${crypto.randomUUID().replaceAll('-', '')}`;
-  localStorage.setItem(CLOUD_SYNC_DEVICE_ID_KEY, next);
-  return next;
-}
-function persistWorkflowsLocally() { localStorage.setItem('pr-helper-workflows', JSON.stringify(workflowState.workflows)); }
-async function saveWorkflowToCloud(workflow: Workflow): Promise<Workflow> {
-  if (!workflowState.cloudWorkflowStorage) return workflow;
-  const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflow }), keepalive: true });
-  if (!response.ok) throw new Error(await workflowApiError(response));
-  const payload = await response.json().catch(() => ({})) as { workflow?: Workflow };
-  return payload.workflow && payload.workflow.id === workflow.id ? ensureStageIds(payload.workflow) : workflow;
-}
-function applySavedWorkflow(saved: Workflow, authoritative = false) {
-  const latest = workflowState.workflows.find(workflow => workflow.id === saved.id);
-  const applied = authoritative ? applyAuthoritativeWorkflow(latest, saved) : applyQueuedWorkflowSave(latest, saved);
-  const normalized = ensureStageIds(applied);
-  workflowState.workflows = saveWorkflow(workflowState.workflows, normalized);
-  if (workflowState.active?.id === normalized.id) workflowState.active = normalized;
-  persistWorkflowsLocally();
-  workflowState.cloudWorkflowSyncError = '';
-}
-function reportWorkflowSaveError(error: unknown, workflowId: string) {
-  workflowState.cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail');
-  showToast(t('toast.saved.local', { error: workflowState.cloudWorkflowSyncError }));
-  render();
-  // The toggle was already applied to memory and localStorage, so a failed save leaves the switch
-  // drawn as enabled — and a reload keeps showing it, because boot reads the local copy first.
-  // Read the stored state back so the checkbox can only show what the server accepted.
-  void loadCloudWorkflows().then(() => {
-    if (!workflowState.workflows.some(workflow => workflow.id === workflowId)) return;
-    // The read-back succeeds on its own terms and would otherwise clear the banner for a save that
-    // did not land, hiding the very mismatch it just corrected.
-    workflowState.cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail');
-    render();
-  });
-}
-const workflowSaveQueue = new WorkflowSaveQueue<Workflow>({
-  current: workflowId => workflowState.workflows.find(workflow => workflow.id === workflowId),
-  persist: saveWorkflowToCloud,
-  onSaved: applySavedWorkflow,
-  onError: reportWorkflowSaveError,
-});
-async function persistWorkflowRemotely(workflow: Workflow): Promise<Workflow | null> {
-  try {
-    const saved = await saveWorkflowToCloud(workflow);
-    applySavedWorkflow(saved);
-    return saved;
-  } catch (error) {
-    reportWorkflowSaveError(error, workflow.id);
-    return null;
-  }
-}
-async function persistWorkflowOrder(next: Workflow[]) {
-  workflowState.workflowMutationRevision += 1;
-  const previousPositions = new Map<string, DOMRect>();
-  document.querySelectorAll<HTMLElement>('[data-project-lane]').forEach(lane => {
-    const workflowId = lane.dataset.projectLane;
-    if (workflowId) previousPositions.set(workflowId, lane.getBoundingClientRect());
-  });
-  workflowState.workflows = applyWorkflowOrder(workflowState.workflows, next);
-  persistWorkflowsLocally();
-  render();
-  requestAnimationFrame(() => {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    document.querySelectorAll<HTMLElement>('[data-project-lane]').forEach(lane => {
-      const workflowId = lane.dataset.projectLane;
-      const previous = workflowId ? previousPositions.get(workflowId) : undefined;
-      if (!previous || !workflowId) return;
-      const current = lane.getBoundingClientRect();
-      const offsetY = previous.top - current.top;
-      if (Math.abs(offsetY) < 1) return;
-      lane.animate(
-        [{ transform: `translateY(${offsetY}px)` }, { transform: 'translateY(0)' }],
-        { duration: 240, easing: 'cubic-bezier(.22, .8, .28, 1)' },
-      );
-    });
-  });
-  if (!workflowState.cloudWorkflowStorage) { showToast(t('toast.order.saved')); return; }
-  try {
-    // Each save carries its own version, so firing the whole board at once lets one response land
-    // after the next request has already read the version it replaces. Ordering only moves lanes, so
-    // a few extra seconds is cheaper than a rejected save that drops the new order.
-    const saved: boolean[] = [];
-    for (const workflow of next) saved.push(await workflowSaveQueue.enqueue(workflow.id));
-    if (saved.some(result => !result)) throw new Error(workflowState.cloudWorkflowSyncError || t('toast.saved.cloudFail'));
-    workflowState.cloudWorkflowSyncError = '';
-    showToast(t('toast.order.saved'));
-  } catch (error) {
-    workflowState.cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.saved.cloudFail');
-    await loadAutomationCredentialStatus();
-    render();
-    showToast(t('toast.order.local', { error: workflowState.cloudWorkflowSyncError }));
-  }
-}
-function save(next: Workflow) {
-  workflowState.workflowMutationRevision += 1;
-  const normalized = ensureStageIds(next);
-  workflowState.active = normalized;
-  uiState.editorDraft = { repository: '', name: '', source: '', target: '' };
-  workflowState.workflows = saveWorkflow(workflowState.workflows, normalized);
-  persistWorkflowsLocally();
-  return workflowState.cloudWorkflowStorage ? workflowSaveQueue.enqueue(normalized.id) : Promise.resolve(true);
-}
 
-async function removeStageAndPersist(workflow: Workflow, stageIndex: number) {
-  const normalizedWorkflow = ensureStageIds(workflow);
-  const removedStage = normalizedWorkflow.stages[stageIndex];
-  if (!removedStage?.stageId) return false;
-  if (!workflowState.cloudWorkflowStorage) return save(removeStage(normalizedWorkflow, stageIndex));
 
-  workflowState.workflowMutationRevision += 1;
-  try {
-    const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: workflow.id, stageId: removedStage.stageId, stageIndex, source: removedStage.source, target: removedStage.target }) });
-    if (!response.ok) throw new Error(await workflowApiError(response));
-    const payload = await response.json() as { workflow?: Workflow };
-    const saved = payload.workflow ? ensureStageIds(payload.workflow) : null;
-    if (!saved || stageIndexForId(saved, removedStage.stageId) !== -1) throw new Error(t('toast.saved.cloudFail'));
-    applySavedWorkflow(saved, true);
-    return true;
-  } catch (error) {
-    reportWorkflowSaveError(error, workflow.id);
-    return false;
-  }
-}
-async function persistWorkflowArchive(workflow: Workflow, archive: boolean) {
-  workflowState.workflowMutationRevision += 1;
-  const next = archive ? archiveWorkflow(workflow) : restoreWorkflow(workflow);
-  workflowState.workflows = saveWorkflow(workflowState.workflows, next);
-  persistWorkflowsLocally();
-  render();
-  if (workflowState.cloudWorkflowStorage && !await workflowSaveQueue.enqueue(next.id)) { render(); return; }
-  // The queue is server-derived, and archiving cancels what was waiting on it, so the board would keep
-  // showing the old items until something else refreshed it.
-  await loadActionQueue(true, next.repository);
-  render();
-  showToast(t(archive ? 'workflowArchive.archived' : 'workflowArchive.restored', { name: next.name }));
-}
-async function persistWorkflowMute(workflow: Workflow, mute: boolean) {
-  workflowState.workflowMutationRevision += 1;
-  const next = mute ? muteWorkflow(workflow) : unmuteWorkflow(workflow);
-  workflowState.workflows = saveWorkflow(workflowState.workflows, next);
-  persistWorkflowsLocally();
-  render();
-  if (workflowState.cloudWorkflowStorage && !await workflowSaveQueue.enqueue(next.id)) { render(); return; }
-  showToast(t(mute ? 'workflowMute.muted' : 'workflowMute.unmuted', { name: next.name }));
-}
-async function removeWorkflowFromStorage(workflowId: string) {
-  workflowState.workflowMutationRevision += 1;
-  workflowState.workflows = deleteWorkflow(workflowState.workflows, workflowId); persistWorkflowsLocally();
-  if (!workflowState.cloudWorkflowStorage) return;
-  try {
-    const response = await fetch(githubAppApiUrl('/api/workflows'), { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: workflowId }) });
-    if (!response.ok) throw new Error(await workflowApiError(response));
-    workflowState.cloudWorkflowSyncError = '';
-  } catch (error) { workflowState.cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.removed.cloudFail'); showToast(t('toast.removed.local', { error: workflowState.cloudWorkflowSyncError })); render(); }
-}
-async function workflowApiError(response: Response) {
-  const payload = await response.json().catch(() => ({})) as { message?: string };
-  return payload.message || t('toast.cloudFail.status', { status: response.status });
-}
-async function loadCloudWorkflows() {
-  if (localViteWithoutApi) {
-    workflowState.cloudWorkflowStorage = false;
-    workflowState.cloudWorkflowSyncError = '';
-    workflowState.pendingLocalWorkflowSync = false;
-    return;
-  }
-  const requestRevision = workflowState.workflowMutationRevision;
-  try {
-    const response = await fetch(githubAppApiUrl('/api/workflows'), { cache: 'no-store' });
-    if (response.status === 401) return;
-    if (!response.ok) throw new Error(await workflowApiError(response));
-    const payload = await response.json() as { workflows?: Workflow[] };
-    if (!Array.isArray(payload.workflows)) return;
-    workflowState.cloudWorkflowStorage = true;
-    workflowState.cloudWorkflowSyncError = '';
-    // A slow bootstrap response may describe the workflow before an in-page edit.
-    // Never let it overwrite a newer local mutation while its save is in flight.
-    if (requestRevision !== workflowState.workflowMutationRevision) return;
-    if (payload.workflows.length) {
-      const loadedWorkflows = sortWorkflows(payload.workflows);
-      workflowState.active = selectWorkflowAfterCloudLoad(workflowState.active, loadedWorkflows, uiState.screen);
-      workflowState.workflows = loadedWorkflows;
-      persistWorkflowsLocally();
-    }
-    else workflowState.pendingLocalWorkflowSync = workflowState.workflows.length > 0;
-  } catch (error) { workflowState.cloudWorkflowStorage = false; workflowState.cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
-}
 async function refreshOverviewSnapshot() {
   if (uiState.overviewSnapshotRefreshing || projection.actionQueueRefreshing || !workflowState.cloudWorkflowStorage || uiState.screen !== 'overview' || document.visibilityState !== 'visible') return;
   uiState.overviewSnapshotRefreshing = true;
   const loaded = await loadActionQueue(false);
   uiState.overviewSnapshotRefreshing = false;
-  if (loaded && uiState.screen === 'overview') render();
+  if (loaded && uiState.screen === 'overview') runtime.render();
 }
 function updateOverviewScrollControls() {
   const controls = document.querySelector<HTMLElement>('.board-scroll-controls');
@@ -272,7 +83,7 @@ function bindOverviewScrollControls() {
 }
 // Returning to the tab is the trigger worth reacting to: a clock spent one `/api/inbox` read plus the
 // direct GitHub reads per interval whether or not anything had moved. `overviewSnapshotRefreshed` keeps
-// the entry refresh to once per visit to the screen rather than once per render.
+// the entry refresh to once per visit to the screen rather than once per runtime.render.
 function bindOverviewSnapshotRefresh() {
   if (!uiState.overviewSnapshotRefreshed) {
     uiState.overviewSnapshotRefreshed = true;
@@ -312,7 +123,7 @@ async function enablePushNotifications() {
     const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidKey(publicKey) });
     const response = await fetch(githubAppApiUrl('/api/notifications/subscription'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(subscription.toJSON()) });
     if (!response.ok) throw new Error((await response.json().catch(() => ({})) as { message?: string }).message || t('toast.push.saveError'));
-    filters.pushConfigured = true; filters.pushSubscribed = true; render(); showToast(t('toast.push.enabled'));
+    filters.pushConfigured = true; filters.pushSubscribed = true; runtime.render(); showToast(t('toast.push.enabled'));
   } catch (error) { showToast(error instanceof Error ? error.message : t('toast.push.enableError')); }
 }
 function showNotificationPermissionHelp() {
@@ -459,7 +270,7 @@ function showDeleteWorkflowDialog(workflow: Workflow) {
     uiState.screen = 'overview';
     await removeWorkflowFromStorage(workflow.id);
     await loadActionQueue(true, workflow.repository);
-    render();
+    runtime.render();
     showToast(t('workflowDelete.success'));
   }, { once: true });
 }
@@ -474,23 +285,7 @@ function showArchiveWorkflowDialog(workflow: Workflow) {
     if (confirmed) await persistWorkflowArchive(workflow, true);
   }, { once: true });
 }
-async function syncLocalWorkflows() {
-  if (!workflowState.cloudWorkflowStorage || !workflowState.workflows.length) return;
-  try {
-    for (const workflow of workflowState.workflows) {
-      const normalized = await persistWorkflowRemotely(workflow);
-      if (!normalized) throw new Error(t('sync.fail.short'));
-    }
-    workflowState.pendingLocalWorkflowSync = false; render(); showToast(t('sync.success'));
-  } catch (error) { workflowState.cloudWorkflowSyncError = error instanceof Error ? error.message : t('sync.fail.short'); render(); showToast(t('sync.fail', { error: workflowState.cloudWorkflowSyncError })); }
-}
-function persistPullRequestDrafts(next: typeof library.pullRequestDrafts) { library.pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); library.draftStorageSynchronized = true; } catch { library.draftStorageSynchronized = false; showToast(t('connect.draft.saveError')); } }
-persistPullRequestDrafts(library.pullRequestDrafts);
-function autoCreatePrerequisites() { return aiState.automationCredentialConfigured && aiState.automationAutoGeneratePrMessage && aiState.automationAutoConfirmPrCreation && library.generationRules.length; }
-async function loadAutomationCredentialStatus() {
-  try { const response = await fetch(githubAppApiUrl('/api/ai-credentials')); const payload = await response.json().catch(() => ({})) as { credential?: { configured?: boolean; autoGeneratePrMessage?: boolean; autoConfirmPrCreation?: boolean } }; aiState.automationCredentialConfigured = Boolean(response.ok && payload.credential?.configured); aiState.automationAutoGeneratePrMessage = Boolean(payload.credential?.autoGeneratePrMessage); aiState.automationAutoConfirmPrCreation = Boolean(payload.credential?.autoConfirmPrCreation); }
-  catch { aiState.automationCredentialConfigured = false; aiState.automationAutoGeneratePrMessage = false; aiState.automationAutoConfirmPrCreation = false; }
-}
+export function persistPullRequestDrafts(next: typeof library.pullRequestDrafts) { library.pullRequestDrafts = next; try { localStorage.setItem(PULL_REQUEST_DRAFTS_KEY, JSON.stringify(next)); library.draftStorageSynchronized = true; } catch { library.draftStorageSynchronized = false; showToast(t('connect.draft.saveError')); } }
 function showAiSettings(selectedRuleId: string | null = null, onRuleChange?: (id: string) => void) {
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog';
@@ -560,7 +355,7 @@ function showAiSettings(selectedRuleId: string | null = null, onRuleChange?: (id
     catch (err) { const raw = err instanceof Error ? err.message : ''; result.textContent = raw.includes('non ISO-8859-1') ? t('ai.test.error.chars') : raw || t('ai.test.error.generic'); result.className = 'ai-connection-result is-error'; }
     finally { button.disabled = false; }
   });
-  dialog.querySelector('#save-ai')!.addEventListener('click', event => { event.preventDefault(); aiState.aiConfig = read(); sessionStorage.setItem('pr-helper-ai', JSON.stringify(aiState.aiConfig)); aiState.automationAutoGeneratePrMessage = Boolean(aiState.aiConfig.autoGeneratePrMessage); aiState.automationAutoConfirmPrCreation = Boolean(aiState.aiConfig.autoConfirmPrCreation); dialog.close(); showToast(t('ai.toast.saved')); render(); });
+  dialog.querySelector('#save-ai')!.addEventListener('click', event => { event.preventDefault(); aiState.aiConfig = read(); sessionStorage.setItem('pr-helper-ai', JSON.stringify(aiState.aiConfig)); aiState.automationAutoGeneratePrMessage = Boolean(aiState.aiConfig.autoGeneratePrMessage); aiState.automationAutoConfirmPrCreation = Boolean(aiState.aiConfig.autoConfirmPrCreation); dialog.close(); showToast(t('ai.toast.saved')); runtime.render(); });
   dialog.addEventListener('close', () => dialog.remove());
 }
 
@@ -579,7 +374,7 @@ function showCloudSyncDialog() {
     dialog.querySelector('#cloud-sync-push')!.addEventListener('click', async () => { await cloudSyncPush(dialog); });
     dialog.querySelector('#cloud-sync-pull')!.addEventListener('click', async () => { await cloudSyncPull(dialog); });
     dialog.querySelector('#cloud-sync-rotate')!.addEventListener('click', () => showCloudSyncRotationDialog(dialog));
-    dialog.querySelector('#cloud-sync-lock')!.addEventListener('click', () => { lockCloudSync(); library.cloudSyncStatus = getCloudSyncStatus(); dialog.close(); render(); });
+    dialog.querySelector('#cloud-sync-lock')!.addEventListener('click', () => { lockCloudSync(); library.cloudSyncStatus = getCloudSyncStatus(); dialog.close(); runtime.render(); });
   } else {
     dialog.innerHTML = `<form method="dialog" autocomplete="off"><p class="eyebrow">${t('cloudSync.eyebrow')}</p><h2>${t('cloudSync.title')}</h2><p>${t('cloudSync.unlock.desc')}</p><label>${t('cloudSync.passphrase')}<input id="cloud-passphrase" type="password" autocomplete="off" /></label><p id="cloud-sync-error" class="error" hidden></p><div class="dialog-actions"><button id="cloud-sync-unlock" type="button" class="primary">${t('cloudSync.unlock')}</button><button value="cancel" class="ghost">${t('cloudSync.close')}</button></div></form>`;
     document.body.append(dialog); dialog.showModal();
@@ -590,7 +385,7 @@ function showCloudSyncDialog() {
       library.cloudSyncStatus = getCloudSyncStatus();
       dialog.close();
       showCloudSyncDialog();
-      render();
+      runtime.render();
     });
   }
   dialog.addEventListener('close', () => dialog.remove());
@@ -608,7 +403,7 @@ async function cloudSyncPush(dialog: HTMLDialogElement) {
     library.cloudSyncStatus = { ...library.cloudSyncStatus, state: 'unlocked', lastSyncedAt: payload.record.updatedAt, revision: payload.record.revision, deviceId: payload.record.deviceId, error: null };
     showToast(t('cloudSync.pushSuccess'));
     dialog.close();
-    render();
+    runtime.render();
   } catch (error) {
     library.cloudSyncStatus = { ...library.cloudSyncStatus, state: 'error', error: error instanceof Error ? error.message : '推送失败' };
     showToast(t('cloudSync.pushFailed'));
@@ -628,7 +423,7 @@ async function cloudSyncPull(dialog: HTMLDialogElement) {
     library.cloudSyncStatus = { ...library.cloudSyncStatus, state: 'unlocked', lastSyncedAt: record.updatedAt, revision: record.revision, deviceId: record.deviceId || null, error: null };
     showToast(t('cloudSync.pullSuccess'));
     dialog.close();
-    render();
+    runtime.render();
   } catch (error) {
     library.cloudSyncStatus = { ...library.cloudSyncStatus, state: 'error', error: error instanceof Error ? error.message : '拉取失败' };
     showToast(t('cloudSync.pullFailed'));
@@ -685,7 +480,7 @@ async function init() {
   try {
     sessionState.repos = await githubFetch<Repo[]>(sessionState.token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated');
     workflowState.cloudWorkspaceLoading = !localViteWithoutApi;
-    render();
+    runtime.render();
     if (workflowState.cloudWorkspaceLoading) void hydrateCloudWorkspace();
   } catch (err) { connect(err instanceof Error ? err.message : t('connect.error.repos')); }
 }
@@ -695,37 +490,8 @@ async function hydrateCloudWorkspace() {
     if (workflowState.cloudWorkflowStorage) await Promise.all([loadActionQueue(false), loadPushState(), loadAutomationCredentialStatus()]);
   } finally {
     workflowState.cloudWorkspaceLoading = false;
-    render();
+    runtime.render();
   }
-}
-
-async function refreshAuthorizedRepositories() {
-  try {
-    sessionState.repos = await githubFetch<Repo[]>(sessionState.token, '/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated');
-    const activeRepositoryRevoked = Boolean(workflowState.active && !sessionState.repos.some(repo => repo.full_name === workflowState.active!.repository));
-    render();
-    if (uiState.screen === 'detail') void refreshStatuses();
-    showToast(activeRepositoryRevoked ? t('toast.repos.synced') : t('toast.repos.syncedCount', { count: sessionState.repos.length }));
-  } catch (err) { showToast(err instanceof Error ? err.message : t('toast.repos.error')); }
-}
-
-function openRepositoryManagement() {
-  if (!sessionState.githubInstallationSettingsUrl) return;
-  filters.repositoryManagementWindow?.close();
-  filters.repositoryManagementWindow = window.open(sessionState.githubInstallationSettingsUrl, 'pr-helper-github-installation', 'popup,width=960,height=780');
-  if (!filters.repositoryManagementWindow) {
-    window.location.assign(sessionState.githubInstallationSettingsUrl);
-    return;
-  }
-  showToast(t('toast.repos.hint'));
-  if (filters.repositoryManagementTimer !== undefined) window.clearInterval(filters.repositoryManagementTimer);
-  filters.repositoryManagementTimer = window.setInterval(() => {
-    if (!filters.repositoryManagementWindow || filters.repositoryManagementWindow.closed) {
-      filters.repositoryManagementWindow = null;
-      if (filters.repositoryManagementTimer !== undefined) { window.clearInterval(filters.repositoryManagementTimer); filters.repositoryManagementTimer = undefined; }
-      void refreshAuthorizedRepositories();
-    }
-  }, 500);
 }
 
 function render() {
@@ -746,10 +512,10 @@ function render() {
     }
   });
   accountMenuPanel.addEventListener('click', closeAccountMenu);
-  document.querySelector<HTMLAnchorElement>('.brand')!.addEventListener('click', event => { event.preventDefault(); goTo('overview'); });
-  document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) { workflowState.active = null; uiState.editorDraft = { repository: '', name: '', source: '', target: '' }; } goTo(target); }));
+  document.querySelector<HTMLAnchorElement>('.brand')!.addEventListener('click', event => { event.preventDefault(); runtime.goTo('overview'); });
+  document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach(button => button.addEventListener('click', () => { const target = button.dataset.nav as Screen; if (startsNewWorkflow(target)) { workflowState.active = null; uiState.editorDraft = { repository: '', name: '', source: '', target: '' }; } runtime.goTo(target); }));
   document.querySelector('#theme-toggle')!.addEventListener('click', toggleTheme);
-  document.querySelector('#lang-toggle')!.addEventListener('click', () => { setLocale(getLocale() === 'zh' ? 'en' : 'zh'); render(); });
+  document.querySelector('#lang-toggle')!.addEventListener('click', () => { setLocale(getLocale() === 'zh' ? 'en' : 'zh'); runtime.render(); });
   document.querySelector('#ai-settings-top')!.addEventListener('click', () => showAiSettings());
   document.querySelector('#cloud-sync-top')!.addEventListener('click', showCloudSyncDialog);
   document.querySelector('#operation-audit')!.addEventListener('click', showOperationAuditDialog);
@@ -766,12 +532,12 @@ function goTo(target: Screen | 'back') {
   const previous = uiState.screen;
   uiState.screen = navigationTarget(uiState.screen, target, Boolean(workflowState.active));
   if (shouldRefreshWorkflowDetail(previous, uiState.screen)) { uiState.statuses = workflowState.active ? projectedDetailStatuses(workflowState.active) : null; uiState.refreshOnNextDetail = true; }
-  render();
+  runtime.render();
 }
 
 function returnToSourceLane(workflowId: string) {
   uiState.screen = 'overview';
-  render();
+  runtime.render();
   window.requestAnimationFrame(() => {
     const findLane = () => [...document.querySelectorAll<HTMLElement>('[data-project-lane]')]
       .find(element => element.dataset.projectLane === workflowId);
@@ -836,289 +602,6 @@ function renderContent() {
   if (uiState.screen === 'editor') editor(); else detail();
 }
 
-function stageState(workflowId: string, stageIndex: number, source?: string, target?: string) {
-  const stageId = workflowState.workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
-  return projection.workflowStageStates.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source) && (target === undefined || state.target === target));
-}
-function statesForStage(flow: Workflow, stageIndex: number) {
-  return matchingStageProjections(flow, stageIndex, projection.workflowStageStates);
-}
-function stageUpdatedAt(state?: WorkflowStageState) {
-  if (!state?.updatedAt) return '';
-  const date = new Date(state.updatedAt);
-  if (Number.isNaN(date.getTime())) return '';
-  return t('overview.run.updated', { time: new Intl.DateTimeFormat(getLocale() === 'zh' ? 'zh-CN' : 'en-US', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date) });
-}
-function stageAgeSeconds(workflowId: string, stageIndex: number, source?: string): number | null {
-  const stageId = workflowState.workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
-  const health = projection.syncHealth?.stages.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source));
-  return health ? health.ageSeconds : null;
-}
-function stageStaleBadge(workflowId: string, stageIndex: number, source?: string): string {
-  const age = stageAgeSeconds(workflowId, stageIndex, source);
-  if (age === null) return '';
-  const stageId = workflowState.workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
-  const stale = projection.syncHealth?.stages.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source))?.stale;
-  if (!stale) return '';
-  const minutes = Math.floor(age / 60);
-  const label = minutes >= 60 ? t('syncHealth.stale.hours', { hours: Math.floor(minutes / 60) }) : t('syncHealth.stale.minutes', { minutes });
-  return `<span class="sync-stale-badge" title="${escape(t('syncHealth.stale.tooltip'))}">${escape(label)}</span>`;
-}
-function brokenTriggerNote(): string {
-  const broken = (projection.syncHealth?.triggerHealth || []).filter(run => run.interrupted || run.state === 'failure');
-  if (!broken.length) return '';
-  return ` · ${t('syncHealth.triggerBroken', { triggers: broken.map(run => t(`syncHealth.trigger.${run.trigger}`)).join('、') })}`;
-}
-
-function syncHealthBanner(): string {
-  if (!projection.syncHealth) return '';
-  const last = projection.syncHealth.lastReconciliation;
-  if (!last) return `<div class="sync-health-banner unknown"><span class="sync-health-icon">⏳</span><span>${t('syncHealth.never')}</span></div>`;
-  if (last.interrupted) return `<div class="sync-health-banner failure"><span class="sync-health-icon">⚠️</span><span>${t('syncHealth.interrupted')}${brokenTriggerNote()}</span></div>`;
-  if (last.state === 'failure') return `<div class="sync-health-banner failure"><span class="sync-health-icon">⚠️</span><span>${t('syncHealth.failed')}${last.errorMessage ? ` · ${escape(last.errorMessage.slice(0, 120))}` : ''}</span></div>`;
-  if (last.state === 'running') return `<div class="sync-health-banner running"><span class="sync-health-icon">🔄</span><span>${t('syncHealth.running')}</span></div>`;
-  const finishedAt = last.finishedAt ? new Date(last.finishedAt) : null;
-  const ageSeconds = finishedAt ? Math.max(0, Math.floor((Date.now() - finishedAt.getTime()) / 1000)) : null;
-  const staleCount = projection.syncHealth.stages.filter(stage => stage.stale).length;
-  const timeAgo = relativeAgeText(ageSeconds);
-  const staleWarning = staleCount > 0 ? ` · ${t('syncHealth.staleCount', { count: staleCount })}` : '';
-  const duration = last.durationMs !== null ? ` · ${t('syncHealth.duration', { ms: last.durationMs })}` : '';
-  if (last.state === 'degraded') return `<div class="sync-health-banner degraded"><span class="sync-health-icon">⚠️</span><span>${t('syncHealth.degraded', { reconciled: last.stagesReconciled, failed: last.stagesFailed })} · ${timeAgo}${duration}${staleWarning}</span></div>`;
-  return `<div class="sync-health-banner success"><span class="sync-health-icon">✓</span><span>${t('syncHealth.lastSync', { time: timeAgo, stages: last.stagesReconciled })}${duration}${staleWarning}</span></div>`;
-}
-function stageEvents(workflowId: string, stageIndex: number, source?: string) { const stageId = workflowState.workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId; return projection.workflowStageEvents.filter(event => event.workflowId === workflowId && (stageId ? event.stageId === stageId : event.stageIndex === stageIndex) && (source === undefined || event.source === null || event.source === source)).slice(0, 4); }
-function stageDeployments(workflowId: string, stageIndex: number, source?: string) { const stageId = workflowState.workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId; return projection.workflowStageDeployments.filter(deployment => deployment.workflowId === workflowId && (stageId ? deployment.stageId === stageId : deployment.stageIndex === stageIndex) && (source === undefined || deployment.source === source)); }
-function deploymentCards(workflowId: string, stageIndex: number, source?: string) {
-  const deployments = stageDeployments(workflowId, stageIndex, source);
-  const flow = workflowState.workflows.find(workflow => workflow.id === workflowId);
-  if (!deployments.length) return '';
-  return `<section class="drawer-deployments"><p class="eyebrow">${t('overview.deployment.title')}</p><div>${deployments.map(deployment => {
-    const primaryUrl = deployment.deploymentUrl || deployment.runUrl;
-    const link = primaryUrl ? `<a href="${escape(primaryUrl)}" target="_blank" rel="noreferrer">${deployment.deploymentUrl ? t('overview.deployment.openSite') : t('overview.deployment.openLogs')} ↗</a>` : '';
-    const logLink = deployment.deploymentUrl && deployment.runUrl ? `<a href="${escape(deployment.runUrl)}" target="_blank" rel="noreferrer">${t('overview.deployment.openLogs')} ↗</a>` : '';
-    const failure = (deployment.state === 'failure' || deployment.runId === null) && deployment.failureSummary ? `<p>${escape(deployment.failureSummary)}</p>` : '';
-    const health = deployment.healthState ? `<small>${t('overview.deployment.health')} · ${deployment.healthState === 'success' ? t('overview.deployment.healthPassed') : t('overview.deployment.healthFailed')}${deployment.healthDetail ? ` (${escape(deployment.healthDetail)})` : ''}</small>` : '';
-    const jobLink = deployment.failureJobUrl ? `<a href="${escape(deployment.failureJobUrl)}" target="_blank" rel="noreferrer">${t('overview.deployment.openFailedJob')} ↗</a>` : '';
-    const retry = deployment.state === 'failure' && deployment.runId && flow && canOperateWorkflow(flow, 'actions-rerun') ? `<button class="ghost deployment-retry" data-deployment-run="${deployment.runId}" data-deployment-provider="${deployment.provider}">${t('overview.deployment.retry')}</button>` : '';
-    return `<article class="deployment-card ${deployment.state}"><div><b>${deploymentProviderName(deployment.provider)}</b><small>${t(`overview.deployment.${deployment.environment}`)} · ${deployment.runId === null ? t('overview.deployment.missing') : deploymentStateText(deployment.state)}</small>${health}${failure}</div><span>${retry}${jobLink}${link}${logLink}</span></article>`;
-  }).join('')}</div></section>`;
-}
-function deploymentRunHistory(flow: Workflow, stageIndex: number, source?: string) {
-  const stageId = flow.stages[stageIndex]?.stageId;
-  const runs = projection.workflowStageDeploymentRuns.filter(run => run.workflowId === flow.id && (stageId ? run.stageId === stageId : run.stageIndex === stageIndex) && (source === undefined || run.source === source));
-  if (!runs.length) return '';
-  const target = flow.stages[stageIndex]?.target;
-  return `<section class="drawer-deployment-history"><p class="eyebrow">${t('overview.deployment.history')}</p><ol>${runs.map(run => {
-    const rollback = run.state === 'success' && run.runId && run.deploymentUrl && canOperateWorkflow(flow, 'deployment-rollback') && deploymentConfigs(flow).some(configuration => configuration.target === target && configuration.provider === run.provider && configuration.rollbackWorkflowName)
-      ? `<button type="button" class="ghost deployment-rollback" data-deployment-run="${run.runId}" data-deployment-provider="${run.provider}">${t('overview.deployment.rollback')}</button>`
-      : '';
-    return `<li class="${run.state}"><div><b>${deploymentProviderName(run.provider)} · ${t(`overview.deployment.${run.environment}`)}</b><small>${deploymentStateText(run.state)}${run.healthState ? ` · ${t('overview.deployment.health')} ${run.healthState === 'success' ? t('overview.deployment.healthPassed') : t('overview.deployment.healthFailed')}` : ''}</small></div><time>${escape(stageUpdatedAt({ updatedAt: run.firstSeenAt } as WorkflowStageState))}</time><span>${rollback}${run.runUrl ? `<a href="${escape(run.runUrl)}" target="_blank" rel="noreferrer">${t('overview.deployment.openLogs')} ↗</a>` : ''}</span></li>`;
-  }).join('')}</ol></section>`;
-}
-function deploymentRuntimeWarnings(flow: Workflow): WorkflowConfigurationWarning[] {
-  const warnings: WorkflowConfigurationWarning[] = [];
-  const now = Date.now();
-  projection.workflowStageStates.filter(state => state.workflowId === flow.id && state.pullState === 'merged' && state.mergedAt).forEach(state => {
-    deploymentConfigs(flow).filter(configuration => configuration.target === state.target).forEach(configuration => {
-      const matchingRuns = projection.workflowStageDeploymentRuns.filter(run => run.workflowId === flow.id && (state.stageId ? run.stageId === state.stageId : run.stageIndex === state.stageIndex) && run.source === state.source && run.provider === configuration.provider);
-      const configurationAlreadyExplainsMissingRun = projection.workflowConfigurationWarnings.some(warning => warning.workflowId === flow.id && (warning.code === 'actions-unavailable' || warning.code === 'workflow-not-found' && warning.target === configuration.target && warning.provider === configuration.provider));
-      if (!matchingRuns.length && !configurationAlreadyExplainsMissingRun && now - new Date(state.mergedAt!).getTime() > 10 * 60_000) {
-        warnings.push({ workflowId: flow.id, stageIndex: state.stageIndex, source: state.source, target: state.target, provider: configuration.provider, value: configuration.workflowName, code: 'deployment-not-seen' });
-        return;
-      }
-      const pending = matchingRuns.find(run => run.state === 'pending');
-      if (pending && now - new Date(pending.firstSeenAt).getTime() > 20 * 60_000) warnings.push({ workflowId: flow.id, stageIndex: state.stageIndex, source: state.source, target: state.target, provider: configuration.provider, value: configuration.workflowName, code: 'deployment-stuck' });
-    });
-  });
-  return warnings;
-}
-function laneConfigurationWarnings(flow: Workflow) { return [...projection.workflowConfigurationWarnings.filter(warning => warning.workflowId === flow.id), ...deploymentRuntimeWarnings(flow)]; }
-function drawerConfigurationWarnings(flow: Workflow, stageIndex: number, source: string) {
-  const target = flow.stages[stageIndex]?.target;
-  const warnings = laneConfigurationWarnings(flow).filter(warning => warning.stageIndex === undefined ? warning.target === undefined || warning.target === target : warning.stageIndex === stageIndex && (!warning.source || warning.source === source));
-  if (!warnings.length) return '';
-  return `<section class="drawer-config-warnings"><p class="eyebrow">${t('overview.configWarning.title')}</p><ul>${warnings.map(warning => `<li>${escape(configurationWarningText(warning))}</li>`).join('')}</ul></section>`;
-}
-function laneRunSummary(flow: Workflow) {
-  const summary = workflowRunSummary(flow.stages.map((stage, index) => stageState(flow.id, index, undefined, stage.target)));
-  const prChip = summary.pullNumber ? prReferenceHtml(githubPullUrl(flow.repository, summary.pullNumber), `PR #${summary.pullNumber}`) : '';
-  const status = prChip ? `${prChip} · ${t(`overview.run.${summary.status}`)}` : stageRunPresentationText(summary);
-  const text = t('overview.run.current', { step: summary.stageIndex + 1, total: flow.stages.length, status });
-  const latestUpdatedAt = statesForStage(flow, summary.stageIndex).map(state => state.updatedAt).filter(Boolean).sort().at(-1);
-  const updatedLabel = latestUpdatedAt ? stageUpdatedAt({ updatedAt: latestUpdatedAt } as WorkflowStageState) : '';
-  return { ...summary, text: updatedLabel ? `${text} · ${updatedLabel}` : text };
-}
-async function loadPreflight(workflowId?: string) {
-  if (!workflowState.cloudWorkflowStorage) { projection.preflightResults = []; projection.preflightError = ''; return; }
-  projection.preflightLoading = true;
-  try {
-    const url = workflowId ? `/api/preflight?workflowId=${encodeURIComponent(workflowId)}` : '/api/preflight';
-    const response = await fetch(githubAppApiUrl(url));
-    if (!response.ok) { const payload = await response.json().catch(() => ({})) as { message?: string }; projection.preflightError = payload.message || t('preflight.error'); projection.preflightResults = []; return; }
-    const payload = await response.json() as { results?: PreflightResult[] };
-    projection.preflightResults = Array.isArray(payload.results) ? payload.results : [];
-    projection.preflightError = '';
-  } catch (error) { projection.preflightError = error instanceof Error ? error.message : t('preflight.error'); projection.preflightResults = []; }
-  finally { projection.preflightLoading = false; }
-}
-function preflightPanel(): string {
-  if (!projection.preflightResults.length && !projection.preflightLoading && !projection.preflightError) return '';
-  const totalErrors = projection.preflightResults.reduce((sum, r) => sum + r.summary.errors, 0);
-  const totalWarnings = projection.preflightResults.reduce((sum, r) => sum + r.summary.warnings, 0);
-  const totalInfo = projection.preflightResults.reduce((sum, r) => sum + r.summary.info, 0);
-  const badgeClass = totalErrors > 0 ? 'pf-fail' : totalWarnings > 0 ? 'pf-warn' : 'pf-pass';
-  const badge = projection.preflightLoading ? `<span class="pf-badge pf-loading">${t('preflight.loading')}</span>` : projection.preflightError ? `<span class="pf-badge pf-fail">${escape(projection.preflightError)}</span>` : `<span class="pf-badge ${badgeClass}">${totalErrors ? t('preflight.fail', { errors: totalErrors }) : t('preflight.pass')}</span>`;
-  const checksHtml = projection.preflightResults.flatMap(result => result.checks.map(check => {
-    const severityIcon = check.severity === 'error' ? '❌' : check.severity === 'warning' ? '⚠️' : 'ℹ️';
-    const flow = workflowState.workflows.find(w => w.id === result.workflowId);
-    const stageLabel = check.stageIndex !== null && flow ? `${flow.stages[check.stageIndex]?.source || ''} → ${flow.stages[check.stageIndex]?.target || ''}` : '';
-    const fixHtml = check.fix ? `<small class="pf-fix">💡 ${escape(check.fix)}</small>` : '';
-    return `<li class="pf-${check.severity}"><span class="pf-sev">${severityIcon}</span><div><b>${escape(check.title)}</b><small>${escape(check.detail)}${stageLabel ? ` · ${escape(stageLabel)}` : ''}</small>${fixHtml}</div></li>`;
-  })).join('');
-  return `<section class="preflight-panel"><div class="pf-head"><p class="eyebrow">${t('preflight.eyebrow')}</p><div class="pf-summary">${badge}<button id="run-preflight" class="ghost"${projection.preflightLoading ? ' disabled' : ''}>${t('preflight.run')}</button></div></div>${projection.preflightResults.length ? `<ul class="pf-checks">${checksHtml}</ul>` : ''}</section>`;
-}
-function recoveryStatusFor(workflowId: string, stageIndex: number, source: string): RecoveryStatus | undefined {
-  return projection.recoveryStatuses.find(s => s.workflowId === workflowId && s.stageIndex === stageIndex && s.source === source);
-}
-function recoveryStatusBadge(status: RecoveryStatus | undefined): string {
-  if (!status) return '';
-  if (status.escalationNeeded) return `<span class="fc-recovery-badge fc-escalation">${t('recovery.escalation')}</span>`;
-  if (status.exhausted) return `<span class="fc-recovery-badge fc-exhausted">${t('recovery.exhausted', { count: status.maxRetries })}</span>`;
-  if (status.cooldownRemainingSeconds > 0) return `<span class="fc-recovery-badge fc-cooldown">${t('recovery.cooldown', { seconds: status.cooldownRemainingSeconds })}</span>`;
-  if (status.retryCount > 0) return `<span class="fc-recovery-badge fc-retries">${t('recovery.retries', { count: status.retryCount, max: status.maxRetries })}</span>`;
-  return '';
-}
-function automationActionFor(workflowId: string, stageIndex: number, source: string): AutomationAction | undefined {
-  const stage = workflowState.workflows.find(flow => flow.id === workflowId)?.stages[stageIndex];
-  const scoped = projection.automationActions.filter(action => action.workflowId === workflowId);
-  // A stage keeps its identity across reorders, so prefer it and fall back to the index only for
-  // legacy stages saved before stable ids existed.
-  if (stage?.stageId) return latestAutomationAction(scoped, stage.stageId, source);
-  return latestAutomationAction(scoped.map(action => ({ ...action, stageId: String(action.stageIndex) })), String(stageIndex), source);
-}
-function automationUpdatedLabel(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
-  return t('automation.updated', { time: new Intl.DateTimeFormat(getLocale() === 'zh' ? 'zh-CN' : 'en-US', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date) });
-}
-function automationActionSummary(action: AutomationAction): string {
-  const presentation = automationActionPresentation(action);
-  const attempts = action.attempts > 0 ? ` · ${t('automation.attempts', { count: action.attempts })}` : '';
-  return `${t(`automation.kind.${action.kind}`)} · ${t(`automation.state.${presentation.status}`)}${attempts}`;
-}
-function automationStageBadge(workflowId: string, stageIndex: number, source: string): string {
-  const action = automationActionFor(workflowId, stageIndex, source);
-  if (!action) return '';
-  const presentation = automationActionPresentation(action);
-  if (!presentation.blocked) return '';
-  return `<span class="automation-badge is-${presentation.tone}" title="${escape(t('automation.blockedTooltip'))}">${t('automation.blockedBadge')}</span>`;
-}
-function automationDetailBlock(workflowId: string, stageIndex: number, source: string, showEmpty = true): string {
-  const action = automationActionFor(workflowId, stageIndex, source);
-  if (!action) return showEmpty ? `<div class="automation-detail"><p class="eyebrow">${t('automation.detail.eyebrow')}</p><p class="automation-empty">${t('automation.detail.empty')}</p></div>` : '';
-  const presentation = automationActionPresentation(action);
-  const reason = presentation.blocked ? `<p class="automation-reason">${escape(action.failureReason?.trim() || t('automation.reasonUnknown'))}</p>` : '';
-  return `<div class="automation-detail is-${presentation.tone}"><p class="eyebrow">${t('automation.detail.eyebrow')}</p><p class="automation-line">${escape(automationActionSummary(action))}</p>${reason}<small>${automationUpdatedLabel(action.updatedAt)}</small></div>`;
-}
-function stageProgressStatus(flow: Workflow, stageIndex: number): StageProgressStatus {
-  const states = statesForStage(flow, stageIndex);
-  if (!states.length) return stageProgressNode({ automation: automationActionFor(flow.id, stageIndex, flow.stages[stageIndex]!.source) }).status;
-  return worstStageProgress(states.map(state => stageProgressNode({ decision: state.decision, automation: automationActionFor(flow.id, stageIndex, state.source) }).status));
-}
-function stageProgressTooltip(flow: Workflow, stageIndex: number): string {
-  const states = statesForStage(flow, stageIndex);
-  const action = automationActionFor(flow.id, stageIndex, states[0]?.source || flow.stages[stageIndex]!.source);
-  const lines = [`${flow.stages[stageIndex]!.source} → ${flow.stages[stageIndex]!.target}`];
-  const message = states.map(state => state.decision?.message).find(Boolean);
-  if (message) lines.push(message);
-  // Name the running automation only when a server action exists: with auto-merge off there is no
-  // action row, so a moving node must not read as "auto-merging" — that step merges by hand.
-  const actionKey = progressActionKey(action?.kind);
-  if (actionKey && !automationActionPresentation(action!).blocked) lines.push(`${t('detail.progress.currentAction')}：${t(actionKey)}`);
-  if (action && automationActionPresentation(action).blocked && action.failureReason?.trim()) lines.push(action.failureReason.trim());
-  return lines.join(' · ');
-}
-function flowProgressBar(flow: Workflow): string {
-  const statuses = flow.stages.map((_, index) => stageProgressStatus(flow, index));
-  const progress = workflowProgress(statuses);
-  if (!progress.total) return '';
-  // Every node idle means no projection has arrived yet, and a bar of empty nodes would read as a
-  // flow that is stalled rather than one that has never been reconciled.
-  const synced = statuses.some(status => status !== 'idle');
-  const headline = !synced
-    ? t('detail.progress.waitingSync')
-    : progress.currentIndex === null
-      ? t('detail.progress.allDone', { total: progress.total })
-      : t('detail.progress.position', { step: progress.currentIndex + 1, total: progress.total, completed: progress.completed });
-  // The bar reads the server projection, which only moves when reconciliation runs. Saying when that
-  // last happened keeps it from being mistaken for a live view of GitHub.
-  const syncedAt = flow.stages.flatMap((_, index) => statesForStage(flow, index).map(state => state.updatedAt)).filter(Boolean).sort().at(-1);
-  const age = syncedAt ? relativeAgeText(Math.max(0, Math.floor((Date.now() - new Date(syncedAt).getTime()) / 1000))) : '';
-  const syncedNote = age ? `<p class="flow-progress-sync">${escape(t('detail.progress.syncedAt', { time: age }))}</p>` : '';
-  // The "next" line names the step the flow is actually waiting on and copies the server decision's
-  // unlock condition, so a locked bar explains itself instead of only showing a color.
-  const next = nextStepSummary(progress.nodes, progress.nodes.map((_, index) => statesForStage(flow, index).map(state => state.decision?.message).find(Boolean)));
-  const nextLine = next && synced ? `<p class="flow-progress-next"><span>${escape(t('detail.progress.next', { step: next.index + 1 }))}</span>${next.reason ? `<span class="flow-progress-next-reason">${escape(next.reason)}</span>` : ''}</p>` : '';
-  const nodes = progress.nodes.map((status, index) => `<button type="button" class="fp-node is-${status} ${progress.currentIndex !== null && index === progress.currentIndex && synced ? 'is-current' : ''}" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(statesForStage(flow, index)[0]?.source || flow.stages[index]!.source)}" title="${escape(stageProgressTooltip(flow, index))}" aria-label="${escape(`${t('detail.progress.step', { step: index + 1 })} · ${t(`detail.progress.node.${status}`)}`)}"><span class="fp-node-index">${index + 1}</span><span class="fp-node-status">${t(`detail.progress.node.${status}`)}</span></button>`).join('');
-  return `<div class="flow-progress"><p class="eyebrow">${t('detail.progress.eyebrow')}</p><p class="flow-progress-headline">${escape(headline)}</p><div class="flow-progress-nodes">${nodes}</div>${nextLine}${syncedNote}</div>`;
-}
-function automationStepKey(workflowId: string, stageIndex: number, source: string) {
-  return `${workflowId}|${stageIndex}|${source}`;
-}
-function currentAutomationAction(workflowId: string, stageIndex: number, source: string) {
-  return projection.automationActions.find(action => action.workflowId === workflowId && action.stageIndex === stageIndex && action.source === source);
-}
-// A wildcard rule stands for every concrete route beneath it, so it covers the whole stage; an exact
-// branch only covers the route a person actually touched.
-function resolvedSourceMatches(resolved: string, candidate: string) {
-  return resolved === candidate || resolved.includes('*') && sourceRuleMatches(candidate, resolved);
-}
-function isAutomationResolved(workflowId: string, stageIndex: number, source: string) {
-  const prefix = `${workflowId}|${stageIndex}|`;
-  for (const [key, record] of aiState.resolvedAutomation) {
-    if (!key.startsWith(prefix) || !resolvedSourceMatches(record.source, source)) continue;
-    if (Date.now() - record.resolvedAt > RESOLVED_AUTOMATION_TTL_MS) { aiState.resolvedAutomation.delete(key); continue; }
-    // A different or newer row is a fresh event rather than the one just handled, so it must surface.
-    const current = currentAutomationAction(workflowId, stageIndex, source);
-    if (current && (current.id !== record.actionId || current.updatedAt > record.updatedAt)) { aiState.resolvedAutomation.delete(key); continue; }
-    return true;
-  }
-  return false;
-}
-/**
- * Records that a person just moved this step by hand, which drops it from the board at once.
- * Reconciliation runs asynchronously, so reloading immediately would read the stale row back and put
- * work the user already did in front of them again; the projection catches up quietly instead.
- *
- * The automation projection itself is left intact — only the board's view of it is filtered — so every
- * other reader (the drawer's automation block, the progress bar) keeps seeing the server's real state.
- * The attention queue is different: it exists purely to say "a person needs to do this", so once they
- * have, dropping the entry is the honest thing to do rather than something to re-derive later.
- */
-function markAutomationResolved(flow: Workflow, stageIndex: number, source: string) {
-  const key = automationStepKey(flow.id, stageIndex, source);
-  const current = currentAutomationAction(flow.id, stageIndex, source);
-  aiState.resolvedAutomation.set(key, { resolvedAt: Date.now(), source, actionId: current?.id ?? null, updatedAt: current?.updatedAt ?? '' });
-  projection.actionQueue = projection.actionQueue.filter(item => !(item.workflowId === flow.id && item.stageIndex === stageIndex && resolvedSourceMatches(source, item.source)));
-  void reconcileAutomationInBackground(flow, stageIndex, source);
-}
-async function reconcileAutomationInBackground(flow: Workflow, stageIndex: number, source: string) {
-  const key = automationStepKey(flow.id, stageIndex, source);
-  for (const delay of AUTOMATION_RECONCILE_DELAYS_MS) {
-    await new Promise(resolve => window.setTimeout(resolve, delay));
-    if (!aiState.resolvedAutomation.has(key)) return;
-    await loadActionQueue(true, flow.repository).catch(() => undefined);
-    // Once the server projection agrees the step is no longer blocked it becomes the source of truth
-    // again, and the local note has served its purpose.
-    const stillBlocked = projection.automationActions.some(action => action.workflowId === flow.id && action.stageIndex === stageIndex && resolvedSourceMatches(source, action.source) && automationActionPresentation(action).blocked);
-    if (!stillBlocked) {
-      aiState.resolvedAutomation.delete(key);
-      if (uiState.screen === 'overview') render();
-      return;
-    }
-    if (uiState.screen === 'overview') render();
-  }
-}
 function blockedAutomationActions(): AutomationAction[] {
   return projection.automationActions.filter(action => automationActionPresentation(action).blocked && !isAutomationResolved(action.workflowId, action.stageIndex, action.source));
 }
@@ -1219,8 +702,8 @@ function overview() {
   const searchControl = content.querySelector<HTMLElement>('.lane-search');
   if (searchCount && boardSummary && sortControls) boardSummary.insertBefore(searchCount, sortControls);
   if (searchControl && boardSummary && sortControls) boardSummary.insertBefore(searchControl, sortControls);
-  document.querySelector('#new-flow')!.addEventListener('click', () => { workflowState.active = null; uiState.editorDraft = { repository: '', name: '', source: '', target: '' }; uiState.screen = 'editor'; render(); });
-  document.querySelector('#empty-new')?.addEventListener('click', () => { workflowState.active = null; uiState.editorDraft = { repository: '', name: '', source: '', target: '' }; uiState.screen = 'editor'; render(); });
+  document.querySelector('#new-flow')!.addEventListener('click', () => { workflowState.active = null; uiState.editorDraft = { repository: '', name: '', source: '', target: '' }; uiState.screen = 'editor'; runtime.render(); });
+  document.querySelector('#empty-new')?.addEventListener('click', () => { workflowState.active = null; uiState.editorDraft = { repository: '', name: '', source: '', target: '' }; uiState.screen = 'editor'; runtime.render(); });
   document.querySelector('#sync-local-workflows')?.addEventListener('click', () => void syncLocalWorkflows());
   document.querySelector('#refresh-action-queue')?.addEventListener('click', () => void refreshActionQueue());
   document.querySelectorAll<HTMLButtonElement>('[data-board-scroll]').forEach(button => button.addEventListener('click', () => {
@@ -1228,29 +711,29 @@ function overview() {
   }));
   document.querySelector<HTMLInputElement>('#lane-search')?.addEventListener('input', event => {
     filters.laneSearchQuery = (event.target as HTMLInputElement).value;
-    render();
+    runtime.render();
     const search = document.querySelector<HTMLInputElement>('#lane-search');
     search?.focus();
     search?.setSelectionRange(filters.laneSearchQuery.length, filters.laneSearchQuery.length);
   });
-  document.querySelector<HTMLButtonElement>('#clear-lane-search')?.addEventListener('click', () => { filters.laneSearchQuery = ''; render(); });
-  document.querySelector('#run-preflight')?.addEventListener('click', async () => { await loadPreflight(); render(); });
+  document.querySelector<HTMLButtonElement>('#clear-lane-search')?.addEventListener('click', () => { filters.laneSearchQuery = ''; runtime.render(); });
+  document.querySelector('#run-preflight')?.addEventListener('click', async () => { await loadPreflight(); runtime.render(); });
   document.querySelectorAll<HTMLButtonElement>('[data-lane-sort]').forEach(button => button.addEventListener('click', () => {
     const mode = button.dataset.laneSort as WorkflowSortMode | undefined;
     if (!mode) return;
     if (filters.laneSortMode === mode && mode !== 'custom') filters.laneSortDirection = filters.laneSortDirection === 'asc' ? 'desc' : 'asc';
     else { filters.laneSortMode = mode; filters.laneSortDirection = mode === 'createdAt' ? 'desc' : 'asc'; }
-    render();
+    runtime.render();
   }));
-  document.querySelectorAll<HTMLButtonElement>('[data-board-filter]').forEach(button => button.addEventListener('click', () => { filters.overviewFilter = button.dataset.boardFilter as typeof filters.overviewFilter; render(); }));
+  document.querySelectorAll<HTMLButtonElement>('[data-board-filter]').forEach(button => button.addEventListener('click', () => { filters.overviewFilter = button.dataset.boardFilter as typeof filters.overviewFilter; runtime.render(); }));
   document.querySelectorAll<HTMLButtonElement>('[data-lane-collapse]').forEach(button => button.addEventListener('click', () => {
     const workflowId = button.dataset.laneCollapse;
     if (!workflowId) return;
     if (filters.expandedLaneIds.has(workflowId)) filters.expandedLaneIds.delete(workflowId); else filters.expandedLaneIds.add(workflowId);
-    render();
+    runtime.render();
   }));
   document.querySelectorAll<HTMLButtonElement>('[data-lane-step]').forEach(button => button.addEventListener('click', () => showProjectStepDrawer(button.dataset.workflowId || '', Number(button.dataset.laneStep), button.dataset.laneSource)));
-  document.querySelectorAll<HTMLButtonElement>('[data-edit-project]').forEach(button => button.addEventListener('click', () => { workflowState.active = workflowState.workflows.find(item => item.id === button.dataset.editProject) || null; uiState.screen = 'editor'; render(); }));
+  document.querySelectorAll<HTMLButtonElement>('[data-edit-project]').forEach(button => button.addEventListener('click', () => { workflowState.active = workflowState.workflows.find(item => item.id === button.dataset.editProject) || null; uiState.screen = 'editor'; runtime.render(); }));
   document.querySelectorAll<HTMLButtonElement>('[data-archive-project]').forEach(button => button.addEventListener('click', () => {
     const flow = workflowState.workflows.find(item => item.id === button.dataset.archiveProject);
     if (flow && canOperateWorkflow(flow, 'workflow-edit')) showArchiveWorkflowDialog(flow);
@@ -1296,7 +779,7 @@ function bindFailureCenter() {
       if (!response.ok) throw new Error(payload.message || t('recovery.retryFailed'));
       showToast(t('recovery.retryStarted', { count: payload.count || 0 }));
       markAutomationResolved(flow, stageIndex, source);
-      render();
+      runtime.render();
     } catch (error) {
       showToast(error instanceof Error ? error.message : t('recovery.retryFailed'));
       button.disabled = false;
@@ -1447,7 +930,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   dialog.querySelector<HTMLButtonElement>('.drawer-create-pr')?.addEventListener('click', () => {
     workflowState.active = flow;
     dialog.close();
-    showCreateDialog(stageIndex, () => render(), routeSource);
+    showCreateDialog(stageIndex, () => runtime.render(), routeSource);
   });
   dialog.querySelector<HTMLButtonElement>('.drawer-merge-pr')?.addEventListener('click', () => {
     if (!mergeStatus) return;
@@ -1456,7 +939,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
     showMergeDialog(stageIndex, mergeStatus, () => {
       // The step is already resolved locally, so show that at once. Reconciliation is slow and
       // asynchronous; blocking the board on it would make a finished action look like it failed.
-      render();
+      runtime.render();
     }, routeSource);
   });
   dialog.querySelector<HTMLButtonElement>('.drawer-sync')?.addEventListener('click', async event => {
@@ -1491,11 +974,11 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
     dialog.close();
     showDeploymentRollbackDialog(flow, stageIndex, routeSource, run);
   }));
-  dialog.querySelector('.drawer-view-flow')!.addEventListener('click', () => { workflowState.active = flow; dialog.close(); goTo('detail'); });
+  dialog.querySelector('.drawer-view-flow')!.addEventListener('click', () => { workflowState.active = flow; dialog.close(); runtime.goTo('detail'); });
   dialog.addEventListener('click', event => { if (event.target === dialog) close(); });
   dialog.addEventListener('close', () => dialog.remove());
 }
-function bindFlowCards() { document.querySelectorAll<HTMLButtonElement>('[data-open]').forEach(button => button.addEventListener('click', () => { workflowState.active = workflowState.workflows.find(item => item.id === button.dataset.open) || null; goTo('detail'); })); }
+function bindFlowCards() { document.querySelectorAll<HTMLButtonElement>('[data-open]').forEach(button => button.addEventListener('click', () => { workflowState.active = workflowState.workflows.find(item => item.id === button.dataset.open) || null; runtime.goTo('detail'); })); }
 
 function bindDraftStepSorting() {
   const steps = [...document.querySelectorAll<HTMLElement>('[data-draft-step]')];
@@ -1560,7 +1043,7 @@ function bindDraftActions() {
     uiState.stageRouteEditIndex = Number(button.dataset.editRoute);
     rerenderStepForm(workflowState.active.repository);
   }));
-  document.querySelector('#view-flow')?.addEventListener('click', () => goTo('detail'));
+  document.querySelector('#view-flow')?.addEventListener('click', () => runtime.goTo('detail'));
   document.querySelector('#delete-flow')?.addEventListener('click', () => { if (workflowState.active) showDeleteWorkflowDialog(workflowState.active); });
 }
 
@@ -1577,7 +1060,7 @@ function editor() {
   const occupiedRepositories = new Set(workflowState.workflows.filter(workflow => workflow.id !== workflowState.active?.id).map(workflow => workflow.repository));
   const repositoryManagementAction = sessionState.githubInstallationSettingsUrl ? `<button id="editor-manage-repositories" type="button" class="text-link editor-manage-repositories">${t('account.manageRepos')}</button>` : '';
   content.innerHTML = `<section class="page-head"><button id="back-from-editor" class="ghost">${workflowState.active ? t('editor.back.detail') : t('editor.back.overview')}</button><p class="eyebrow">${t('editor.eyebrow')}</p><h1>${workflowState.active ? t('editor.title.edit') : t('editor.title.new')}</h1><p>${t('editor.subtitle')}</p></section><section class="editor-layout"><section class="panel editor-panel"><label>${t('editor.label.name')}<input id="flow-name" value="${escape(editorName)}" placeholder="${t('editor.placeholder.name')}" /></label><label>${t('editor.label.repo')}<select id="repo"><option value="">${t('editor.repo.placeholder')}</option>${sessionState.repos.map(repo => { const occupied = occupiedRepositories.has(repo.full_name); return `<option value="${repo.full_name}" ${repo.full_name === selected ? 'selected' : ''} ${occupied ? 'disabled' : ''}>${repo.full_name}${repo.private ? t('editor.repo.private') : ''}${occupied ? t('editor.repo.used') : ''}</option>`; }).join('')}</select></label><div id="step-form">${selected ? `<p class="meta">${t('editor.branch.loading')}</p>` : `<div class="editor-repository-help"><p class="meta">${t('editor.branch.hint')}</p>${repositoryManagementAction}</div>`}</div></section><aside id="draft" class="panel draft">${renderDraft()}</aside></section>`;
-  document.querySelector('#back-from-editor')!.addEventListener('click', () => { if (!workflowState.active) uiState.editorDraft = { repository: '', name: '', source: '', target: '' }; goTo('back'); });
+  document.querySelector('#back-from-editor')!.addEventListener('click', () => { if (!workflowState.active) uiState.editorDraft = { repository: '', name: '', source: '', target: '' }; runtime.goTo('back'); });
   document.querySelector<HTMLInputElement>('#flow-name')!.addEventListener('input', event => { if (!workflowState.active) uiState.editorDraft.name = (event.target as HTMLInputElement).value; });
   document.querySelector('#editor-manage-repositories')?.addEventListener('click', openRepositoryManagement);
   bindDraftActions();
@@ -1848,534 +1331,6 @@ function renderDraft() {
   }).join('')}<div class="draft-footer"><button id="view-flow" class="ghost">${t('draft.viewDetail')}</button>${deleteAction}</div>`;
 }
 
-function detail() {
-  const content = document.querySelector('#content')!;
-  if (!workflowState.active) { uiState.screen = 'overview'; return overview(); }
-  const summary = workflowSummary(workflowState.active);
-  const editable = canOperateWorkflow(workflowState.active, 'workflow-edit');
-  content.innerHTML = `<section class="page-head detail-page-head"><div class="detail-header-row"><div class="detail-page-actions"><button id="back-from-detail" class="ghost">${t('editor.back.overview')}</button><button id="refresh-status" class="ghost detail-refresh">${t('detail.refresh')}</button></div><div class="detail-page-head-main"><p class="eyebrow">${t('detail.eyebrow')}</p><h1>${escape(workflowState.active.name)}</h1>${sharedWorkflowBadge(workflowState.active)}</div><span aria-hidden="true"></span></div></section><section class="detail-grid"><section class="panel timeline"><p class="eyebrow">${t('detail.timeline.eyebrow')}</p>${flowProgressBar(workflowState.active)}${workflowState.active.stages.map((stage, index) => stageTimeline(stage, index)).join('')}</section><div class="detail-side-col"><aside class="panel next-action"><p class="eyebrow">${t('detail.nextAction.eyebrow')}</p><h2>${nextActionTitle()}</h2><p>${uiState.statuses ? t('detail.desc.withStatuses') : t('detail.desc.noStatuses')}</p><button id="edit-flow" class="primary" ${editable ? '' : 'disabled'}>${t('detail.edit')}</button></aside><p class="detail-route">${escape(workflowState.active.repository)} · ${escape(summary.route)}</p></div></section>`;
-  document.querySelector('#back-from-detail')!.addEventListener('click', () => returnToSourceLane(workflowState.active!.id));
-  document.querySelector('#edit-flow')!.addEventListener('click', () => { uiState.screen = 'editor'; render(); });
-  document.querySelector('#refresh-status')!.addEventListener('click', () => { void refreshDetailStatuses(); });
-  document.querySelectorAll<HTMLButtonElement>('[data-step-drawer-stage]').forEach(button => button.addEventListener('click', () => {
-    if (!workflowState.active) return;
-    showProjectStepDrawer(workflowState.active.id, Number(button.dataset.stepDrawerStage), button.dataset.stepDrawerSource);
-  }));
-  document.querySelectorAll<HTMLButtonElement>('[data-codex-repair]').forEach(button => button.addEventListener('click', () => {
-    const index = Number(button.dataset.codexRepair);
-    void showCodexRepairDialog(index, undefined, uiState.statuses?.[index]?.pr?.number);
-  }));
-  if (!uiState.refreshOnFocusBound) {
-    uiState.refreshOnFocusBound = true;
-    window.addEventListener('focus', () => { if (uiState.screen === 'detail' && !uiState.detailStatusRefreshing) void refreshStatuses(); });
-    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && uiState.screen === 'detail' && !uiState.detailStatusRefreshing) void refreshStatuses(); });
-  }
-  document.querySelectorAll<HTMLButtonElement>('[data-create-pr]').forEach(button => button.addEventListener('click', () => showCreateDialog(Number(button.dataset.createPr))));
-  document.querySelectorAll<HTMLInputElement>('[data-detail-auto-create-stage]').forEach(input => input.addEventListener('change', () => {
-    if (!workflowState.active) return;
-    const stageIndex = Number(input.dataset.detailAutoCreateStage);
-    const stage = workflowState.active.stages[stageIndex];
-    const rule = stageGenerationRule(stage.automation?.generationRule, library.generationRules) || (stage.automation?.generationRule ? undefined : defaultGenerationRule(library.generationRules));
-    if (input.checked && (!autoCreatePrerequisites() || !rule)) { input.checked = false; showToast(t('draft.autoCreatePrerequisites')); return; }
-    const threshold = Number(document.querySelector<HTMLInputElement>(`[data-detail-auto-create-threshold="${stageIndex}"]`)?.value || workflowState.active.stages[stageIndex]?.automation?.triggerMinCommits || 1);
-    void (async () => {
-      if (!await confirmImmediateAutomation('create', stageIndex, input.checked, threshold)) { input.checked = !input.checked; return; }
-      save(setStageAutoCreate(workflowState.active!, stageIndex, input.checked, rule ? { name: rule.name, content: rule.content } : undefined, threshold));
-      showToast(input.checked ? t('draft.autoCreateEnabled') : t('draft.autoCreateDisabled'));
-      render();
-    })();
-  }));
-  document.querySelectorAll<HTMLButtonElement>('[data-detail-rule-sync]').forEach(button => button.addEventListener('click', () => {
-    if (!workflowState.active) return;
-    const stageIndex = Number(button.dataset.detailRuleSync);
-    const stage = workflowState.active.stages[stageIndex];
-    const update = stageGenerationRuleUpdate(stage?.automation?.generationRule, library.generationRules);
-    if (!update) { render(); return; }
-    save(setStageAutoCreate(workflowState.active, stageIndex, true, { name: update.name, content: update.content }, stage!.automation!.triggerMinCommits || 1));
-    showToast(t('detail.ruleOutdated.synced', { name: update.name }));
-    render();
-  }));
-  document.querySelectorAll<HTMLInputElement>('[data-detail-auto-merge-stage]').forEach(input => input.addEventListener('change', () => {
-    if (!workflowState.active) return;
-    const stageIndex = Number(input.dataset.detailAutoMergeStage);
-    const updated = setStageAutoMerge(workflowState.active, stageIndex, input.checked);
-    if (updated === workflowState.active) { input.checked = !input.checked; showToast(t('detail.autoMergeLegacyPolicy')); return; }
-    void (async () => {
-      if (!await confirmImmediateAutomation('merge', stageIndex, input.checked)) { input.checked = !input.checked; return; }
-      save(updated);
-      showToast(input.checked ? t('draft.autoMergeEnabled') : t('draft.autoMergeDisabled'));
-      render();
-    })();
-  }));
-  document.querySelectorAll<HTMLInputElement>('[data-detail-auto-advance-stage]').forEach(input => input.addEventListener('change', () => {
-    if (!workflowState.active) return;
-    const stageIndex = Number(input.dataset.detailAutoAdvanceStage);
-    const updated = setStageAutoAdvance(workflowState.active, stageIndex, input.checked);
-    if (updated === workflowState.active) { input.checked = !input.checked; showToast(t('detail.autoAdvanceLegacyPolicy')); return; }
-    save(updated);
-    showToast(input.checked ? t('draft.autoAdvanceEnabled') : t('draft.autoAdvanceDisabled'));
-    render();
-  }));
-  document.querySelectorAll<HTMLInputElement>('[data-detail-auto-create-threshold]').forEach(input => input.addEventListener('change', () => {
-    if (!workflowState.active) return;
-    const stageIndex = Number(input.dataset.detailAutoCreateThreshold);
-    const stage = workflowState.active.stages[stageIndex];
-    const rule = stageGenerationRule(stage.automation?.generationRule, library.generationRules) || (stage.automation?.generationRule ? undefined : defaultGenerationRule(library.generationRules));
-    if (!stage?.automation?.autoCreatePullRequest || !rule) return;
-    const threshold = Number(input.value);
-    if (!Number.isInteger(threshold) || threshold < 1) { input.value = String(stage.automation.triggerMinCommits || 1); showToast(t('draft.autoCreateThresholdInvalid')); return; }
-    const boundedThreshold = Math.min(20, threshold);
-    input.value = String(boundedThreshold);
-    save(setStageAutoCreate(workflowState.active, stageIndex, true, rule ? { name: rule.name, content: rule.content } : undefined, boundedThreshold));
-    showToast(t('draft.autoCreateThresholdSaved', { count: boundedThreshold }));
-    render();
-  }));
-  document.querySelectorAll<HTMLButtonElement>('[data-merge-pr]').forEach(button => button.addEventListener('click', () => showMergeDialog(Number(button.dataset.mergePr))));
-  document.querySelectorAll<HTMLButtonElement>('[data-merge-menu-toggle]').forEach(button => button.addEventListener('click', () => {
-    const menu = document.querySelector<HTMLElement>(`[data-merge-menu="${button.dataset.mergeMenuToggle}"]`)!;
-    menu.hidden = !menu.hidden;
-    button.setAttribute('aria-expanded', String(!menu.hidden));
-    if (!menu.hidden) positionMergeMenu(menu, button.closest<HTMLElement>('.merge-control')!);
-  }));
-  document.querySelectorAll<HTMLButtonElement>('[data-merge-method="merge"]').forEach(button => button.addEventListener('click', () => {
-    const control = button.closest<HTMLElement>('.merge-control')!;
-    control.querySelector<HTMLElement>('[data-merge-menu]')!.hidden = true;
-    control.querySelector<HTMLButtonElement>('[data-merge-menu-toggle]')!.setAttribute('aria-expanded', 'false');
-  }));
-  document.querySelectorAll<HTMLElement>('[data-native-only]').forEach(item => {
-    item.addEventListener('mouseenter', showNativeOnlyTooltip);
-    item.addEventListener('mousemove', moveNativeOnlyTooltip);
-    item.addEventListener('mouseleave', hideNativeOnlyTooltip);
-  });
-  if (uiState.refreshOnNextDetail) { uiState.refreshOnNextDetail = false; void refreshStatuses(); }
-}
-
-
-
-
-function lockedStageText(index: number) {
-  if (!workflowState.active || !uiState.statuses || index === 0) return t('status.locked');
-  const dependencies = workflowState.active.stages[index]?.waitFor?.length ? workflowState.active.stages[index].waitFor : [index - 1];
-  const dependencyStatuses = dependencies.map(dependency => uiState.statuses?.[dependency]);
-  const blocking = dependencies.flatMap(dependency => missingDeploymentWorkflowNames(
-    projection.workflowStageDeployments.filter(deployment => deployment.workflowId === workflowState.active!.id),
-    { stageId: workflowState.active!.stages[dependency]?.stageId, stageIndex: dependency },
-  ));
-  if (blocking.length) return t('status.locked.deployment', { workflow: blocking[0] });
-  const hasChecks = dependencyStatuses.every(status => status?.kind === 'merged') && dependencyStatuses.some(status => Boolean(status?.checks?.total));
-  return hasChecks ? t('status.locked') : t('status.locked.noChecks');
-}
-
-async function executeAutoCreatePr(stageIndex: number) {
-  if (!workflowState.active || !canOperateWorkflow(workflowState.active, 'pr-create')) return;
-  const stage = workflowState.active.stages[stageIndex];
-  const rule = stage?.automation?.executionMode === 'server' ? stage.automation.generationRule : undefined;
-  if (!stage || !rule || !stage.automation?.autoCreatePullRequest || !autoCreatePrerequisites()) { showToast(t('draft.autoCreatePrerequisites')); return; }
-  if (!await confirmAutoCreateExecution(stage.source, stage.target, rule.name)) return;
-  const key = `${workflowState.active.id}:${stage.stageId}:${stage.source}:${stage.target}:create-pr:${Date.now()}`;
-  try {
-    const queueResponse = await fetch(githubAppApiUrl('/api/automation'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: workflowState.active.id, stageIndex, source: stage.source, kind: 'create-pr', idempotencyKey: key, generationRule: rule.content }) });
-    const queued = await queueResponse.json().catch(() => ({})) as { action?: { id?: number }; message?: string };
-    if (!queueResponse.ok || !queued.action?.id) throw new Error(queued.message || t('automation.queueFailed'));
-    const executeResponse = await fetch(githubAppApiUrl('/api/automation?action=execute'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actionId: queued.action.id }) });
-    const executed = await executeResponse.json().catch(() => ({})) as { result?: { pullNumber?: number; pullUrl?: string }; message?: string };
-    if (!executeResponse.ok) throw new Error(executed.message || t('automation.executeFailed'));
-    showToast(t('automation.executeSucceeded', { number: executed.result?.pullNumber || 0 }));
-    await refreshStatuses(true, true, true);
-  } catch (error) { showToast(error instanceof Error ? error.message : t('automation.executeFailed')); }
-}
-
-// A tick that acts inside the same save request needs the same confirmation an explicit button gets.
-async function confirmImmediateAutomation(toggle: 'create' | 'merge', stageIndex: number, enabling: boolean, triggerMinCommits?: number) {
-  const stage = workflowState.active?.stages[stageIndex];
-  if (!stage) return false;
-  const status = uiState.statuses?.[stageIndex];
-  const unlocked = Boolean(workflowState.active && uiState.statuses && canCreateWorkflowStage(stageIndex, workflowState.active.stages, uiState.statuses));
-  const effect = immediateAutomationEffect({ toggle, enabling, stage, status, unlocked, triggerMinCommits });
-  if (effect.kind === 'none') return true;
-  const description = effect.kind === 'create-pr'
-    ? t('automation.tick.createDesc', { source: escape(effect.source), target: escape(effect.target), count: effect.aheadBy })
-    : t('automation.tick.mergeDesc', { source: escape(effect.source), target: escape(effect.target), number: effect.pullNumber });
-  return await confirmDialog(t('automation.tick.eyebrow'), t('automation.tick.title'), description, t('automation.tick.cancel'), t('automation.tick.confirm'));
-}
-
-
-function stageTimeline(stage: Workflow['stages'][number], index: number) {
-  const autoEnabled = stage.automation?.autoCreatePullRequest === true;
-  const canEditAutomation = Boolean(workflowState.active && canOperateWorkflow(workflowState.active, 'workflow-edit'));
-  const autoDisabled = !canEditAutomation || !autoCreatePrerequisites();
-  const autoHint = !canEditAutomation ? t('detail.autoCreateReadonly') : autoDisabled ? t('draft.autoCreatePrerequisites') : t('detail.autoCreateDesc');
-  const threshold = stage.automation?.triggerMinCommits || 1;
-  const mergeEnabled = stage.automation?.autoMergePullRequest === true;
-  // Merging is a server-side action, so a legacy browser-session policy cannot carry it.
-  const mergeLegacyPolicy = stage.automation?.executionMode === 'browser-session';
-  const canMergeAutomation = Boolean(workflowState.active && canOperateWorkflow(workflowState.active, 'pull-merge'));
-  const mergeDisabled = autoDisabled || !canMergeAutomation || mergeLegacyPolicy;
-  const mergeHint = !canEditAutomation ? t('detail.autoCreateReadonly') : !autoCreatePrerequisites() ? t('draft.autoCreatePrerequisites') : !canMergeAutomation ? t('detail.autoMergeReadonly') : mergeLegacyPolicy ? t('detail.autoMergeLegacyPolicy') : t('detail.autoMergeDesc');
-  const mergeControl = `<label class="timeline-auto-merge"><input type="checkbox" data-detail-auto-merge-stage="${index}" ${mergeEnabled ? 'checked' : ''} ${mergeDisabled ? 'disabled' : ''} /><span>${t('draft.autoMerge')}</span></label>`;
-  const advanceEnabled = (stage.automation as { autoAdvanceNext?: true } | undefined)?.autoAdvanceNext === true;
-  // Advancing needs an existing server automation; a bare stage or a legacy browser-session policy
-  // cannot carry it, mirroring setStageAutoAdvance's refusal.
-  const advanceLegacyPolicy = !stage.automation || stage.automation.executionMode !== 'server';
-  const advanceDisabled = autoDisabled || !canMergeAutomation || advanceLegacyPolicy;
-  const advanceHint = !canEditAutomation ? t('detail.autoCreateReadonly') : !autoCreatePrerequisites() ? t('draft.autoCreatePrerequisites') : !canMergeAutomation ? t('detail.autoMergeReadonly') : advanceLegacyPolicy ? t('detail.autoAdvanceLegacyPolicy') : t('detail.autoAdvanceDesc');
-  const advanceControl = `<label class="timeline-auto-merge"><input type="checkbox" data-detail-auto-advance-stage="${index}" ${advanceEnabled ? 'checked' : ''} ${advanceDisabled ? 'disabled' : ''} /><span>${t('draft.autoAdvance')}</span></label>`;
-  // 自动化只认 stage 钉住的那一版提示词，改了默认规则不会自己传过来，所以过期时给一个显式的同步入口。
-  const ruleUpdate = autoEnabled && stage.automation?.executionMode === 'server' ? stageGenerationRuleUpdate(stage.automation.generationRule, library.generationRules) : undefined;
-  const ruleNotice = ruleUpdate
-    ? `<p class="timeline-rule-outdated">${escape(ruleUpdate.kind === 'content' ? t('detail.ruleOutdated.content', { name: ruleUpdate.name }) : t('detail.ruleOutdated.rule', { name: ruleUpdate.name, stored: stage.automation!.generationRule!.name }))}<button type="button" class="link-button" data-detail-rule-sync="${index}" ${canEditAutomation ? '' : 'disabled'}>${t('detail.ruleOutdated.sync')}</button></p>`
-    : '';
-  const autoControl = `<div class="timeline-automation"><label class="timeline-auto-create"><input type="checkbox" data-detail-auto-create-stage="${index}" ${autoEnabled ? 'checked' : ''} ${autoDisabled ? 'disabled' : ''} /><span>${t('draft.autoCreate')}</span><span>${t('draft.autoCreateThreshold')}</span><input class="auto-create-threshold" type="number" min="1" max="20" step="1" value="${threshold}" data-detail-auto-create-threshold="${index}" aria-label="${escape(t('draft.autoCreateThreshold'))}" title="${escape(t('draft.autoCreateThresholdTooltip'))}" ${autoDisabled ? 'disabled' : ''} /></label>${mergeControl}${advanceControl}<small>${escape(autoHint)}</small>${mergeHint === autoHint ? '' : `<small>${escape(mergeHint)}</small>`}${advanceHint === autoHint || advanceHint === mergeHint ? '' : `<small>${escape(advanceHint)}</small>`}${ruleNotice}${automationDetailBlock(workflowState.active!.id, index, stage.source, false)}</div>`;
-  if (stage.source.includes('*')) {
-    const states = workflowState.active ? statesForStage(workflowState.active, index) : [];
-    const runs = states.map(state => `<button type="button" class="timeline-action" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(state.source)}"><b>${escape(state.source)}</b><small>${escape(dynamicBranchStatusText(state))}</small></button>`).join('');
-    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p class="meta">${t('detail.dynamicRoute')}</p>${runs ? `<div class="timeline-actions dynamic-stage-actions">${runs}</div>` : `<p>${t('detail.timeline.placeholder')}</p>`}</div></article>`;
-  }
-  const status = uiState.statuses?.[index];
-  if (!status) return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p>${t('detail.timeline.placeholder')}</p></div></article>`;
-  if (status.kind === 'not-created') {
-    const unlocked = canCreateWorkflowStage(index, workflowState.active!.stages, uiState.statuses!);
-    const hasNewCommits = Boolean(status.aheadBy);
-    const canCreate = unlocked && hasNewCommits && canOperateWorkflow(workflowState.active!, 'pr-create');
-    const changeMessage = hasNewCommits
-      ? `<p><b class="status neutral">${t('status.newCommits', { count: status.aheadBy || 0 })}</b> · ${unlocked ? t('status.newCommits.canCreate') : t('status.newCommits.waiting')}</p>`
-      : unlocked ? `<p class="meta">${t('status.newCommits.waitingChanges')}</p>` : '';
-    const autoCreate = '';
-    return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status neutral">${t('status.waitingPr')}</b> · ${t('status.noPr')}</p>${changeMessage}${unlocked ? `<div class="timeline-actions">${autoCreate}${canCreate ? `<button class="timeline-action" data-create-pr="${index}">${t('status.createPr')}</button>` : ''}<a class="text-link" target="_blank" href="${githubCompareUrl(workflowState.active!.repository, stage.source, stage.target)}">${t('status.createPrLink')}</a></div>` : `<p class="meta">${lockedStageText(index)}</p>`}</div></article>`;
-  }
-  if (status.kind === 'error') return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status failure">${t('status.fetchFailed')}</b> · ${escape(status.message || '')}</p></div></article>`;
-  const checks = status.checks?.total ? gateDisclosure(t('status.checks.summary', { passed: status.checks.passed, total: status.checks.total, state: status.checks.state === 'success' ? t('status.checks.completed') : status.checks.state === 'failure' ? t('status.checks.failed') : t('status.checks.running') }), status.checkDetails, 'checks', stage.target) : '';
-  const actions = status.actions?.total ? gateDisclosure(t('status.actions.runs.summary', { passed: status.actions.passed, total: status.actions.total, state: status.actions.state === 'success' ? t('status.actions.passed') : status.actions.state === 'failure' ? t('status.actions.failed') : t('status.actions.running') }), status.actionDetails, 'actions', stage.target) : '';
-  const approvals = status.requiredApprovals ? t('status.approvals', { approvals: status.approvals || 0, required: status.requiredApprovals }) : '';
-  const mergeability = status.mergeable === false || status.mergeableState === 'dirty' ? t('status.merge.conflict') : status.mergeableState === 'behind' ? t('status.merge.behind') : status.mergeableState === 'blocked' ? t('status.merge.blocked') : '';
-  const mergeabilityPending = status.mergeable !== true || status.mergeableState !== 'clean';
-  const mergedVerification = status.checks?.state;
-  const superseded = status.kind === 'merged' && mergedVerification === 'failure' && Boolean(status.aheadBy);
-  const state = superseded ? t('state.superseded') : status.kind === 'merged' ? mergedVerification === 'success' ? t('state.postMerge.passed') : mergedVerification === 'failure' ? t('state.postMerge.failed') : status.checks ? t('state.postMerge.running') : t('state.merged') : status.kind === 'closed' ? t('state.closed') : status.checks?.state === 'failure' ? t('state.actionsFailed') : status.checks?.state === 'pending' ? t('state.waitingActions') : status.requiredApprovals && (status.approvals || 0) < status.requiredApprovals ? t('state.waitingApprovals') : mergeability ? t('state.mergeBlocked') : mergeabilityPending ? t('state.mergeChecking') : t('state.waitingMerge');
-  const approvalGate = approvals ? `<span>${approvals}</span>` : '';
-  const mergeabilityGate = mergeability ? `<span>${mergeability}</span>` : '';
-  const gates = status.kind === 'merged' ? [checks, actions] : [checks, actions, approvalGate, mergeabilityGate];
-  const canCreateNewPull = status.kind === 'merged' && Boolean(status.aheadBy) && canCreateWorkflowStage(index, workflowState.active!.stages, uiState.statuses!);
-  const newCommits = status.kind === 'merged' && status.aheadBy
-    ? `<p><b class="status neutral">${t('status.newCommits', { count: status.aheadBy })}</b> · ${canCreateNewPull ? t('status.newCommits.canCreate') : t('status.newCommits.waiting')}</p>`
-    : '';
-  const autoNewPullAction = '';
-  const newPullAction = canCreateNewPull && canOperateWorkflow(workflowState.active!, 'pr-create') ? `${autoNewPullAction}<button class="timeline-action" data-create-pr="${index}">${t('status.createPr.button')}</button>` : '';
-  const stateClass = status.kind === 'merged' ? superseded ? 'neutral' : mergedVerification === 'failure' ? 'failure' : mergedVerification === 'pending' ? 'pending' : 'success' : status.checks?.state === 'failure' || status.mergeable === false || status.mergeableState === 'dirty' ? 'failure' : 'pending';
-  // A projected first paint lacks the live pull's head ref and Actions detail, so the merge menu only
-  // appears once the live read replaces it.
-  const mergeAction = !status.projected && status.kind === 'open' && !filters.recentlyCreatedPullNumbers.has(index) && canMergePull(status) && canOperateWorkflow(workflowState.active!, 'pull-merge') ? filters.mergingStages.has(index) ? `<button class="create-pr" disabled>${t('merge.merging')}</button>` : `<span class="merge-control"><button class="create-pr merge-main" data-merge-pr="${index}">${t('merge.button')}</button><button class="merge-arrow" type="button" data-merge-menu-toggle="${index}" aria-label="${t('merge.selectMethod')}" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><span class="merge-menu" data-merge-menu="${index}" role="menu" hidden><button type="button" class="merge-menu-option active" role="menuitem" data-merge-method="merge"><b>${t('merge.commit.title')}</b><small>${t('merge.commit.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.squash.title')}</b><small>${t('merge.squash.desc')}</small></button><button type="button" class="merge-menu-option" role="menuitem" data-native-only><b>${t('merge.rebase.title')}</b><small>${t('merge.squash.desc')}</small></button></span></span>` : '';
-  const repairAction = status.checks?.state === 'failure' ? `<button class="timeline-action" data-codex-repair="${index}">${t('repair.codex')}</button>` : '';
-  // The drawer owns every per-step operation (rerun, sync, deployment retry). Without an entry point
-  // here a static step's recovery actions were reachable only from the board, unlike a dynamic one.
-  const drawerAction = `<button type="button" class="timeline-action" data-step-drawer-stage="${index}" data-step-drawer-source="${escape(stage.source)}">${t('overview.board.stepDetail')}</button>`;
-  const gateList = gates.filter(Boolean);
-  const sourceBranchWarning = status.sourceBranchMissing ? `<p class="meta">${t('status.sourceBranchDeletedHint')}</p>` : '';
-  return `<article><span>${index + 1}</span><div><strong>${escape(stage.source)} → ${escape(stage.target)}</strong>${autoControl}<p><b class="status ${stateClass}">${state}</b></p>${sourceBranchWarning}${gateList.length ? `<div class="gate-list">${gateList.join('')}</div>` : ''}${newCommits}<div class="timeline-actions"><a class="text-link" target="_blank" href="${status.pr!.html_url || githubPullUrl(workflowState.active!.repository, status.pr!.number)}">${t('status.openPr', { number: status.pr!.number })}</a>${drawerAction}${repairAction}${mergeAction}${newPullAction}</div></div></article>`;
-}
-async function refreshDetailStatuses() {
-  await refreshStatuses(false, false, true);
-  // The browser reads above only change what is rendered. Reconciling here is what moves the persisted
-  // projection the server automation reads, so an explicit refresh has to do it for every workflow:
-  // narrowing it to wildcard sources left static-branch workflows with no on-demand path at all.
-  if (workflowState.active) await loadActionQueue(true, workflowState.active.repository);
-  if (uiState.screen === 'detail') detail();
-}
-async function showCodexRepairDialog(index: number, source?: string, pullNumber?: number) {
-  if (!workflowState.active) return;
-  const dialog = document.createElement('dialog');
-  dialog.className = 'create-dialog repair-dialog';
-  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('repair.eyebrow')}</p><h2>${t('repair.collecting')}</h2><p class="meta">${t('repair.collecting.desc')}</p></form>`;
-  document.body.append(dialog); dialog.showModal();
-  try {
-    const response = await fetch(githubAppApiUrl('/api/repair-context'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: workflowState.active.id, stageIndex: index, source, pullNumber }) });
-    const payload = await response.json().catch(() => ({})) as { markdown?: string; pullUrl?: string; message?: string };
-    if (!response.ok || !payload.markdown) throw new Error(payload.message || t('repair.error.generate'));
-    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('repair.eyebrow')}</p><h2>${t('repair.ready.title')}</h2><p class="meta">${t('repair.ready.desc')}</p><textarea id="repair-context" readonly></textarea><div class="dialog-actions"><a class="ghost" target="_blank" href="${escape(payload.pullUrl || '#')}">${t('repair.openActions')}</a><button id="copy-repair-context" type="button" class="primary">${t('repair.copy')}</button><button value="cancel" class="ghost">${t('repair.close')}</button></div></form>`;
-    dialog.querySelector<HTMLTextAreaElement>('#repair-context')!.value = payload.markdown;
-    dialog.querySelector('#copy-repair-context')!.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(payload.markdown!); showToast(t('repair.toast.copied')); }
-      catch { showToast(t('repair.toast.copyFailed')); }
-    });
-  } catch (error) {
-    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('repair.eyebrow')}</p><h2>${t('repair.error.title')}</h2><p class="error">${escape(error instanceof Error ? error.message : t('repair.error.generic'))}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('repair.close')}</button></div></form>`;
-  }
-  dialog.addEventListener('close', () => dialog.remove());
-}
-function showDeploymentRollbackDialog(flow: Workflow, stageIndex: number, source: string, run: WorkflowStageDeploymentRun) {
-  if (!canOperateWorkflow(flow, 'deployment-rollback')) return;
-  const stage = flow.stages[stageIndex];
-  const deployment = deploymentConfigs(flow).find(configuration => configuration.target === stage?.target && configuration.provider === run.provider);
-  if (!stage || !deployment?.rollbackWorkflowName || !run.runId) { showToast(t('rollback.unavailable')); return; }
-  const rollbackWorkflowName = deployment.rollbackWorkflowName;
-  const dialog = document.createElement('dialog');
-  dialog.className = 'create-dialog confirm-dialog rollback-dialog';
-  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('rollback.eyebrow')}</p><h2>${t('rollback.title')}</h2><p>${t('rollback.desc', { provider: deploymentProviderName(run.provider), environment: t(`overview.deployment.${run.environment}`) })}</p><div class="rollback-target"><b>${t('rollback.target')}</b><span>${escape(flow.repository)} · ${escape(source)} → ${escape(stage.target)}</span><span>${deploymentProviderName(run.provider)} · #${run.runId}</span><small>${t('rollback.workflow', { workflow: escape(deployment.rollbackWorkflowName) })}</small></div><p class="meta">${t('rollback.warning')}</p><p class="error" id="rollback-error" hidden></p><div class="dialog-actions"><button value="cancel" class="ghost">${t('rollback.cancel')}</button><button id="confirm-rollback" type="button" class="danger-button">${t('rollback.confirm')}</button></div></form>`;
-  document.body.append(dialog); dialog.showModal();
-  dialog.querySelector<HTMLButtonElement>('#confirm-rollback')!.addEventListener('click', async event => {
-    const button = event.currentTarget as HTMLButtonElement;
-    const errorElement = dialog.querySelector<HTMLElement>('#rollback-error')!;
-    button.disabled = true; button.textContent = t('rollback.starting'); errorElement.hidden = true;
-    try {
-      const response = await fetch(githubAppApiUrl('/api/deployment-rollback'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: flow.id, stageIndex, source, provider: run.provider, runId: run.runId }) });
-      const payload = await response.json().catch(() => ({})) as { message?: string; workflowName?: string };
-      if (!response.ok) throw new Error(payload.message || t('rollback.failed'));
-      dialog.close();
-      showToast(t('rollback.started', { workflow: payload.workflowName || rollbackWorkflowName }));
-      void loadActionQueue(true, flow.repository).finally(render);
-      window.setTimeout(() => void loadActionQueue(true, flow.repository).finally(render), 1_500);
-    } catch (error) {
-      errorElement.textContent = error instanceof Error ? error.message : t('rollback.failed');
-      errorElement.hidden = false;
-      button.disabled = false; button.textContent = t('rollback.confirm');
-    }
-  });
-  dialog.addEventListener('close', () => dialog.remove(), { once: true });
-}
-async function retryDeployment(flow: Workflow, state: WorkflowStageState, runId: number, provider: string, button: HTMLButtonElement) {
-  if (!canOperateWorkflow(flow, 'actions-rerun')) return;
-  button.disabled = true; button.textContent = t('overview.deployment.retrying');
-  try {
-    const { owner, name } = parseRepository(flow.repository);
-    await githubFetch<Record<string, never>>(sessionState.token, `/repos/${owner}/${name}/actions/runs/${runId}/rerun`, { method: 'POST' }, flow.id);
-    await fetch(githubAppApiUrl('/api/recovery-event'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: flow.id, stageIndex: state.stageIndex, source: state.source }) }).catch(() => undefined);
-    showToast(t('overview.deployment.retryStarted', { provider: deploymentProviderName(provider as WorkflowStageDeployment['provider']) }));
-    void loadActionQueue(true, flow.repository).finally(render);
-    window.setTimeout(() => void loadActionQueue(true, flow.repository).finally(render), 1_500);
-  } catch (error) {
-    showToast(error instanceof Error ? error.message : t('recovery.retryFailed'));
-  } finally {
-    button.disabled = false; button.textContent = t('overview.deployment.retry');
-  }
-}
-async function retryFailedActions(flow: Workflow, state: WorkflowStageState, button: HTMLButtonElement) {
-  if (!canOperateWorkflow(flow, 'actions-rerun')) return;
-  if (!state.headSha) { showToast(t('recovery.retryUnavailable')); return; }
-  button.disabled = true; button.textContent = t('recovery.retrying');
-  try {
-    const response = await fetch(githubAppApiUrl('/api/rerun-actions'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: flow.id, stageIndex: state.stageIndex, source: state.source }) });
-    const payload = await response.json().catch(() => ({})) as { count?: number; message?: string };
-    if (!response.ok) throw new Error(payload.message || t('recovery.retryFailed'));
-    showToast(t('recovery.retryStarted', { count: payload.count || 0 }));
-    // A rerun resolves the failure from the person's point of view; the projection is allowed to
-    // catch up in the background rather than holding the board on a slow reconciliation.
-    markAutomationResolved(flow, state.stageIndex, state.source);
-    render();
-  } catch (error) {
-    showToast(error instanceof Error ? error.message : t('recovery.retryFailed'));
-  } finally {
-    button.disabled = false; button.textContent = t('recovery.retryActions');
-  }
-}
-function canMergePull(status: StepStatus) {
-  return status.kind === 'open' && canMergeOpenPull({
-    checks: status.checks?.state,
-    actions: status.actions?.state,
-    approvalsMet: !status.requiredApprovals || (status.approvals || 0) >= status.requiredApprovals,
-    mergeable: status.mergeable,
-    mergeableState: status.mergeableState,
-  });
-}
-// The detail page's live reads take several GitHub round trips per stage. Projecting from the already
-// loaded server projection gives the page a complete first paint immediately; wildcard stages stay
-// null because their rows already render straight from the same projection.
-function projectedDetailStatuses(flow: Workflow): StepStatus[] {
-  return flow.stages.map((stage, index) => {
-    const projections = statesForStage(flow, index);
-    const state = projections.find(item => item.source === stage.source)
-      || projections.find(item => item.pullState === 'open')
-      || projections[0];
-    return (state ? projectedStageStatus(state) as StepStatus : null) || { kind: 'not-created' } as StepStatus;
-  });
-}
-function laneMergeStatus(state?: WorkflowStageState): StepStatus | undefined {
-  const status = projectedStageStatus(state);
-  return status?.kind === 'open' ? status as StepStatus : undefined;
-}
-function showMergeDialog(index: number, statusOverride?: StepStatus, onMerged?: () => void, sourceOverride?: string) {
-  const status = statusOverride || uiState.statuses?.[index];
-  if (!workflowState.active || !status?.pr || !canMergePull(status) || !canOperateWorkflow(workflowState.active, 'pull-merge')) return;
-  const pull = status.pr;
-  // The head ref is the branch the automation row is keyed by. A stage source may be a wildcard rule,
-  // which never matches a persisted row, so prefer the concrete branch whenever GitHub reports one.
-  const source = sourceOverride || pull.head.ref || workflowState.active.stages[index]?.source || '';
-  const dialog = document.createElement('dialog');
-  dialog.className = 'create-dialog';
-  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">${t('merge.eyebrow')}</p><h2>${t('merge.dialog.title', { number: pull.number })}</h2><p class="meta">${t('merge.dialog.desc')}</p><div class="dialog-actions"><button value="cancel" class="ghost">${t('merge.dialog.cancel')}</button><button id="confirm-merge" class="primary">${t('merge.dialog.confirm')}</button></div></form>`;
-  document.body.append(dialog); dialog.showModal();
-  dialog.querySelector<HTMLButtonElement>('#confirm-merge')!.addEventListener('click', async event => {
-    event.preventDefault();
-    const button = event.currentTarget as HTMLButtonElement;
-    button.disabled = true; button.textContent = t('merge.merging');
-    filters.mergingStages.add(index);
-    if (!onMerged && uiState.screen === 'detail') detail();
-    try {
-      const { owner, name } = parseRepository(workflowState.active!.repository);
-      const result = await githubFetch<MergeResult>(sessionState.token, `/repos/${owner}/${name}/pulls/${pull.number}/merge`, { method: 'PUT', body: JSON.stringify(mergePullRequestPayload('merge', pull.head.sha)) }, workflowState.active!.id);
-      if (!result.merged) throw new Error(result.message || t('merge.error.incomplete'));
-      const pendingChecks = { state: 'pending' as const, passed: 0, total: 0 };
-      uiState.statuses = uiState.statuses?.map((item, statusIndex) => statusIndex === index ? { ...item, kind: 'merged', pr: { ...pull, state: 'closed', merged_at: new Date().toISOString(), merge_commit_sha: result.sha }, checks: pendingChecks } : item) || null;
-      filters.recentlyMergedPullNumbers.set(index, pull.number);
-      filters.mergingStages.delete(index);
-      if (source) markAutomationResolved(workflowState.active!, index, source);
-      dialog.close();
-      if (onMerged) {
-        onMerged();
-        window.setTimeout(onMerged, 1_000);
-      } else {
-        if (uiState.screen === 'detail') detail();
-        window.setTimeout(() => { void refreshStatuses(true, true, true); }, 1_000)
-      }
-    } catch (err) {
-      filters.mergingStages.delete(index);
-      if (!onMerged && uiState.screen === 'detail') detail();
-      showToast(mergeErrorMessage(err));
-      button.disabled = false; button.textContent = t('merge.dialog.confirm');
-    }
-  });
-  dialog.addEventListener('close', () => dialog.remove());
-}
-function nextActionTitle() {
-  if (!uiState.statuses) return t('nextAction.notStarted');
-  const dynamicFailure = Boolean(workflowState.active?.stages.some((stage, index) => stage.source.includes('*') && statesForStage(workflowState.active!, index).some(state => state.checksState === 'failure')));
-  if (dynamicFailure || uiState.statuses.some(status => status.kind === 'open' && status.checks?.state === 'failure')) return t('nextAction.gateFailed');
-  if (uiState.statuses.some(status => status.kind === 'not-created')) return t('nextAction.canCheck');
-  return t('nextAction.synced');
-}
-async function readBranchProtection(owner: string, name: string, branch: string) {
-  try { return await githubFetch<BranchProtection>(sessionState.token, `/repos/${owner}/${name}/branches/${encodeURIComponent(branch)}/protection`); } catch { return null; }
-}
-async function resolveDetailSource(owner: string, name: string, sourceRule: string, target: string): Promise<string | null> {
-  if (!sourceRule.includes('*')) return sourceRule;
-  const repoBranches = await githubFetch<{ name: string }[]>(sessionState.token, `/repos/${owner}/${name}/branches?per_page=100`);
-  const matches = repoBranches.map(branch => branch.name).filter(source => sourceRuleMatches(sourceRule, source));
-  if (!matches.length) return null;
-  const openPulls = await Promise.all(matches.map(async source => {
-    const pulls = await githubFetch<Pull[]>(sessionState.token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + source)}&base=${encodeURIComponent(target)}&per_page=1`).catch(() => []);
-    return { source, pull: pulls[0] };
-  }));
-  return openPulls.find(candidate => candidate.pull)?.source || matches[0];
-}
-// A tab switch fires both return-to-tab listeners, and both are needed: one covers a tab switch, the
-// other a window switch. Measured in production 2026-08-22, coming back issued two identical reads in
-// the same second. The flag is set here rather than in the listeners so that a refresh the user pressed
-// is never the one dropped — only an automatic one that duplicates a read already running.
-async function refreshStatuses(renderDetail = true, refreshProjectedStates = true, force = false) {
-  // Navigation and focus refreshes share a short per-workflow TTL; an explicit refresh or an action
-  // that just changed a PR passes force and always reads live.
-  if (!force && workflowState.active && !detailRefreshDueAt(uiState.lastDetailLiveRead.get(workflowState.active.id), Date.now())) return;
-  uiState.detailStatusRefreshing = true;
-  try { await loadDetailStatuses(renderDetail, refreshProjectedStates, force); }
-  finally { uiState.detailStatusRefreshing = false; }
-}
-async function loadDetailStatuses(renderDetail = true, refreshProjectedStates = true, force = false) {
-  if (!workflowState.active) return;
-  // A background revalidation paints over an already populated page, so only an explicit refresh
-  // takes over the button.
-  if (force) {
-    const button = document.querySelector<HTMLButtonElement>('#refresh-status');
-    if (button) { button.disabled = true; button.textContent = t('detail.refresh.loading'); }
-  }
-  const { owner, name } = parseRepository(workflowState.active.repository);
-  const previous = uiState.statuses;
-  uiState.statuses = await Promise.all(workflowState.active.stages.map(async (stage, index) => {
-    try {
-      const source = await resolveDetailSource(owner, name, stage.source, stage.target);
-      if (!source) return { kind: 'not-created' } as StepStatus;
-      const recentlyCreatedNumber = filters.recentlyCreatedPullNumbers.get(index);
-      const recentlyMergedNumber = filters.recentlyMergedPullNumbers.get(index);
-      const recentlyChangedNumber = recentlyCreatedNumber || recentlyMergedNumber;
-      const [openPulls, closedPulls, comparison, recentlyChangedPull] = await Promise.all([
-        githubFetch<Pull[]>(sessionState.token, `/repos/${owner}/${name}/pulls?state=open&head=${encodeURIComponent(owner + ':' + source)}&base=${encodeURIComponent(stage.target)}&per_page=1`).catch(error => {
-          if (error instanceof GitHubRequestError && error.status === 404) return [];
-          throw error;
-        }),
-        githubFetch<Pull[]>(sessionState.token, `/repos/${owner}/${name}/pulls?state=closed&head=${encodeURIComponent(owner + ':' + source)}&base=${encodeURIComponent(stage.target)}&per_page=1`).catch(error => {
-          if (error instanceof GitHubRequestError && error.status === 404) return [];
-          throw error;
-        }),
-        githubFetch<{ ahead_by: number }>(sessionState.token, `/repos/${owner}/${name}/compare/${encodeURIComponent(stage.target)}...${encodeURIComponent(source)}`).then(value => ({ ...value, notFound: false })).catch(error => {
-          if (error instanceof GitHubRequestError && error.status === 404) return { ahead_by: 0, notFound: true };
-          throw error;
-        }),
-        recentlyChangedNumber ? githubFetch<Pull>(sessionState.token, `/repos/${owner}/${name}/pulls/${recentlyChangedNumber}`).catch(() => null) : Promise.resolve(null),
-      ]);
-      if (recentlyCreatedNumber && openPulls.some(pull => pull.number === recentlyCreatedNumber)) filters.recentlyCreatedPullNumbers.delete(index);
-      if (recentlyCreatedNumber && recentlyChangedPull?.state !== 'open') filters.recentlyCreatedPullNumbers.delete(index);
-      if (recentlyMergedNumber && !openPulls.some(pull => pull.number === recentlyMergedNumber) && closedPulls.some(pull => pull.number === recentlyMergedNumber)) filters.recentlyMergedPullNumbers.delete(index);
-      if (recentlyMergedNumber && !recentlyChangedPull?.merged_at && previous?.[index]?.kind === 'merged') return previous[index];
-      let pr: Pull | null = recentlyMergedNumber && recentlyChangedPull?.merged_at
-        ? recentlyChangedPull
-        : recentlyCreatedNumber && recentlyChangedPull?.state === 'open'
-          ? recentlyChangedPull
-          : selectCurrentPull([...openPulls, ...closedPulls]);
-      let sourceBranchMissing = false;
-      if (comparison.notFound) {
-        const targetBranchExists = await githubFetch<unknown>(sessionState.token, `/repos/${owner}/${name}/branches/${encodeURIComponent(stage.target)}`)
-          .then(() => true)
-          .catch(error => error instanceof GitHubRequestError && error.status === 404 ? false : true);
-        if (!targetBranchExists) return { kind: 'error', message: t('status.targetBranchMissing') } as StepStatus;
-        sourceBranchMissing = true;
-        if (!pr) {
-          const historicalPulls = await githubFetch<Pull[]>(sessionState.token, `/repos/${owner}/${name}/pulls?state=closed&base=${encodeURIComponent(stage.target)}&per_page=100`).catch(() => []);
-          pr = historicalPulls.find(candidate => candidate.head.ref === source) || null;
-        }
-      }
-      if (!pr) return comparison.notFound ? { kind: 'error', message: t('status.sourceBranchMissing') } as StepStatus : { kind: 'not-created', aheadBy: comparison.ahead_by } as StepStatus;
-      if (pr.merged_at) {
-        let checks: StepStatus['checks'];
-        if (pr.merge_commit_sha) {
-          try {
-            const [runs, statuses, actionRuns] = await Promise.all([
-              githubFetch<{ check_runs: CheckRun[] }>(sessionState.token, `/repos/${owner}/${name}/commits/${pr.merge_commit_sha}/check-runs?per_page=100`),
-              githubFetch<{ statuses: CommitStatus[] }>(sessionState.token, `/repos/${owner}/${name}/commits/${pr.merge_commit_sha}/status`),
-              githubFetch<{ workflow_runs: GitHubWorkflowRunSummary[] }>(sessionState.token, `/repos/${owner}/${name}/actions/runs?head_sha=${encodeURIComponent(pr.merge_commit_sha)}&per_page=100`).catch(() => ({ workflow_runs: [] })),
-            ]);
-            checks = runs.check_runs.length || statuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, statuses.statuses) : undefined;
-            const checkDetails = runs.check_runs.length || statuses.statuses.length ? summarizeGitHubCheckDetails(runs.check_runs, statuses.statuses) : undefined;
-            const actions = actionRuns.workflow_runs.length ? summarizeChecks(actionRuns.workflow_runs) : undefined;
-            const actionDetails = actionRuns.workflow_runs.length ? actionRunDetails(actionRuns.workflow_runs) : undefined;
-            return { kind: 'merged', pr, checks, checkDetails, actions, actionDetails, approvals: 0, aheadBy: comparison.ahead_by, sourceBranchMissing } as StepStatus;
-          } catch { /* Keep the merged PR visible while its post-merge checks cannot be read yet. */ }
-        }
-        return { kind: 'merged', pr, checks, approvals: 0, aheadBy: comparison.ahead_by, sourceBranchMissing } as StepStatus;
-      }
-      if (pr.state === 'closed') return { kind: 'closed', pr, approvals: 0, sourceBranchMissing } as StepStatus;
-      const [details, runs, commitStatuses, reviews, protection, actionRuns] = await Promise.all([
-        githubFetch<Pull>(sessionState.token, `/repos/${owner}/${name}/pulls/${pr.number}`),
-        githubFetch<{ check_runs: CheckRun[] }>(sessionState.token, `/repos/${owner}/${name}/commits/${pr.head.sha}/check-runs?per_page=100`),
-        githubFetch<{ statuses: CommitStatus[] }>(sessionState.token, `/repos/${owner}/${name}/commits/${pr.head.sha}/status`),
-        githubFetch<Review[]>(sessionState.token, `/repos/${owner}/${name}/pulls/${pr.number}/reviews?per_page=100`),
-        readBranchProtection(owner, name, stage.target),
-        githubFetch<{ workflow_runs: GitHubWorkflowRunSummary[] }>(sessionState.token, `/repos/${owner}/${name}/actions/runs?head_sha=${encodeURIComponent(pr.head.sha)}&per_page=100`).catch(() => ({ workflow_runs: [] })),
-      ]);
-      const requiredApprovals = protection?.required_pull_request_reviews?.required_approving_review_count || 0;
-      const checks = runs.check_runs.length || commitStatuses.statuses.length ? summarizeGitHubChecks(runs.check_runs, commitStatuses.statuses) : undefined;
-      const checkDetails = runs.check_runs.length || commitStatuses.statuses.length ? summarizeGitHubCheckDetails(runs.check_runs, commitStatuses.statuses) : undefined;
-      const actions = actionRuns.workflow_runs.length ? summarizeChecks(actionRuns.workflow_runs) : undefined;
-      const actionDetails = actionRuns.workflow_runs.length ? actionRunDetails(actionRuns.workflow_runs) : undefined;
-      return { kind: 'open', pr: details, checks, checkDetails, actions, actionDetails, approvals: reviews.filter(review => review.state === 'APPROVED').length, requiredApprovals: requiredApprovals || undefined, mergeable: details.mergeable, mergeableState: details.mergeable_state, sourceBranchMissing } as StepStatus;
-    } catch (err) { return { kind: 'error', message: err instanceof Error ? err.message : t('toast.unknownError') } as StepStatus; }
-  }));
-  uiState.statuses.forEach((status, index) => {
-    const before = previous?.[index];    const oldCheck = before?.checks?.state;
-    const newCheck = status.checks?.state;
-    const newPullReady = status.kind === 'merged' && Boolean(status.aheadBy) && canCreateWorkflowStage(index, workflowState.active!.stages, uiState.statuses!) && !(before?.kind === 'merged' && before.aheadBy);
-    const changed = Boolean(before && statusChanged({ kind: before.kind, checks: oldCheck }, { kind: status.kind, checks: newCheck }));
-    if (!changed && !newPullReady) return;
-    const detail = newPullReady ? t('notif.newPullReady') : status.kind === 'merged' ? t('notif.merged') : newCheck === 'failure' ? t('notif.actionsFailed') : newCheck === 'success' ? t('notif.actionsPassed') : status.kind;
-    const message = t('notif.stepUpdate', { index: index + 1, detail });
-    showToast(message);
-    if (Notification.permission === 'granted') new Notification(t('notif.title'), { body: message });
-  });
-  // The GitHub reads above only feed the step rows. The progress bar and the automation blocks read the
-  // server projection, so without this the poll left them frozen until someone pressed refresh. `false`
-  // keeps it a plain read: no `?refresh=1`, so the server does not call GitHub for it.
-  uiState.lastDetailLiveRead.set(workflowState.active.id, Date.now());
-  if (refreshProjectedStates) await loadActionQueue(false);
-  if (renderDetail && uiState.screen === 'detail') detail();
-}
-
 function showGenerationRules(selectedId: string | null, onUse: (id: string) => void, onRulesChanged: () => void) {
   const dialog = document.createElement('dialog');
   dialog.className = 'create-dialog rules-dialog';
@@ -2567,7 +1522,7 @@ function showTakeoverDialog(action: AutomationAction) {
       if (result?.pullNumber) showToast(t('takeover.confirmSucceeded', { number: result.pullNumber }));
       dialog.close();
       markAutomationResolved(flow, action.stageIndex, action.source);
-      render();
+      runtime.render();
     } catch (error) {
       operationStatus.textContent = error instanceof Error ? error.message : t('takeover.failed');
       setBusy(false);
@@ -2835,5 +1790,5 @@ applyTheme(currentTheme);
 initPrReferenceTooltip(showToast);
 // The orchestration callbacks bind after their declarations hoist; modules
 // deeper in the split invoke them through app/state/runtime.
-Object.assign(runtime, { render, goTo, init });
+Object.assign(runtime, { render, goTo, init, returnToSourceLane, restoreConnection, connect, openRepositoryManagement });
 void restoreConnection();

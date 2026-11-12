@@ -1,11 +1,19 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
-const source = readFileSync(new URL('./main.ts', import.meta.url), 'utf8');
+const sources: Record<string, string> = {
+  main: readFileSync(new URL('./main.ts', import.meta.url), 'utf8'),
+  statusRefresh: readFileSync(new URL('./app/state/status-refresh.ts', import.meta.url), 'utf8'),
+  detail: readFileSync(new URL('./app/render/detail.ts', import.meta.url), 'utf8'),
+};
+const source = sources.main;
 
 function body(name: string) {
-  const start = source.indexOf(`async function ${name}(`);
-  return source.slice(start, source.indexOf('\n}', start));
+  for (const text of Object.values(sources)) {
+    const start = text.indexOf(`async function ${name}(`);
+    if (start !== -1) return text.slice(start, text.indexOf('\n}', start));
+  }
+  return '';
 }
 
 describe('background refresh', () => {
@@ -24,8 +32,10 @@ describe('background refresh', () => {
   // showing whatever it had when the user last looked at it.
   it('refreshes each screen when the tab becomes visible again', () => {
     expect(source).toContain("window.addEventListener('focus', () => { if (uiState.screen === 'overview') void refreshOverviewSnapshot(); })");
-    expect(source).toContain("if (uiState.screen === 'detail' && !uiState.detailStatusRefreshing) void refreshStatuses();");
-    expect(source.match(/document\.addEventListener\('visibilitychange'/g) || []).toHaveLength(2);
+    expect(sources.detail).toContain("window.addEventListener('focus', () => { if (uiState.screen === 'detail' && !uiState.detailStatusRefreshing) void refreshStatuses(); })");
+    // One return-to-tab listener per screen: the overview's lives in main.ts, the detail's in render/detail.ts.
+    expect(source.match(/document\.addEventListener\('visibilitychange'/g) || []).toHaveLength(1);
+    expect(sources.detail.match(/document\.addEventListener\('visibilitychange'/g) || []).toHaveLength(1);
   });
 
   // Switching tabs fires visibilitychange and focus, and both listeners are needed: one covers a tab
@@ -38,7 +48,7 @@ describe('background refresh', () => {
     expect(poll).toMatch(/finally \{ uiState.detailStatusRefreshing = false;/);
     // Only the two return-to-tab listeners are guarded. A repository sync also refreshes the detail
     // screen, and that one the user asked for.
-    const listeners = source.match(/(?:window|document)\.addEventListener\('(?:focus|visibilitychange)'[^\n]*refreshStatuses[^\n]*/g) || [];
+    const listeners = sources.detail.match(/(?:window|document)\.addEventListener\('(?:focus|visibilitychange)'[^\n]*refreshStatuses[^\n]*/g) || [];
     expect(listeners).toHaveLength(2);
     expect(listeners.filter(listener => !listener.includes('!uiState.detailStatusRefreshing'))).toEqual([]);
   });
@@ -76,7 +86,7 @@ describe('detail staleness while revalidating', () => {
   // The server projection already loaded for the board paints the page first.
   it('prefills statuses from the server projection when entering the detail screen', () => {
     expect(source).toContain('uiState.statuses = workflowState.active ? projectedDetailStatuses(workflowState.active) : null');
-    expect(source).toMatch(/function projectedDetailStatuses[\s\S]{0,400}projectedStageStatus/);
+    expect(sources.detail).toMatch(/function projectedDetailStatuses[\s\S]{0,400}projectedStageStatus/);
   });
 
   // Navigation and focus share a short TTL so tab switches cannot issue the same GitHub reads twice;

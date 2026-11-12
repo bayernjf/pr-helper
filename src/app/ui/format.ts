@@ -2,6 +2,8 @@ import { deploymentSummaryForTarget, type GitHubCheckDetail } from '../../lib/do
 import { t } from '../../lib/i18n';
 import { stageRunPresentation, type WorkflowStageRunState } from '../../lib/workflow-run';
 import { escape } from '../dom';
+import { teamRoleLabel } from '../../lib/team-permissions';
+import type { Workflow } from '../../lib/workflow';
 import type { GitHubWorkflowRunSummary, StepStatus, WorkflowConfigurationWarning, WorkflowStageDeployment, WorkflowStageState } from '../types';
 
 export function stageRunPresentationText(run: ReturnType<typeof stageRunPresentation>) {
@@ -81,4 +83,9 @@ export function drawerStatusText(state?: WorkflowStageState, detailStatus?: Step
   if (detailStatus.mergeable === false || ['dirty', 'behind', 'blocked'].includes(detailStatus.mergeableState || '')) return t('state.mergeBlocked');
   if (detailStatus.mergeable !== true || detailStatus.mergeableState !== 'clean') return t('state.mergeChecking');
   return t('state.waitingMerge');
+}
+
+export function sharedWorkflowBadge(workflow: Workflow) {
+  if (!workflow.team) return '';
+  return `<small class="team-workflow-badge">${escape(t('teams.sharedBadge', { team: workflow.team.name, role: teamRoleLabel(workflow.team.role) }))}</small>`;
 }
