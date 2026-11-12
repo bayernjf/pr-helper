@@ -9,7 +9,7 @@ import { deletePullRequestDraft, findPullRequestDraft, loadPullRequestDrafts, up
 import { initPrReferenceTooltip, prReferenceHtml } from './lib/pr-reference';
 import { activeWorkflows, archiveWorkflow, archivedWorkflows, isWorkflowMuted, muteWorkflow, unmuteWorkflow, restoreWorkflow, addDeployment, replaceDeployment, deploymentSuggestions, addStage, syncedDeployments, applyAuthoritativeWorkflow, applyQueuedWorkflowSave, applyWorkflowOrder, createWorkflow, deploymentConfigurationWarnings, deploymentConfigs, deleteWorkflow, ensureStageIds, immediateAutomationEffect, deploymentsForRepository, matchingStageProjections, missingDeploymentWorkflowNames, moveWorkflowToPosition, removeDeployment, removeStage, reorderStages, reorderWorkflows, saveWorkflow, setStageAutoAdvance, setStageAutoCreate, setStageAutoMerge, setStageRouteMode, sortWorkflows, sortWorkflowsForView, sourceRuleMatches, stageIndexForId, workflowSummary, type DeploymentConfig, type DeploymentConfigurationWarning, type RecoveryPolicy, type StageRouteMode, type Workflow, type WorkflowSortDirection, type WorkflowSortMode } from './lib/workflow';
 import { WorkflowSaveQueue } from './lib/workflow-save-queue';
-import { ACTION_QUEUE_REFRESH_TIMEOUT_MS, ActionQueueRequestQueue } from './lib/action-queue-request-queue';
+import { ACTION_QUEUE_REFRESH_TIMEOUT_MS } from './lib/action-queue-request-queue';
 import { automationActionPresentation, latestAutomationAction, nextStepSummary, progressActionKey, stageProgressNode, stageRunPresentation, workflowProgress, workflowRunSummary, worstStageProgress, type AutomationActionState, type StageProgressStatus, type WorkflowStageRunState } from './lib/workflow-run';
 import { detailRefreshDueAt, projectedStageStatus } from './lib/projected-stage';
 import { getCloudSyncStatus, unlockCloudSync, lockCloudSync, isCloudSyncUnlocked, encryptForCloud, decryptFromCloud, rotateCloudSyncKey, type CloudSyncStatus, type SyncableData } from './lib/encrypted-sync';
@@ -18,6 +18,7 @@ import { t, getLocale, setLocale, detectLocale, registerTranslations, type Local
 import en from './lib/translations/en';
 import zh from './lib/translations/zh';
 import { app, escape } from './app/dom';
+import { actionQueueRequestQueue, projection } from './app/state/projection';
 import { currentTheme, applyTheme, toggleTheme } from './app/ui/theme';
 import { showToast } from './app/ui/toast';
 import { showOperationAuditDialog } from './app/ui/audit';
@@ -69,24 +70,6 @@ let cloudWorkflowStorage = false;
 let pendingLocalWorkflowSync = false;
 let cloudWorkflowSyncError = '';
 let cloudWorkspaceLoading = false;
-let actionQueue: ActionQueueItem[] = [];
-let workflowStageStates: WorkflowStageState[] = [];
-let workflowStageEvents: WorkflowStageEvent[] = [];
-let workflowStageDeployments: WorkflowStageDeployment[] = [];
-let workflowStageDeploymentRuns: WorkflowStageDeploymentRun[] = [];
-let workflowConfigurationWarnings: WorkflowConfigurationWarning[] = [];
-let syncHealth: SyncHealth | null = null;
-let workflowRuns: WorkflowRun[] = [];
-let timeline: TimelineEntry[] = [];
-let preflightResults: PreflightResult[] = [];
-let preflightLoading = false;
-let preflightError = '';
-let recoveryStatuses: RecoveryStatus[] = [];
-let automationActions: AutomationAction[] = [];
-let actionQueueError = '';
-let actionQueueRefreshing = false;
-let actionQueueReconciliationScheduled = false;
-const actionQueueRequestQueue = new ActionQueueRequestQueue();
 let overviewFilter: 'all' | 'attention' | 'running' | 'failed' | 'automation' | 'archived' = 'all';
 let laneSearchQuery = '';
 const expandedLaneIds = new Set<string>();
@@ -324,7 +307,7 @@ async function loadCloudWorkflows() {
   } catch (error) { cloudWorkflowStorage = false; cloudWorkflowSyncError = error instanceof Error ? error.message : t('toast.cloudFail.generic'); }
 }
 async function loadActionQueue(reconcile = true, repository?: string) {
-  if (!cloudWorkflowStorage) { actionQueue = []; workflowStageStates = []; workflowStageEvents = []; workflowStageDeployments = []; workflowStageDeploymentRuns = []; workflowConfigurationWarnings = []; syncHealth = null; workflowRuns = []; timeline = []; recoveryStatuses = []; automationActions = []; actionQueueError = ''; return false; }
+  if (!cloudWorkflowStorage) { projection.actionQueue = []; projection.workflowStageStates = []; projection.workflowStageEvents = []; projection.workflowStageDeployments = []; projection.workflowStageDeploymentRuns = []; projection.workflowConfigurationWarnings = []; projection.syncHealth = null; projection.workflowRuns = []; projection.timeline = []; projection.recoveryStatuses = []; projection.automationActions = []; projection.actionQueueError = ''; return false; }
   return actionQueueRequestQueue.run(reconcile, currentReconcile => loadActionQueueOnce(currentReconcile, repository));
 }
 async function loadActionQueueOnce(reconcile: boolean, repository?: string) {
@@ -333,32 +316,32 @@ async function loadActionQueueOnce(reconcile: boolean, repository?: string) {
     const response = await fetch(githubAppApiUrl(`/api/inbox${query}`), reconcile ? { signal: AbortSignal.timeout(ACTION_QUEUE_REFRESH_TIMEOUT_MS) } : undefined);
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { message?: string };
-      actionQueueError = payload.message || t('toast.queue.failed');
+      projection.actionQueueError = payload.message || t('toast.queue.failed');
       return false;
     }
     const payload = await response.json() as { items?: ActionQueueItem[]; states?: WorkflowStageState[]; events?: WorkflowStageEvent[]; deployments?: WorkflowStageDeployment[]; deploymentRuns?: WorkflowStageDeploymentRun[]; configurationWarnings?: WorkflowConfigurationWarning[]; syncHealth?: SyncHealth; runs?: WorkflowRun[]; timeline?: TimelineEntry[]; recoveryStatuses?: RecoveryStatus[]; automation?: AutomationAction[]; reconciliationScheduled?: boolean };
-    actionQueue = Array.isArray(payload.items) ? payload.items : [];
-    workflowStageStates = Array.isArray(payload.states) ? payload.states : [];
-    workflowStageEvents = Array.isArray(payload.events) ? payload.events : [];
-    workflowStageDeployments = Array.isArray(payload.deployments) ? payload.deployments : [];
-    workflowStageDeploymentRuns = Array.isArray(payload.deploymentRuns) ? payload.deploymentRuns : [];
-    workflowConfigurationWarnings = Array.isArray(payload.configurationWarnings) ? payload.configurationWarnings : [];
-    syncHealth = payload.syncHealth || null;
-    workflowRuns = Array.isArray(payload.runs) ? payload.runs : [];
-    timeline = Array.isArray(payload.timeline) ? payload.timeline : [];
-    recoveryStatuses = Array.isArray(payload.recoveryStatuses) ? payload.recoveryStatuses : [];
-    automationActions = Array.isArray(payload.automation) ? payload.automation : [];
-    actionQueueReconciliationScheduled = Boolean(reconcile && payload.reconciliationScheduled);
-    actionQueueError = '';
+    projection.actionQueue = Array.isArray(payload.items) ? payload.items : [];
+    projection.workflowStageStates = Array.isArray(payload.states) ? payload.states : [];
+    projection.workflowStageEvents = Array.isArray(payload.events) ? payload.events : [];
+    projection.workflowStageDeployments = Array.isArray(payload.deployments) ? payload.deployments : [];
+    projection.workflowStageDeploymentRuns = Array.isArray(payload.deploymentRuns) ? payload.deploymentRuns : [];
+    projection.workflowConfigurationWarnings = Array.isArray(payload.configurationWarnings) ? payload.configurationWarnings : [];
+    projection.syncHealth = payload.syncHealth || null;
+    projection.workflowRuns = Array.isArray(payload.runs) ? payload.runs : [];
+    projection.timeline = Array.isArray(payload.timeline) ? payload.timeline : [];
+    projection.recoveryStatuses = Array.isArray(payload.recoveryStatuses) ? payload.recoveryStatuses : [];
+    projection.automationActions = Array.isArray(payload.automation) ? payload.automation : [];
+    projection.actionQueueReconciliationScheduled = Boolean(reconcile && payload.reconciliationScheduled);
+    projection.actionQueueError = '';
     return true;
   } catch (error) {
-    actionQueueError = error instanceof DOMException && error.name === 'TimeoutError' ? t('toast.queue.timeout') : error instanceof Error ? error.message : t('toast.queue.failed');
+    projection.actionQueueError = error instanceof DOMException && error.name === 'TimeoutError' ? t('toast.queue.timeout') : error instanceof Error ? error.message : t('toast.queue.failed');
     return false;
   }
 }
 async function refreshActionQueue() {
-  if (actionQueueRefreshing) return;
-  actionQueueRefreshing = true;
+  if (projection.actionQueueRefreshing) return;
+  projection.actionQueueRefreshing = true;
   render();
 
   // Give the browser a frame to paint the pressed/loading state before a fast local response completes.
@@ -367,16 +350,16 @@ async function refreshActionQueue() {
   const loaded = await loadActionQueue(true);
   const remainingFeedbackTime = 450 - (Date.now() - startedAt);
   if (remainingFeedbackTime > 0) await new Promise<void>(resolve => window.setTimeout(resolve, remainingFeedbackTime));
-  actionQueueRefreshing = false;
+  projection.actionQueueRefreshing = false;
   if (loaded) {
-    showToast(actionQueueReconciliationScheduled ? t('toast.queue.syncStarted') : t('toast.queue.refreshed', { count: actionQueue.length }));
+    showToast(projection.actionQueueReconciliationScheduled ? t('toast.queue.syncStarted') : t('toast.queue.refreshed', { count: projection.actionQueue.length }));
   } else {
-    showToast(cloudWorkflowStorage ? actionQueueError || t('toast.queue.failed') : t('toast.queue.unavailable'));
+    showToast(cloudWorkflowStorage ? projection.actionQueueError || t('toast.queue.failed') : t('toast.queue.unavailable'));
   }
   render();
 }
 async function refreshOverviewSnapshot() {
-  if (overviewSnapshotRefreshing || actionQueueRefreshing || !cloudWorkflowStorage || screen !== 'overview' || document.visibilityState !== 'visible') return;
+  if (overviewSnapshotRefreshing || projection.actionQueueRefreshing || !cloudWorkflowStorage || screen !== 'overview' || document.visibilityState !== 'visible') return;
   overviewSnapshotRefreshing = true;
   const loaded = await loadActionQueue(false);
   overviewSnapshotRefreshing = false;
@@ -970,10 +953,10 @@ function renderContent() {
 
 function stageState(workflowId: string, stageIndex: number, source?: string, target?: string) {
   const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
-  return workflowStageStates.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source) && (target === undefined || state.target === target));
+  return projection.workflowStageStates.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source) && (target === undefined || state.target === target));
 }
 function statesForStage(flow: Workflow, stageIndex: number) {
-  return matchingStageProjections(flow, stageIndex, workflowStageStates);
+  return matchingStageProjections(flow, stageIndex, projection.workflowStageStates);
 }
 function stageUpdatedAt(state?: WorkflowStageState) {
   if (!state?.updatedAt) return '';
@@ -983,43 +966,43 @@ function stageUpdatedAt(state?: WorkflowStageState) {
 }
 function stageAgeSeconds(workflowId: string, stageIndex: number, source?: string): number | null {
   const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
-  const health = syncHealth?.stages.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source));
+  const health = projection.syncHealth?.stages.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source));
   return health ? health.ageSeconds : null;
 }
 function stageStaleBadge(workflowId: string, stageIndex: number, source?: string): string {
   const age = stageAgeSeconds(workflowId, stageIndex, source);
   if (age === null) return '';
   const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId;
-  const stale = syncHealth?.stages.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source))?.stale;
+  const stale = projection.syncHealth?.stages.find(state => state.workflowId === workflowId && (stageId ? state.stageId === stageId : state.stageIndex === stageIndex) && (source === undefined || state.source === source))?.stale;
   if (!stale) return '';
   const minutes = Math.floor(age / 60);
   const label = minutes >= 60 ? t('syncHealth.stale.hours', { hours: Math.floor(minutes / 60) }) : t('syncHealth.stale.minutes', { minutes });
   return `<span class="sync-stale-badge" title="${escape(t('syncHealth.stale.tooltip'))}">${escape(label)}</span>`;
 }
 function brokenTriggerNote(): string {
-  const broken = (syncHealth?.triggerHealth || []).filter(run => run.interrupted || run.state === 'failure');
+  const broken = (projection.syncHealth?.triggerHealth || []).filter(run => run.interrupted || run.state === 'failure');
   if (!broken.length) return '';
   return ` · ${t('syncHealth.triggerBroken', { triggers: broken.map(run => t(`syncHealth.trigger.${run.trigger}`)).join('、') })}`;
 }
 
 function syncHealthBanner(): string {
-  if (!syncHealth) return '';
-  const last = syncHealth.lastReconciliation;
+  if (!projection.syncHealth) return '';
+  const last = projection.syncHealth.lastReconciliation;
   if (!last) return `<div class="sync-health-banner unknown"><span class="sync-health-icon">⏳</span><span>${t('syncHealth.never')}</span></div>`;
   if (last.interrupted) return `<div class="sync-health-banner failure"><span class="sync-health-icon">⚠️</span><span>${t('syncHealth.interrupted')}${brokenTriggerNote()}</span></div>`;
   if (last.state === 'failure') return `<div class="sync-health-banner failure"><span class="sync-health-icon">⚠️</span><span>${t('syncHealth.failed')}${last.errorMessage ? ` · ${escape(last.errorMessage.slice(0, 120))}` : ''}</span></div>`;
   if (last.state === 'running') return `<div class="sync-health-banner running"><span class="sync-health-icon">🔄</span><span>${t('syncHealth.running')}</span></div>`;
   const finishedAt = last.finishedAt ? new Date(last.finishedAt) : null;
   const ageSeconds = finishedAt ? Math.max(0, Math.floor((Date.now() - finishedAt.getTime()) / 1000)) : null;
-  const staleCount = syncHealth.stages.filter(stage => stage.stale).length;
+  const staleCount = projection.syncHealth.stages.filter(stage => stage.stale).length;
   const timeAgo = relativeAgeText(ageSeconds);
   const staleWarning = staleCount > 0 ? ` · ${t('syncHealth.staleCount', { count: staleCount })}` : '';
   const duration = last.durationMs !== null ? ` · ${t('syncHealth.duration', { ms: last.durationMs })}` : '';
   if (last.state === 'degraded') return `<div class="sync-health-banner degraded"><span class="sync-health-icon">⚠️</span><span>${t('syncHealth.degraded', { reconciled: last.stagesReconciled, failed: last.stagesFailed })} · ${timeAgo}${duration}${staleWarning}</span></div>`;
   return `<div class="sync-health-banner success"><span class="sync-health-icon">✓</span><span>${t('syncHealth.lastSync', { time: timeAgo, stages: last.stagesReconciled })}${duration}${staleWarning}</span></div>`;
 }
-function stageEvents(workflowId: string, stageIndex: number, source?: string) { const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId; return workflowStageEvents.filter(event => event.workflowId === workflowId && (stageId ? event.stageId === stageId : event.stageIndex === stageIndex) && (source === undefined || event.source === null || event.source === source)).slice(0, 4); }
-function stageDeployments(workflowId: string, stageIndex: number, source?: string) { const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId; return workflowStageDeployments.filter(deployment => deployment.workflowId === workflowId && (stageId ? deployment.stageId === stageId : deployment.stageIndex === stageIndex) && (source === undefined || deployment.source === source)); }
+function stageEvents(workflowId: string, stageIndex: number, source?: string) { const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId; return projection.workflowStageEvents.filter(event => event.workflowId === workflowId && (stageId ? event.stageId === stageId : event.stageIndex === stageIndex) && (source === undefined || event.source === null || event.source === source)).slice(0, 4); }
+function stageDeployments(workflowId: string, stageIndex: number, source?: string) { const stageId = workflows.find(workflow => workflow.id === workflowId)?.stages[stageIndex]?.stageId; return projection.workflowStageDeployments.filter(deployment => deployment.workflowId === workflowId && (stageId ? deployment.stageId === stageId : deployment.stageIndex === stageIndex) && (source === undefined || deployment.source === source)); }
 function deploymentCards(workflowId: string, stageIndex: number, source?: string) {
   const deployments = stageDeployments(workflowId, stageIndex, source);
   const flow = workflows.find(workflow => workflow.id === workflowId);
@@ -1037,7 +1020,7 @@ function deploymentCards(workflowId: string, stageIndex: number, source?: string
 }
 function deploymentRunHistory(flow: Workflow, stageIndex: number, source?: string) {
   const stageId = flow.stages[stageIndex]?.stageId;
-  const runs = workflowStageDeploymentRuns.filter(run => run.workflowId === flow.id && (stageId ? run.stageId === stageId : run.stageIndex === stageIndex) && (source === undefined || run.source === source));
+  const runs = projection.workflowStageDeploymentRuns.filter(run => run.workflowId === flow.id && (stageId ? run.stageId === stageId : run.stageIndex === stageIndex) && (source === undefined || run.source === source));
   if (!runs.length) return '';
   const target = flow.stages[stageIndex]?.target;
   return `<section class="drawer-deployment-history"><p class="eyebrow">${t('overview.deployment.history')}</p><ol>${runs.map(run => {
@@ -1050,10 +1033,10 @@ function deploymentRunHistory(flow: Workflow, stageIndex: number, source?: strin
 function deploymentRuntimeWarnings(flow: Workflow): WorkflowConfigurationWarning[] {
   const warnings: WorkflowConfigurationWarning[] = [];
   const now = Date.now();
-  workflowStageStates.filter(state => state.workflowId === flow.id && state.pullState === 'merged' && state.mergedAt).forEach(state => {
+  projection.workflowStageStates.filter(state => state.workflowId === flow.id && state.pullState === 'merged' && state.mergedAt).forEach(state => {
     deploymentConfigs(flow).filter(configuration => configuration.target === state.target).forEach(configuration => {
-      const matchingRuns = workflowStageDeploymentRuns.filter(run => run.workflowId === flow.id && (state.stageId ? run.stageId === state.stageId : run.stageIndex === state.stageIndex) && run.source === state.source && run.provider === configuration.provider);
-      const configurationAlreadyExplainsMissingRun = workflowConfigurationWarnings.some(warning => warning.workflowId === flow.id && (warning.code === 'actions-unavailable' || warning.code === 'workflow-not-found' && warning.target === configuration.target && warning.provider === configuration.provider));
+      const matchingRuns = projection.workflowStageDeploymentRuns.filter(run => run.workflowId === flow.id && (state.stageId ? run.stageId === state.stageId : run.stageIndex === state.stageIndex) && run.source === state.source && run.provider === configuration.provider);
+      const configurationAlreadyExplainsMissingRun = projection.workflowConfigurationWarnings.some(warning => warning.workflowId === flow.id && (warning.code === 'actions-unavailable' || warning.code === 'workflow-not-found' && warning.target === configuration.target && warning.provider === configuration.provider));
       if (!matchingRuns.length && !configurationAlreadyExplainsMissingRun && now - new Date(state.mergedAt!).getTime() > 10 * 60_000) {
         warnings.push({ workflowId: flow.id, stageIndex: state.stageIndex, source: state.source, target: state.target, provider: configuration.provider, value: configuration.workflowName, code: 'deployment-not-seen' });
         return;
@@ -1064,7 +1047,7 @@ function deploymentRuntimeWarnings(flow: Workflow): WorkflowConfigurationWarning
   });
   return warnings;
 }
-function laneConfigurationWarnings(flow: Workflow) { return [...workflowConfigurationWarnings.filter(warning => warning.workflowId === flow.id), ...deploymentRuntimeWarnings(flow)]; }
+function laneConfigurationWarnings(flow: Workflow) { return [...projection.workflowConfigurationWarnings.filter(warning => warning.workflowId === flow.id), ...deploymentRuntimeWarnings(flow)]; }
 function drawerConfigurationWarnings(flow: Workflow, stageIndex: number, source: string) {
   const target = flow.stages[stageIndex]?.target;
   const warnings = laneConfigurationWarnings(flow).filter(warning => warning.stageIndex === undefined ? warning.target === undefined || warning.target === target : warning.stageIndex === stageIndex && (!warning.source || warning.source === source));
@@ -1081,36 +1064,36 @@ function laneRunSummary(flow: Workflow) {
   return { ...summary, text: updatedLabel ? `${text} · ${updatedLabel}` : text };
 }
 async function loadPreflight(workflowId?: string) {
-  if (!cloudWorkflowStorage) { preflightResults = []; preflightError = ''; return; }
-  preflightLoading = true;
+  if (!cloudWorkflowStorage) { projection.preflightResults = []; projection.preflightError = ''; return; }
+  projection.preflightLoading = true;
   try {
     const url = workflowId ? `/api/preflight?workflowId=${encodeURIComponent(workflowId)}` : '/api/preflight';
     const response = await fetch(githubAppApiUrl(url));
-    if (!response.ok) { const payload = await response.json().catch(() => ({})) as { message?: string }; preflightError = payload.message || t('preflight.error'); preflightResults = []; return; }
+    if (!response.ok) { const payload = await response.json().catch(() => ({})) as { message?: string }; projection.preflightError = payload.message || t('preflight.error'); projection.preflightResults = []; return; }
     const payload = await response.json() as { results?: PreflightResult[] };
-    preflightResults = Array.isArray(payload.results) ? payload.results : [];
-    preflightError = '';
-  } catch (error) { preflightError = error instanceof Error ? error.message : t('preflight.error'); preflightResults = []; }
-  finally { preflightLoading = false; }
+    projection.preflightResults = Array.isArray(payload.results) ? payload.results : [];
+    projection.preflightError = '';
+  } catch (error) { projection.preflightError = error instanceof Error ? error.message : t('preflight.error'); projection.preflightResults = []; }
+  finally { projection.preflightLoading = false; }
 }
 function preflightPanel(): string {
-  if (!preflightResults.length && !preflightLoading && !preflightError) return '';
-  const totalErrors = preflightResults.reduce((sum, r) => sum + r.summary.errors, 0);
-  const totalWarnings = preflightResults.reduce((sum, r) => sum + r.summary.warnings, 0);
-  const totalInfo = preflightResults.reduce((sum, r) => sum + r.summary.info, 0);
+  if (!projection.preflightResults.length && !projection.preflightLoading && !projection.preflightError) return '';
+  const totalErrors = projection.preflightResults.reduce((sum, r) => sum + r.summary.errors, 0);
+  const totalWarnings = projection.preflightResults.reduce((sum, r) => sum + r.summary.warnings, 0);
+  const totalInfo = projection.preflightResults.reduce((sum, r) => sum + r.summary.info, 0);
   const badgeClass = totalErrors > 0 ? 'pf-fail' : totalWarnings > 0 ? 'pf-warn' : 'pf-pass';
-  const badge = preflightLoading ? `<span class="pf-badge pf-loading">${t('preflight.loading')}</span>` : preflightError ? `<span class="pf-badge pf-fail">${escape(preflightError)}</span>` : `<span class="pf-badge ${badgeClass}">${totalErrors ? t('preflight.fail', { errors: totalErrors }) : t('preflight.pass')}</span>`;
-  const checksHtml = preflightResults.flatMap(result => result.checks.map(check => {
+  const badge = projection.preflightLoading ? `<span class="pf-badge pf-loading">${t('preflight.loading')}</span>` : projection.preflightError ? `<span class="pf-badge pf-fail">${escape(projection.preflightError)}</span>` : `<span class="pf-badge ${badgeClass}">${totalErrors ? t('preflight.fail', { errors: totalErrors }) : t('preflight.pass')}</span>`;
+  const checksHtml = projection.preflightResults.flatMap(result => result.checks.map(check => {
     const severityIcon = check.severity === 'error' ? '❌' : check.severity === 'warning' ? '⚠️' : 'ℹ️';
     const flow = workflows.find(w => w.id === result.workflowId);
     const stageLabel = check.stageIndex !== null && flow ? `${flow.stages[check.stageIndex]?.source || ''} → ${flow.stages[check.stageIndex]?.target || ''}` : '';
     const fixHtml = check.fix ? `<small class="pf-fix">💡 ${escape(check.fix)}</small>` : '';
     return `<li class="pf-${check.severity}"><span class="pf-sev">${severityIcon}</span><div><b>${escape(check.title)}</b><small>${escape(check.detail)}${stageLabel ? ` · ${escape(stageLabel)}` : ''}</small>${fixHtml}</div></li>`;
   })).join('');
-  return `<section class="preflight-panel"><div class="pf-head"><p class="eyebrow">${t('preflight.eyebrow')}</p><div class="pf-summary">${badge}<button id="run-preflight" class="ghost"${preflightLoading ? ' disabled' : ''}>${t('preflight.run')}</button></div></div>${preflightResults.length ? `<ul class="pf-checks">${checksHtml}</ul>` : ''}</section>`;
+  return `<section class="preflight-panel"><div class="pf-head"><p class="eyebrow">${t('preflight.eyebrow')}</p><div class="pf-summary">${badge}<button id="run-preflight" class="ghost"${projection.preflightLoading ? ' disabled' : ''}>${t('preflight.run')}</button></div></div>${projection.preflightResults.length ? `<ul class="pf-checks">${checksHtml}</ul>` : ''}</section>`;
 }
 function recoveryStatusFor(workflowId: string, stageIndex: number, source: string): RecoveryStatus | undefined {
-  return recoveryStatuses.find(s => s.workflowId === workflowId && s.stageIndex === stageIndex && s.source === source);
+  return projection.recoveryStatuses.find(s => s.workflowId === workflowId && s.stageIndex === stageIndex && s.source === source);
 }
 function recoveryStatusBadge(status: RecoveryStatus | undefined): string {
   if (!status) return '';
@@ -1122,7 +1105,7 @@ function recoveryStatusBadge(status: RecoveryStatus | undefined): string {
 }
 function automationActionFor(workflowId: string, stageIndex: number, source: string): AutomationAction | undefined {
   const stage = workflows.find(flow => flow.id === workflowId)?.stages[stageIndex];
-  const scoped = automationActions.filter(action => action.workflowId === workflowId);
+  const scoped = projection.automationActions.filter(action => action.workflowId === workflowId);
   // A stage keeps its identity across reorders, so prefer it and fall back to the index only for
   // legacy stages saved before stable ids existed.
   if (stage?.stageId) return latestAutomationAction(scoped, stage.stageId, source);
@@ -1198,7 +1181,7 @@ function automationStepKey(workflowId: string, stageIndex: number, source: strin
   return `${workflowId}|${stageIndex}|${source}`;
 }
 function currentAutomationAction(workflowId: string, stageIndex: number, source: string) {
-  return automationActions.find(action => action.workflowId === workflowId && action.stageIndex === stageIndex && action.source === source);
+  return projection.automationActions.find(action => action.workflowId === workflowId && action.stageIndex === stageIndex && action.source === source);
 }
 // A wildcard rule stands for every concrete route beneath it, so it covers the whole stage; an exact
 // branch only covers the route a person actually touched.
@@ -1231,7 +1214,7 @@ function markAutomationResolved(flow: Workflow, stageIndex: number, source: stri
   const key = automationStepKey(flow.id, stageIndex, source);
   const current = currentAutomationAction(flow.id, stageIndex, source);
   resolvedAutomation.set(key, { resolvedAt: Date.now(), source, actionId: current?.id ?? null, updatedAt: current?.updatedAt ?? '' });
-  actionQueue = actionQueue.filter(item => !(item.workflowId === flow.id && item.stageIndex === stageIndex && resolvedSourceMatches(source, item.source)));
+  projection.actionQueue = projection.actionQueue.filter(item => !(item.workflowId === flow.id && item.stageIndex === stageIndex && resolvedSourceMatches(source, item.source)));
   void reconcileAutomationInBackground(flow, stageIndex, source);
 }
 async function reconcileAutomationInBackground(flow: Workflow, stageIndex: number, source: string) {
@@ -1242,7 +1225,7 @@ async function reconcileAutomationInBackground(flow: Workflow, stageIndex: numbe
     await loadActionQueue(true, flow.repository).catch(() => undefined);
     // Once the server projection agrees the step is no longer blocked it becomes the source of truth
     // again, and the local note has served its purpose.
-    const stillBlocked = automationActions.some(action => action.workflowId === flow.id && action.stageIndex === stageIndex && resolvedSourceMatches(source, action.source) && automationActionPresentation(action).blocked);
+    const stillBlocked = projection.automationActions.some(action => action.workflowId === flow.id && action.stageIndex === stageIndex && resolvedSourceMatches(source, action.source) && automationActionPresentation(action).blocked);
     if (!stillBlocked) {
       resolvedAutomation.delete(key);
       if (screen === 'overview') render();
@@ -1252,11 +1235,11 @@ async function reconcileAutomationInBackground(flow: Workflow, stageIndex: numbe
   }
 }
 function blockedAutomationActions(): AutomationAction[] {
-  return automationActions.filter(action => automationActionPresentation(action).blocked && !isAutomationResolved(action.workflowId, action.stageIndex, action.source));
+  return projection.automationActions.filter(action => automationActionPresentation(action).blocked && !isAutomationResolved(action.workflowId, action.stageIndex, action.source));
 }
 function failureCenterPanel(): string {
-  const failures = actionQueue.filter(item => item.kind === 'checks-failed' || item.kind === 'needs-approval');
-  const deploymentFailures = workflowStageStates.filter(state => state.checksState === 'failure' && state.pullState === 'merged');
+  const failures = projection.actionQueue.filter(item => item.kind === 'checks-failed' || item.kind === 'needs-approval');
+  const deploymentFailures = projection.workflowStageStates.filter(state => state.checksState === 'failure' && state.pullState === 'merged');
   if (!failures.length && !deploymentFailures.length && !blockedAutomationActions().length) return '';
   const items = failures.map(item => {
     const flow = workflows.find(w => w.id === item.workflowId);
@@ -1303,18 +1286,18 @@ function overview() {
   const localModeNotice = localViteWithoutApi ? `<section class="local-sync-notice local-mode-notice"><div><b>${t('localMode.title')}</b><p>${t('localMode.desc')}</p></div></section>` : '';
   const cloudWorkspaceNotice = cloudWorkspaceLoading ? `<section class="local-sync-notice"><div><b>${t('sync.loading.title')}</b><p>${t('sync.loading.desc')}</p></div></section>` : '';
   const storageWarning = cloudWorkflowSyncError ? `<details class="compact-notice is-error"><summary><span><b>${t('sync.warning.title')}</b><span>${t('sync.warning.desc')}</span></span><small>${t('sync.warning.detail')}</small></summary><p>${escape(cloudWorkflowSyncError)}</p></details>` : '';
-  const queueWarning = actionQueueError ? `<details class="compact-notice is-error"><summary><span><b>${t('overview.queue.error.title')}</b></span><small>${t('sync.warning.detail')}</small></summary><p>${escape(actionQueueError)}</p></details>` : '';
+  const queueWarning = projection.actionQueueError ? `<details class="compact-notice is-error"><summary><span><b>${t('overview.queue.error.title')}</b></span><small>${t('sync.warning.detail')}</small></summary><p>${escape(projection.actionQueueError)}</p></details>` : '';
   const syncPrompt = pendingLocalWorkflowSync ? `<section class="local-sync-notice"><div><b>${t('sync.prompt.title', { count: workflows.length })}</b><p>${t('sync.prompt.desc', { login: githubLogin || '' })}</p></div><button id="sync-local-workflows" class="ghost">${t('sync.prompt.button')}</button></section>` : '';
   const syncBanner = cloudWorkflowStorage ? syncHealthBanner() : '';
   const failurePanel = failureCenterPanel();
   const preflight = preflightPanel();
-  const failedCount = actionQueue.filter(item => item.kind === 'checks-failed').length;
+  const failedCount = projection.actionQueue.filter(item => item.kind === 'checks-failed').length;
   const automationBlockedCount = blockedAutomationActions().length;
   const workflowCount = activeWorkflows(workflows).length;
   const archivedCount = archivedWorkflows(workflows).length;
   // 'Running' includes every active workflow that is actively progressing: either its current stage is in a running
   // tone, or a human has taken over (it is in the attention queue). 'Needs attention' is therefore a subset of 'Running'.
-  const attentionWorkflowIds = new Set(actionQueue.map(item => item.workflowId));
+  const attentionWorkflowIds = new Set(projection.actionQueue.map(item => item.workflowId));
   const runningWorkflowIds = new Set<string>();
   for (const flow of activeWorkflows(workflows)) {
     if (attentionWorkflowIds.has(flow.id) || laneRunSummary(flow).tone === 'running') runningWorkflowIds.add(flow.id);
@@ -1327,13 +1310,13 @@ function overview() {
     if (overviewFilter === 'all' || overviewFilter === 'archived') return true;
     if (overviewFilter === 'automation') return blockedAutomationActions().some(action => action.workflowId === flow.id);
     if (overviewFilter === 'running') return runningWorkflowIds.has(flow.id);
-    return actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed'));
+    return projection.actionQueue.some(item => item.workflowId === flow.id && (overviewFilter === 'attention' || item.kind === 'checks-failed'));
   });
   const normalizedSearch = laneSearchQuery.trim().toLocaleLowerCase();
   const visibleWorkflows = filterMatchedWorkflows.filter(flow => !normalizedSearch || `${flow.name} ${flow.repository}`.toLocaleLowerCase().includes(normalizedSearch));
   const hasSearchMiss = Boolean(normalizedSearch && !visibleWorkflows.length);
-  const refreshLabel = actionQueueRefreshing ? t('overview.queue.refreshing') : t('overview.queue.refresh');
-  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div>${laneSortControls()}<button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="running" class="${overviewFilter === 'running' ? 'active' : ''}"><span>${runningCount}</span>${t('overview.board.running')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button data-board-filter="automation" class="${overviewFilter === 'automation' ? 'active' : ''}"><span>${automationBlockedCount}</span>${t('overview.board.automationBlocked')}</button>${archivedCount || overviewFilter === 'archived' ? `<button data-board-filter="archived" class="${overviewFilter === 'archived' ? 'active' : ''}"><span>${archivedCount}</span>${t('overview.board.archived')}</button>` : ''}<button id="refresh-action-queue" class="board-refresh${actionQueueRefreshing ? ' is-loading' : ''}"${actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${overviewFilter === 'archived' ? t('overview.board.archivedEmpty') : t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section><div class="board-scroll-controls" hidden aria-label="${escape(t('overview.board.scrollControls'))}"><button type="button" data-board-scroll="top" aria-label="${escape(t('overview.board.scrollTop'))}" title="${escape(t('overview.board.scrollTop'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 10 5-5 5 5M3 14l5-5 5 5"/></svg></button><button type="button" data-board-scroll="bottom" aria-label="${escape(t('overview.board.scrollBottom'))}" title="${escape(t('overview.board.scrollBottom'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 6 5 5 5-5M3 2l5 5 5-5"/></svg></button></div>`;
+  const refreshLabel = projection.actionQueueRefreshing ? t('overview.queue.refreshing') : t('overview.queue.refresh');
+  content.innerHTML = `<section class="board-head"><div class="board-title"><h1>${t('overview.board.title')}</h1><p>${t('overview.board.sub')}</p></div>${laneSortControls()}<button id="new-flow" class="primary">${t('overview.board.addProject')}</button></section>${localModeNotice}${cloudWorkspaceNotice}${storageWarning}${queueWarning}${syncBanner}${preflight}${failurePanel}${syncPrompt}<section class="board-summary" aria-label="${t('overview.board.summary')}"><button data-board-filter="attention" class="${overviewFilter === 'attention' ? 'active' : ''}"><span>${projection.actionQueue.length}</span>${t('overview.board.attention')}</button><button data-board-filter="running" class="${overviewFilter === 'running' ? 'active' : ''}"><span>${runningCount}</span>${t('overview.board.running')}</button><button data-board-filter="all" class="${overviewFilter === 'all' ? 'active' : ''}"><span>${workflowCount}</span>${t('overview.board.active')}</button><button data-board-filter="failed" class="${overviewFilter === 'failed' ? 'active' : ''}"><span>${failedCount}</span>${t('overview.board.failed')}</button><button data-board-filter="automation" class="${overviewFilter === 'automation' ? 'active' : ''}"><span>${automationBlockedCount}</span>${t('overview.board.automationBlocked')}</button>${archivedCount || overviewFilter === 'archived' ? `<button data-board-filter="archived" class="${overviewFilter === 'archived' ? 'active' : ''}"><span>${archivedCount}</span>${t('overview.board.archived')}</button>` : ''}<button id="refresh-action-queue" class="board-refresh${projection.actionQueueRefreshing ? ' is-loading' : ''}"${projection.actionQueueRefreshing ? ' disabled aria-busy="true"' : ''}>${projection.actionQueueRefreshing ? '<span class="refresh-spinner" aria-hidden="true"></span>' : ''}${refreshLabel}</button></section><section class="project-board">${visibleWorkflows.length ? visibleWorkflows.map(projectLane).join('') : workflows.length ? `<article class="board-empty"><h3>${overviewFilter === 'archived' ? t('overview.board.archivedEmpty') : t('overview.board.filterEmpty')}</h3><button data-board-filter="all" class="ghost">${t('overview.board.showAll')}</button></article>` : `<article class="empty"><h3>${t('overview.empty.title')}</h3><p>${t('overview.empty.desc')}</p><button id="empty-new" class="ghost">${t('overview.empty.button')}</button></article>`}</section><div class="board-scroll-controls" hidden aria-label="${escape(t('overview.board.scrollControls'))}"><button type="button" data-board-scroll="top" aria-label="${escape(t('overview.board.scrollTop'))}" title="${escape(t('overview.board.scrollTop'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 10 5-5 5 5M3 14l5-5 5 5"/></svg></button><button type="button" data-board-scroll="bottom" aria-label="${escape(t('overview.board.scrollBottom'))}" title="${escape(t('overview.board.scrollBottom'))}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 6 5 5 5-5M3 2l5 5 5-5"/></svg></button></div>`;
   const emptyResetButton = content.querySelector<HTMLButtonElement>('.board-empty button[data-board-filter="all"]');
   if (hasSearchMiss && emptyResetButton) {
     emptyResetButton.removeAttribute('data-board-filter');
@@ -1416,7 +1399,7 @@ function bindFailureCenter() {
     const source = button.dataset.fcSource;
     if (!workflowId || !source) return;
     const flow = workflows.find(w => w.id === workflowId);
-    const state = workflowStageStates.find(s => s.workflowId === workflowId && s.stageIndex === stageIndex && s.source === source);
+    const state = projection.workflowStageStates.find(s => s.workflowId === workflowId && s.stageIndex === stageIndex && s.source === source);
     if (!flow || !state) return;
     const recovery = recoveryStatusFor(workflowId, stageIndex, source);
     if (recovery?.exhausted) { showToast(t('recovery.exhausted', { count: recovery.maxRetries })); return; }
@@ -1436,7 +1419,7 @@ function bindFailureCenter() {
   }));
   document.querySelectorAll<HTMLButtonElement>('.fc-takeover').forEach(button => button.addEventListener('click', () => {
     const actionId = Number(button.dataset.fcTakeoverAction);
-    const action = automationActions.find(candidate => candidate.id === actionId);
+    const action = projection.automationActions.find(candidate => candidate.id === actionId);
     if (!action) return;
     showTakeoverDialog(action);
   }));
@@ -1449,7 +1432,7 @@ function bindFailureCenter() {
   }));
 }
 function laneRunHistory(flow: Workflow): string {
-  const runs = workflowRuns.filter(run => run.workflowId === flow.id).slice(0, 5);
+  const runs = projection.workflowRuns.filter(run => run.workflowId === flow.id).slice(0, 5);
   if (!runs.length) return '';
   return `<details class="lane-run-history"><summary class="eyebrow">${t('overview.run.history')}</summary><ol>${runs.map(run => {
     const stateClass = run.state === 'completed' ? 'completed' : run.state === 'failed' ? 'failed' : 'active';
@@ -1473,7 +1456,7 @@ function dynamicBranchStatusText(state: WorkflowStageState) {
   return readyToMerge ? `${t('state.waitingMerge')} · ${pull}` : pull;
 }
 function workflowTimelineSection(flow: Workflow): string {
-  const entries = timeline.filter(entry => entry.workflowId === flow.id).slice(0, 8);
+  const entries = projection.timeline.filter(entry => entry.workflowId === flow.id).slice(0, 8);
   if (!entries.length) return '';
   return `<details class="lane-timeline"><summary class="eyebrow">${t('timeline.eyebrow')}</summary><ol>${entries.map(entry => {
     const icon = timelineEntryIcon(entry.kind);
@@ -1483,7 +1466,7 @@ function workflowTimelineSection(flow: Workflow): string {
 }
 function stepTimelineSection(flow: Workflow, stageIndex: number, source: string): string {
   const stageId = flow.stages[stageIndex]?.stageId;
-  const entries = timeline.filter(entry => entry.workflowId === flow.id && (stageId ? entry.stageId === stageId : entry.stageIndex === stageIndex) && (entry.source === source || !entry.source)).slice(0, 12);
+  const entries = projection.timeline.filter(entry => entry.workflowId === flow.id && (stageId ? entry.stageId === stageId : entry.stageIndex === stageIndex) && (entry.source === source || !entry.source)).slice(0, 12);
   if (!entries.length) return '';
   return `<details class="drawer-timeline"><summary class="eyebrow">${t('timeline.step.eyebrow')}</summary><ol>${entries.map(entry => {
     const icon = timelineEntryIcon(entry.kind);
@@ -1491,7 +1474,7 @@ function stepTimelineSection(flow: Workflow, stageIndex: number, source: string)
   }).join('')}</ol></details>`;
 }
 function projectLane(flow: Workflow) {
-  const items = actionQueue.filter(item => item.workflowId === flow.id);
+  const items = projection.actionQueue.filter(item => item.workflowId === flow.id);
   const laneStep = (stage: Workflow['stages'][number], index: number, state?: WorkflowStageState) => {
     const source = state?.source || stage.source;
     const item = items.find(candidate => candidate.stageIndex === index && candidate.source === source);
@@ -1533,7 +1516,7 @@ function projectLane(flow: Workflow) {
 function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: string) {
   const flow = workflows.find(item => item.id === workflowId), stage = flow?.stages[stageIndex];
   if (!flow || !stage) return;
-  const queueItem = actionQueue.find(item => item.workflowId === workflowId && item.stageIndex === stageIndex && (!source || item.source === source));
+  const queueItem = projection.actionQueue.find(item => item.workflowId === workflowId && item.stageIndex === stageIndex && (!source || item.source === source));
   const state = stageState(workflowId, stageIndex, source, stage.target);
   const routeSource = state?.source || source || stage.source;
   const detailStatus = active?.id === flow.id && !stage.source.includes('*') ? statuses?.[stageIndex] : undefined;
@@ -1599,7 +1582,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
     try {
       await refreshStatuses(false, true, true);
       const queueLoaded = await loadActionQueue(true, flow.repository);
-      if (!queueLoaded && actionQueueError) showToast(actionQueueError);
+      if (!queueLoaded && projection.actionQueueError) showToast(projection.actionQueueError);
       dialog.addEventListener('close', () => showProjectStepDrawer(flow.id, stageIndex, routeSource), { once: true });
       dialog.close();
     } catch (error) {
@@ -1618,7 +1601,7 @@ function showProjectStepDrawer(workflowId: string, stageIndex: number, source?: 
   dialog.querySelectorAll<HTMLButtonElement>('.deployment-rollback').forEach(button => button.addEventListener('click', () => {
     const runId = Number(button.dataset.deploymentRun);
     const provider = button.dataset.deploymentProvider as WorkflowStageDeployment['provider'] | undefined;
-    const run = workflowStageDeploymentRuns.find(candidate => candidate.workflowId === flow.id && candidate.stageIndex === stageIndex && candidate.source === routeSource && candidate.provider === provider && candidate.runId === runId);
+    const run = projection.workflowStageDeploymentRuns.find(candidate => candidate.workflowId === flow.id && candidate.stageIndex === stageIndex && candidate.source === routeSource && candidate.provider === provider && candidate.runId === runId);
     if (!run || !provider) return;
     dialog.close();
     showDeploymentRollbackDialog(flow, stageIndex, routeSource, run);
@@ -2090,7 +2073,7 @@ function lockedStageText(index: number) {
   const dependencies = active.stages[index]?.waitFor?.length ? active.stages[index].waitFor : [index - 1];
   const dependencyStatuses = dependencies.map(dependency => statuses?.[dependency]);
   const blocking = dependencies.flatMap(dependency => missingDeploymentWorkflowNames(
-    workflowStageDeployments.filter(deployment => deployment.workflowId === active!.id),
+    projection.workflowStageDeployments.filter(deployment => deployment.workflowId === active!.id),
     { stageId: active!.stages[dependency]?.stageId, stageIndex: dependency },
   ));
   if (blocking.length) return t('status.locked.deployment', { workflow: blocking[0] });
@@ -2881,8 +2864,8 @@ function showCreateDialog(index: number, onCreated?: () => void, sourceOverride?
       statuses = statuses?.map((status, statusIndex) => statusIndex === index ? { kind: 'open', pr: createdPull, checks: { state: 'pending', passed: 0, total: 0 }, approvals: 0, mergeable: null } : status) || null;
       // The reconciliation queue may still contain the previously merged PR for this route.
       // Do not let that stale record expose a merge action for the new PR before GitHub reports its checks.
-      workflowStageStates = workflowStageStates.filter(state => state.workflowId !== active!.id || state.stageIndex !== index || state.source !== source);
-      actionQueue = actionQueue.filter(item => item.workflowId !== active!.id || item.stageIndex !== index || item.source !== source);
+      projection.workflowStageStates = projection.workflowStageStates.filter(state => state.workflowId !== active!.id || state.stageIndex !== index || state.source !== source);
+      projection.actionQueue = projection.actionQueue.filter(item => item.workflowId !== active!.id || item.stageIndex !== index || item.source !== source);
       markAutomationResolved(active!, index, source);
       dialog.close();
       if (onCreated) {
