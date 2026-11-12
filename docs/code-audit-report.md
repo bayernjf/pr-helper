@@ -254,7 +254,7 @@ Agent Card + JSON-RPC（`tasks/send`、`sendSubscribe`、`get`、`cancel`）+ SS
 - `ci.yml`：PR + push(dev/main)，步骤 `npm run lint` → `npm test` → `npm run build`，`cancel-in-progress` ✅。
 - **P0 级门禁缺失（本版新增）**：
   - ~~**CI 不做任何类型检查**~~ **已于 2026-11-12 核实为过时结论**：`package.json` 的 `lint` 现在是 `tsc --noEmit`（不再是 `vite build`），`ci.yml` 第 5 步 `Run npm run lint` 实测 success，`api/` 的类型错误 CI 现在能发现。原始论断「无 `vite.config.*`，`lint` 即 `vite build`」描述的是更早的 `package.json`，当时成立、现已失效。
-  - **部署不被测试门禁** ✅（仍成立）：`ci.yml` 与两个 deploy workflow 都在 `push: dev/main` 独立触发，无 `needs:` / `workflow_run:` → 单测红的提交照样直上 production。
+  - ~~**部署不被测试门禁**~~ **已于 2026-11-12 核实为过时结论**：两个 deploy workflow 现在都是 `on: workflow_run: workflows: [CI] types: [completed]`，且 job 级 `if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'`——CI 失败的同提交不会部署。最近两次 Vercel 部署的 `event` 字段实测为 `workflow_run`、结论 success。原论断「都在 `push: dev/main` 独立触发、无 `needs:` / `workflow_run:`」描述的是更早的 workflow 版本。
   - ~~CI 把 vite build 跑两遍（`lint` + `build`），纯浪费。~~ **已随 `lint` 改为 `tsc --noEmit` 消失**；现在是 `tsc` + `build` 各一遍，无重复。
   - **e2e 完全不进 CI**（仍成立）：`ci.yml` 无 Playwright 步骤，浏览器用例只在本地。
   - 迁移规范检查器**已于 2026-11-12 接入 CI**（`npm run check:migrations`，`ci.yml` 第 6 步）；历史 7 条违规冻结在 `tools/migration-baseline.txt`，新迁移零违规才通过。
