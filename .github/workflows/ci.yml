@@ -33,6 +33,14 @@ jobs:
       - run: npm test
       - run: npm run build
 
+      # Browser regression gate. The 34 Playwright cases stub every backend call via page.route,
+      # so they need no GitHub or Supabase credentials. playwright.config.ts already switches to
+      # retries: 2 + the github reporter and starts its own Vite server when CI is set.
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Browser E2E
+        run: npm run test:e2e
+
       # Mobile monitoring (2026-10-29 plan, layer 1): the desktop board is unreachable while
       # working through mobile remote control, so CI failures are pushed to Feishu. No-op unless
       # the repository secret FEISHU_WEBHOOK is set.
