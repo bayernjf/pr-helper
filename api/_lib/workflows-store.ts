@@ -1911,6 +1911,9 @@ export async function upsertWorkflow(environment: Record<string, string | undefi
         return !next || stage.stageId !== next.stageId || stage.source !== next.source || stage.target !== next.target ? [stage.stageId].filter((value): value is string => Boolean(value)) : [];
       });
       for (const stageId of changedStageIds) await transaction`DELETE FROM workflow_stage_events WHERE user_id = ${ownerUserId} AND workflow_id = ${savedWorkflow.id} AND stage_id = ${stageId}`;
+      // Stages the save removed or re-routed leave queued and paused actions minted for the old route;
+      // cancel them so the next sweep re-enqueues fresh actions against the new definition.
+      if (changedStageIds.length) await transaction`UPDATE workflow_automation_actions a SET state = 'cancelled', failure_reason = ${'步骤已删除或路由已变更，自动化动作不再执行'}, updated_at = now() FROM workflow_automation_runs r WHERE r.id = a.run_id AND r.user_id = a.user_id AND r.user_id = ${ownerUserId} AND r.workflow_id = ${savedWorkflow.id} AND r.stage_id = ANY(${changedStageIds}) AND a.state IN ('queued', 'paused')`;
     }
     await pruneStaleWorkflowStageData(transaction, ownerUserId, savedWorkflow);
     await saveWorkflowVersion(transaction, ownerUserId, savedWorkflow);
@@ -1964,6 +1967,11 @@ export async function removeWorkflowStage(environment: Record<string, string | u
     await transaction`UPDATE pr_helper_workflows SET updated_at = now() WHERE user_id = ${access.ownerUserId} AND id = ${workflowId}`;
     await writeWorkflowRows(transaction, access.ownerUserId, savedWorkflow);
     await transaction`DELETE FROM workflow_stage_events WHERE user_id = ${access.ownerUserId} AND workflow_id = ${workflowId} AND stage_id = ${stageId}`;
+    // A removed stage leaves its queued and paused actions pointing at a stage that no longer exists
+    // (pr-helper 4025 sat in the failure center for a deleted feature/20260722 → dev stage, with its
+    // takeover precheck reading the re-indexed stage 0). Cancel them inside this transaction — the
+    // archive path uses the same terminal state.
+    await transaction`UPDATE workflow_automation_actions a SET state = 'cancelled', failure_reason = ${'步骤已删除，自动化动作不再执行'}, updated_at = now() FROM workflow_automation_runs r WHERE r.id = a.run_id AND r.user_id = a.user_id AND r.user_id = ${access.ownerUserId} AND r.workflow_id = ${workflowId} AND r.stage_id = ${stageId} AND a.state IN ('queued', 'paused')`;
     await pruneStaleWorkflowStageData(transaction, access.ownerUserId, savedWorkflow);
     await saveWorkflowVersion(transaction, access.ownerUserId, savedWorkflow);
     await recordOperationAuditForUser(transaction, access.ownerUserId, identity.installationId, {
