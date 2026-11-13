@@ -1,6 +1,6 @@
 # PR Helper 当前状态
 
-> 最后更新：2026-11-10（Supabase 迁移状态经 information_schema 实测核对：**001–046 已全部执行**（044 DROP `payload` 列于 2026-11-10 执行，`pr_helper_workflows` 终态 15 列；046 `workflow_versions.snapshot` 改可空已执行并验证，保存链路恢复、积压本地保存队列重放成功）。2026-11-10 生产清理 19 个 `*-landing` 落地页 + 4 个 `e2e-sandbox` 沙盒流程（级联干净，全库 45 → 22 个流程）；同日晚间按产品分级（`bayjf/docs/PROJECT-TIER-CONVENTION.md`）再删非 Tier 0/0.5 的 14 个流程（Tier 1×4、Tier 2×2、Tier 3×8），终态保留 8 个：agent-world、zeus、atlas、loom、agent-dev、job-agent（Tier 0/0.5）+ bayjf、pr-helper，全库 8 个流程 / 12 stages。同日再为缺失流程的 5 个 Tier 0 产品新建流程（commerce-os、growth-os、ops-console、growth-agent、model-hub：单阶段 `dev → main`、server、自动创建+合并、阈值 1、复用 `PR-message` 规则快照、无部署门禁——仓库只有 ci 工作流），首个 sweep 即为 5 仓库各建 PR 并全部自动合并、dev 追平 main，全库 13 个流程 / 17 stages。**同日第三起部署错位事故**：040 令版本行不再携带 `snapshot` 但该列仍 NOT NULL 无默认——10-30 部署起所有云端流程保存 23502 静默失败（UI 兜底「已保存在当前浏览器」本地保存），修复为迁移 `046`（`snapshot` 改可空，已执行并验证；保存链路恢复、积压的本地保存队列全部重放成功，无数据丢失）。2026-11-10 生产曾报 `column workflows.muted does not exist`，根因是 PR #397（流程静音）代码上线但 045 迁移未跑，手动执行 045 后恢复。2026-10-30 批量落地已全部合入 main 并部署：红门禁停摆修复、AI 失败接管弹窗、移动端状态监控 ①②③（飞书推送/聚合脚本/自包含状态页）、合并后自动推进、`workflow_versions.snapshot` 停止新写入、主应用窄屏适配（统一 700px 断点：看板/抽屉全屏/弹窗/失败中心/时间线，Lane 步骤轨道保留横滑）；E2E 34 用例含 2 个手机竖屏用例。仅剩 9/20 宽限期前的 9 月账单精确复核（当前只读查询未遇 402）。此前：出站量优化最终结论已于 2026-08-31 收口（优化后日均约 72 MB、总降幅 −94%、月投影约 2.1 GB / 5 GB 额度）；详情页首屏改由服务端投影直出 + 后台 live 校正 + 自动刷新 30s TTL 已部署生产；`payload` 列删除已重定级为普通代码债、不再受宽限期驱动。服务端自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 是唯一执行入口；流程详情页的只读进度条已上线）
+> 最后更新：2026-11-10（Supabase 迁移状态经 information_schema 实测核对：**001–046 已全部执行**（044 DROP `payload` 列于 2026-11-10 执行，`pr_helper_workflows` 终态 15 列；046 `workflow_versions.snapshot` 改可空已执行并验证，保存链路恢复、积压本地保存队列重放成功）。2026-11-10 生产清理 19 个 `*-landing` 落地页 + 4 个 `e2e-sandbox` 沙盒流程（级联干净，全库 45 → 22 个流程）；同日晚间按产品分级（`bayjf/docs/PROJECT-TIER-CONVENTION.md`）再删非 Tier 0/0.5 的 14 个流程（Tier 1×4、Tier 2×2、Tier 3×8），终态保留 8 个：agent-world、zeus、atlas、loom、agent-dev、job-agent（Tier 0/0.5）+ bayjf、pr-helper，全库 8 个流程 / 12 stages。同日再为缺失流程的 5 个 Tier 0 产品新建流程（commerce-os、growth-os、ops-console、growth-agent、model-hub：单阶段 `dev → main`、server、自动创建+合并、阈值 1、复用 `PR-message` 规则快照、无部署门禁——仓库只有 ci 工作流），首个 sweep 即为 5 仓库各建 PR 并全部自动合并、dev 追平 main，全库 13 个流程 / 17 stages；2026-11-12 用户经 UI 为 `bayernjf/pr-helper-git` 新建同类流程，全库 14 个流程。**同日第三起部署错位事故**：040 令版本行不再携带 `snapshot` 但该列仍 NOT NULL 无默认——10-30 部署起所有云端流程保存 23502 静默失败（UI 兜底「已保存在当前浏览器」本地保存），修复为迁移 `046`（`snapshot` 改可空，已执行并验证；保存链路恢复、积压的本地保存队列全部重放成功，无数据丢失）。2026-11-10 生产曾报 `column workflows.muted does not exist`，根因是 PR #397（流程静音）代码上线但 045 迁移未跑，手动执行 045 后恢复。2026-10-30 批量落地已全部合入 main 并部署：红门禁停摆修复、AI 失败接管弹窗、移动端状态监控 ①②③（飞书推送/聚合脚本/自包含状态页）、合并后自动推进、`workflow_versions.snapshot` 停止新写入、主应用窄屏适配（统一 700px 断点：看板/抽屉全屏/弹窗/失败中心/时间线，Lane 步骤轨道保留横滑）；E2E 34 用例含 2 个手机竖屏用例。仅剩 9/20 宽限期前的 9 月账单精确复核（当前只读查询未遇 402）。此前：出站量优化最终结论已于 2026-08-31 收口（优化后日均约 72 MB、总降幅 −94%、月投影约 2.1 GB / 5 GB 额度）；详情页首屏改由服务端投影直出 + 后台 live 校正 + 自动刷新 30s TTL 已部署生产；`payload` 列删除已重定级为普通代码债、不再受宽限期驱动。服务端自动创建 PR 与逐步骤自动合并均已在生产端到端跑通；自动化队列 drain 是唯一执行入口；流程详情页的只读进度条已上线）
 > 本文是当前架构、功能边界和下一阶段工作的事实来源。`docs/superpowers/specs/` 与 `docs/superpowers/plans/` 保存历史决策和实施过程，不作为当前 backlog。
 
 ## 产品形态
@@ -18,7 +18,7 @@ PR Helper 是 GitHub-first 的 PR / Release Control Tower。用户以项目 Lane
 
 ## 当前整体评估
 
-- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（732 个单元测试）；前端 `src/main.ts` 仍较集中，后续应按页面和服务边界渐进拆分。
+- **代码质量：7.5/10**。服务端已集中处理 GitHub 权限、阶段决策、幂等队列和凭据边界，测试覆盖稳定（44 个文件 / 857 个单元测试 + 34 条 e2e）；前端 `src/main.ts` 的渐进拆分已于 2026-11-13 完成（2 968 → **1 794** 行编排入口、顶层可变 `let` 由 67 归零，状态/渲染/对话框拆入 `src/app/` 新增 23 个模块、该目录现共 32 个文件；方案与执行记录见 `docs/superpowers/plans/2026-11-12-split-main-ts-handoff.md`），后续按模块补单元测试。
 - **功能质量：8.5/10**。流程 CRUD、Lane 看板、动态来源、多路径汇聚、PR 创建/合并、五类门禁、合并后 Actions/部署状态、失败恢复和审计均已具备；后台自动创建 PR 和逐步骤自动合并已有生产成功记录。
 - **产品完善度：7.5/10**。个人使用和小团队发布控制塔已可用；多账号权限、private/organization 边界、Web Push 关闭页面投递和部署回滚仍需外部条件验收。
 - **生产准备度：7/10**。主链路和两级自动化都已有真实 Production 证据；健康检查已于 2026-08-22 在沙箱 Preview 实测成功与失败两条路径，并借此发现它一直只落库不参与门禁（`f1bbb9df` 已修，修复上线后门禁效果亦已实测确认，见下文）；失败部署投影、确认式回滚和部分协作能力仍不能仅凭本地测试视为通过。Supabase Free Plan 在上个账单周期出现 Egress 超额（`pr-helper` 6.28GB / 5GB），当前高频 `/api/inbox` 把看板状态与历史数据绑在一起，不适合直接承载多用户轮询。
@@ -375,7 +375,7 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 
 ## 测试覆盖
 
-- 本地单元/服务端测试：`npm test` 运行 33 个文件 / 748 个测试；`npx tsc --noEmit` 和 `npm run build` 同时通过。
+- 本地单元/服务端测试：`npm test` 运行 44 个文件 / 857 个测试；`npx tsc --noEmit` 和 `npm run build` 同时通过；`npm run check:migrations` 通过。
 - 浏览器回归：`npm run test:e2e` 使用 Playwright Chromium 与本地 Vite，在 API mock 下覆盖 34 个用例，包括 GitHub App 授权返回、新建流程并整页恢复、步骤排序持久化、失败步骤抽屉、创建/合并 PR、删除流程、确认式部署回滚、操作审计查询、编辑既有流程时步骤表单折叠、换仓库确认、流程详情进度条的步骤状态、前缀计数、同步时间标注、全部完成后不再高亮当前步与「下一步及其解锁条件」行、AI 失败接管弹窗（打开/重新生成/确认后失败中心消失）、合并后自动推进开关（仅 server 策略可开、保存 `autoAdvanceNext`、裸步骤禁用），以及两个手机竖屏（390×844）用例（整页无横向溢出、Lane 展开与步骤抽屉全宽、失败中心接管弹窗不出界）。它验证真实 DOM、二次确认和浏览器请求负载，不替代真实 GitHub 写入、门禁和部署验收。
 - 已新增流程保存队列回归：连续编辑会串行使用服务端返回的新版本，且不会由旧响应覆盖最新编辑；真实跨窗口乐观锁冲突仍会明确报错。
 - Production E2E 通过项目与尚未通过的集成项目均以 [验证报告](verification-report.md) 为准。
@@ -437,6 +437,8 @@ drain 首轮在生产运行（Actions run `31880783398`，6 次 sweep）：
 | 17 | `supabase/migrations/044_drop_workflow_payload.sql` | DROP `pr_helper_workflows.payload` | 停写 payload 列方案 E 步收口；关系表自此为唯一真相 |
 | 18 | `supabase/migrations/045_mute_column.sql` | `pr_helper_workflows.muted` 列 | 流程静音（PR #397）：静音流程校准/自动化照常、仅停 Web Push |
 | 19 | `supabase/migrations/046_workflow_versions_snapshot_nullable.sql` | `workflow_versions.snapshot` 改可空 | 已执行并验证。修复 040 部署后所有云端流程保存 23502 静默失败；新版本行存 NULL，历史行快照保留 |
+
+**编号碰撞注记（2026-11-11 起）**：编号 `041` 被两个已执行文件占用——`041_account_deletion_fk_indexes.sql`（历史遗留）与 `041_stage_gate_sha.sql`（2026-10-30 批次）。check-migrations.sh 对重复编号只警告不阻断；已应用清单冻结在 [`tools/migration-baseline.txt`](../tools/migration-baseline.txt)（截至 2026-11-11，information_schema 实测核对），**新增迁移从 047 起编号**。
 
 ### 二、代码部署状态
 

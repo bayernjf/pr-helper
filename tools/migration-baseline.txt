@@ -1,0 +1,56 @@
+# 迁移基线（applied-migration baseline）
+#
+# 本文件冻结截至 2026-11-11 的已执行迁移清单（information_schema 实测核对，
+# 见 docs/current-state.md 迁移台账）。生成目的：迁移编号 041 被两个已执行
+# 文件占用（历史编号碰撞，见下），check-migrations.sh 对重复编号只警告
+# 不阻断；本文件是「哪些文件已应用」的权威人工记录。
+#
+# 新增迁移请从 047 起编号。
+#
+001_users_and_workflows.sql
+002_normalize_workflow_payloads.sql
+003_github_webhook_deliveries.sql
+004_workflow_stage_states.sql
+005_workflow_monitoring.sql
+006_push_notifications.sql
+007_track_stage_ahead_by.sql
+008_workflow_stage_events.sql
+009_dynamic_branch_routes.sql
+010_track_stage_deployments.sql
+011_deployment_failure_details.sql
+012_deployment_health_checks.sql
+013_deployment_run_history.sql
+014_reconciliation_runs.sql
+015_workflow_versions_and_runs.sql
+016_encrypted_cloud_sync.sql
+017_reconciliation_scope_and_degraded_state.sql
+018_stage_identity_compatibility.sql
+019_stage_identity_primary_keys.sql
+020_operation_audit_logs.sql
+021_encrypted_sync_hardening.sql
+022_data_retention.sql
+023_team_permissions.sql
+024_ai_automation_credentials.sql
+025_workflow_automation_queue.sql
+026_ai_automation_preferences.sql
+027_reconciliation_concurrency_and_fairness.sql
+028_reconciliation_leases_and_pending.sql
+029_reconciliation_github_call_cost.sql
+030_reconciliation_pg_cron_clock.sql
+031_reconciliation_claimed_workflows.sql
+032_reconciliation_phase_timings.sql
+033_relax_reconciliation_clock.sql
+034_workflow_repository_index.sql
+035_generation_rule_content.sql
+036_workflow_relational_expand.sql
+037_workflow_relational_backfill.sql
+038_workflow_relational_read_switch.sql
+039_drop_workflow_payload_index.sql
+040_generation_rule_contract.sql
+041_account_deletion_fk_indexes.sql
+041_stage_gate_sha.sql
+042_payload_nullable.sql
+043_version_not_null.sql
+044_drop_workflow_payload.sql
+045_mute_column.sql
+046_workflow_versions_snapshot_nullable.sql
