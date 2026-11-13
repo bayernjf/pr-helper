@@ -163,11 +163,11 @@
 | 功能 | 状态 | 证据 |
 |---|---|---|
 | Vitest 单元（33 文件 / 716 项，2026-10-08 实测） | ✅ | `npm test` |
-| Playwright 浏览器 E2E（30 test，端口 4373，全部桩化后端） | ✅ | `e2e/pr-helper.spec.ts` |
-| CI：lint + 单测 + build | 🟡 | `ci.yml` —— **不含 `tsc --noEmit`、不跑 e2e、部署不被其门禁**（审计报告 §5.1） |
+| Playwright 浏览器 E2E（34 test，端口 4373，全部桩化后端） | ✅ | `e2e/pr-helper.spec.ts` |
+| CI：tsc + 单测 + build + 迁移门禁 + 浏览器 E2E | ✅ | `ci.yml`：迁移门禁 → `npm run lint`（`tsc --noEmit`）→ 单测 → build → Playwright E2E；两个 deploy workflow 以 `workflow_run` + `conclusion == 'success'` 为其门禁 |
 | 双平台部署（Vercel + Cloudflare Pages 同步） | 🟡 | `deploy-vercel.yml` / `deploy-cloudflare-pages.yml` —— 两平台构建来源不同构，CF 侧 `VITE_AUTH_ORIGIN` 无存在性校验 |
 | 迁移一致性静态守卫（SELECT 列 ⊆ 迁移声明列，防 P8 类回归） | ✅ | `workflows-store.test.ts:688-728` |
-| 迁移规范检查器 `tools/check-migrations.sh` | 🟡 | 脚本可用（实测 40 文件 39 warning），但**未被 CI / package.json / 文档任何一处引用** |
+| 迁移规范检查器 `tools/check-migrations.sh` | ✅ | 已接入 CI（`Check migration conventions`）与 `package.json`（`check:migrations`）；当前 47 文件 / 45 warning / 7 条基线豁免（`tools/migration-baseline.txt`） |
 
 ## 16. 能力错配与缺口
 
@@ -192,7 +192,7 @@
 
 | 功能域 | 覆盖 | 说明 |
 |---|---|---|
-| 看板渲染 / 筛选 / 排序 / 重排 / 换仓库 | e2e | 30 例中占多数 |
+| 看板渲染 / 筛选 / 排序 / 重排 / 换仓库 | e2e | 34 例中占多数 |
 | 步骤抽屉、PR 创建与合并、失败重跑 | e2e | 断言经 GitHub 代理提交的准确负载 |
 | 进度条前缀统计、主题色守卫、部署行按钮布局 | e2e | |
 | PR 引用复制与 tooltip | e2e | 2026-10-08 新增 |

@@ -19,15 +19,17 @@ Read `docs/current-state.md` before using historical specifications or implement
 
 ```bash
 npm run dev      # start the local app
-npm test         # run unit tests
-npm run lint     # run the production build used as a static check
+npm test         # run unit tests (44 files / 857 cases)
+npm run lint     # TypeScript check (tsc --noEmit), also the CI gate
+npm run check:migrations  # migration naming/numbering/header gate, also runs in CI
+npm run test:e2e # 34 browser E2E cases (Playwright, also runs in CI)
 npm run build    # create dist/
-npx tsc --noEmit # TypeScript check for browser and api/ code
+npx tsc --noEmit # same check as `npm run lint`
 ```
 
 ## Code layout
 
-- `src/main.ts`: init/render/goTo orchestration and event wiring (~1790 lines after the 2026-11-13 split; the rest of the former monolith lives in the modules below).
+- `src/main.ts`: init/render/goTo orchestration and event wiring (1 794 lines after the 2026-11-13 split, with zero top-level mutable `let`; the rest of the former monolith lives in the modules below).
 - `src/app/state/*.ts`: the mutable-state modules the split extracted (projection, session, workflows, ui, filters, ai, library, persist, runtime, status-refresh) — one exported object each; `runtime.ts` carries the render/goTo/init hooks main.ts binds.
 - `src/app/render/{overview,lane,detail,editor}.ts`: the four screens. `src/app/dialogs/*.ts`: all dialogs. `src/app/ui/derive.ts`: shared projection-derived helpers. `src/app/ui/permissions.ts`: the team-role operation gate.
 - `src/style.css`: application styles.
@@ -40,7 +42,7 @@ npx tsc --noEmit # TypeScript check for browser and api/ code
 - `api/*.ts`: Vercel API entry points.
 - `api/account.ts`: account deletion endpoint (`DELETE /api/account`).
 - `public/privacy.html`: static Privacy Policy page.
-- `supabase/migrations/`: the only source of truth for database schema; the current baseline is `001`–`040`.
+- `supabase/migrations/`: the only source of truth for database schema; the current baseline is `001`–`046` (47 files — number `041` is claimed by two applied files, frozen in `tools/migration-baseline.txt`).
 - `.github/workflows/`: CI, Vercel/Cloudflare deployment, reconciliation, and confirmed Production rollback.
 - `docs/current-state.md`: current architecture, capabilities, boundaries, and backlog.
 - `docs/code-audit-report.md`: project-level code audit (severity-ranked findings, re-checked against code).
