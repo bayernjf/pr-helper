@@ -853,6 +853,25 @@ function functionSource(source: string, name: string) {
   return source.slice(start, next === -1 ? undefined : next);
 }
 
+describe('deleting a stage or re-routing it cancels its in-flight actions', () => {
+  const removal = functionSource(readFileSync(STORE_SOURCE, 'utf8'), 'removeWorkflowStage');
+  const upsert = functionSource(readFileSync(STORE_SOURCE, 'utf8'), 'upsertWorkflow');
+
+  // A stage the user deletes (or whose route they edit) leaves its queued and paused actions pointing
+  // at a stage that no longer exists — pr-helper action 4025 sat in the failure center for a
+  // feature/20260722 → dev stage the user had already removed, and its takeover precheck would read
+  // the re-indexed stage 0. Cancellation is the same terminal state the archive path uses.
+  it('cancels the queued and paused actions of the removed stage', () => {
+    expect(removal).toContain("state IN ('queued', 'paused')");
+    expect(removal).toContain('r.stage_id = ${stageId}');
+  });
+
+  it('cancels the queued and paused actions of stages a save removed or re-routed', () => {
+    expect(upsert).toContain("state IN ('queued', 'paused')");
+    expect(upsert).toContain('ANY(${changedStageIds})');
+  });
+});
+
 describe('the sweep payload read', () => {
   const sweep = functionSource(readFileSync(STORE_SOURCE, 'utf8'), 'reconcileWorkflowStages');
 
