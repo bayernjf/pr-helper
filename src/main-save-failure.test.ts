@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
-const source = readFileSync(new URL('./main.ts', import.meta.url), 'utf8');
+const source = readFileSync(new URL('./app/state/persist.ts', import.meta.url), 'utf8');
 
 function body(name: string) {
   const start = source.indexOf(`function ${name}(`);

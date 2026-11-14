@@ -1,11 +1,19 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
-const source = readFileSync(new URL('./main.ts', import.meta.url), 'utf8');
+const sources: Record<string, string> = {
+  main: readFileSync(new URL('./main.ts', import.meta.url), 'utf8'),
+  statusRefresh: readFileSync(new URL('./app/state/status-refresh.ts', import.meta.url), 'utf8'),
+  detail: readFileSync(new URL('./app/render/detail.ts', import.meta.url), 'utf8'),
+};
+const source = sources.main;
 
 function body(name: string) {
-  const start = source.indexOf(`async function ${name}(`);
-  return source.slice(start, source.indexOf('\n}', start));
+  for (const text of Object.values(sources)) {
+    const start = text.indexOf(`async function ${name}(`);
+    if (start !== -1) return text.slice(start, text.indexOf('\n}', start));
+  }
+  return '';
 }
 
 describe('background refresh', () => {
@@ -23,9 +31,11 @@ describe('background refresh', () => {
   // Returning to the tab is what replaces the clock, so losing either listener would leave the board
   // showing whatever it had when the user last looked at it.
   it('refreshes each screen when the tab becomes visible again', () => {
-    expect(source).toContain("window.addEventListener('focus', () => { if (screen === 'overview') void refreshOverviewSnapshot(); })");
-    expect(source).toContain("if (screen === 'detail' && !detailStatusRefreshing) void refreshStatuses();");
-    expect(source.match(/document\.addEventListener\('visibilitychange'/g) || []).toHaveLength(2);
+    expect(source).toContain("window.addEventListener('focus', () => { if (uiState.screen === 'overview') void refreshOverviewSnapshot(); })");
+    expect(sources.detail).toContain("window.addEventListener('focus', () => { if (uiState.screen === 'detail' && !uiState.detailStatusRefreshing) void refreshStatuses(); })");
+    // One return-to-tab listener per screen: the overview's lives in main.ts, the detail's in render/detail.ts.
+    expect(source.match(/document\.addEventListener\('visibilitychange'/g) || []).toHaveLength(1);
+    expect(sources.detail.match(/document\.addEventListener\('visibilitychange'/g) || []).toHaveLength(1);
   });
 
   // Switching tabs fires visibilitychange and focus, and both listeners are needed: one covers a tab
@@ -34,20 +44,20 @@ describe('background refresh', () => {
   // in the listeners so a refresh the user asked for is never the one that gets dropped.
   it('drops a return-to-tab refresh that duplicates one already in flight', () => {
     const poll = body('refreshStatuses');
-    expect(poll).toContain('detailStatusRefreshing = true;');
-    expect(poll).toMatch(/finally \{ detailStatusRefreshing = false;/);
+    expect(poll).toContain('uiState.detailStatusRefreshing = true;');
+    expect(poll).toMatch(/finally \{ uiState.detailStatusRefreshing = false;/);
     // Only the two return-to-tab listeners are guarded. A repository sync also refreshes the detail
     // screen, and that one the user asked for.
-    const listeners = source.match(/(?:window|document)\.addEventListener\('(?:focus|visibilitychange)'[^\n]*refreshStatuses[^\n]*/g) || [];
+    const listeners = sources.detail.match(/(?:window|document)\.addEventListener\('(?:focus|visibilitychange)'[^\n]*refreshStatuses[^\n]*/g) || [];
     expect(listeners).toHaveLength(2);
-    expect(listeners.filter(listener => !listener.includes('!detailStatusRefreshing'))).toEqual([]);
+    expect(listeners.filter(listener => !listener.includes('!uiState.detailStatusRefreshing'))).toEqual([]);
   });
 
   // Entering the overview must still load once, but `overview()` runs on every render, so the guard is
   // what keeps a re-render from issuing a second read.
   it('loads the overview once per visit rather than once per render', () => {
-    expect(source).toContain('if (!overviewSnapshotRefreshed) {');
-    expect(source).toContain('overviewSnapshotRefreshed = false;');
+    expect(source).toContain('if (!uiState.overviewSnapshotRefreshed) {');
+    expect(source).toContain('uiState.overviewSnapshotRefreshed = false;');
   });
 });
 
@@ -57,7 +67,7 @@ describe('refreshDetailStatuses', () => {
   // left every static-branch workflow with no way to reconcile on demand at all.
   it('reconciles on the server for every workflow, not only wildcard sources', () => {
     const refresh = body('refreshDetailStatuses');
-    expect(refresh).toContain('loadActionQueue(true, active.repository)');
+    expect(refresh).toContain('loadActionQueue(true, workflowState.active.repository)');
     expect(refresh).not.toContain("includes('*')");
   });
 
@@ -75,15 +85,15 @@ describe('detail staleness while revalidating', () => {
   // Entering the page used to blank every row until several GitHub round trips per stage completed.
   // The server projection already loaded for the board paints the page first.
   it('prefills statuses from the server projection when entering the detail screen', () => {
-    expect(source).toContain('statuses = active ? projectedDetailStatuses(active) : null');
-    expect(source).toMatch(/function projectedDetailStatuses[\s\S]{0,400}projectedStageStatus/);
+    expect(source).toContain('uiState.statuses = workflowState.active ? projectedDetailStatuses(workflowState.active) : null');
+    expect(sources.detail).toMatch(/function projectedDetailStatuses[\s\S]{0,400}projectedStageStatus/);
   });
 
   // Navigation and focus share a short TTL so tab switches cannot issue the same GitHub reads twice;
   // the explicit button bypasses it through the force argument.
   it('skips an automatic live read inside the TTL but lets a forced one through', () => {
     const refresh = body('refreshStatuses');
-    expect(refresh).toContain('if (!force && active && !detailRefreshDueAt(lastDetailLiveRead.get(active.id), Date.now())) return;');
+    expect(refresh).toContain('if (!force && workflowState.active && !detailRefreshDueAt(uiState.lastDetailLiveRead.get(workflowState.active.id), Date.now())) return;');
     const explicit = body('refreshDetailStatuses');
     expect(explicit).toContain('refreshStatuses(false, false, true)');
   });

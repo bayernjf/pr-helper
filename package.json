@@ -6,6 +6,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "lint": "tsc --noEmit",
+    "check:migrations": "bash tools/check-migrations.sh",
     "test": "vitest run --exclude 'e2e/**'",
     "test:e2e": "playwright test",
     "wip": "node scripts/wip-server.mjs"
