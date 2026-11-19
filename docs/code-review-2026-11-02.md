@@ -68,7 +68,7 @@ PR Helper 是 GitHub-first 的 PR / 发布控制塔：浏览器端 Vite + 原生
 #### P0-2 A2A JSON-RPC 端点缺 token 时 fail-open（旧审计复核：仍存在）
 
 - **位置**：`api/a2a/agent-card.ts:47-53`：`const expected = process.env.ZEUS_A2A_TOKEN; if (expected && bearerToken(request.headers) !== expected) { 401 }`——`expected` 未配置时整个 POST 面匿名可用。
-- **当前缓解**（已回读确认）：`api/_lib/a2a/skills.ts:36-41` 对 `mode:'execute'` 恒返回 `credentialRequired`（input-required），技能只产出 plan 文本，不触达 GitHub/DB，任务存储为进程内 `Map`（`agent-card.ts:18`）。`docs/a2a-vassal.md` 明确这是设计行为。
+- **当前缓解**（已回读确认）：`api/_lib/a2a/skills.ts:36-41` 对 `mode:'execute'` 恒返回 `credentialRequired`（input-required），技能只产出 plan 文本，不触达 GitHub/DB，任务存储为进程内 `Map`（`agent-card.ts:18`）。`docs/a2a-executor.md` 明确这是设计行为。
 - **残余风险**：匿名面可被无成本刷 CPU/内存（每请求同步执行 + 无速率限制）；一旦未来「委派凭据」落地而忘记此处 fail-open，即升级为远程命令面。另外 token 比较用 `!==` 非恒定时间（`agent-card.ts:48`），实践中风险低。
 - **修复建议**：生产环境缺失 `ZEUS_A2A_TOKEN` 时启动即拒绝服务（fail-closed）或默认 401；token 比较改 `timingSafeEqual`。
 
