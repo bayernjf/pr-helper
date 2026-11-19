@@ -149,7 +149,7 @@
 | execute 模式（Zeus 凭据委托） | 🔧 | `a2a/skills.ts:36-41`(未实现，当前仅 plan 模式) |
 | SSE 流式订阅 | 🟡 | 卡片声明 `streaming:true`，但 `executeTask` 同步完成、事件一次性刷出（`agent-card.ts:71-81`）——声明超前于实现 |
 | 前端 UI 入口 | ❌ | **无任何入口**：A2A 6 文件 696 行纯后端能力，`src/` 零引用 |
-| 端点文档正确性 | ❌ | `docs/a2a-vassal.md:9,57,63` 写 `POST /api/a2a/tasks`，该文件不存在，实际挂在 `POST /api/a2a/agent-card` → 照文档实现的第三方客户端全部 404 |
+| 端点文档正确性 | ❌ | `docs/a2a-executor.md:9,57,63` 写 `POST /api/a2a/tasks`，该文件不存在，实际挂在 `POST /api/a2a/agent-card` → 照文档实现的第三方客户端全部 404 |
 
 ## 14. 国际化 / 主题
 

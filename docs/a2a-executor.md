@@ -1,6 +1,6 @@
-# A2A Agent Card 与注册声明（fealty）
+# A2A Agent Card 与注册声明（handshake）
 
-> 状态：现行（2026-09-21）。pr-helper 作为 Zeus 的**第一个注册执行器**，本文件记录其对外发布的 Agent Card、注册握手契约与任务执行接口。协议设计全文见 zeus 仓库 `docs/design-vassal-protocol.md`。
+> 状态：现行（2026-09-21）。pr-helper 作为 Zeus 的**第一个注册执行器**，本文件记录其对外发布的 Agent Card、注册握手契约与任务执行接口。协议设计全文见 zeus 仓库 `docs/design-executor-protocol.md`。
 
 ## 发布内容
 
@@ -21,7 +21,7 @@
 
 消息格式：data part `{ "kind": "data", "data": { "skill": "create-pr", "owner": "...", "repo": "...", ... } }`；Zeus 注入的 `x-zeus-runId`（message.metadata）会在每个事件回显。
 
-## 注册握手契约（x-zeus-fealty）
+## 注册握手契约（x-zeus-handshake）
 
 | 字段 | 值 | 说明 |
 | --- | --- | --- |
@@ -38,9 +38,9 @@
 - **任务存储为实例内存**（30 分钟 TTL，500 条上限）：任务在单次请求内同步执行完成，`tasks/sendSubscribe` 的完整事件流在同一次调用中返回；跨调用的 `tasks/get`/`tasks/cancel` 在同一实例内有效，属尽力而为。跨实例持久化（Supabase）待立项。
 - **execute 模式需要凭据委派**：Zeus 委派 GitHub installation token 的机制未实现。
 
-## 验收清单（对照 zeus design-vassal-protocol.md §7）
+## 验收清单（对照 zeus design-executor-protocol.md §7）
 
-1. ~~Agent Card + fealty 发布~~ ✅
+1. ~~Agent Card + handshake 发布~~ ✅
 2. ~~`tasks/sendSubscribe` 全流程~~ ✅（受理→working→completed/failed，14 项单测覆盖）
 3. ~~任务产物回传三字段~~ ✅（summary/evidence/cost，plan artifact 上）
 4. ~~escalation：不可逆场景走 input-required~~ ✅（merge-pr、production-rollback）

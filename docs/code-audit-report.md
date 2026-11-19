@@ -140,7 +140,7 @@ PR Helper 是一个 **GitHub-first 的 PR / 发布控制塔**：用 GitHub App �
 
 Agent Card + JSON-RPC（`tasks/send`、`sendSubscribe`、`get`、`cancel`）+ SSE。
 
-- **P0-2 fail-open** ✅：`api/a2a/agent-card.ts:47-48` `if (expected && token !== expected)`，`ZEUS_A2A_TOKEN` 缺失时整个 JSON-RPC 面匿名可用，无生产环境启动断言；`docs/a2a-vassal.md:11` 明确写了这一行为，属设计而非笔误。**当下缓解**：`api/_lib/a2a/skills.ts:36-41` `credentialRequired()` 让 `mode:'execute'` 恒返回 `input-required`，即只产 plan 不执行 GitHub 动作，所以泄露面限于流程信息与 DoS 面；一旦委派凭据落地即成远程命令面。
+- **P0-2 fail-open** ✅：`api/a2a/agent-card.ts:47-48` `if (expected && token !== expected)`，`ZEUS_A2A_TOKEN` 缺失时整个 JSON-RPC 面匿名可用，无生产环境启动断言；`docs/a2a-executor.md:11` 明确写了这一行为，属设计而非笔误。**当下缓解**：`api/_lib/a2a/skills.ts:36-41` `credentialRequired()` 让 `mode:'execute'` 恒返回 `input-required`，即只产 plan 不执行 GitHub 动作，所以泄露面限于流程信息与 DoS 面；一旦委派凭据落地即成远程命令面。
 - **P1 任务态在实例内存**：`api/a2a/agent-card.ts:18` + `task-store.ts:3-13`（500 条 / 30 分钟），冷启动与多实例下 `tasks/get`/`tasks/cancel` 必然 `TASK_NOT_FOUND`；`rpc.ts:75-80` 先 create 后执行，无按调用方的隔离键。
 - **P2 夸大声明**：`agent-card.ts:71-81` 声称 SSE，但 `executeTask` 同步完成、事件一次性刷出；卡片 `api/_lib/agent-card.ts:56` 的 `streaming: true` 与之呼应。`rpc.ts:53-58` 把 text part 的首个空白 token 当 skill id。
 - CORS `*`、body 无尺寸上限（P1/P2）。
@@ -313,7 +313,7 @@ Vercel=canonical 安全 API + Cookie 签发；Cloudflare Pages=静态镜像，`V
 | D6 | `reconcile-pr-helper.yml:41` 注释「reconciles every 5」 | 迁移 `033` 已改 `*/30` | ⚠️ 未修 |
 | D7 | `supabase/README.md` 多处过时 | 现 `:9` 已写 `001…040` ✅ | **部分已修复** |
 | **N1** | `current-state.md:21,125,378` 写 31 文件 / 691 测试 | 实测 **33 文件 / 716 测试** ✅ | 新增，未修 |
-| **N2** | `docs/a2a-vassal.md:9,57,63` 声明任务端点 `POST /api/a2a/tasks`（`api/a2a/tasks.ts`） | 该文件不存在，实际挂在 `POST /api/a2a/agent-card`（`api/_lib/agent-card.ts:108` 自认） | 新增，**对外契约错误**：照文档实现的 Zeus 客户端全部 404 |
+| **N2** | `docs/a2a-executor.md:9,57,63` 声明任务端点 `POST /api/a2a/tasks`（`api/a2a/tasks.ts`） | 该文件不存在，实际挂在 `POST /api/a2a/agent-card`（`api/_lib/agent-card.ts:108` 自认） | 新增，**对外契约错误**：照文档实现的 Zeus 客户端全部 404 |
 | **N3** | README/AGENTS 能力清单 | **零**提及 A2A（6 文件 696 行）、团队权限（迁移 023）、数据保留（022）、pg_cron 时钟（030） | 新增，未修 |
 | **N4** | `AGENTS.md:35` 称 `encrypted-sync.ts` 是 skeleton | 174 行完整实现 + 迁移 016/021 | 新增，未修 |
 
@@ -406,7 +406,7 @@ e2e 30 例在真实 Chromium 里驱动整套 UI（授权回跳、审计查询、
 | 前端 | 预检入口 URL 疑似 404（**待线上验证**） | `main.ts:1243` |
 | CI | 无类型检查；部署不被测试门禁；e2e 不进 CI | `ci.yml:19-24` |
 | CI | Cloudflare `VITE_AUTH_ORIGIN` 无存在性校验 | `deploy-cloudflare-pages.yml:29-30` |
-| 文档 | N2 A2A 对外契约端点写错 | `a2a-vassal.md:9` |
+| 文档 | N2 A2A 对外契约端点写错 | `a2a-executor.md:9` |
 
 ### P2 / P3 — 工程卫生
 
