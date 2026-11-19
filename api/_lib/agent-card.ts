@@ -21,7 +21,7 @@ export type AgentCard = {
   skills: AgentCardSkill[];
   authentication: { schemes: string[] };
   preferredTransport: string;
-  'x-zeus-fealty': {
+  'x-zeus-handshake': {
     version: string;
     swornTo: string;
     domain: string;
@@ -95,7 +95,7 @@ export function buildAgentCard(request: ApiRequest): AgentCard {
       schemes: ['bearer'],
     },
     preferredTransport: 'JSONRPC',
-    'x-zeus-fealty': {
+    'x-zeus-handshake': {
       version: '1',
       swornTo: 'zeus',
       domain: 'pr-release-control',

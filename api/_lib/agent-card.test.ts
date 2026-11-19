@@ -22,9 +22,9 @@ describe('buildAgentCard', () => {
     expect(card.authentication.schemes).toContain('bearer');
   });
 
-  it('declares the x-zeus-fealty vassal contract', () => {
+  it('declares the x-zeus-handshake executor contract', () => {
     const card = buildAgentCard(requestWith({ host: 'pr-helper.example' }));
-    expect(card['x-zeus-fealty']).toMatchObject({
+    expect(card['x-zeus-handshake']).toMatchObject({
       version: '1',
       swornTo: 'zeus',
       domain: 'pr-release-control',
